@@ -389,6 +389,13 @@
 - `app/web/templates/candidate_detail.html`: the primary metadata list renders Chinese labels; the untranslated originals moved into a collapsed `details` block so a gallery with both no longer interleaves two copies of every field.
 - `app/web/static/app.css`: added `.metadata-raw` styling for the new collapsible block.
 
+### Runtime Verification (2026-08-20)
+- **Status:** complete
+- Committed as `b69030b`; `app/candidates/reference.py` was deliberately left out because nothing imports it and it still has no tests.
+- Restored the line endings on six files before committing. `core.autocrlf=true` plus whole-file rewrites had normalised untouched lines, inflating the diff to about 950 lines; the committed diff is 504 lines of real change.
+- Port 8000 was already held by an older EhBot instance (PID 12960/26656). Stopping it freed the port and the `TELEGRAM_CONFLICT` 409 disappeared, so that stale local process, not an external one, was the second poller. The other Python processes on this machine are VS Code isort/black language servers.
+- Restarted on the new code: startup logged `tag_database_ready version=7 entries=43874 reason=cache_fresh` (the 24 hour window skipped GitHub entirely), `getUpdates` returned 200, and `/healthz`, `/readyz`, `/login` all returned 200.
+
 ### Open Items
 - Archive hardening (plan sections 8.8, 17.2, 21.9) is still missing: `stream_zip_to_cbz` passes member names straight through, with no path-traversal, zip-bomb, or magic-number checks.
 - `app/candidates/reference.py` parses the operator's Telegram reference format but has no tests yet.
