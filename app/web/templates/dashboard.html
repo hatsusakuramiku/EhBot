@@ -3,10 +3,11 @@
 {% block content %}
 <div class="page-heading">
   <div>
+    <span class="eyebrow">总览</span>
     <h1>审核工作台</h1>
-    <p>本地持久化与审核服务已就绪</p>
+    <p>本地服务状态与接入概览</p>
   </div>
-  <span class="status status-ok">系统正常</span>
+  <span class="status status-connected"><i></i>系统正常</span>
 </div>
 
 <section class="metrics" aria-label="任务概览">
@@ -16,13 +17,20 @@
   <div class="metric metric-alert"><strong>0</strong><span>失败</span></div>
 </section>
 
-<section class="status-table" aria-labelledby="connection-heading">
-  <h2 id="connection-heading">外部连接</h2>
-  <div class="status-row">
-    <span>Telegram</span><span class="status status-muted">尚未配置</span>
+<section class="section-block" aria-labelledby="connection-heading">
+  <div class="section-heading">
+    <div><h2 id="connection-heading">外部连接</h2><p>消息入口与内容源会话</p></div>
+    <a class="text-action" href="{{ url_for('connections_page') }}">管理连接</a>
   </div>
-  <div class="status-row">
-    <span>ExHentai</span><span class="status status-muted">尚未配置</span>
+  <div class="connection-summary">
+    <div class="summary-row">
+      <div><strong>Telegram Bot</strong><span>{{ connections.telegram.identity or "Bot API" }}</span></div>
+      <span class="status status-{{ connections.telegram.state }}"><i></i>{{ "已连接" if connections.telegram.state == "connected" else "连接异常" if connections.telegram.state == "error" else "连接中" if connections.telegram.state == "connecting" else "尚未配置" }}</span>
+    </div>
+    <div class="summary-row">
+      <div><strong>ExHentai</strong><span>{{ connections.exhentai.identity or "Cookie 会话" }}</span></div>
+      <span class="status status-{{ connections.exhentai.state }}"><i></i>{{ "已连接" if connections.exhentai.state == "connected" else "连接异常" if connections.exhentai.state == "error" else "连接中" if connections.exhentai.state == "connecting" else "尚未配置" }}</span>
+    </div>
   </div>
 </section>
 {% endblock %}

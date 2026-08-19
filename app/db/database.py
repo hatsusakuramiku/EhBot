@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -108,3 +109,32 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise LookupError(f"Administrator account {username!r} does not exist")
+
+    async def save_telegram_updates(self, updates: list[dict]) -> int:
+        return await asyncio.to_thread(self._save_telegram_updates_sync, updates)
+
+    def _save_telegram_updates_sync(self, updates: list[dict]) -> int:
+        with self._connect() as connection:
+            changes_before = connection.total_changes
+            connection.executemany(
+                "INSERT OR IGNORE INTO telegram_bot_updates "
+                "(update_id, payload_json) VALUES (?, ?)",
+                [
+                    (
+                        int(update["update_id"]),
+                        json.dumps(update, ensure_ascii=False, separators=(",", ":")),
+                    )
+                    for update in updates
+                ],
+            )
+            return connection.total_changes - changes_before
+
+    async def latest_telegram_update_id(self) -> int | None:
+        return await asyncio.to_thread(self._latest_telegram_update_id_sync)
+
+    def _latest_telegram_update_id_sync(self) -> int | None:
+        with self._connect() as connection:
+            value = connection.execute(
+                "SELECT MAX(update_id) FROM telegram_bot_updates"
+            ).fetchone()[0]
+        return int(value) if value is not None else None

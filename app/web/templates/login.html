@@ -7,15 +7,20 @@
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
 </head>
 <body>
-  <main class="login-shell">
-    <h1>EhBot</h1>
-    <form method="post" action="{{ url_for('login') }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
-      <label for="password">管理员密码</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required>
-      <button class="primary-button" type="submit">登录</button>
-    </form>
+  <main class="auth-layout">
+    <section class="auth-intro">
+      <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
+      <div><span class="eyebrow">本地内容工作流</span><h1>EhBot</h1><p>消息接入、审核与归档控制台</p></div>
+    </section>
+    <section class="auth-panel">
+      <div class="auth-heading"><h2>管理员登录</h2><p>使用服务启动时生成的密码登录</p></div>
+      <form method="post" action="{{ url_for('login') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+        <div class="field-group"><label for="password">管理员密码</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus></div>
+        <button class="primary-button" type="submit">登录</button>
+      </form>
+    </section>
   </main>
 </body>
 </html>

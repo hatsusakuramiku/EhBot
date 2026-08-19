@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 1 code complete; Docker runtime verification pending
+Implementation phase 2 in progress: external connections and Web UI
 
 ## Phases
 
@@ -63,3 +63,20 @@ Implementation phase 1 code complete; Docker runtime verification pending
 - [x] Pass the complete automated test suite
 - [ ] Build and start the Docker image on a host with Docker installed
 - **Status:** code complete; runtime container acceptance pending because Docker is not installed on this machine
+
+### Implementation Phase 2: Token-Only Connections And UI
+- [x] Add a private runtime secret store for Telegram and ExHentai credentials
+- [x] Add Telegram Bot API verification, long polling, status, and idempotent update persistence
+- [x] Add ExHentai Cookie verification, status, and reconnect/disconnect lifecycle
+- [x] Add authenticated connection-management routes and status API
+- [x] Redesign login, dashboard, navigation, connection page, and responsive styles
+- [x] Pass adapter, lifecycle, Web integration, and full regression tests
+- [x] Verify desktop/mobile UI in the browser
+- [x] Complete two-axis review and commit the implementation
+- **Status:** complete
+
+## Phase 2 Interface Decisions
+- Telegram Token-only mode uses the official Bot API. Telethon/MTProto remains a later optional path because it also requires API ID and API Hash.
+- Raw Telegram Token and ExHentai Cookies are stored only in private files under the data directory, never in ordinary database fields or rendered HTML.
+- Telegram updates are durably stored before later candidate parsing is introduced.
+- ExHentai connection in this phase validates authenticated site access; metadata and archive download remain later adapters.

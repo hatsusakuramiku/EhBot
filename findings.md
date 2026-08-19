@@ -54,3 +54,13 @@
 - Never commit or log Telegram tokens, API hashes, sessions, ExHentai cookies, or administrator credentials.
 - Validate archive paths, extracted size, file count, compression ratio, and file signatures.
 - Only fetch URLs from configured Telegram and E-Hentai/ExHentai sources; revalidate redirect targets.
+
+## Implementation Findings: Token-Only Connections
+- Telegram Bot Token alone can authenticate only against the Bot API. Telethon/MTProto still requires an API ID and API Hash.
+- The Token-only connector therefore supports `getMe` verification and `getUpdates` polling, while large-file MTProto download remains explicitly deferred.
+- Telegram Bot API embeds the Token in the request path, so log redaction must cover `/bot<TOKEN>/...` paths in addition to query strings and headers.
+- ExHentai connection settings are the `ipb_member_id`, `ipb_pass_hash`, and `igneous` Cookie values; they should be saved as one atomically replaced private secret document.
+- Connection forms must never render saved credential values. Only configured identity and health status are visible.
+- The existing `main.py` already owns authentication and lifecycle wiring; connection routes should be isolated in a router and call one connection manager instead of adding provider details to `main.py`.
+- The existing Windows SID/Linux mode hardening in `private_files.py` should back a generic atomic private-text writer shared by bootstrap passwords and external credentials.
+- The existing database class uses short `asyncio.to_thread` SQLite operations, so Telegram update persistence should follow that established boundary without introducing an ORM.

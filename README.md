@@ -1,8 +1,8 @@
 # EhBot
 
-EhBot 是面向 Telegram 漫画来源的本地审核与 CBZ 归档服务。当前仓库完成开发方案的阶段 1：基础工程、SQLite 持久化、管理员登录、Web 工作台、健康检查和 Docker 部署。
+EhBot 是面向 Telegram 漫画来源的本地审核与 CBZ 归档服务。当前仓库已完成基础工程、SQLite 持久化、管理员登录、响应式 Web 工作台、健康检查和 Docker 部署，并提供外部连接管理。
 
-Telegram 与 ExHentai 尚未接入，工作台会明确显示为“尚未配置”。当前阶段不会发起任何 TG/EX 网络请求。
+Web UI 支持填写一个 Bot Token 接入 Telegram Bot API，服务会通过 `getMe` 校验身份并使用 `getUpdates` 持久化接收更新；也支持填写 `ipb_member_id`、`ipb_pass_hash` 和 `igneous` 校验 ExHentai Cookie 会话。当前阶段尚未实现 Telegram 媒体下载、候选解析和 ExHentai 归档下载。
 
 ## 本地开发
 
@@ -18,6 +18,8 @@ python -m uv run uvicorn app.main:app --reload
 访问 `http://127.0.0.1:8000`。存活和就绪检查分别为 `/healthz` 与 `/readyz`。
 
 首次启动时，系统会创建 `admin` 管理员并生成临时密码。为避免密码进入日志，命令行只提示私有文件路径；临时密码保存在 `data/bootstrap_admin_password`。使用该密码登录后必须立即修改密码，成功后临时文件会被删除。只要密码尚未在 Web UI 修改，每次重启都会轮换临时密码。
+
+Telegram Token 和 ExHentai Cookie 保存在 `data/private/` 下的私密文件中。页面只显示连接状态和已验证身份，不会回显已保存凭据。
 
 ## Docker
 

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="title">
+  <title id="title">EhBot</title>
+  <rect width="40" height="40" rx="8" fill="#16756b"/>
+  <path d="M10 11h13v4h-8v3h7v4h-7v3h8v4H10V11Zm16 0h4v6h-4v-6Zm0 10h4v8h-4v-8Z" fill="#fff"/>
+</svg>

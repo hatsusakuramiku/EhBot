@@ -4,6 +4,7 @@ import csv
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 
 def restrict_private_path(path: Path, *, directory: bool = False) -> None:
@@ -28,3 +29,21 @@ def restrict_private_path(path: Path, *, directory: bool = False) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def write_private_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}-",
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        restrict_private_path(temporary_path)
+        temporary_path.write_text(value, encoding="utf-8")
+        os.replace(temporary_path, path)
+        restrict_private_path(path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise

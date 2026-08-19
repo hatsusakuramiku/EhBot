@@ -7,16 +7,37 @@
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
 </head>
 <body>
-  <header class="app-header">
-    <a class="brand" href="{{ url_for('dashboard') }}">EhBot</a>
-    <div class="header-actions">
-      <a href="{{ url_for('change_password_page') }}">修改密码</a>
-      <form method="post" action="{{ url_for('logout') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="quiet-button" type="submit">退出</button>
-      </form>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <a class="brand" href="{{ url_for('dashboard') }}">
+        <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
+        <span>EhBot</span>
+      </a>
+      <nav class="primary-nav" aria-label="主导航">
+        <a class="nav-link {% if request.url.path == url_for('dashboard').path %}is-active{% endif %}" href="{{ url_for('dashboard') }}">工作台</a>
+        <a class="nav-link {% if request.url.path == url_for('connections_page').path %}is-active{% endif %}" href="{{ url_for('connections_page') }}">外部连接</a>
+      </nav>
+      <div class="sidebar-footer">
+        <a class="nav-link {% if request.url.path == url_for('change_password_page').path %}is-active{% endif %}" href="{{ url_for('change_password_page') }}">修改密码</a>
+        <form method="post" action="{{ url_for('logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="nav-button" type="submit">退出登录</button>
+        </form>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="mobile-header">
+        <a class="brand" href="{{ url_for('dashboard') }}">
+          <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
+          <span>EhBot</span>
+        </a>
+        <nav aria-label="移动端导航">
+          <a href="{{ url_for('dashboard') }}">工作台</a>
+          <a href="{{ url_for('connections_page') }}">连接</a>
+        </nav>
+      </header>
+      <main class="page-shell">{% block content %}{% endblock %}</main>
     </div>
-  </header>
-  <main class="page-shell">{% block content %}{% endblock %}</main>
+  </div>
 </body>
 </html>

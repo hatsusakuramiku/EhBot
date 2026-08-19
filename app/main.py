@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 import hmac
 import logging
 from pathlib import Path
@@ -8,6 +9,7 @@ import sqlite3
 import time
 
 from fastapi import FastAPI, Form, HTTPException, Request
+import httpx
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -17,21 +19,33 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Settings
 from app.bootstrap import remove_bootstrap_password, write_bootstrap_password
+from app.connections.exhentai import ExHentaiCredentials
+from app.connections.manager import ConnectionManager
+from app.connections.models import ProviderConnectionError
 from app.db.database import Database
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
+from app.secrets import SecretStore
 from app.storage.readiness import ensure_writable_directory
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    telegram_transport: httpx.AsyncBaseTransport | None = None,
+    exhentai_transport: httpx.AsyncBaseTransport | None = None,
+) -> FastAPI:
     configure_logging()
     app_settings = settings or Settings.from_env()
     database = Database(app_settings.data_path / "ehbot.db")
     password_hasher = PasswordHash.recommended()
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(application: FastAPI):
         app.state.startup_errors = app_settings.readiness_errors()
+        connection_manager: ConnectionManager | None = None
+        telegram_client: httpx.AsyncClient | None = None
+        exhentai_client: httpx.AsyncClient | None = None
         try:
             for path in (
                 app_settings.data_path,
@@ -59,18 +73,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.to_thread(
                     remove_bootstrap_password, app_settings.data_path
                 )
+            secret_store = SecretStore(app_settings.data_path / "private")
+            telegram_client = httpx.AsyncClient(
+                base_url="https://api.telegram.org",
+                timeout=40,
+                transport=telegram_transport,
+            )
+            exhentai_client = httpx.AsyncClient(
+                timeout=15,
+                follow_redirects=True,
+                transport=exhentai_transport,
+            )
+            connection_manager = ConnectionManager(
+                secret_store,
+                database,
+                telegram_client=telegram_client,
+                exhentai_client=exhentai_client,
+            )
+            application.state.connection_manager = connection_manager
+            await connection_manager.start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             app.state.startup_errors.append(str(exc))
             logging.getLogger(__name__).error(
                 "application_startup_failed", extra={"error_code": "STARTUP_FAILED"}
             )
-        yield
+        try:
+            yield
+        finally:
+            if connection_manager is not None:
+                await connection_manager.stop()
+            if telegram_client is not None:
+                await telegram_client.aclose()
+            if exhentai_client is not None:
+                await exhentai_client.aclose()
 
     app = FastAPI(
         title="EhBot", lifespan=lifespan, root_path=app_settings.app_root_path
     )
     app.state.settings = app_settings
     app.state.database = database
+    app.state.connection_manager = None
     app.add_exception_handler(AppError, app_error_handler)
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
@@ -95,8 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ):
             raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
-    @app.get("/")
-    async def dashboard(request: Request):
+    def require_authenticated(request: Request) -> RedirectResponse | None:
         if not request.session.get("authenticated"):
             return RedirectResponse(
                 request.url_for("login_page").path, status_code=303
@@ -105,11 +146,126 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return RedirectResponse(
                 request.url_for("change_password_page").path, status_code=303
             )
+        return None
+
+    def connection_manager() -> ConnectionManager:
+        manager = app.state.connection_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Connections are unavailable")
+        return manager
+
+    @app.get("/")
+    async def dashboard(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
-            context={"csrf_token": request.session["csrf_token"]},
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "connections": connection_manager().snapshot(),
+            },
         )
+
+    @app.get("/connections")
+    async def connections_page(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="connections.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "connections": connection_manager().snapshot(),
+            },
+        )
+
+    @app.post("/connections/telegram")
+    async def configure_telegram(
+        request: Request,
+        bot_token: str = Form(),
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await connection_manager().configure_telegram(bot_token)
+        except ProviderConnectionError:
+            return templates.TemplateResponse(
+                request=request,
+                name="connections.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "connections": connection_manager().snapshot(),
+                },
+                status_code=400,
+            )
+        return RedirectResponse(
+            request.url_for("connections_page").path, status_code=303
+        )
+
+    @app.post("/connections/telegram/disconnect")
+    async def disconnect_telegram(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        await connection_manager().disconnect_telegram()
+        return RedirectResponse(
+            request.url_for("connections_page").path, status_code=303
+        )
+
+    @app.post("/connections/exhentai")
+    async def configure_exhentai(
+        request: Request,
+        ipb_member_id: str = Form(),
+        ipb_pass_hash: str = Form(),
+        igneous: str = Form(),
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await connection_manager().configure_exhentai(
+                ExHentaiCredentials(ipb_member_id, ipb_pass_hash, igneous)
+            )
+        except ProviderConnectionError:
+            return templates.TemplateResponse(
+                request=request,
+                name="connections.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "connections": connection_manager().snapshot(),
+                },
+                status_code=400,
+            )
+        return RedirectResponse(
+            request.url_for("connections_page").path, status_code=303
+        )
+
+    @app.post("/connections/exhentai/disconnect")
+    async def disconnect_exhentai(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        await connection_manager().disconnect_exhentai()
+        return RedirectResponse(
+            request.url_for("connections_page").path, status_code=303
+        )
+
+    @app.get("/api/connections/status")
+    async def connection_status(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return asdict(connection_manager().snapshot())
 
     @app.get("/login")
     async def login_page(request: Request):

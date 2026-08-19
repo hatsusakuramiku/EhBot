@@ -15,9 +15,11 @@ _SENSITIVE_VALUE = re.compile(
 )
 _URL_QUERY = re.compile(r"(?i)(\b(?:https?://|/)[^\s?]*)\?[^\s]+")
 _COOKIE_HEADER = re.compile(r"(?i)(\bcookie\s*[:=]\s*)[^\r\n]+")
+_TELEGRAM_BOT_PATH = re.compile(r"(?i)(/bot)[^/\s]+(/(?:getMe|getUpdates)\b)")
 
 
 def redact_sensitive_values(message: str) -> str:
+    message = _TELEGRAM_BOT_PATH.sub(r"\1<redacted>\2", message)
     message = _URL_QUERY.sub(r"\1?<redacted>", message)
     message = _AUTHORIZATION.sub(r"\1<redacted>", message)
     message = _SENSITIVE_VALUE.sub(r"\1<redacted>", message)

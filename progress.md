@@ -72,3 +72,28 @@
 - Frozen dependency sync: passed.
 - Local startup check: `/healthz` and `/readyz` returned 200; bootstrap password file was created without logging its contents.
 - Docker image build/start: not run because Docker CLI is not installed on this machine.
+
+## Implementation Session: External Connections And UI
+
+### Scope
+- **Status:** in progress
+- Add Token-only Telegram Bot API connection and durable update polling.
+- Add ExHentai Cookie connection verification.
+- Add private credential storage, connection management, and a redesigned responsive Web UI.
+- Continue to defer Telegram media download, candidate parsing, and ExHentai archive download.
+
+### Private Secret Store
+- **Status:** complete
+- Added one atomic private-text writer for Linux modes and Windows SID-based ACLs.
+- Added a small secret-store interface and reused the writer for bootstrap passwords.
+- Verification: secret-store and authentication regression tests passed (9 tests).
+
+### Token-Only Connections And Web UI
+- **Status:** implementation and verification complete
+- Added Telegram Bot API identity verification, durable `getUpdates` polling, restart recovery, disconnect, and idempotent SQLite update persistence.
+- Added ExHentai Cookie verification, private session persistence, independent restart recovery, and disconnect.
+- Added authenticated, CSRF-protected connection routes and a status API without rendering saved credentials.
+- Redesigned login, dashboard, navigation, password, and connection views for desktop and mobile layouts.
+- Verification: 34 tests passed; Python compile check passed; frozen dependency sync would make no changes; `/healthz` and `/readyz` returned HTTP 200.
+- Visual verification: Edge headless screenshots passed at 1440px desktop and 500px mobile-breakpoint widths with no clipping, overlap, or blank content.
+- Final review: scope matches Token/Cookie-only connection requirements; authentication, CSRF, private credential storage, log redaction, lifecycle cleanup, and regression coverage passed standards review.

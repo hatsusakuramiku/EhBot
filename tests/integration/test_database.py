@@ -28,7 +28,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 2
+    assert migration_count == 3
     assert journal_mode == "wal"
     assert {
         "telegram_accounts",
@@ -41,5 +41,23 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         "download_jobs",
         "artifacts",
         "admin_users",
+        "telegram_bot_updates",
         "schema_migrations",
     } <= tables
+
+
+@pytest.mark.asyncio
+async def test_telegram_updates_are_persisted_idempotently(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+
+    first_insert = await database.save_telegram_updates(
+        [{"update_id": 100, "message": {"text": "first"}}]
+    )
+    duplicate_insert = await database.save_telegram_updates(
+        [{"update_id": 100, "message": {"text": "first"}}]
+    )
+
+    assert first_insert == 1
+    assert duplicate_insert == 0
+    assert await database.latest_telegram_update_id() == 100
