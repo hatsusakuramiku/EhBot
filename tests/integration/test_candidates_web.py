@@ -45,6 +45,14 @@ def authenticate(client: TestClient, settings: Settings) -> None:
 
 async def seed_candidate(database: Database) -> None:
     await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100123,
+        display_name="Fixture Channel",
+        enabled=True,
+        allowed_archive_formats=("zip", "rar", "7z", "cbz"),
+        max_attachment_size_mb=0,
+    )
     await database.save_telegram_updates(
         [
             {

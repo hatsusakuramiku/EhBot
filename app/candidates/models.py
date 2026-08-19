@@ -64,3 +64,20 @@ class IngestSummary:
     created_candidates: int = 0
     ignored_updates: int = 0
     failed_updates: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramSourceConfig:
+    source_id: int
+    source_type: str
+    chat_id: int
+    display_name: str
+    enabled: bool
+    allowed_archive_formats: tuple[str, ...]
+    max_attachment_size_mb: int
+
+
+@dataclass(frozen=True, slots=True)
+class RuleDecision:
+    result: str
+    reason: str

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}来源规则 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">摄取</span>
+    <h1>来源规则</h1>
+    <p>管理 Telegram 频道与私聊发送者白名单</p>
+  </div>
+</div>
+
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+
+<div class="source-layout">
+  <section class="source-create">
+    <div class="section-heading"><div><h2>添加来源</h2><p>按 Telegram Chat ID 建立白名单项</p></div></div>
+    <form class="settings-form" method="post" action="{{ url_for('configure_source') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-group"><label for="source-type">来源类型</label><select id="source-type" name="source_type"><option value="CHANNEL">频道</option><option value="PRIVATE_CHAT">私聊发送者</option></select></div>
+      <div class="field-group"><label for="chat-id">Chat ID</label><input id="chat-id" name="chat_id" type="number" required></div>
+      <div class="field-group"><label for="display-name">显示名称</label><input id="display-name" name="display_name" required></div>
+      <label class="toggle-row"><input name="enabled" type="checkbox" checked><span>启用白名单</span></label>
+      <fieldset class="rule-fieldset"><legend>允许的压缩格式</legend><div class="checkbox-grid">{% for format in ["zip", "rar", "7z", "cbz"] %}<label><input name="allowed_archive_formats" type="checkbox" value="{{ format }}" checked><span>{{ format|upper }}</span></label>{% endfor %}</div></fieldset>
+      <div class="field-group"><label for="max-size">附件上限（MB）</label><input id="max-size" name="max_attachment_size_mb" type="number" min="1" placeholder="不限"></div>
+      <div class="form-actions"><button class="primary-button" type="submit">保存来源</button></div>
+    </form>
+  </section>
+
+  <section class="source-list">
+    <div class="section-heading"><div><h2>已配置来源</h2><p>{{ sources|length }} 项</p></div></div>
+    <div class="source-items">
+      {% for source in sources %}
+      <form class="source-item" method="post" action="{{ url_for('configure_source') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="source_type" value="{{ source.source_type }}">
+        <input type="hidden" name="chat_id" value="{{ source.chat_id }}">
+        <header><div><strong>{{ source.display_name }}</strong><span>{{ "频道" if source.source_type == "CHANNEL" else "私聊发送者" }} · {{ source.chat_id }}</span></div><span class="status status-{{ 'connected' if source.enabled else 'not_configured' }}"><i></i>{{ "已启用" if source.enabled else "未启用" }}</span></header>
+        <div class="field-group"><label>显示名称</label><input name="display_name" value="{{ source.display_name }}" required></div>
+        <label class="toggle-row"><input name="enabled" type="checkbox" {% if source.enabled %}checked{% endif %}><span>启用白名单</span></label>
+        <fieldset class="rule-fieldset"><legend>允许的压缩格式</legend><div class="checkbox-grid">{% for format in ["zip", "rar", "7z", "cbz"] %}<label><input name="allowed_archive_formats" type="checkbox" value="{{ format }}" {% if format in source.allowed_archive_formats %}checked{% endif %}><span>{{ format|upper }}</span></label>{% endfor %}</div></fieldset>
+        <div class="field-group"><label>附件上限（MB）</label><input name="max_attachment_size_mb" type="number" min="1" value="{{ source.max_attachment_size_mb if source.max_attachment_size_mb else '' }}" placeholder="不限"></div>
+        <div class="source-summary"><span>{{ source.allowed_archive_formats|join("、")|upper if source.allowed_archive_formats else "不接收压缩包" }}</span><span>{% if source.max_attachment_size_mb %}{{ source.max_attachment_size_mb }} MB{% else %}不限{% endif %}</span></div>
+        <div class="form-actions"><button class="quiet-button" type="submit">更新规则</button></div>
+      </form>
+      {% else %}
+      <div class="empty-state"><strong>暂无来源</strong><p>新消息来源会以未启用状态显示</p></div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+{% endblock %}

@@ -35,8 +35,11 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1]
             for row in connection.execute("PRAGMA index_list(telegram_bot_updates)")
         }
+        source_message_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(source_messages)")
+        }
 
-    assert migration_count == 5
+    assert migration_count == 6
     assert journal_mode == "wal"
     assert {
         "telegram_accounts",
@@ -54,6 +57,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     } <= tables
     assert {"processed_at", "processing_result", "processing_reason"} <= update_columns
     assert "idx_telegram_bot_updates_pending" in update_indexes
+    assert {"filter_result", "filter_reason"} <= source_message_columns
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@
     <h1>{{ candidate.title or "未命名候选" }}</h1>
     <p>{{ candidate.filter_reason }}</p>
   </div>
-  <span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else candidate.status }}</span>
+  <span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else "待补充" if candidate.status == "NEEDS_INFO" else candidate.status }}</span>
 </div>
 
 {% if candidate.ex_gid %}

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 import re
 
 from app.candidates.models import IngestSummary, ParsedSourceMessage
+from app.candidates.rules import evaluate_source_rules
 from app.db.database import Database
 
 
@@ -46,6 +48,24 @@ class CandidateIngestor:
                     processed += 1
                     ignored += 1
                     continue
+                source = await self._database.discover_telegram_source(message)
+                decision = evaluate_source_rules(source, message)
+                if decision.result == "IGNORE":
+                    if message.is_edit:
+                        await self._database.deactivate_candidate_message(
+                            message.chat_id, message.message_id
+                        )
+                    await self._database.mark_telegram_update_result(
+                        update_id, decision.result, decision.reason
+                    )
+                    processed += 1
+                    ignored += 1
+                    continue
+                message = replace(
+                    message,
+                    filter_result=decision.result,
+                    filter_reason=decision.reason,
+                )
                 was_created = await self._database.save_candidate_message(
                     update_id, message
                 )

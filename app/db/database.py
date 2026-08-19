@@ -11,6 +11,7 @@ from app.candidates.models import (
     CandidateListItem,
     CandidateMessage,
     ParsedSourceMessage,
+    TelegramSourceConfig,
 )
 
 
@@ -28,6 +29,190 @@ class Database:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
+
+    @staticmethod
+    def _ensure_bot_account(connection: sqlite3.Connection) -> int:
+        connection.execute(
+            "INSERT INTO telegram_accounts "
+            "(account_type, display_name, session_path, status) "
+            "VALUES ('BOT', 'Telegram Bot API', 'bot-api://configured', "
+            "'DISCONNECTED') ON CONFLICT(session_path) DO NOTHING"
+        )
+        return int(
+            connection.execute(
+                "SELECT id FROM telegram_accounts "
+                "WHERE session_path = 'bot-api://configured'"
+            ).fetchone()[0]
+        )
+
+    @staticmethod
+    def _source_from_row(row: sqlite3.Row | tuple) -> TelegramSourceConfig:
+        enabled = bool(row[4])
+        try:
+            rules = json.loads(row[5])
+            if not isinstance(rules, dict):
+                raise ValueError("source rules must be an object")
+            raw_formats = rules.get("allowed_archive_formats", [])
+            if not isinstance(raw_formats, list) or any(
+                value not in {"zip", "rar", "7z", "cbz"}
+                for value in raw_formats
+            ):
+                raise ValueError("invalid archive formats")
+            max_attachment_size_mb = int(
+                rules.get("max_attachment_size_mb", 0)
+            )
+            if max_attachment_size_mb < 0:
+                raise ValueError("invalid attachment size")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            enabled = False
+            raw_formats = []
+            max_attachment_size_mb = 0
+        return TelegramSourceConfig(
+            source_id=int(row[0]),
+            source_type=str(row[1]),
+            chat_id=int(row[2]),
+            display_name=str(row[3]),
+            enabled=enabled,
+            allowed_archive_formats=tuple(
+                str(value).lower() for value in raw_formats
+            ),
+            max_attachment_size_mb=max_attachment_size_mb,
+        )
+
+    @staticmethod
+    def _update_candidate_filter_state(
+        connection: sqlite3.Connection,
+        candidate_id: int,
+        fallback_reason: str,
+    ) -> None:
+        has_title = connection.execute(
+            "SELECT 1 FROM metadata_values WHERE candidate_id = ? "
+            "AND field_name = 'Title' LIMIT 1",
+            (candidate_id,),
+        ).fetchone()
+        needs_rows = connection.execute(
+            "SELECT sm.filter_reason FROM candidate_messages cm "
+            "JOIN source_messages sm ON sm.id = cm.source_message_id "
+            "WHERE cm.candidate_id = ? AND sm.filter_result = 'NEEDS_INFO' "
+            "ORDER BY sm.id",
+            (candidate_id,),
+        ).fetchall()
+        needs_reason = next(
+            (
+                str(row[0])
+                for row in needs_rows
+                if row[0] != "缺少可识别标题" or has_title is None
+            ),
+            None,
+        )
+        connection.execute(
+            "UPDATE candidates SET status = ?, filter_result = ?, "
+            "filter_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (
+                "NEEDS_INFO" if needs_reason is not None else "PENDING_REVIEW",
+                "NEEDS_INFO" if needs_reason is not None else "ACCEPT",
+                needs_reason or fallback_reason,
+                candidate_id,
+            ),
+        )
+
+    async def configure_telegram_source(
+        self,
+        *,
+        source_type: str,
+        chat_id: int,
+        display_name: str,
+        enabled: bool,
+        allowed_archive_formats: tuple[str, ...],
+        max_attachment_size_mb: int,
+    ) -> None:
+        await asyncio.to_thread(
+            self._configure_telegram_source_sync,
+            source_type,
+            chat_id,
+            display_name,
+            enabled,
+            allowed_archive_formats,
+            max_attachment_size_mb,
+        )
+
+    def _configure_telegram_source_sync(
+        self,
+        source_type: str,
+        chat_id: int,
+        display_name: str,
+        enabled: bool,
+        allowed_archive_formats: tuple[str, ...],
+        max_attachment_size_mb: int,
+    ) -> None:
+        rules_json = json.dumps(
+            {
+                "allowed_archive_formats": list(allowed_archive_formats),
+                "max_attachment_size_mb": max_attachment_size_mb,
+            },
+            separators=(",", ":"),
+        )
+        with self._connect() as connection:
+            account_id = self._ensure_bot_account(connection)
+            connection.execute(
+                "INSERT INTO telegram_sources "
+                "(account_id, source_type, chat_id, display_name, enabled, rules_json) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, chat_id) "
+                "DO UPDATE SET source_type = excluded.source_type, "
+                "display_name = excluded.display_name, enabled = excluded.enabled, "
+                "rules_json = excluded.rules_json",
+                (
+                    account_id,
+                    source_type,
+                    chat_id,
+                    display_name,
+                    int(enabled),
+                    rules_json,
+                ),
+            )
+
+    async def list_telegram_sources(self) -> list[TelegramSourceConfig]:
+        return await asyncio.to_thread(self._list_telegram_sources_sync)
+
+    def _list_telegram_sources_sync(self) -> list[TelegramSourceConfig]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
+                "ts.enabled, ts.rules_json FROM telegram_sources ts "
+                "JOIN telegram_accounts ta ON ta.id = ts.account_id "
+                "WHERE ta.session_path = 'bot-api://configured' "
+                "ORDER BY ts.enabled DESC, ts.id DESC"
+            ).fetchall()
+        return [self._source_from_row(row) for row in rows]
+
+    async def discover_telegram_source(
+        self, message: ParsedSourceMessage
+    ) -> TelegramSourceConfig:
+        return await asyncio.to_thread(self._discover_telegram_source_sync, message)
+
+    def _discover_telegram_source_sync(
+        self, message: ParsedSourceMessage
+    ) -> TelegramSourceConfig:
+        with self._connect() as connection:
+            account_id = self._ensure_bot_account(connection)
+            connection.execute(
+                "INSERT INTO telegram_sources "
+                "(account_id, source_type, chat_id, display_name, enabled) "
+                "VALUES (?, ?, ?, ?, 0) ON CONFLICT(account_id, chat_id) "
+                "DO NOTHING",
+                (
+                    account_id,
+                    "CHANNEL" if message.chat_id < 0 else "PRIVATE_CHAT",
+                    message.chat_id,
+                    message.chat_title,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id, source_type, chat_id, display_name, enabled, rules_json "
+                "FROM telegram_sources WHERE account_id = ? AND chat_id = ?",
+                (account_id, message.chat_id),
+            ).fetchone()
+        return self._source_from_row(row)
 
     def _initialize_sync(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +478,7 @@ class Database:
                         filter_reason = "包含 ExHentai 画廊链接"
                 connection.execute(
                     "UPDATE candidates SET ex_gid = NULL, ex_gallery_token = NULL, "
-                    "filter_result = 'ACCEPT', filter_reason = ?, "
+                    "filter_reason = ?, "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (filter_reason, candidate_id),
                 )
@@ -319,6 +504,9 @@ class Database:
                             best_title_confidence,
                         ),
                     )
+                self._update_candidate_filter_state(
+                    connection, candidate_id, filter_reason
+                )
 
     async def save_candidate_message(
         self, update_id: int, message: ParsedSourceMessage
@@ -331,23 +519,12 @@ class Database:
         self, update_id: int, message: ParsedSourceMessage
     ) -> bool:
         with self._connect() as connection:
-            connection.execute(
-                "INSERT INTO telegram_accounts "
-                "(account_type, display_name, session_path, status) "
-                "VALUES ('BOT', 'Telegram Bot API', 'bot-api://configured', "
-                "'CONNECTED') ON CONFLICT(session_path) DO NOTHING"
-            )
-            account_id = int(
-                connection.execute(
-                    "SELECT id FROM telegram_accounts "
-                    "WHERE session_path = 'bot-api://configured'"
-                ).fetchone()[0]
-            )
+            account_id = self._ensure_bot_account(connection)
             connection.execute(
                 "INSERT INTO telegram_sources "
-                "(account_id, source_type, chat_id, display_name) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(account_id, chat_id) "
-                "DO UPDATE SET display_name = excluded.display_name",
+                "(account_id, source_type, chat_id, display_name, enabled) "
+                "VALUES (?, ?, ?, ?, 0) ON CONFLICT(account_id, chat_id) "
+                "DO NOTHING",
                 (
                     account_id,
                     "CHANNEL" if message.chat_id < 0 else "PRIVATE_CHAT",
@@ -359,8 +536,8 @@ class Database:
                 "INSERT OR IGNORE INTO source_messages "
                 "(account_id, chat_id, message_id, sender_id, "
                 "reply_to_message_id, media_group_id, message_text, "
-                "attachment_json, file_unique_id, message_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "attachment_json, file_unique_id, message_date, filter_result, "
+                "filter_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     account_id,
                     message.chat_id,
@@ -376,6 +553,8 @@ class Database:
                     ),
                     message.file_unique_id,
                     message.message_date,
+                    message.filter_result,
+                    message.filter_reason,
                 ),
             )
             created_message = cursor.rowcount == 1
@@ -384,6 +563,7 @@ class Database:
                     "UPDATE source_messages SET sender_id = ?, "
                     "reply_to_message_id = ?, message_text = ?, "
                     "attachment_json = ?, file_unique_id = ?, "
+                    "filter_result = ?, filter_reason = ?, "
                     "message_state = 'ACTIVE' WHERE account_id = ? "
                     "AND chat_id = ? AND message_id = ?",
                     (
@@ -396,6 +576,8 @@ class Database:
                             separators=(",", ":"),
                         ),
                         message.file_unique_id,
+                        message.filter_result,
+                        message.filter_reason,
                         account_id,
                         message.chat_id,
                         message.message_id,
@@ -533,11 +715,17 @@ class Database:
                         "DELETE FROM candidates WHERE id = ?", (ex_candidate_id,)
                     )
                 if candidate_id is None:
+                    candidate_status = (
+                        "NEEDS_INFO"
+                        if message.filter_result == "NEEDS_INFO"
+                        else "PENDING_REVIEW"
+                    )
                     candidate_cursor = connection.execute(
                         "INSERT INTO candidates "
                         "(status, ex_gid, ex_gallery_token, filter_result, "
-                        "filter_reason) VALUES ('PENDING_REVIEW', ?, ?, ?, ?)",
+                        "filter_reason) VALUES (?, ?, ?, ?, ?)",
                         (
+                            candidate_status,
                             message.ex_gid,
                             message.ex_gallery_token,
                             message.filter_result,
@@ -612,11 +800,14 @@ class Database:
                                 message.title_confidence,
                             ),
                         )
+                self._update_candidate_filter_state(
+                    connection, candidate_id, message.filter_reason
+                )
             connection.execute(
                 "UPDATE telegram_bot_updates SET processed_at = CURRENT_TIMESTAMP, "
-                "processing_result = 'ACCEPT', processing_reason = ? "
+                "processing_result = ?, processing_reason = ? "
                 "WHERE update_id = ?",
-                (message.filter_reason, update_id),
+                (message.filter_result, message.filter_reason, update_id),
             )
             return created_candidate
 

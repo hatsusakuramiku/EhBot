@@ -108,4 +108,15 @@
 - Visual verification: Edge headless screenshots passed at 1440px and 500px for candidate queue and detail pages with no clipping or overlap.
 - Two-axis review fixes: merged adjacent same-title preview/archive messages, isolated malformed Updates, kept polling alive after ingestion errors, added the pending-Update partial index, filtered the queue to `PENDING_REVIEW`, accepted edited messages, and preserved explicit Telegram titles over inferred titles.
 - Final review fixes: restricted time-window merging to one unique directly adjacent candidate, kept edited messages on their original candidate, replaced stale automatic titles and ExHentai identities after edits, removed stale candidates when an edit no longer contains candidate content, and rebuilt derived fields from any remaining linked messages.
-- Deferred scope: source-channel/private-sender allowlists, `NEEDS_INFO`, size/format/metadata rules and their Web configuration, fuzzy title matching, review actions, media download, ExHentai metadata requests, and archive download.
+- Deferred scope after this foundation: tag/language/category/rating rules, fuzzy title matching, review actions, media download, ExHentai metadata requests, and archive download.
+
+### Source Rules And Needs Info
+- **Status:** code, automated verification, and two-axis review complete; browser visual verification blocked
+- Added deny-by-default discovery for unknown Telegram channels and private senders.
+- Added authenticated Web configuration for source enablement, ZIP/RAR/7Z/CBZ allowlists, and per-source attachment-size limits.
+- Added deterministic `ACCEPT`, `IGNORE`, and `NEEDS_INFO` evaluation without real Telegram or ExHentai requests.
+- Added a separate pending-information queue and linked dashboard counters.
+- Deferred tag, language, category, and rating rules until ExHentai metadata ingestion provides reliable values.
+- Verification: 68 tests passed; Python compile check passed.
+- Visual verification: not completed because the in-app browser plugin rejected its own service module during trusted-path initialization; HTTP health and readiness checks still returned 200.
+- Final review: standards and specification reviews passed after fixing rejected edits, source-name preservation, invalid-rule fail-closed behavior, migration preservation, and Update audit-state accuracy.

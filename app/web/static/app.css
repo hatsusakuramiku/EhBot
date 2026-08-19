@@ -14,7 +14,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: #f3f5f6; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 a { color: inherit; }
 h1, h2, p { letter-spacing: 0; }
 h1 { margin: 3px 0 0; font-size: 28px; line-height: 1.25; }
@@ -101,9 +101,9 @@ p { margin: 6px 0 0; color: var(--muted); }
 .field-group { display: grid; gap: 7px; }
 .field-group label { color: #39434a; font-size: 13px; font-weight: 600; }
 .field-group small { color: var(--muted); font-size: 12px; }
-.field-group input { width: 100%; min-height: 42px; padding: 8px 11px; border: 1px solid #b9c2c7; border-radius: 4px; color: var(--ink); background: #fff; }
+.field-group input, .field-group select { width: 100%; min-height: 42px; padding: 8px 11px; border: 1px solid #b9c2c7; border-radius: 4px; color: var(--ink); background: #fff; }
 .field-group input::placeholder { color: #9ba5aa; }
-.field-group input:focus { border-color: var(--accent); outline: 2px solid #c8e5e1; outline-offset: 1px; }
+.field-group input:focus, .field-group select:focus { border-color: var(--accent); outline: 2px solid #c8e5e1; outline-offset: 1px; }
 .form-actions { display: flex; justify-content: flex-end; padding-top: 2px; }
 .primary-button, .quiet-button, .danger-button { min-height: 40px; padding: 0 16px; border-radius: 4px; font-weight: 600; cursor: pointer; }
 .primary-button { border: 1px solid var(--accent); color: #fff; background: var(--accent); }
@@ -115,6 +115,20 @@ p { margin: 6px 0 0; color: var(--muted); }
 .form-error { margin: 14px 0 0; padding: 10px 12px; border-left: 3px solid var(--danger); color: #8d3030; background: #fbefef; font-size: 13px; }
 .form-page { width: min(560px, 100%); }
 .settings-form { margin-top: 28px; padding: 24px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.source-layout { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(420px, 1.2fr); align-items: start; gap: 28px; margin-top: 30px; }
+.source-create .settings-form { margin-top: 16px; }
+.source-items { display: grid; gap: 14px; margin-top: 16px; }
+.source-item { display: grid; gap: 15px; padding: 20px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.source-item header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid #edf0f1; }
+.source-item header strong, .source-item header span { display: block; }
+.source-item header > div > span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.toggle-row { min-height: 34px; display: flex; align-items: center; gap: 9px; color: #39434a; font-size: 13px; font-weight: 600; }
+.toggle-row input, .checkbox-grid input { width: 16px; height: 16px; accent-color: var(--accent); }
+.rule-fieldset { margin: 0; padding: 0; border: 0; }
+.rule-fieldset legend { margin-bottom: 8px; color: #39434a; font-size: 13px; font-weight: 600; }
+.checkbox-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.checkbox-grid label { min-height: 36px; display: flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #d4dcdf; border-radius: 4px; color: #405158; background: #f8fafb; font-size: 12px; }
+.source-summary { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
 
 .auth-layout { width: min(920px, calc(100% - 40px)); min-height: 100vh; margin: 0 auto; display: grid; grid-template-columns: 1.05fr .95fr; align-items: center; gap: 70px; }
 .auth-intro { display: flex; align-items: center; gap: 22px; }
@@ -136,6 +150,7 @@ p { margin: 6px 0 0; color: var(--muted); }
   .mobile-header nav a { color: var(--accent-dark); font-size: 13px; font-weight: 600; text-decoration: none; }
   .page-shell { padding: 28px 20px 52px; }
   .integration-grid { grid-template-columns: 1fr; }
+  .source-layout { grid-template-columns: 1fr; }
   .auth-layout { grid-template-columns: 1fr; align-content: center; gap: 32px; max-width: 440px; padding: 40px 0; }
   .auth-intro { justify-content: center; }
 }
@@ -158,4 +173,7 @@ p { margin: 6px 0 0; color: var(--muted); }
   .auth-intro h1 { font-size: 34px; }
   .auth-panel { padding: 24px 20px; }
   .settings-form { padding: 20px 18px; }
+  .checkbox-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mobile-header nav { gap: 10px; }
+  .mobile-header nav a { font-size: 12px; }
 }

@@ -4,23 +4,23 @@
 <div class="page-heading">
   <div>
     <span class="eyebrow">审核</span>
-    <h1>待审核队列</h1>
-    <p>由 Telegram 消息自动归并的漫画候选</p>
+    <h1>{{ queue_title }}</h1>
+    <p>{{ queue_description }}</p>
   </div>
   <span class="queue-count">{{ candidates|length }} 项</span>
 </div>
 
-<section class="queue-table" aria-label="待审核候选">
+<section class="queue-table" aria-label="{{ queue_title }}">
   <div class="queue-header"><span>候选</span><span>来源消息</span><span>状态</span><span></span></div>
   {% for candidate in candidates %}
   <a class="queue-row" href="{{ url_for('candidate_detail', candidate_id=candidate.candidate_id) }}">
     <span class="candidate-title"><strong>{{ candidate.title or "未命名候选" }}</strong>{% if candidate.ex_gid %}<small>ExHentai #{{ candidate.ex_gid }}</small>{% endif %}</span>
     <span>{{ candidate.message_count }} 条</span>
-    <span><span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else candidate.status }}</span></span>
+    <span><span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else "待补充" if candidate.status == "NEEDS_INFO" else candidate.status }}</span></span>
     <span class="row-arrow" aria-hidden="true">›</span>
   </a>
   {% else %}
-  <div class="empty-state"><strong>暂无待审核候选</strong><p>相关 Telegram 消息接入后会显示在这里</p></div>
+  <div class="empty-state"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p></div>
   {% endfor %}
 </section>
 {% endblock %}

@@ -2,7 +2,7 @@
 
 EhBot 是面向 Telegram 漫画来源的本地审核与 CBZ 归档服务。当前仓库已完成基础工程、SQLite 持久化、管理员登录、响应式 Web 工作台、健康检查和 Docker 部署，并提供外部连接管理。
 
-Web UI 支持填写一个 Bot Token 接入 Telegram Bot API，服务会通过 `getMe` 校验身份并使用 `getUpdates` 持久化接收更新；也支持填写 `ipb_member_id`、`ipb_pass_hash` 和 `igneous` 校验 ExHentai Cookie 会话。当前已支持离线 Update 解析、预览/画廊/压缩包候选生成、确定性消息归并和只读候选审核页面；尚未实现人工通过/驳回、Telegram 媒体下载和 ExHentai 归档下载。
+Web UI 支持填写一个 Bot Token 接入 Telegram Bot API，服务会通过 `getMe` 校验身份并使用 `getUpdates` 持久化接收更新；也支持填写 `ipb_member_id`、`ipb_pass_hash` 和 `igneous` 校验 ExHentai Cookie 会话。当前已支持离线 Update 解析、来源白名单、压缩格式与附件大小规则、`NEEDS_INFO` 待补充队列、确定性消息归并和只读候选页面；尚未实现人工通过/驳回、Telegram 媒体下载和 ExHentai 归档下载。
 
 ## 本地开发
 

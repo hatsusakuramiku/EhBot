@@ -182,6 +182,28 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "candidates": await database.list_candidates(),
+                "queue_title": "待审核队列",
+                "queue_description": "由 Telegram 消息自动归并的漫画候选",
+                "empty_title": "暂无待审核候选",
+                "empty_text": "白名单来源的新候选会显示在这里",
+            },
+        )
+
+    @app.get("/candidates/needs-info")
+    async def needs_info_queue(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="candidates.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "candidates": await database.list_candidates(status="NEEDS_INFO"),
+                "queue_title": "待补充队列",
+                "queue_description": "需要补全标题或附件信息的漫画候选",
+                "empty_title": "暂无待补充候选",
+                "empty_text": "信息不足的候选会显示在这里",
             },
         )
 
@@ -201,6 +223,69 @@ def create_app(
                 "candidate": candidate,
             },
         )
+
+    @app.get("/sources")
+    async def sources_page(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="sources.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "sources": await database.list_telegram_sources(),
+            },
+        )
+
+    @app.post("/sources")
+    async def configure_source(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        source_type = str(form.get("source_type") or "")
+        display_name = str(form.get("display_name") or "").strip()
+        try:
+            chat_id = int(str(form.get("chat_id") or ""))
+            max_attachment_size_mb = int(
+                str(form.get("max_attachment_size_mb") or "0")
+            )
+        except ValueError:
+            chat_id = 0
+            max_attachment_size_mb = -1
+        valid_identity = (
+            source_type == "CHANNEL" and chat_id < 0
+        ) or (
+            source_type == "PRIVATE_CHAT" and chat_id > 0
+        )
+        if not valid_identity or not display_name or max_attachment_size_mb < 0:
+            return templates.TemplateResponse(
+                request=request,
+                name="sources.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "sources": await database.list_telegram_sources(),
+                    "error": "来源类型、ID、名称或附件上限无效",
+                },
+                status_code=400,
+            )
+        submitted_formats = set(form.getlist("allowed_archive_formats"))
+        allowed_archive_formats = tuple(
+            archive_format
+            for archive_format in ("zip", "rar", "7z", "cbz")
+            if archive_format in submitted_formats
+        )
+        await database.configure_telegram_source(
+            source_type=source_type,
+            chat_id=chat_id,
+            display_name=display_name,
+            enabled=form.get("enabled") == "on",
+            allowed_archive_formats=allowed_archive_formats,
+            max_attachment_size_mb=max_attachment_size_mb,
+        )
+        return RedirectResponse(request.url_for("sources_page").path, status_code=303)
 
     @app.get("/connections")
     async def connections_page(request: Request):

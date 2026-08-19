@@ -68,6 +68,14 @@ async def test_configuring_telegram_starts_durable_update_polling(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100123,
+        display_name="Polling Channel",
+        enabled=True,
+        allowed_archive_formats=("zip", "rar", "7z", "cbz"),
+        max_attachment_size_mb=0,
+    )
     store = SecretStore(tmp_path / "private")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -257,6 +265,14 @@ async def test_startup_processes_saved_updates_without_telegram_connection(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100123,
+        display_name="Offline Channel",
+        enabled=True,
+        allowed_archive_formats=("zip", "rar", "7z", "cbz"),
+        max_attachment_size_mb=0,
+    )
     await database.save_telegram_updates(
         [
             {
@@ -328,6 +344,7 @@ async def test_candidate_storage_failure_sets_visible_connection_error(
                                 "message_id": 71,
                                 "date": 1_700_000_201,
                                 "chat": {"id": 900, "username": "fixture"},
+                                "from": {"id": 900},
                                 "text": "https://exhentai.org/g/99887/errorToken/",
                             },
                         }
@@ -339,6 +356,14 @@ async def test_candidate_storage_failure_sets_visible_connection_error(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await database.configure_telegram_source(
+        source_type="PRIVATE_CHAT",
+        chat_id=900,
+        display_name="Fixture Sender",
+        enabled=True,
+        allowed_archive_formats=("zip", "rar", "7z", "cbz"),
+        max_attachment_size_mb=0,
+    )
     with sqlite3.connect(database.path) as connection:
         connection.execute("DROP TABLE candidates")
     store = SecretStore(tmp_path / "private")

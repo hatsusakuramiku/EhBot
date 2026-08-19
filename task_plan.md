@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 3 offline foundation complete; source rules and `NEEDS_INFO` remain for a later slice
+Implementation phase 4 code complete; browser visual verification blocked by local plugin initialization
 
 ## Phases
 
@@ -83,11 +83,22 @@ Implementation phase 3 offline foundation complete; source rules and `NEEDS_INFO
 - [x] Add live dashboard candidate counts and startup/polling ingestion
 - [x] Pass offline integration and Web regression tests
 - [x] Verify candidate queue and detail layouts in desktop/mobile browsers
-- [ ] Add source-channel and private-sender allowlists plus rule configuration
-- [ ] Add `NEEDS_INFO` classification and its follow-up queue
+- [x] Add source-channel and private-sender allowlists plus rule configuration
+- [x] Add allowed archive-format and maximum attachment-size rules
+- [x] Add `NEEDS_INFO` classification and its follow-up queue
 - [ ] Add manual metadata editing and review actions
 - [ ] Add Telegram media download and persistent download jobs
-- **Status:** offline candidate foundation complete; source rules, `NEEDS_INFO`, review actions, and downloads remain deferred
+- **Status:** offline candidate ingestion and source-rule slices complete; review actions and downloads remain deferred
+
+### Implementation Phase 4: Source Rules And Needs Info
+- [x] Default newly discovered Telegram sources to disabled
+- [x] Add channel and private-sender whitelist configuration
+- [x] Add archive-format and attachment-size filtering
+- [x] Route missing titles and unknown bounded sizes to `NEEDS_INFO`
+- [x] Add authenticated source-rule UI and separate needs-info queue
+- [x] Pass offline integration and Web regression tests
+- [ ] Add tag, language, category, and rating rules after Ex metadata ingestion exists
+- **Status:** code, automated verification, and two-axis review complete; browser visual verification blocked by local plugin initialization
 
 ## Phase 2 Interface Decisions
 - Telegram Token-only mode uses the official Bot API. Telethon/MTProto remains a later optional path because it also requires API ID and API Hash.
