@@ -98,7 +98,7 @@ class DownloadService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
-            if str(candidate_row[0]) not in {"APPROVED", "PENDING_REVIEW"}:
+            if str(candidate_row[0]) != "APPROVED":
                 raise DownloadError(
                     "CANDIDATE_NOT_DOWNLOADABLE",
                     "Only approved candidates can be queued for download",

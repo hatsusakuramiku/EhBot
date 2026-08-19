@@ -216,7 +216,8 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         asyncio.run(asyncio.sleep(2.0))
 
         database = Database(settings.data_path / "ehbot.db")
-        jobs = asyncio.run(database.list_jobs_for_candidate(candidate_id))
+        service = DownloadService(database, settings.work_path)
+        jobs = asyncio.run(service.list_jobs_for_candidate(candidate_id))
         assert jobs
         job = jobs[0]
         assert job.state == DOWNLOAD_STATE_COMPLETED

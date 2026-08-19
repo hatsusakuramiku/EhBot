@@ -85,7 +85,7 @@ def test_approve_moves_candidate_to_approved_state(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/candidates/{candidate_id}")
         assert detail.status_code == 200
@@ -105,7 +105,7 @@ def test_reject_requires_reason(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/candidates/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -121,7 +121,7 @@ def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/candidates/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -149,7 +149,7 @@ def test_metadata_edit_rejects_unknown_field(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/candidates/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -169,7 +169,7 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/candidates/{candidate_id}")
         csrf = detail.context["csrf_token"]

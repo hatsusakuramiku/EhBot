@@ -62,6 +62,25 @@ def _extract_all_with_html(html: str, pattern: str) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _extract_table_row(html: str, label: str) -> str | None:
+    """Return the raw second-cell HTML of an E-Hentai metadata row."""
+    match = re.search(
+        r"<tr>[^<]*<td[^>]*>\s*" + re.escape(label) + r"\s*</td>"
+        r"[^<]*<td[^>]*>(.*?)</td>",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1) if match else None
+
+
+def _strip_tags(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = re.sub(r"<[^>]+>", " ", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
 def _parse_rating(value: str | None) -> float | None:
     if not value:
         return None
@@ -96,16 +115,11 @@ def parse_gallery_html(html: str) -> GalleryMetadata | None:
         html, r'<h1[^>]*id="gj"[^>]*>(.*?)</h1>'
     )
 
-    category_match = re.search(
-        r'category[\'"]?\s*[:=]\s*[\'"]?([a-z0-9_\-]+)',
-        html,
-        flags=re.IGNORECASE,
-    )
     category = (
-        category_match.group(1)
-        if category_match
-        else _extract_with_html(
-            html, r'class="ic[^"]*"[^>]*>\s*<[^>]*>([^<]+)</a>'
+        _strip_tags(_extract_with_html(html, r'<div[^>]*id="gdc"[^>]*>(.*?)</div>'))
+        or _strip_tags(_extract_table_row(html, "Category"))
+        or _strip_tags(
+            _extract_with_html(html, r'<a[^>]*class="ic[^"]*"[^>]*>([^<]+)</a>')
         )
     )
 
@@ -119,38 +133,23 @@ def parse_gallery_html(html: str) -> GalleryMetadata | None:
         _extract_with_html(html, r'class="rating"[^>]*>([^<]+)')
     )
 
-    language_match = re.search(
-        r"<tr>[^<]*<td[^>]*>\s*Language\s*</td>[^<]*<td[^>]*>(.*?)</td>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    language_cell = _extract_table_row(html, "Language")
     language = None
-    if language_match:
-        lang_text = re.sub(r"<[^>]+>", " ", language_match.group(1)).strip()
-        lang_attr = re.search(r'title="([^"]+)"', language_match.group(1))
-        language = lang_attr.group(1) if lang_attr else (lang_text or None)
+    if language_cell is not None:
+        lang_attr = re.search(r'title="([^"]+)"', language_cell)
+        language = (
+            lang_attr.group(1) if lang_attr else _strip_tags(language_cell)
+        )
 
-    artist_value = re.search(
-        r"<tr>[^<]*<td[^>]*>\s*Artist\s*</td>[^<]*<td[^>]*>(.*?)</td>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    artist_cell = _extract_table_row(html, "Artist")
     artists: tuple[str, ...] = ()
-    if artist_value:
-        artists = _extract_all_with_html(
-            artist_value.group(1), r'<a[^>]*>([^<]+)</a>'
-        )
+    if artist_cell is not None:
+        artists = _extract_all_with_html(artist_cell, r"<a[^>]*>([^<]+)</a>")
 
-    group_value = re.search(
-        r"<tr>[^<]*<td[^>]*>\s*Group\s*</td>[^<]*<td[^>]*>(.*?)</td>",
-        html,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+    group_cell = _extract_table_row(html, "Group")
     groups: tuple[str, ...] = ()
-    if group_value:
-        groups = _extract_all_with_html(
-            group_value.group(1), r'<a[^>]*>([^<]+)</a>'
-        )
+    if group_cell is not None:
+        groups = _extract_all_with_html(group_cell, r"<a[^>]*>([^<]+)</a>")
 
     tag_rows = re.findall(
         r"<tr>[^<]*<td[^>]*>\s*([a-z\s]+?)\s*</td>[^<]*<td[^>]*>(.*?)</td>",
