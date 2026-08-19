@@ -55,3 +55,19 @@
 | What's the goal? | Produce an implementation-ready EhBot development plan |
 | What have I learned? | See `findings.md` |
 | What have I done? | Created and verified `DEVELOPMENT_PLAN.md` |
+
+## Implementation Session: 2026-08-19
+
+### Stage 1: Foundation And Persistence
+- **Status:** code complete; Docker runtime verification pending
+- Initialized Git and committed the development-plan baseline as `8ae45fd`.
+- Added the Python 3.12 application, locked dependencies, SQLite WAL migration, administrator authentication, CSRF protection, login throttling, Web dashboard, and health endpoints.
+- Added Docker/Compose definitions, secret-file generation, persistent volume mappings, and setup documentation.
+- Kept Telegram and ExHentai clients out of this stage; the application performs no TG/EX requests.
+
+### Verification
+- `pytest`: 11 passed.
+- Python compile check: passed for `app`, `scripts`, and `tests`.
+- Compose YAML structure parse: passed.
+- Frozen dependency sync: passed.
+- Docker image build/start: not run because Docker CLI is not installed on this machine.

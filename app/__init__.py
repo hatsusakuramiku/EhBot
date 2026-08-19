@@ -1,0 +1,1 @@
+"""EhBot application package."""

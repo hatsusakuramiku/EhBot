@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}工作台 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <h1>审核工作台</h1>
+    <p>本地持久化与审核服务已就绪</p>
+  </div>
+  <span class="status status-ok">系统正常</span>
+</div>
+
+<section class="metrics" aria-label="任务概览">
+  <div class="metric"><strong>0</strong><span>待审核</span></div>
+  <div class="metric"><strong>0</strong><span>待补充</span></div>
+  <div class="metric"><strong>0</strong><span>处理中</span></div>
+  <div class="metric metric-alert"><strong>0</strong><span>失败</span></div>
+</section>
+
+<section class="status-table" aria-labelledby="connection-heading">
+  <h2 id="connection-heading">外部连接</h2>
+  <div class="status-row">
+    <span>Telegram</span><span class="status status-muted">尚未配置</span>
+  </div>
+  <div class="status-row">
+    <span>ExHentai</span><span class="status status-muted">尚未配置</span>
+  </div>
+</section>
+{% endblock %}

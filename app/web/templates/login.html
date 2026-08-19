@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - EhBot</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="login-shell">
+    <h1>EhBot</h1>
+    <form method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+      <label for="password">管理员密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="primary-button" type="submit">登录</button>
+    </form>
+  </main>
+</body>
+</html>

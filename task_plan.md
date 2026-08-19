@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Phase 3 complete
+Implementation phase 1 code complete; Docker runtime verification pending
 
 ## Phases
 
@@ -50,5 +50,16 @@ Phase 3 complete
 | `rg.exe` could not start in the empty workspace | 1 | Used PowerShell file enumeration |
 
 ## Notes
-- This task produces a plan only. Implementation starts after user approval.
+- The plan was approved for implementation on 2026-08-19.
 - Do not place external research text in this file; external findings belong in `findings.md`.
+
+### Implementation Phase 1: Foundation And Persistence
+- [x] Initialize the Git repository and commit the approved plan as the baseline
+- [x] Add the Python 3.12 project and locked dependencies
+- [x] Add SQLite WAL initialization and the initial core-schema migration
+- [x] Add administrator login, CSRF protection, short-term login lockout, and logout
+- [x] Add the Web dashboard plus liveness and readiness endpoints
+- [x] Add Docker, Compose, secret-file bootstrap, and local development documentation
+- [x] Pass the complete automated test suite
+- [ ] Build and start the Docker image on a host with Docker installed
+- **Status:** code complete; runtime container acceptance pending because Docker is not installed on this machine
