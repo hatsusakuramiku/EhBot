@@ -27,3 +27,17 @@ def test_settings_rejects_ambiguous_secret_sources(
 
     with pytest.raises(ValueError, match="either APP_SECRET_KEY or APP_SECRET_KEY_FILE"):
         Settings.from_env()
+
+
+def test_settings_loads_explicit_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1, 10.0.0.2")
+    monkeypatch.setenv("APP_ROOT_PATH", "/ehbot")
+
+    settings = Settings.from_env()
+
+    assert settings.trust_proxy_headers is True
+    assert settings.trusted_proxy_ips == ("10.0.0.1", "10.0.0.2")
+    assert settings.app_root_path == "/ehbot"

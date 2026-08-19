@@ -28,7 +28,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 1
+    assert migration_count == 2
     assert journal_mode == "wal"
     assert {
         "telegram_accounts",
@@ -40,5 +40,6 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         "review_actions",
         "download_jobs",
         "artifacts",
+        "admin_users",
         "schema_migrations",
     } <= tables

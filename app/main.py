@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 import hmac
 import logging
@@ -15,7 +16,9 @@ from pwdlib.exceptions import PwdlibError
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import Settings
+from app.bootstrap import remove_bootstrap_password, write_bootstrap_password
 from app.db.database import Database
+from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
 from app.storage.readiness import ensure_writable_directory
 
@@ -24,6 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
     app_settings = settings or Settings.from_env()
     database = Database(app_settings.data_path / "ehbot.db")
+    password_hasher = PasswordHash.recommended()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -36,6 +40,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ):
                 ensure_writable_directory(path)
             await database.initialize()
+            admin_auth = await database.get_admin_auth("admin")
+            if admin_auth is None or not admin_auth[1]:
+                bootstrap_password = secrets.token_urlsafe(18)
+                bootstrap_hash = await asyncio.to_thread(
+                    password_hasher.hash, bootstrap_password
+                )
+                await database.set_bootstrap_admin("admin", bootstrap_hash)
+                password_file = await asyncio.to_thread(
+                    write_bootstrap_password,
+                    app_settings.data_path,
+                    bootstrap_password,
+                )
+                logging.getLogger(__name__).warning(
+                    "bootstrap_admin_password_created path=%s", password_file
+                )
+            else:
+                await asyncio.to_thread(
+                    remove_bootstrap_password, app_settings.data_path
+                )
         except (OSError, ValueError, sqlite3.Error) as exc:
             app.state.startup_errors.append(str(exc))
             logging.getLogger(__name__).error(
@@ -43,9 +66,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         yield
 
-    app = FastAPI(title="EhBot", lifespan=lifespan)
+    app = FastAPI(
+        title="EhBot", lifespan=lifespan, root_path=app_settings.app_root_path
+    )
     app.state.settings = app_settings
     app.state.database = database
+    app.add_exception_handler(AppError, app_error_handler)
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
         SessionMiddleware,
@@ -72,7 +98,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     async def dashboard(request: Request):
         if not request.session.get("authenticated"):
-            return RedirectResponse("/login", status_code=303)
+            return RedirectResponse(
+                request.url_for("login_page").path, status_code=303
+            )
+        if request.session.get("must_change_password"):
+            return RedirectResponse(
+                request.url_for("change_password_page").path, status_code=303
+            )
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
@@ -103,11 +135,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if locked_until:
             failed_count = 0
             login_attempts.pop(client_key, None)
-        if not app_settings.admin_password_hash:
+        admin_auth = await database.get_admin_auth("admin")
+        if admin_auth is None:
             raise HTTPException(status_code=503, detail="Authentication is not configured")
         try:
-            password_matches = PasswordHash.recommended().verify(
-                password, app_settings.admin_password_hash
+            password_matches = await asyncio.to_thread(
+                password_hasher.verify, password, admin_auth[0]
             )
         except PwdlibError as exc:
             raise HTTPException(
@@ -132,13 +165,80 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.session.clear()
         request.session["authenticated"] = True
         request.session["csrf_token"] = secrets.token_urlsafe(32)
-        return RedirectResponse("/", status_code=303)
+        request.session["must_change_password"] = not admin_auth[1]
+        destination = (
+            request.url_for("change_password_page").path
+            if not admin_auth[1]
+            else request.url_for("dashboard").path
+        )
+        return RedirectResponse(destination, status_code=303)
+
+    @app.get("/change-password")
+    async def change_password_page(request: Request):
+        if not request.session.get("authenticated"):
+            return RedirectResponse(
+                request.url_for("login_page").path, status_code=303
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="change_password.html",
+            context={"csrf_token": request.session["csrf_token"]},
+        )
+
+    @app.post("/change-password")
+    async def change_password(
+        request: Request,
+        current_password: str = Form(),
+        new_password: str = Form(),
+        confirmation: str = Form(),
+        csrf_token: str = Form(),
+    ):
+        if not request.session.get("authenticated"):
+            return RedirectResponse(
+                request.url_for("login_page").path, status_code=303
+            )
+        validate_csrf(request, csrf_token)
+        error: str | None = None
+        if len(new_password) < 12:
+            error = "新密码至少需要 12 个字符"
+        elif new_password != confirmation:
+            error = "两次输入的新密码不一致"
+        admin_auth = await database.get_admin_auth("admin")
+        if admin_auth is None:
+            raise HTTPException(status_code=503, detail="Authentication is not configured")
+        try:
+            current_password_matches = await asyncio.to_thread(
+                password_hasher.verify, current_password, admin_auth[0]
+            )
+        except PwdlibError as exc:
+            raise HTTPException(
+                status_code=503, detail="Authentication is not configured"
+            ) from exc
+        if not current_password_matches:
+            error = "当前密码不正确"
+        if error:
+            return templates.TemplateResponse(
+                request=request,
+                name="change_password.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "error": error,
+                },
+                status_code=400,
+            )
+        new_password_hash = await asyncio.to_thread(
+            password_hasher.hash, new_password
+        )
+        await database.change_admin_password("admin", new_password_hash)
+        await asyncio.to_thread(remove_bootstrap_password, app_settings.data_path)
+        request.session["must_change_password"] = False
+        return RedirectResponse(request.url_for("dashboard").path, status_code=303)
 
     @app.post("/logout")
     async def logout(request: Request, csrf_token: str = Form()):
         validate_csrf(request, csrf_token)
         request.session.clear()
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse(request.url_for("login_page").path, status_code=303)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -149,6 +249,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         errors = list(app.state.startup_errors)
         if not await database.check_writable():
             errors.append("database is not writable")
+        for name, path in (
+            ("data", app_settings.data_path),
+            ("library", app_settings.library_path),
+            ("work", app_settings.work_path),
+        ):
+            try:
+                await asyncio.to_thread(ensure_writable_directory, path)
+            except OSError:
+                errors.append(f"{name} directory is not writable")
         if errors:
             return JSONResponse(
                 status_code=503,

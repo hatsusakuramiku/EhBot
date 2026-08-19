@@ -57,7 +57,7 @@ Implementation phase 1 code complete; Docker runtime verification pending
 - [x] Initialize the Git repository and commit the approved plan as the baseline
 - [x] Add the Python 3.12 project and locked dependencies
 - [x] Add SQLite WAL initialization and the initial core-schema migration
-- [x] Add administrator login, CSRF protection, short-term login lockout, and logout
+- [x] Add bootstrap administrator creation, forced password change, CSRF protection, short-term login lockout, and logout
 - [x] Add the Web dashboard plus liveness and readiness endpoints
 - [x] Add Docker, Compose, secret-file bootstrap, and local development documentation
 - [x] Pass the complete automated test suite

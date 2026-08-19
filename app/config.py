@@ -15,14 +15,23 @@ def _read_secret(name: str) -> str | None:
     return direct_value
 
 
+def _read_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes"}
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     data_path: Path = Path("data")
     library_path: Path = Path("library")
     work_path: Path = Path("work")
     app_secret_key: str | None = None
-    admin_password_hash: str | None = None
     session_cookie_secure: bool = False
+    trust_proxy_headers: bool = False
+    trusted_proxy_ips: tuple[str, ...] = ()
+    app_root_path: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -31,15 +40,20 @@ class Settings:
             library_path=Path(os.getenv("LIBRARY_PATH", "library")),
             work_path=Path(os.getenv("WORK_PATH", "work")),
             app_secret_key=_read_secret("APP_SECRET_KEY"),
-            admin_password_hash=_read_secret("ADMIN_PASSWORD_HASH"),
-            session_cookie_secure=os.getenv("SESSION_COOKIE_SECURE", "false").lower()
-            in {"1", "true", "yes"},
+            session_cookie_secure=_read_bool("SESSION_COOKIE_SECURE"),
+            trust_proxy_headers=_read_bool("TRUST_PROXY_HEADERS"),
+            trusted_proxy_ips=tuple(
+                item.strip()
+                for item in os.getenv("TRUSTED_PROXY_IPS", "").split(",")
+                if item.strip()
+            ),
+            app_root_path=os.getenv("APP_ROOT_PATH", ""),
         )
 
     def readiness_errors(self) -> list[str]:
         errors: list[str] = []
         if not self.app_secret_key or len(self.app_secret_key) < 32:
             errors.append("APP_SECRET_KEY must contain at least 32 characters")
-        if not self.admin_password_hash:
-            errors.append("ADMIN_PASSWORD_HASH is required")
+        if self.trust_proxy_headers and not self.trusted_proxy_ips:
+            errors.append("TRUSTED_PROXY_IPS is required when proxy headers are trusted")
         return errors

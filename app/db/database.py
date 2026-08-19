@@ -60,3 +60,51 @@ class Database:
             return True
         except sqlite3.Error:
             return False
+
+    async def get_admin_auth(self, username: str) -> tuple[str, bool] | None:
+        return await asyncio.to_thread(self._get_admin_auth_sync, username)
+
+    def _get_admin_auth_sync(self, username: str) -> tuple[str, bool] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT password_hash, password_changed "
+                "FROM admin_users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0], bool(row[1])
+
+    async def set_bootstrap_admin(self, username: str, password_hash: str) -> None:
+        await asyncio.to_thread(
+            self._set_bootstrap_admin_sync, username, password_hash
+        )
+
+    def _set_bootstrap_admin_sync(self, username: str, password_hash: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO admin_users (username, password_hash, password_changed) "
+                "VALUES (?, ?, 0) "
+                "ON CONFLICT(username) DO UPDATE SET "
+                "password_hash = excluded.password_hash, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE admin_users.password_changed = 0",
+                (username, password_hash),
+            )
+
+    async def change_admin_password(
+        self, username: str, password_hash: str
+    ) -> None:
+        await asyncio.to_thread(
+            self._change_admin_password_sync, username, password_hash
+        )
+
+    def _change_admin_password_sync(self, username: str, password_hash: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE admin_users SET password_hash = ?, password_changed = 1, "
+                "updated_at = CURRENT_TIMESTAMP WHERE username = ?",
+                (password_hash, username),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"Administrator account {username!r} does not exist")

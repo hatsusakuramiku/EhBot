@@ -20,6 +20,8 @@ button, input { font: inherit; }
 }
 
 .brand { color: #17202a; font-weight: 700; text-decoration: none; }
+.header-actions { display: flex; align-items: center; gap: 16px; }
+.header-actions a { color: #315f78; text-decoration: none; }
 .page-shell { width: min(1080px, 100%); margin: 0 auto; padding: 32px 24px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 h1 { margin: 0; font-size: 26px; letter-spacing: 0; }
@@ -51,9 +53,10 @@ p { margin: 6px 0 0; color: #66717c; }
 .quiet-button:hover { background: #f0f2f3; }
 
 .login-shell { width: min(360px, calc(100% - 32px)); margin: 15vh auto 0; }
-.login-shell form { display: grid; gap: 12px; margin-top: 28px; }
-.login-shell input[type="password"] { width: 100%; min-height: 42px; padding: 8px 10px; border: 1px solid #aeb6bd; border-radius: 4px; background: #ffffff; }
-.login-shell input:focus { outline: 2px solid #28785a; outline-offset: 1px; }
+.login-shell form, .form-page form { display: grid; gap: 12px; margin-top: 28px; }
+.login-shell input[type="password"], .form-page input[type="password"] { width: 100%; min-height: 42px; padding: 8px 10px; border: 1px solid #aeb6bd; border-radius: 4px; background: #ffffff; }
+.login-shell input:focus, .form-page input:focus { outline: 2px solid #28785a; outline-offset: 1px; }
+.form-page { width: min(480px, 100%); }
 .primary-button { min-height: 42px; border: 0; border-radius: 4px; color: #ffffff; background: #17633e; cursor: pointer; }
 .primary-button:hover { background: #104c30; }
 .form-error { margin: 0; color: #a33a36; }

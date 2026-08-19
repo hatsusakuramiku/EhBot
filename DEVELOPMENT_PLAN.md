@@ -486,7 +486,6 @@ SESSION_COOKIE_SECURE=false
 
 ```text
 APP_SECRET_KEY_FILE
-ADMIN_PASSWORD_HASH_FILE
 TELEGRAM_API_ID
 TELEGRAM_API_HASH_FILE
 TELEGRAM_BOT_TOKEN_FILE
@@ -503,6 +502,8 @@ WORK_PATH
 要求：
 
 - `.env` 不进入 Git。
+- 管理员首次启动密码由系统自动生成，明文只写入数据目录中的私有临时文件；未手动修改前每次重启轮换。
+- 管理员在 Web UI 修改密码后删除临时密码文件，此后仅在 SQLite 中保存强哈希。
 - 日志必须对 Token、Cookie、Authorization 和查询参数脱敏。
 - Web UI 只能显示凭据健康状态，不能回显秘密。
 - Telethon session 权限限制为容器运行用户可读写。
@@ -513,6 +514,7 @@ WORK_PATH
 
 - 第一版仅提供管理员账号，不提供公开注册。
 - 密码只保存强哈希。
+- 首次登录必须修改系统生成的临时密码。
 - 使用 HttpOnly、SameSite 会话 Cookie。
 - 所有修改操作实施 CSRF 校验。
 - 登录失败实施速率限制和短期锁定。

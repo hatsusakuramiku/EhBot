@@ -2,7 +2,22 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
+
+
+_AUTHORIZATION = re.compile(
+    r"(?i)(\bauthorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+"
+)
+_SENSITIVE_VALUE = re.compile(
+    r"(?i)(\b(?:cookie|token|api[_-]?hash|ipb_member_id|ipb_pass_hash|igneous)"
+    r"\s*[:=]\s*)[^\s,;&]+"
+)
+
+
+def redact_sensitive_values(message: str) -> str:
+    message = _AUTHORIZATION.sub(r"\1<redacted>", message)
+    return _SENSITIVE_VALUE.sub(r"\1<redacted>", message)
 
 
 class JsonFormatter(logging.Formatter):
@@ -10,7 +25,7 @@ class JsonFormatter(logging.Formatter):
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
-            "event": record.getMessage(),
+            "event": redact_sensitive_values(record.getMessage()),
         }
         for field in (
             "candidate_id",

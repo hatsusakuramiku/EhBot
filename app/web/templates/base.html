@@ -4,15 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}EhBot{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
 </head>
 <body>
   <header class="app-header">
-    <a class="brand" href="/">EhBot</a>
-    <form method="post" action="/logout">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button class="quiet-button" type="submit">退出</button>
-    </form>
+    <a class="brand" href="{{ url_for('dashboard') }}">EhBot</a>
+    <div class="header-actions">
+      <a href="{{ url_for('change_password_page') }}">修改密码</a>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="quiet-button" type="submit">退出</button>
+      </form>
+    </div>
   </header>
   <main class="page-shell">{% block content %}{% endblock %}</main>
 </body>

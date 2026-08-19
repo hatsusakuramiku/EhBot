@@ -1,34 +1,44 @@
 from __future__ import annotations
 
-from getpass import getpass
 from pathlib import Path
+import shutil
 import secrets
-
-from pwdlib import PasswordHash
-
+import tempfile
 
 def write_private_file(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
     path.chmod(0o600)
 
 
+def create_secret_files(output_dir: Path) -> None:
+    if output_dir.exists():
+        raise FileExistsError(
+            f"{output_dir} already exists; refusing to replace credentials"
+        )
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent)
+    )
+    try:
+        temporary_dir.chmod(0o700)
+        write_private_file(
+            temporary_dir / "app_secret_key", secrets.token_urlsafe(48)
+        )
+        temporary_dir.rename(output_dir)
+    except BaseException:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+        raise
+
+
 def main() -> None:
     output_dir = Path("secrets")
-    output_dir.mkdir(mode=0o700, exist_ok=True)
-
-    password = getpass("管理员密码: ")
-    confirmation = getpass("再次输入管理员密码: ")
-    if password != confirmation:
-        raise SystemExit("两次输入的密码不一致")
-    if len(password) < 12:
-        raise SystemExit("管理员密码至少需要 12 个字符")
-
-    write_private_file(output_dir / "app_secret_key", secrets.token_urlsafe(48))
-    write_private_file(
-        output_dir / "admin_password_hash",
-        PasswordHash.recommended().hash(password),
-    )
-    print("秘密文件已写入 secrets 目录；其内容不会显示。")
+    try:
+        create_secret_files(output_dir)
+    except FileExistsError as exc:
+        raise SystemExit("secrets 目录已存在；为避免轮换凭据，已停止。") from exc
+    for runtime_dir in (Path("data"), Path("library"), Path("work")):
+        runtime_dir.mkdir(exist_ok=True)
+    print("应用秘密及运行目录已创建；秘密内容不会显示。")
 
 
 if __name__ == "__main__":

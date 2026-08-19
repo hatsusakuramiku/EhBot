@@ -2,6 +2,7 @@ services:
   ehbot:
     build: .
     init: true
+    user: "${EHBOT_UID:-1000}:${EHBOT_GID:-1000}"
     restart: unless-stopped
     ports:
       - "${EHBOT_PORT:-8080}:8080"
@@ -10,12 +11,13 @@ services:
       LIBRARY_PATH: /library
       WORK_PATH: /work
       APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
-      ADMIN_PASSWORD_HASH_FILE: /run/secrets/admin_password_hash
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
+      TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
+      TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:-}"
+      APP_ROOT_PATH: "${APP_ROOT_PATH:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     secrets:
       - app_secret_key
-      - admin_password_hash
     volumes:
       - ./data:/app/data
       - "${LIBRARY_PATH:-./library}:/library"
@@ -30,5 +32,3 @@ services:
 secrets:
   app_secret_key:
     file: ./secrets/app_secret_key
-  admin_password_hash:
-    file: ./secrets/admin_password_hash
