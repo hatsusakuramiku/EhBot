@@ -26,6 +26,18 @@ from app.connections.models import ProviderConnectionError
 from app.db.database import Database
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
+
+from app.review.service import ReviewError, ReviewService
+from app.downloads.service import DownloadError, DownloadService
+from app.conversion.service import (
+    ConversionError,
+    ConversionService,
+    CONVERSION_STATE_COMPLETED,
+    CONVERSION_STATE_FAILED,
+    CONVERSION_STATE_PENDING,
+    CONVERSION_STATE_RUNNING,
+)
+from app.exhentai.service import ExHentaiDownloadError, ExHentaiService
 from app.secrets import SecretStore
 from app.storage.readiness import ensure_writable_directory
 
@@ -94,6 +106,34 @@ def create_app(
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
+            download_service = DownloadService(
+                database,
+                app_settings.work_path,
+                telegram_client_factory=(
+                    lambda: _build_telegram_context(
+                        secret_store, telegram_client
+                    )
+                ),
+            )
+            application.state.download_service = download_service
+            await download_service.start()
+            conversion_service = ConversionService(
+                database,
+                app_settings.work_path,
+                app_settings.library_path,
+            )
+            application.state.conversion_service = conversion_service
+            await conversion_service.start()
+            exhentai_service = ExHentaiService(
+                database,
+                app_settings.work_path,
+                app_settings.library_path,
+                credentials_provider=(
+                    lambda: _build_exhentai_credentials(secret_store)
+                ),
+                http_client=exhentai_client,
+            )
+            application.state.exhentai_service = exhentai_service
         except (OSError, ValueError, sqlite3.Error) as exc:
             app.state.startup_errors.append(str(exc))
             logging.getLogger(__name__).error(
@@ -104,6 +144,12 @@ def create_app(
         finally:
             if connection_manager is not None:
                 await connection_manager.stop()
+            download_service = application.state.download_service
+            if download_service is not None:
+                await download_service.stop()
+            conversion_service = application.state.conversion_service
+            if conversion_service is not None:
+                await conversion_service.stop()
             if telegram_client is not None:
                 await telegram_client.aclose()
             if exhentai_client is not None:
@@ -115,6 +161,9 @@ def create_app(
     app.state.settings = app_settings
     app.state.database = database
     app.state.connection_manager = None
+    app.state.download_service = None
+    app.state.conversion_service = None
+    app.state.exhentai_service = None
     app.add_exception_handler(AppError, app_error_handler)
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
@@ -126,6 +175,21 @@ def create_app(
     templates = Jinja2Templates(
         directory=Path(__file__).parent / "web" / "templates"
     )
+
+    def _status_label(status: str) -> str:
+        labels = {
+            "PENDING_REVIEW": "待审核",
+            "NEEDS_INFO": "待补充",
+            "APPROVED": "已通过",
+            "REJECTED": "已驳回",
+            "NEEDS_REVISION": "需要修订",
+            "PROCESSING": "处理中",
+            "FAILED": "失败",
+        }
+        return labels.get(status, status)
+
+    templates.env.filters["status_label"] = _status_label
+    templates.env.globals["status_label"] = _status_label
     app.mount(
         "/static",
         StaticFiles(directory=Path(__file__).parent / "web" / "static"),
@@ -155,6 +219,44 @@ def create_app(
         if manager is None:
             raise HTTPException(status_code=503, detail="Connections are unavailable")
         return manager
+
+    async def _build_telegram_context(secret_store, default_client):
+        token = await asyncio.to_thread(
+            secret_store.read, "telegram_bot_token"
+        )
+        return token, default_client
+
+    def download_service() -> DownloadService:
+        service = app.state.download_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Downloads are unavailable")
+        return service
+
+    def conversion_service() -> ConversionService:
+        service = app.state.conversion_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Conversion is unavailable")
+        return service
+
+    def exhentai_service() -> ExHentaiService:
+        service = app.state.exhentai_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="ExHentai is unavailable")
+        return service
+
+    async def _build_exhentai_credentials(secret_store):
+        cookies_json = await asyncio.to_thread(
+            secret_store.read, "exhentai_cookies"
+        )
+        if not cookies_json:
+            return None
+        try:
+            return ExHentaiCredentials.from_json(cookies_json)
+        except (ValueError, KeyError):
+            return None
+
+    def review_service() -> ReviewService:
+        return ReviewService(database)
 
     @app.get("/")
     async def dashboard(request: Request):
@@ -215,13 +317,316 @@ def create_app(
         candidate = await database.get_candidate(candidate_id)
         if candidate is None:
             raise HTTPException(status_code=404, detail="Candidate not found")
+        summary = await review_service().get_candidate_review_summary(candidate_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        jobs = await download_service().list_jobs_for_candidate(candidate_id)
+        archive_ready = any(
+            job.provider == "TELEGRAM" and job.state == "COMPLETED"
+            for job in jobs
+        )
+        download_eligible = any(
+            attachment.get("type") == "archive"
+            for message in candidate.messages
+            for attachment in message.attachments
+        )
         return templates.TemplateResponse(
             request=request,
             name="candidate_detail.html",
             context={
                 "csrf_token": request.session["csrf_token"],
                 "candidate": candidate,
+                "metadata_entries": summary.metadata,
+                "review_history": summary.review_history,
+                "download_jobs": jobs,
+                "download_eligible": download_eligible,
+                "archive_ready": archive_ready,
+                "metadata_fields": (
+                    "Title",
+                    "Artist",
+                    "Language",
+                    "Category",
+                    "Tags",
+                    "Rating",
+                    "Description",
+                ),
+                "current_user": request.session.get("username", "admin"),
             },
+        )
+
+    @app.post("/candidates/{candidate_id}/approve")
+    async def approve_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        operator = request.session.get("username", "admin")
+        form = await request.form()
+        note = str(form.get("note") or "").strip() or None
+        try:
+            await review_service().approve_candidate(candidate_id, operator, note)
+        except ReviewError as exc:
+            return await _render_review_error(
+                request,
+                candidate_id,
+                exc.public_message,
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/reject")
+    async def reject_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+        reason: str = Form(""),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        operator = request.session.get("username", "admin")
+        try:
+            await review_service().reject_candidate(
+                candidate_id, operator, reason
+            )
+        except ReviewError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/needs-revision")
+    async def needs_revision_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+        reason: str = Form(""),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        operator = request.session.get("username", "admin")
+        try:
+            await review_service().request_revision(
+                candidate_id, operator, reason
+            )
+        except ReviewError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/requeue")
+    async def requeue_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        operator = request.session.get("username", "admin")
+        form = await request.form()
+        note = str(form.get("note") or "").strip() or None
+        try:
+            await review_service().requeue_candidate(candidate_id, operator, note)
+        except ReviewError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/metadata")
+    async def edit_metadata(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+        field_name: str = Form(),
+        field_value: str = Form(""),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        operator = request.session.get("username", "admin")
+        try:
+            await review_service().set_manual_metadata(
+                candidate_id, operator, field_name, field_value
+            )
+        except ReviewError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/download")
+    async def download_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        candidate = await database.get_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        archive_attachments = []
+        for message in candidate.messages:
+            for attachment in message.attachments:
+                if attachment.get("type") == "archive":
+                    archive_attachments.append(attachment)
+        if not archive_attachments:
+            return await _render_review_error(
+                request,
+                candidate_id,
+                "该候选没有可下载的压缩附件",
+            )
+        try:
+            await download_service().enqueue_telegram_download(
+                candidate_id, archive_attachments[0]
+            )
+        except DownloadError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.get("/downloads")
+    async def downloads_dashboard(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        active = await download_service().list_active_jobs()
+        return templates.TemplateResponse(
+            request=request,
+            name="downloads.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "active_jobs": active,
+            },
+        )
+
+    @app.post("/candidates/{candidate_id}/exhentai-metadata")
+    async def fetch_exhentai_metadata(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await exhentai_service().fetch_metadata_for_candidate(candidate_id)
+        except ExHentaiDownloadError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/exhentai-archive")
+    async def download_exhentai_archive(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await exhentai_service().download_archive_for_candidate(candidate_id)
+        except ExHentaiDownloadError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/convert")
+    async def convert_candidate(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await conversion_service().enqueue_for_candidate(candidate_id)
+        except ConversionError as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    async def _render_review_error(
+        request: Request, candidate_id: int, message: str
+    ):
+        candidate = await database.get_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        summary = await review_service().get_candidate_review_summary(candidate_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="candidate_detail.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "candidate": candidate,
+                "metadata_entries": (
+                    summary.metadata if summary is not None else ()
+                ),
+                "review_history": (
+                    summary.review_history if summary is not None else ()
+                ),
+                "metadata_fields": (
+                    "Title",
+                    "Artist",
+                    "Language",
+                    "Category",
+                    "Tags",
+                    "Rating",
+                    "Description",
+                ),
+                "current_user": request.session.get("username", "admin"),
+                "error": message,
+            },
+            status_code=400,
         )
 
     @app.get("/sources")
@@ -439,6 +844,7 @@ def create_app(
         login_attempts.pop(client_key, None)
         request.session.clear()
         request.session["authenticated"] = True
+        request.session["username"] = "admin"
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         request.session["must_change_password"] = not admin_auth[1]
         destination = (
@@ -544,3 +950,4 @@ def create_app(
 
 
 app = create_app()
+

@@ -14,6 +14,8 @@ from app.candidates.models import (
     TelegramSourceConfig,
 )
 
+from app.review.models import MetadataEntry, ReviewActionEntry
+
 
 class Database:
     def __init__(self, path: Path) -> None:
@@ -919,3 +921,198 @@ class Database:
             ex_gallery_token=str(row[6]) if row[6] is not None else None,
             messages=messages,
         )
+
+
+    _REVIEWABLE_STATUSES = frozenset(
+        {"PENDING_REVIEW", "NEEDS_INFO", "NEEDS_REVISION", "REJECTED"}
+    )
+
+
+    async def transition_candidate_status(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        action: str,
+        new_status: str,
+        note: str | None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._transition_candidate_status_sync,
+            candidate_id,
+            operator_name,
+            action,
+            new_status,
+            note,
+        )
+
+
+    def _transition_candidate_status_sync(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        action: str,
+        new_status: str,
+        note: str | None,
+    ) -> None:
+        details = {"status": new_status}
+        if note:
+            details["note"] = note
+        details_json = json.dumps(details, separators=(",", ":"))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "SELECT status FROM candidates WHERE id = ?",
+                (candidate_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise LookupError(f"Candidate {candidate_id} does not exist")
+            current_status = str(row[0])
+            if current_status not in self._REVIEWABLE_STATUSES:
+                raise PermissionError(
+                    f"Candidate in state {current_status} cannot be reviewed"
+                )
+            connection.execute(
+                "UPDATE candidates SET status = ?, filter_reason = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_status, note or "", candidate_id),
+            )
+            connection.execute(
+                "INSERT INTO review_actions "
+                "(candidate_id, action, operator_name, details_json) "
+                "VALUES (?, ?, ?, ?)",
+                (candidate_id, action, operator_name, details_json),
+            )
+
+
+    async def set_manual_metadata(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        field_name: str,
+        field_value: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_manual_metadata_sync,
+            candidate_id,
+            operator_name,
+            field_name,
+            field_value,
+        )
+
+
+    def _set_manual_metadata_sync(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        field_name: str,
+        field_value: str,
+    ) -> None:
+        with self._connect() as connection:
+            candidate_row = connection.execute(
+                "SELECT 1 FROM candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if candidate_row is None:
+                raise LookupError(f"Candidate {candidate_id} does not exist")
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, "
+                "confidence, is_manual) VALUES (?, ?, ?, 'OPERATOR', 1.0, 1) "
+                "ON CONFLICT(candidate_id, field_name, value_source) "
+                "DO UPDATE SET field_value = excluded.field_value, "
+                "confidence = 1.0, is_manual = 1, "
+                "created_at = CURRENT_TIMESTAMP",
+                (candidate_id, field_name, field_value),
+            )
+            connection.execute(
+                "INSERT INTO review_actions "
+                "(candidate_id, action, operator_name, details_json) "
+                "VALUES (?, 'EDIT_METADATA', ?, ?)",
+                (
+                    candidate_id,
+                    operator_name,
+                    json.dumps(
+                        {"field": field_name, "value": field_value},
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+
+
+    async def list_metadata(
+        self, candidate_id: int
+    ) -> tuple[MetadataEntry, ...]:
+        return await asyncio.to_thread(self._list_metadata_sync, candidate_id)
+
+
+    def list_metadata_sync(
+        self, candidate_id: int
+    ) -> tuple[MetadataEntry, ...]:
+        return self._list_metadata_sync(candidate_id)
+
+
+    def _list_metadata_sync(self, candidate_id: int) -> tuple[MetadataEntry, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT field_name, field_value, value_source, confidence, "
+                "is_manual, created_at FROM metadata_values "
+                "WHERE candidate_id = ? ORDER BY is_manual DESC, field_name",
+                (candidate_id,),
+            ).fetchall()
+        return tuple(
+            MetadataEntry(
+                field_name=str(row[0]),
+                field_value=str(row[1]),
+                value_source=str(row[2]),
+                confidence=float(row[3]) if row[3] is not None else None,
+                is_manual=bool(row[4]),
+                created_at=str(row[5]),
+            )
+            for row in rows
+        )
+
+
+    async def list_review_actions(
+        self, candidate_id: int
+    ) -> tuple[ReviewActionEntry, ...]:
+        return await asyncio.to_thread(
+            self._list_review_actions_sync, candidate_id
+        )
+
+
+    def list_review_actions_sync(
+        self, candidate_id: int
+    ) -> tuple[ReviewActionEntry, ...]:
+        return self._list_review_actions_sync(candidate_id)
+
+
+    def _list_review_actions_sync(
+        self, candidate_id: int
+    ) -> tuple[ReviewActionEntry, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT action, operator_name, details_json, created_at "
+                "FROM review_actions WHERE candidate_id = ? "
+                "ORDER BY id DESC",
+                (candidate_id,),
+            ).fetchall()
+        return tuple(
+            ReviewActionEntry(
+                action=str(row[0]),
+                operator_name=str(row[1]),
+                details=self._safe_json(row[2]),
+                created_at=str(row[3]),
+            )
+            for row in rows
+        )
+
+
+    @staticmethod
+    def _safe_json(value: str | None) -> dict:
+        if not value:
+            return {}
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}

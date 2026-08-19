@@ -86,9 +86,9 @@ Implementation phase 4 code complete; browser visual verification blocked by loc
 - [x] Add source-channel and private-sender allowlists plus rule configuration
 - [x] Add allowed archive-format and maximum attachment-size rules
 - [x] Add `NEEDS_INFO` classification and its follow-up queue
-- [ ] Add manual metadata editing and review actions
-- [ ] Add Telegram media download and persistent download jobs
-- **Status:** offline candidate ingestion and source-rule slices complete; review actions and downloads remain deferred
+- [x] Add manual metadata editing and review actions
+- [x] Add Telegram media download and persistent download jobs
+- **Status:** complete
 
 ### Implementation Phase 4: Source Rules And Needs Info
 - [x] Default newly discovered Telegram sources to disabled

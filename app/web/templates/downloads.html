@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}下载任务 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">下载</span>
+    <h1>活跃下载任务</h1>
+    <p>通过 Telegram Bot API 与 ExHentai 直接拉取到工作目录</p>
+  </div>
+  <span class="queue-count">{{ active_jobs|length }} 项</span>
+</div>
+
+<section class="queue-table" aria-label="下载任务">
+  <div class="queue-header"><span>任务</span><span>候选</span><span>提供方</span><span>尝试</span><span></span></div>
+  {% for job in active_jobs %}
+  <a class="queue-row" href="{{ url_for('candidate_detail', candidate_id=job.candidate_id) }}">
+    <span><strong>#{{ job.job_id }}</strong><small>{{ job.state }}</small></span>
+    <span>候选 #{{ job.candidate_id }}</span>
+    <span>{{ job.provider }}</span>
+    <span>{{ job.attempt_count }}</span>
+    <span class="row-arrow" aria-hidden="true">→</span>
+  </a>
+  {% else %}
+  <div class="empty-state"><strong>暂无活跃下载任务</strong><p>在已审核候选详情页触发下载后会出现在这里</p></div>
+  {% endfor %}
+</section>
+{% endblock %}

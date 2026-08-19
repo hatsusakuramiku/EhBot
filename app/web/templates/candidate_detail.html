@@ -1,20 +1,32 @@
 {% extends "base.html" %}
 {% block title %}{{ candidate.title or "候选详情" }} - EhBot{% endblock %}
 {% block content %}
-<a class="back-link" href="{{ url_for('candidate_queue') }}">‹ 返回候选队列</a>
+<a class="back-link" href="{{ url_for('candidate_queue') }}">← 返回候选队列</a>
 <div class="page-heading detail-heading">
   <div>
     <span class="eyebrow">候选 #{{ candidate.candidate_id }}</span>
     <h1>{{ candidate.title or "未命名候选" }}</h1>
     <p>{{ candidate.filter_reason }}</p>
   </div>
-  <span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else "待补充" if candidate.status == "NEEDS_INFO" else candidate.status }}</span>
+  <span class="status status-connecting"><i></i>{{ status_label(candidate.status) }}</span>
 </div>
+
+{% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
 
 {% if candidate.ex_gid %}
 <section class="reference-band" aria-label="画廊引用">
   <span>ExHentai 画廊</span>
   <a href="https://exhentai.org/g/{{ candidate.ex_gid }}/{{ candidate.ex_gallery_token }}/" rel="noreferrer">#{{ candidate.ex_gid }}</a>
+  <div class="reference-actions">
+    <form method="post" action="{{ url_for('fetch_exhentai_metadata', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="quiet-button">拉取元数据</button>
+    </form>
+    <form method="post" action="{{ url_for('download_exhentai_archive', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="quiet-button">下载原档</button>
+    </form>
+  </div>
 </section>
 {% endif %}
 
@@ -35,5 +47,153 @@
     </article>
     {% endfor %}
   </div>
+</section>
+
+<section class="metadata-section" aria-labelledby="metadata-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="metadata-heading">元数据</h2>
+      <p>标记为手动编辑的字段会覆盖自动来源</p>
+    </div>
+  </div>
+  {% if metadata_entries %}
+  <ul class="metadata-list">
+    {% for entry in metadata_entries %}
+    <li class="metadata-item {% if entry.is_manual %}is-manual{% endif %}">
+      <div class="metadata-meta">
+        <strong>{{ entry.field_name }}</strong>
+        <span class="metadata-source">{{ entry.value_source }}{% if entry.confidence is not none %} · 信任度 {{ entry.confidence }}{% endif %}</span>
+      </div>
+      <div class="metadata-value">{{ entry.field_value }}</div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">暂无元数据</p>
+  {% endif %}
+
+  <form class="metadata-form" method="post" action="{{ url_for('edit_metadata', candidate_id=candidate.candidate_id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label>
+      <span>字段</span>
+      <select name="field_name" required>
+        {% for field in metadata_fields %}
+        <option value="{{ field }}">{{ field }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      <span>新值</span>
+      <input name="field_value" type="text" required maxlength="500" />
+    </label>
+    <button type="submit" class="primary-button">更新元数据</button>
+  </form>
+</section>
+
+<section class="download-section" aria-labelledby="download-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="download-heading">下载与转码</h2>
+      <p>将压缩附件下载到本地工作目录，再转换为标准 CBZ</p>
+    </div>
+  </div>
+  {% if download_eligible %}
+  <form class="download-form" method="post" action="{{ url_for('download_candidate', candidate_id=candidate.candidate_id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <button type="submit" class="primary-button">触发下载</button>
+  </form>
+  {% else %}
+  <p class="empty-state">当前候选没有可下载的压缩附件</p>
+  {% endif %}
+  {% if archive_ready %}
+  <form class="download-form" method="post" action="{{ url_for('convert_candidate', candidate_id=candidate.candidate_id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <button type="submit" class="primary-button">转换为 CBZ</button>
+  </form>
+  {% endif %}
+  {% if download_jobs %}
+  <h3 class="subsection-heading">任务历史</h3>
+  <ol class="review-history">
+    {% for job in download_jobs %}
+    <li class="review-entry">
+      <div class="review-entry-meta">
+        <strong>#{{ job.job_id }} · {{ job.provider }} · {{ job.state }}</strong>
+        <span>{{ job.created_at }}</span>
+      </div>
+      <pre class="review-entry-details">{{ {"attempt": job.attempt_count, "artifact": job.artifact_path, "size_bytes": job.artifact_size, "error_code": job.error_code, "error_message": job.error_message} | tojson(indent=2) }}</pre>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty-state">暂无下载任务</p>
+  {% endif %}
+</section>
+
+<section class="review-section" aria-labelledby="review-heading">
+  <div class="section-heading">
+    <div>
+      <h2 id="review-heading">审核操作</h2>
+      <p>所有变更会记录到审核日志</p>
+    </div>
+  </div>
+
+  <div class="review-actions">
+    <form method="post" action="{{ url_for('approve_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        <span>备注</span>
+        <input name="note" type="text" maxlength="240" />
+      </label>
+      <button type="submit" class="primary-button">通过审核</button>
+    </form>
+
+    <form method="post" action="{{ url_for('reject_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        <span>驳回理由</span>
+        <input name="reason" type="text" required maxlength="240" />
+      </label>
+      <button type="submit" class="danger-button">驳回</button>
+    </form>
+
+    <form method="post" action="{{ url_for('needs_revision_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        <span>修改要求</span>
+        <input name="reason" type="text" required maxlength="240" />
+      </label>
+      <button type="submit" class="secondary-button">需要修改</button>
+    </form>
+
+    {% if candidate.status in ('REJECTED', 'NEEDS_REVISION') %}
+    <form method="post" action="{{ url_for('requeue_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        <span>复审备注</span>
+        <input name="note" type="text" maxlength="240" />
+      </label>
+      <button type="submit" class="secondary-button">重新排队</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if review_history %}
+  <h3 class="subsection-heading">审核记录</h3>
+  <ol class="review-history">
+    {% for entry in review_history %}
+    <li class="review-entry">
+      <div class="review-entry-meta">
+        <strong>{{ entry.action }}</strong>
+        <span>{{ entry.operator_name }} · {{ entry.created_at }}</span>
+      </div>
+      {% if entry.details %}
+      <pre class="review-entry-details">{{ entry.details | tojson(indent=2) }}</pre>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty-state">暂无审核记录</p>
+  {% endif %}
 </section>
 {% endblock %}

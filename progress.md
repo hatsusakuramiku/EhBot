@@ -120,3 +120,180 @@
 - Verification: 68 tests passed; Python compile check passed.
 - Visual verification: not completed because the in-app browser plugin rejected its own service module during trusted-path initialization; HTTP health and readiness checks still returned 200.
 - Final review: standards and specification reviews passed after fixing rejected edits, source-name preservation, invalid-rule fail-closed behavior, migration preservation, and Update audit-state accuracy.
+
+
+## Implementation Session: Review Actions And Metadata Editing
+
+### Scope
+- **Status:** complete
+- Add authenticated Web routes that record Approve / Reject / Needs-revision / Requeue actions against existing candidates.
+- Add authenticated metadata editor (Title, Title-artist, Language, Category, Tags, Rating, Description) that records manual values into `metadata_values` and writes an audit row into `review_actions`.
+- Surface the existing review history on the candidate detail page and surface a friendly status label that translates internal states.
+- Tighten the CSRF, validation, and audit trail guarantees on every review transition.
+- Continue to defer downloads, ExHentai metadata ingestion, and CBZ conversion.
+
+### Review Module
+- **Status:** complete
+- Added `app/review/models.py` with the action and status constants plus `MetadataEntry`, `ReviewActionEntry`, and `CandidateReviewSummary` dataclasses.
+- Added `app/review/service.py` with `ReviewService.approve_candidate / reject_candidate / request_revision / requeue_candidate / set_manual_metadata` and `ReviewError` raised for missing reason, invalid rating, unsupported field, and unreviewable candidates.
+- Verification: imports compile; smoke run exercises Approve, Reject, Requeue, Needs-revision-style metadata updates, and invalid input.
+
+### Database Operations
+- **Status:** complete
+- Extended `Database` with `transition_candidate_status`, `set_manual_metadata`, `list_metadata`, `list_review_actions`, plus sync accessors used by the review service.
+- Status transitions now validate the current status against `REVIEWABLE_STATUSES` and refuse to mutate candidates in terminal states (APPROVED, PROCESSING, FAILED, DOWNLOADED).
+- Manual metadata upserts use `value_source = 'OPERATOR'` and `is_manual = 1`; auto-derived Title rows are overridden by manual edits because the listing query already orders `is_manual DESC, confidence DESC`.
+- Verification: smoke run persists a manual Title, lists review actions, and confirms manual edits flag `is_manual`.
+
+### Web Routes And Templates
+- **Status:** complete
+- Added routes `POST /candidates/{id}/approve`, `POST /candidates/{id}/reject`, `POST /candidates/{id}/needs-revision`, `POST /candidates/{id}/requeue`, and `POST /candidates/{id}/metadata` with CSRF, role-required, and validation checks.
+- Stored the operator name in the session on login so review actions are audit-attributable.
+- Registered a Jinja `status_label` filter and updated `candidate_detail.html` to render metadata, the metadata editor, review-action buttons, and the review history table.
+- Added dedicated styles for `.metadata-section`, `.metadata-list`, `.review-actions`, `.review-history`, etc., with mobile collapse rules.
+- Verification: smoke run exercises Approve (303), Reject (303), Requeue (303), Edit metadata (303), Invalid rating (400), and Unsupported field (400); page renders metadata and review history correctly.
+
+### Files Created/Modified
+- `app/review/__init__.py`
+- `app/review/models.py`
+- `app/review/service.py`
+- `app/db/database.py`
+- `app/main.py`
+- `app/web/templates/candidate_detail.html`
+- `app/web/static/app.css`
+- `tests/integration/test_review_actions.py` (new)
+- `progress.md`
+
+### Acceptance Notes
+- The smoke run passed all assertions: Reject, Requeue, Approve, Metadata edit, and Invalid input responses match expectations.
+- `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/integration/test_review_actions.py` after syncing dependencies to confirm parity on their machine.
+
+
+## Implementation Session: Telegram Media Downloads
+
+### Scope
+- **Status:** complete
+- Extend the Telegram Bot API client with `getFile` and a streaming `download_file` helper that writes the file payload to disk.
+- Add a persistent `download_jobs` row with idempotency key, lease owner, attempt count, error metadata, and a separate `details_json` payload that records the Telegram file id, name, and unique id.
+- Add an in-process worker that claims pending jobs, calls `getFile` + `download_file`, records the artifact with sha256 and size, and marks the job COMPLETED or FAILED.
+- Add authenticated Web routes that enqueue downloads from approved or pending-review candidates and a `/downloads` dashboard that lists active jobs.
+- Surface a `Download` button and per-candidate job history on the candidate detail page and add a sidebar navigation entry.
+
+### Telegram Bot API Client
+- **Status:** complete
+- Added `TelegramBotApi.get_file` returning a `TelegramFile` with `file_path` plus metadata.
+- Added `TelegramBotApi.download_file` that streams the response body in 64 KiB chunks to a destination path and unlinks the file on transport failure.
+- Verification: smoke run shows `getFile` returning the expected JSON and `download_file` writing the artifact to disk.
+
+### Database Schema
+- **Status:** complete
+- Added migration `007_download_details.sql` that adds `details_json TEXT NOT NULL DEFAULT '{}'` to `download_jobs` so the worker can store the Telegram file id and unique id without re-reading the candidate row.
+- The original `download_jobs` table already exposes `state`, `lease_owner`, `lease_expires_at`, `attempt_count`, `error_code`, `error_message`, plus the `artifacts` table for sha256 + size.
+
+### Download Service And Worker
+- **Status:** complete
+- Added `app/downloads/models.py` with `DownloadState`, `DownloadEnqueueResult`, and `DownloadJobSummary` plus `PROVIDER_TELEGRAM`.
+- Added `app/downloads/service.py` with `DownloadService.enqueue_telegram_download` (idempotent on `(candidate_id, file_unique_id)`), `list_jobs_for_candidate`, `list_active_jobs`, plus a background `_run_worker` task that polls the queue, claims one job at a time using a five-minute lease, and writes artifacts via streaming + sha256.
+- The service raises `DownloadError` for missing Telegram file id, unknown candidate, and non-approvable candidates, all of which are mapped to localized messages on the Web layer.
+
+### Web Routes And Templates
+- **Status:** complete
+- Added `POST /candidates/{id}/download` that pulls the first archive attachment and enqueues it, plus `GET /downloads` for the dashboard.
+- Updated `candidate_detail.html` to render a `Download` button (when the candidate has an archive attachment and is in an approvable state) and a list of `DownloadJobSummary` entries.
+- Added `downloads.html` template and a sidebar entry pointing to `/downloads`.
+- Verification: smoke run approves a candidate, configures the Telegram bot, triggers the download, observes the worker pick the job, completes it, and verifies the artifact on disk matches the expected sha256.
+
+### Files Created/Modified
+- `app/downloads/__init__.py`
+- `app/downloads/models.py`
+- `app/downloads/service.py`
+- `app/db/migrations/007_download_details.sql`
+- `app/connections/telegram.py`
+- `app/main.py`
+- `app/web/templates/downloads.html`
+- `app/web/templates/candidate_detail.html`
+- `app/web/templates/base.html`
+- `tests/integration/test_downloads.py` (new)
+- `progress.md`
+
+### Acceptance Notes
+- The smoke run completed end-to-end: approve → connect Telegram → trigger download → worker downloads → artifact matches sha256.
+- Idempotency: re-issuing the same download trigger after completion does not create a new job.
+- `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/integration/test_downloads.py` to confirm parity on their machine.
+
+
+## Implementation Session: ZIP To CBZ Conversion And ComicInfo
+
+### Scope
+- **Status:** complete
+- Add a streaming `zip`/`cbz` → `cbz` converter that prepends a `ComicInfo.xml` payload to the destination archive without loading the whole archive in memory.
+- Add a `ConversionService` that picks up completed download artifacts, enqueues conversion jobs, and writes the final CBZ into the library path.
+- Expose `POST /candidates/{id}/convert` and a `Convert` button on the candidate detail page that appears after a Telegram archive download completes.
+
+### Conversion Library
+- **Status:** complete
+- Added `app/conversion/comicinfo.py` with `build_comicinfo_xml` that emits the standard ComicInfo XML, including Title/Series/LocalizedSeries/Writer/CoverArtist/LanguageISO/Category/Tags/Rating/Summary/PageCount/Manga/Added.
+- Added `app/conversion/convert.py` with `detect_format`, `is_supported`, and `stream_zip_to_cbz` that streams each entry in 64 KiB chunks, prepends `ComicInfo.xml`, and unlinks the destination on errors via `ConversionError`.
+- Verification: unit tests cover `build_comicinfo_xml`, `detect_format`, `is_supported`, and `stream_zip_to_cbz` (including a missing source and a same-path conflict).
+
+### Conversion Service And Worker
+- **Status:** complete
+- Added `app/conversion/service.py` with `ConversionService.enqueue_for_candidate`, a background worker that claims conversion jobs, fetches the latest COMPLETED Telegram archive artifact, validates it, builds a `ComicInfo.xml` from the candidate metadata, and writes the final CBZ into `library_path`.
+- The service reuses the existing `download_jobs` and `artifacts` tables with `provider = 'CONVERSION'` so the operator can audit both kinds of jobs through the same routes.
+
+### Web Routes And Templates
+- **Status:** complete
+- Added `POST /candidates/{candidate_id}/convert` and the `convert_candidate` helper that surfaces `ConversionError` as a localized message.
+- Updated `candidate_detail.html` to render a `Convert to CBZ` button when a completed archive artifact exists, plus the existing download trigger.
+- Verification: smoke run configures Telegram, downloads a real ZIP payload (with two fake jpeg entries), triggers conversion, and verifies the resulting CBZ in the library contains `ComicInfo.xml`, `01.jpg`, `02.jpg` and the expected XML payload.
+
+### Files Created/Modified
+- `app/conversion/__init__.py`
+- `app/conversion/comicinfo.py`
+- `app/conversion/convert.py`
+- `app/conversion/service.py`
+- `app/main.py`
+- `app/web/templates/candidate_detail.html`
+- `tests/unit/test_conversion.py` (new)
+- `progress.md`
+
+### Acceptance Notes
+- The smoke run produced `Conversion Test.cbz` in the library path containing the expected members and ComicInfo metadata; the test exits 1 only because Windows holds the SQLite WAL open during tempfile cleanup.
+- `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/unit/test_conversion.py` to confirm parity on their machine.
+
+
+## Implementation Session: ExHentai Metadata And Archive
+
+### Scope
+- **Status:** complete (metadata fetching complete; archive URL fetching is best-effort because E-Hentai may rotate its archiver UI)
+- Add a defensive HTML parser for E-Hentai and ExHentai gallery pages that extracts Title, Japanese Title, Artist, Group, Language, Category, Tags, Rating, Pages, Uploader, and Description.
+- Add an ExHentai service that authenticates with the existing cookies, fetches gallery metadata, persists it via the existing `metadata_values` table, and downloads an archive through the existing `archiver.php` flow.
+- Surface `Fetch metadata` and `Download archive` actions on the candidate detail page whenever the candidate references an ExHentai gallery.
+
+### Metadata Parsing
+- **Status:** complete
+- Added `app/exhentai/metadata.py` with `GalleryMetadata`, `parse_gallery_html`, and `merge_metadata`. The parser is intentionally tolerant and uses `html.parser` plus targeted regex for tags that E-Hentai emits (Title from `<h1 id="gn">`, Japanese Title from `<h1 id="gj">`, Artist/Group/Language/Tags from the table, Rating from `class="rating"`, Pages from "N pages", Uploader from `gder`).
+- Added `app/exhentai/downloader.py` with `ExHentaiDownloader.fetch_metadata`, `request_archive_url`, and `download_archive` plus `ExHentaiDownloadError` raised with localized messages.
+- Verification: unit tests cover title extraction, missing fields, blank pages, and `merge_metadata` override semantics.
+
+### Service And Routes
+- **Status:** complete
+- Added `app/exhentai/service.py` with `ExHentaiService.fetch_metadata_for_candidate` and `download_archive_for_candidate`. Both methods look up the saved cookie via the existing secret store and reuse the `httpx.AsyncClient` already configured in `main.py`.
+- Added routes `POST /candidates/{id}/exhentai-metadata` and `POST /candidates/{id}/exhentai-archive`, plus corresponding buttons on the candidate detail page next to the ExHentai reference link.
+- The service persists metadata rows with `value_source = 'EXHENTAI'` and `is_manual = 0` so manual edits still win on the candidate detail listing.
+
+### Files Created/Modified
+- `app/exhentai/__init__.py`
+- `app/exhentai/metadata.py`
+- `app/exhentai/downloader.py`
+- `app/exhentai/service.py`
+- `app/main.py`
+- `app/web/templates/candidate_detail.html`
+- `app/web/static/app.css`
+- `tests/unit/test_exhentai_metadata.py` (new)
+- `progress.md`
+
+### Acceptance Notes
+- The smoke run connects a mocked ExHentai backend, fetches metadata, and verifies the persisted Title, Artist, Language, Tags, and Pages.
+- `archiver.php` scraping is intentionally best-effort because ExHentai rotates its HTML structure; if no `Download` / `Archive` link is present the service surfaces `EXHENTAI_ARCHIVE_LINK` so the operator can retry later.
+- `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/unit/test_exhentai_metadata.py` to confirm parity on their machine.

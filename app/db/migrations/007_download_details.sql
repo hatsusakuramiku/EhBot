@@ -1,0 +1,1 @@
+ALTER TABLE download_jobs ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}';
