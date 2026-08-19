@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+import tempfile
+
+from app.private_files import restrict_private_path
 
 
 BOOTSTRAP_PASSWORD_FILE = "bootstrap_admin_password"
@@ -10,19 +12,17 @@ BOOTSTRAP_PASSWORD_FILE = "bootstrap_admin_password"
 
 def write_bootstrap_password(data_path: Path, password: str) -> Path:
     destination = data_path / BOOTSTRAP_PASSWORD_FILE
-    with NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
+    descriptor, temporary_name = tempfile.mkstemp(
         dir=data_path,
         prefix=".bootstrap-password-",
-        delete=False,
-    ) as temporary_file:
-        temporary_file.write(password)
-        temporary_path = Path(temporary_file.name)
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
     try:
-        temporary_path.chmod(0o600)
+        restrict_private_path(temporary_path)
+        temporary_path.write_text(password, encoding="utf-8")
         os.replace(temporary_path, destination)
-        destination.chmod(0o600)
+        restrict_private_path(destination)
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise

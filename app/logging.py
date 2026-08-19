@@ -10,14 +10,18 @@ _AUTHORIZATION = re.compile(
     r"(?i)(\bauthorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+"
 )
 _SENSITIVE_VALUE = re.compile(
-    r"(?i)(\b(?:cookie|token|api[_-]?hash|ipb_member_id|ipb_pass_hash|igneous)"
+    r"(?i)(\b(?:token|api[_-]?hash|ipb_member_id|ipb_pass_hash|igneous)"
     r"\s*[:=]\s*)[^\s,;&]+"
 )
+_URL_QUERY = re.compile(r"(?i)(\b(?:https?://|/)[^\s?]*)\?[^\s]+")
+_COOKIE_HEADER = re.compile(r"(?i)(\bcookie\s*[:=]\s*)[^\r\n]+")
 
 
 def redact_sensitive_values(message: str) -> str:
+    message = _URL_QUERY.sub(r"\1?<redacted>", message)
     message = _AUTHORIZATION.sub(r"\1<redacted>", message)
-    return _SENSITIVE_VALUE.sub(r"\1<redacted>", message)
+    message = _SENSITIVE_VALUE.sub(r"\1<redacted>", message)
+    return _COOKIE_HEADER.sub(r"\1<redacted>", message)
 
 
 class JsonFormatter(logging.Formatter):

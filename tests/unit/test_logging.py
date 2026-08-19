@@ -10,8 +10,9 @@ def test_json_formatter_redacts_sensitive_values() -> None:
         pathname=__file__,
         lineno=1,
         msg=(
-            "Authorization=Bearer-secret Cookie:session-secret "
-            "https://example.test/path?token=query-secret&safe=value"
+            "Authorization=Bearer-secret "
+            "https://example.test/path?authkey=query-secret&safe=value "
+            "Cookie: sid=session-secret; theme=dark"
         ),
         args=(),
         exc_info=None,
@@ -22,4 +23,5 @@ def test_json_formatter_redacts_sensitive_values() -> None:
     assert "Bearer-secret" not in output
     assert "session-secret" not in output
     assert "query-secret" not in output
-    assert "value" in output
+    assert "value" not in output
+    assert "theme" not in output

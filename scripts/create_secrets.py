@@ -5,9 +5,12 @@ import shutil
 import secrets
 import tempfile
 
+from app.private_files import restrict_private_path
+
+
 def write_private_file(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
-    path.chmod(0o600)
+    restrict_private_path(path)
 
 
 def create_secret_files(output_dir: Path) -> None:
@@ -20,7 +23,7 @@ def create_secret_files(output_dir: Path) -> None:
         tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent)
     )
     try:
-        temporary_dir.chmod(0o700)
+        restrict_private_path(temporary_dir, directory=True)
         write_private_file(
             temporary_dir / "app_secret_key", secrets.token_urlsafe(48)
         )
