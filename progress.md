@@ -89,7 +89,7 @@
 - Verification: secret-store and authentication regression tests passed (9 tests).
 
 ### Token-Only Connections And Web UI
-- **Status:** implementation and verification complete
+- **Status:** complete
 - Added Telegram Bot API identity verification, durable `getUpdates` polling, restart recovery, disconnect, and idempotent SQLite update persistence.
 - Added ExHentai Cookie verification, private session persistence, independent restart recovery, and disconnect.
 - Added authenticated, CSRF-protected connection routes and a status API without rendering saved credentials.
@@ -97,3 +97,15 @@
 - Verification: 34 tests passed; Python compile check passed; frozen dependency sync would make no changes; `/healthz` and `/readyz` returned HTTP 200.
 - Visual verification: Edge headless screenshots passed at 1440px desktop and 500px mobile-breakpoint widths with no clipping, overlap, or blank content.
 - Final review: scope matches Token/Cookie-only connection requirements; authentication, CSRF, private credential storage, log redaction, lifecycle cleanup, and regression coverage passed standards review.
+
+### Offline Candidate Ingestion And Review Queue
+- **Status:** offline foundation complete; source rules and `NEEDS_INFO` deferred
+- Added normalized Telegram Update handling for photo previews, ExHentai gallery references, and ZIP/RAR/7Z/CBZ attachments.
+- Added deterministic merging by media group, reply relationship, and `gid + token`; added title confidence ordering so explicit Telegram titles replace inferred placeholders.
+- Added idempotent `ACCEPT`/`IGNORE` Update processing with bounded 100-row batches and restart/polling integration.
+- Added authenticated candidate queue, source-message detail page, ExHentai reference display, and dashboard counts.
+- Verification: 55 tests passed; Python compile check passed; `/healthz` and `/readyz` returned HTTP 200.
+- Visual verification: Edge headless screenshots passed at 1440px and 500px for candidate queue and detail pages with no clipping or overlap.
+- Two-axis review fixes: merged adjacent same-title preview/archive messages, isolated malformed Updates, kept polling alive after ingestion errors, added the pending-Update partial index, filtered the queue to `PENDING_REVIEW`, accepted edited messages, and preserved explicit Telegram titles over inferred titles.
+- Final review fixes: restricted time-window merging to one unique directly adjacent candidate, kept edited messages on their original candidate, replaced stale automatic titles and ExHentai identities after edits, removed stale candidates when an edit no longer contains candidate content, and rebuilt derived fields from any remaining linked messages.
+- Deferred scope: source-channel/private-sender allowlists, `NEEDS_INFO`, size/format/metadata rules and their Web configuration, fuzzy title matching, review actions, media download, ExHentai metadata requests, and archive download.

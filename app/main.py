@@ -17,6 +17,7 @@ from pwdlib import PasswordHash
 from pwdlib.exceptions import PwdlibError
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.bootstrap import remove_bootstrap_password, write_bootstrap_password
 from app.connections.exhentai import ExHentaiCredentials
@@ -89,6 +90,7 @@ def create_app(
                 database,
                 telegram_client=telegram_client,
                 exhentai_client=exhentai_client,
+                candidate_ingestor=CandidateIngestor(database),
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -165,6 +167,38 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "connections": connection_manager().snapshot(),
+                "candidate_counts": await database.candidate_counts(),
+            },
+        )
+
+    @app.get("/candidates")
+    async def candidate_queue(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="candidates.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "candidates": await database.list_candidates(),
+            },
+        )
+
+    @app.get("/candidates/{candidate_id}")
+    async def candidate_detail(request: Request, candidate_id: int):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        candidate = await database.get_candidate(candidate_id)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return templates.TemplateResponse(
+            request=request,
+            name="candidate_detail.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "candidate": candidate,
             },
         )
 

@@ -35,6 +35,7 @@ p { margin: 6px 0 0; color: var(--muted); }
 .page-shell { width: min(1160px, 100%); margin: 0 auto; padding: 38px 36px 64px; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .eyebrow { color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.queue-count { color: var(--muted); font-size: 13px; font-weight: 600; }
 
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 30px 0 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
 .metric { min-height: 112px; padding: 23px 24px; color: inherit; text-decoration: none; border-right: 1px solid var(--line); }
@@ -54,6 +55,31 @@ p { margin: 6px 0 0; color: var(--muted); }
 .summary-row:first-child { border-top: 0; }
 .summary-row strong, .summary-row span { display: block; }
 .summary-row > div > span { margin-top: 4px; color: var(--muted); font-size: 12px; }
+
+.queue-table { margin-top: 28px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); overflow: hidden; }
+.queue-header, .queue-row { display: grid; grid-template-columns: minmax(220px, 1fr) 110px 120px 24px; align-items: center; gap: 18px; padding: 0 20px; }
+.queue-header { min-height: 42px; color: var(--muted); background: #f7f9f9; font-size: 12px; font-weight: 600; }
+.queue-row { min-height: 72px; border-top: 1px solid var(--line); color: var(--ink); font-size: 13px; text-decoration: none; }
+.queue-row:hover { background: #f6faf9; }
+.candidate-title { min-width: 0; }
+.candidate-title strong, .candidate-title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.candidate-title small { margin-top: 5px; color: var(--muted); font-size: 11px; }
+.row-arrow { color: #89949a; font-size: 24px; text-align: right; }
+.empty-state { padding: 60px 20px; text-align: center; }
+.empty-state p { font-size: 13px; }
+.back-link { display: inline-block; margin-bottom: 18px; color: var(--accent-dark); font-size: 13px; font-weight: 600; text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
+.detail-heading { align-items: center; }
+.reference-band { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 26px; padding: 0 16px; border-block: 1px solid var(--line); background: var(--surface); font-size: 13px; }
+.reference-band a { color: var(--accent-dark); font-weight: 700; text-decoration: none; }
+.message-section { margin-top: 32px; }
+.message-list { display: grid; gap: 12px; margin-top: 16px; }
+.message-item { padding: 18px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.message-item header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.message-item header span { color: var(--muted); font-size: 12px; }
+.message-item pre { margin: 16px 0 0; color: #354047; font: inherit; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.attachment-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.attachment-chip { min-height: 28px; display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid #cbd7da; border-radius: 4px; color: #405158; background: #f3f7f7; font-size: 12px; }
 
 .status { flex: 0 0 auto; display: inline-flex !important; align-items: center; gap: 7px; min-height: 26px; padding: 3px 9px; border-radius: 4px; color: #526067; background: #e9edef; font-size: 12px; font-weight: 600; }
 .status i { width: 7px; height: 7px; border-radius: 50%; background: #849198; }
@@ -125,6 +151,9 @@ p { margin: 6px 0 0; color: var(--muted); }
   .integration-header { grid-template-columns: 38px minmax(0, 1fr); }
   .integration-header .status { grid-column: 1 / -1; width: fit-content; }
   .summary-row { align-items: flex-start; }
+  .queue-header { display: none; }
+  .queue-row { grid-template-columns: minmax(0, 1fr) auto 18px; gap: 12px; padding: 13px 16px; }
+  .queue-row > span:nth-child(2) { display: none; }
   .auth-intro img { width: 58px; height: 58px; }
   .auth-intro h1 { font-size: 34px; }
   .auth-panel { padding: 24px 20px; }

@@ -1,9 +1,11 @@
 import asyncio
 from pathlib import Path
+import sqlite3
 
 import httpx
 import pytest
 
+from app.candidates.ingestor import CandidateIngestor
 from app.connections.manager import ConnectionManager
 from app.connections.exhentai import ExHentaiCredentials
 from app.db.database import Database
@@ -37,7 +39,28 @@ async def test_configuring_telegram_starts_durable_update_polling(
                 200,
                 json={
                     "ok": True,
-                    "result": [{"update_id": 100, "message": {"text": "hello"}}],
+                    "result": [
+                        {
+                            "update_id": 100,
+                            "channel_post": {
+                                "message_id": 80,
+                                "date": 1_700_000_300,
+                                "chat": {
+                                    "id": -100123,
+                                    "title": "Polling Channel",
+                                },
+                                "caption": "Polling Candidate",
+                                "photo": [
+                                    {
+                                        "file_id": "poll-photo",
+                                        "file_unique_id": "poll-photo-unique",
+                                        "width": 800,
+                                        "height": 1200,
+                                    }
+                                ],
+                            },
+                        }
+                    ],
                 },
             )
         await asyncio.Event().wait()
@@ -51,10 +74,15 @@ async def test_configuring_telegram_starts_durable_update_polling(
         base_url="https://api.telegram.org",
         timeout=40,
     ) as client:
-        manager = ConnectionManager(store, database, telegram_client=client)
+        manager = ConnectionManager(
+            store,
+            database,
+            telegram_client=client,
+            candidate_ingestor=CandidateIngestor(database),
+        )
         await manager.configure_telegram("123:secret")
         for _ in range(100):
-            if await database.latest_telegram_update_id() == 100:
+            if await database.list_candidates():
                 break
             await asyncio.sleep(0.01)
 
@@ -65,6 +93,7 @@ async def test_configuring_telegram_starts_durable_update_polling(
     assert snapshot.telegram.state == "connected"
     assert snapshot.telegram.identity == "@ehbot_intake_bot"
     assert await database.latest_telegram_update_id() == 100
+    assert (await database.list_candidates())[0].title == "Polling Candidate"
 
 
 @pytest.mark.asyncio
@@ -220,3 +249,116 @@ async def test_disconnect_removes_saved_provider_credentials(tmp_path: Path) -> 
     assert store.is_configured("exhentai_cookies") is False
     assert snapshot.telegram.state == "not_configured"
     assert snapshot.exhentai.state == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_startup_processes_saved_updates_without_telegram_connection(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 400,
+                "channel_post": {
+                    "message_id": 70,
+                    "date": 1_700_000_200,
+                    "chat": {"id": -100123, "title": "Offline Channel"},
+                    "caption": "Offline Candidate",
+                    "photo": [
+                        {
+                            "file_id": "offline-photo",
+                            "file_unique_id": "offline-photo-unique",
+                            "width": 800,
+                            "height": 1200,
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+    store = SecretStore(tmp_path / "private")
+    async with httpx.AsyncClient() as client:
+        manager = ConnectionManager(
+            store,
+            database,
+            telegram_client=client,
+            candidate_ingestor=CandidateIngestor(database),
+        )
+        await manager.start()
+        candidates = await database.list_candidates()
+        await manager.stop()
+
+    assert len(candidates) == 1
+    assert candidates[0].title == "Offline Candidate"
+
+
+@pytest.mark.asyncio
+async def test_candidate_storage_failure_sets_visible_connection_error(
+    tmp_path: Path,
+) -> None:
+    update_sent = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal update_sent
+        if request.url.path.endswith("/getMe"):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "id": 42,
+                        "is_bot": True,
+                        "first_name": "EhBot Intake",
+                        "username": "ehbot_intake_bot",
+                    },
+                },
+            )
+        if not update_sent:
+            update_sent = True
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 401,
+                            "message": {
+                                "message_id": 71,
+                                "date": 1_700_000_201,
+                                "chat": {"id": 900, "username": "fixture"},
+                                "text": "https://exhentai.org/g/99887/errorToken/",
+                            },
+                        }
+                    ],
+                },
+            )
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("DROP TABLE candidates")
+    store = SecretStore(tmp_path / "private")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.telegram.org",
+    ) as client:
+        manager = ConnectionManager(
+            store,
+            database,
+            telegram_client=client,
+            candidate_ingestor=CandidateIngestor(database),
+        )
+        await manager.configure_telegram("123:secret")
+        for _ in range(100):
+            if manager.snapshot().telegram.state == "error":
+                break
+            await asyncio.sleep(0.01)
+        snapshot = manager.snapshot()
+        await manager.stop()
+
+    assert snapshot.telegram.state == "error"
+    assert snapshot.telegram.error == "消息处理失败，将自动重试"

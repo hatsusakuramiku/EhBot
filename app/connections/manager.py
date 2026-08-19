@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 
 import httpx
 
+from app.candidates.ingestor import CandidateIngestor
 from app.connections.exhentai import ExHentaiApi, ExHentaiCredentials
 from app.connections.models import (
     ConnectionSnapshot,
@@ -24,11 +26,13 @@ class ConnectionManager:
         *,
         telegram_client: httpx.AsyncClient,
         exhentai_client: httpx.AsyncClient | None = None,
+        candidate_ingestor: CandidateIngestor | None = None,
     ) -> None:
         self._secret_store = secret_store
         self._database = database
         self._telegram_client = telegram_client
         self._exhentai_client = exhentai_client
+        self._candidate_ingestor = candidate_ingestor
         self._telegram_task: asyncio.Task[None] | None = None
         self._telegram_status = ProviderStatus(
             state="not_configured", configured=False
@@ -45,6 +49,8 @@ class ConnectionManager:
         )
 
     async def start(self) -> None:
+        if self._candidate_ingestor is not None:
+            await self._candidate_ingestor.process_pending_updates()
         token = await asyncio.to_thread(
             self._secret_store.read, "telegram_bot_token"
         )
@@ -145,6 +151,8 @@ class ConnectionManager:
                 updates = await api.get_updates(offset)
                 if updates:
                     await self._database.save_telegram_updates(updates)
+                    if self._candidate_ingestor is not None:
+                        await self._candidate_ingestor.process_pending_updates()
                     offset = max(int(update["update_id"]) for update in updates) + 1
                 else:
                     await asyncio.sleep(0.05)
@@ -156,6 +164,18 @@ class ConnectionManager:
                     )
             except asyncio.CancelledError:
                 raise
+            except sqlite3.Error:
+                self._telegram_status = ProviderStatus(
+                    state="error",
+                    configured=True,
+                    identity=self._telegram_status.identity,
+                    error="消息处理失败，将自动重试",
+                )
+                logging.getLogger(__name__).error(
+                    "telegram_ingest_failed",
+                    extra={"error_code": "TELEGRAM_INGEST_FAILED"},
+                )
+                await asyncio.sleep(5)
             except ProviderConnectionError as exc:
                 self._telegram_status = ProviderStatus(
                     state="error",

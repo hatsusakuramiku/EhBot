@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 2 in progress: external connections and Web UI
+Implementation phase 3 offline foundation complete; source rules and `NEEDS_INFO` remain for a later slice
 
 ## Phases
 
@@ -74,6 +74,20 @@ Implementation phase 2 in progress: external connections and Web UI
 - [x] Verify desktop/mobile UI in the browser
 - [x] Complete two-axis review and commit the implementation
 - **Status:** complete
+
+### Implementation Phase 3: Offline Candidate Ingestion And Review Queue
+- [x] Add Telegram Update normalization for preview, gallery link, and archive messages
+- [x] Add deterministic media-group, reply, and ExHentai gallery merging
+- [x] Add ACCEPT/IGNORE processing state and idempotent Update consumption
+- [x] Add authenticated candidate queue and read-only detail page
+- [x] Add live dashboard candidate counts and startup/polling ingestion
+- [x] Pass offline integration and Web regression tests
+- [x] Verify candidate queue and detail layouts in desktop/mobile browsers
+- [ ] Add source-channel and private-sender allowlists plus rule configuration
+- [ ] Add `NEEDS_INFO` classification and its follow-up queue
+- [ ] Add manual metadata editing and review actions
+- [ ] Add Telegram media download and persistent download jobs
+- **Status:** offline candidate foundation complete; source rules, `NEEDS_INFO`, review actions, and downloads remain deferred
 
 ## Phase 2 Interface Decisions
 - Telegram Token-only mode uses the official Bot API. Telethon/MTProto remains a later optional path because it also requires API ID and API Hash.

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}{{ candidate.title or "候选详情" }} - EhBot{% endblock %}
+{% block content %}
+<a class="back-link" href="{{ url_for('candidate_queue') }}">‹ 返回候选队列</a>
+<div class="page-heading detail-heading">
+  <div>
+    <span class="eyebrow">候选 #{{ candidate.candidate_id }}</span>
+    <h1>{{ candidate.title or "未命名候选" }}</h1>
+    <p>{{ candidate.filter_reason }}</p>
+  </div>
+  <span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else candidate.status }}</span>
+</div>
+
+{% if candidate.ex_gid %}
+<section class="reference-band" aria-label="画廊引用">
+  <span>ExHentai 画廊</span>
+  <a href="https://exhentai.org/g/{{ candidate.ex_gid }}/{{ candidate.ex_gallery_token }}/" rel="noreferrer">#{{ candidate.ex_gid }}</a>
+</section>
+{% endif %}
+
+<section class="message-section" aria-labelledby="source-message-heading">
+  <div class="section-heading"><div><h2 id="source-message-heading">来源消息</h2><p>{{ candidate.messages|length }} 条关联消息</p></div></div>
+  <div class="message-list">
+    {% for message in candidate.messages %}
+    <article class="message-item">
+      <header><strong>{{ message.chat_title }}</strong><span>消息 #{{ message.message_id }}</span></header>
+      {% if message.message_text %}<pre>{{ message.message_text }}</pre>{% endif %}
+      {% if message.attachments %}
+      <div class="attachment-list">
+        {% for attachment in message.attachments %}
+        <span class="attachment-chip">{{ "图片预览" if attachment.type == "photo" else attachment.file_name }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}
