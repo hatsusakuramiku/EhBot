@@ -13,6 +13,7 @@ from app.candidates.models import (
     ParsedSourceMessage,
     TelegramSourceConfig,
 )
+from app.candidates.rules import evaluate_metadata_rules
 
 from app.review.models import MetadataEntry, ReviewActionEntry
 
@@ -48,6 +49,26 @@ class Database:
         )
 
     @staticmethod
+    def _parse_tag_list(value) -> tuple[str, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            items = [
+                item
+                for item in value.replace("\n", ",").split(",")
+            ]
+        elif isinstance(value, list):
+            items = [str(item) for item in value]
+        else:
+            raise ValueError("tag list must be string or list")
+        cleaned: list[str] = []
+        for item in items:
+            token = item.strip().lower()
+            if token:
+                cleaned.append(token)
+        return tuple(cleaned)
+
+    @staticmethod
     def _source_from_row(row: sqlite3.Row | tuple) -> TelegramSourceConfig:
         enabled = bool(row[4])
         try:
@@ -65,10 +86,37 @@ class Database:
             )
             if max_attachment_size_mb < 0:
                 raise ValueError("invalid attachment size")
+            required_tags = Database._parse_tag_list(
+                rules.get("required_tags")
+            )
+            forbidden_tags = Database._parse_tag_list(
+                rules.get("forbidden_tags")
+            )
+            allowed_languages = Database._parse_tag_list(
+                rules.get("allowed_languages")
+            )
+            allowed_categories = Database._parse_tag_list(
+                rules.get("allowed_categories")
+            )
+            min_rating_raw = rules.get("min_rating")
+            if min_rating_raw in (None, ""):
+                min_rating: float | None = None
+            else:
+                try:
+                    min_rating = float(min_rating_raw)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        "invalid min_rating"
+                    ) from None
         except (TypeError, ValueError, json.JSONDecodeError):
             enabled = False
             raw_formats = []
             max_attachment_size_mb = 0
+            required_tags = ()
+            forbidden_tags = ()
+            allowed_languages = ()
+            allowed_categories = ()
+            min_rating = None
         return TelegramSourceConfig(
             source_id=int(row[0]),
             source_type=str(row[1]),
@@ -79,6 +127,11 @@ class Database:
                 str(value).lower() for value in raw_formats
             ),
             max_attachment_size_mb=max_attachment_size_mb,
+            required_tags=required_tags,
+            forbidden_tags=forbidden_tags,
+            allowed_languages=allowed_languages,
+            allowed_categories=allowed_categories,
+            min_rating=min_rating,
         )
 
     @staticmethod
@@ -127,6 +180,11 @@ class Database:
         enabled: bool,
         allowed_archive_formats: tuple[str, ...],
         max_attachment_size_mb: int,
+        required_tags: tuple[str, ...] = (),
+        forbidden_tags: tuple[str, ...] = (),
+        allowed_languages: tuple[str, ...] = (),
+        allowed_categories: tuple[str, ...] = (),
+        min_rating: float | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._configure_telegram_source_sync,
@@ -136,6 +194,11 @@ class Database:
             enabled,
             allowed_archive_formats,
             max_attachment_size_mb,
+            required_tags,
+            forbidden_tags,
+            allowed_languages,
+            allowed_categories,
+            min_rating,
         )
 
     def _configure_telegram_source_sync(
@@ -146,14 +209,22 @@ class Database:
         enabled: bool,
         allowed_archive_formats: tuple[str, ...],
         max_attachment_size_mb: int,
+        required_tags: tuple[str, ...] = (),
+        forbidden_tags: tuple[str, ...] = (),
+        allowed_languages: tuple[str, ...] = (),
+        allowed_categories: tuple[str, ...] = (),
+        min_rating: float | None = None,
     ) -> None:
-        rules_json = json.dumps(
-            {
-                "allowed_archive_formats": list(allowed_archive_formats),
-                "max_attachment_size_mb": max_attachment_size_mb,
-            },
-            separators=(",", ":"),
-        )
+        rules_payload = {
+            "allowed_archive_formats": list(allowed_archive_formats),
+            "max_attachment_size_mb": max_attachment_size_mb,
+            "required_tags": list(required_tags),
+            "forbidden_tags": list(forbidden_tags),
+            "allowed_languages": list(allowed_languages),
+            "allowed_categories": list(allowed_categories),
+            "min_rating": min_rating,
+        }
+        rules_json = json.dumps(rules_payload, separators=(",", ":"))
         with self._connect() as connection:
             account_id = self._ensure_bot_account(connection)
             connection.execute(
@@ -1049,6 +1120,98 @@ class Database:
         self, candidate_id: int
     ) -> tuple[MetadataEntry, ...]:
         return self._list_metadata_sync(candidate_id)
+
+    async def re_evaluate_candidate_metadata_rules(
+        self, candidate_id: int
+    ) -> None:
+        await asyncio.to_thread(
+            self._re_evaluate_candidate_metadata_rules_sync,
+            candidate_id,
+        )
+
+    def _re_evaluate_candidate_metadata_rules_sync(
+        self, candidate_id: int
+    ) -> None:
+        with self._connect() as connection:
+            source_row = connection.execute(
+                "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
+                "ts.enabled, ts.rules_json FROM telegram_sources ts "
+                "JOIN telegram_accounts ta ON ta.id = ts.account_id "
+                "JOIN source_messages sm ON sm.account_id = ts.account_id "
+                "AND sm.chat_id = ts.chat_id "
+                "JOIN candidate_messages cm ON cm.source_message_id = sm.id "
+                "WHERE cm.candidate_id = ? "
+                "AND ta.session_path = 'bot-api://configured' "
+                "ORDER BY sm.id LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            if source_row is None:
+                return
+            source = self._source_from_row(source_row)
+            current_status_row = connection.execute(
+                "SELECT status FROM candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if current_status_row is None:
+                return
+            current_status = str(current_status_row[0])
+            if current_status in {"APPROVED", "PROCESSING", "FAILED"}:
+                return
+            metadata_rows = connection.execute(
+                "SELECT field_name, field_value FROM metadata_values "
+                "WHERE candidate_id = ? "
+                "ORDER BY is_manual DESC, confidence DESC, created_at",
+                (candidate_id,),
+            ).fetchall()
+            metadata: dict[str, str] = {}
+            for field_name, field_value in metadata_rows:
+                field_key = str(field_name)
+                if field_key in metadata:
+                    continue
+                metadata[field_key] = str(field_value)
+            decision = evaluate_metadata_rules(source, metadata)
+            if decision.result == "ACCEPT":
+                if current_status in {"REJECTED", "NEEDS_INFO"}:
+                    new_status = "PENDING_REVIEW"
+                    new_filter_result = "ACCEPT"
+                    new_filter_reason = decision.reason
+                else:
+                    return
+            elif decision.result == "IGNORE":
+                new_status = "REJECTED"
+                new_filter_result = "IGNORE"
+                new_filter_reason = decision.reason
+            else:
+                new_status = "NEEDS_INFO"
+                new_filter_result = "NEEDS_INFO"
+                new_filter_reason = decision.reason
+            connection.execute(
+                "UPDATE candidates SET status = ?, filter_result = ?, "
+                "filter_reason = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (
+                    new_status,
+                    new_filter_result,
+                    new_filter_reason,
+                    candidate_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO review_actions "
+                "(candidate_id, action, operator_name, details_json) "
+                "VALUES (?, 'METADATA_RULE', 'system', ?)",
+                (
+                    candidate_id,
+                    json.dumps(
+                        {
+                            "result": decision.result,
+                            "reason": decision.reason,
+                            "source_id": source.source_id,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
 
 
     def _list_metadata_sync(self, candidate_id: int) -> tuple[MetadataEntry, ...]:

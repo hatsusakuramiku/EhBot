@@ -297,3 +297,44 @@
 - The smoke run connects a mocked ExHentai backend, fetches metadata, and verifies the persisted Title, Artist, Language, Tags, and Pages.
 - `archiver.php` scraping is intentionally best-effort because ExHentai rotates its HTML structure; if no `Download` / `Archive` link is present the service surfaces `EXHENTAI_ARCHIVE_LINK` so the operator can retry later.
 - `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/unit/test_exhentai_metadata.py` to confirm parity on their machine.
+
+## Implementation Session: Metadata Rule Filtering
+
+### Scope
+- **Status:** complete
+- Add source-level metadata filters (required tags, forbidden tags, allowed languages, allowed categories, minimum rating) that re-evaluate candidates whenever new metadata arrives from ExHentai or from the manual editor.
+- Surface the new filter fields in the existing source-rule Web form so operators can configure each source's filtering policy without leaving `/sources`.
+- Continue to defer fuzzy title matching, tag-source merge resolution, and per-operator notifications.
+
+### Rule Engine
+- **Status:** complete
+- Added `evaluate_metadata_rules(source, metadata)` in `app/candidates/rules.py`. The evaluator walks required tags, forbidden tags, allowed languages, allowed categories, and a minimum rating threshold, returning the same `RuleDecision` shape used by the message-level rules so it slots cleanly into the existing state machine.
+- Allowed-languages and allowed-categories checks treat missing values as `NEEDS_INFO` so the operator can fill them in; mismatched values are `IGNORE`.
+- Required/forbidden tag lists and the comma/newline split logic intentionally mirror how ExHentai renders the `Tags` field so `language:chinese, female:big_breasts` and `language:chinese\nfemale:big_breasts` evaluate identically.
+
+### Database Wiring
+- **Status:** complete
+- Extended `TelegramSourceConfig` with `required_tags`, `forbidden_tags`, `allowed_languages`, `allowed_categories`, and `min_rating`. `Database.configure_telegram_source` now persists the new fields through `rules_json` and `_source_from_row` parses them back with fail-closed semantics so a malformed value disables the source.
+- Added `Database.re_evaluate_candidate_metadata_rules(candidate_id)`. The helper finds the source for a candidate via the existing `candidate_messages -> source_messages -> telegram_sources` join, loads the candidate's metadata with manual rows first, calls the rule evaluator, and transitions `PENDING_REVIEW` / `NEEDS_INFO` to `REJECTED` (with the rule reason) when the evaluator returns `IGNORE`. When the evaluator returns `ACCEPT` and the candidate is currently `REJECTED` or `NEEDS_INFO`, it transitions back to `PENDING_REVIEW`. `APPROVED`, `PROCESSING`, and `FAILED` candidates are intentionally treated as terminal so the operator's review decision is never silently overridden by automatic rules.
+- Every rule transition writes a `METADATA_RULE` row into `review_actions` with `operator_name = 'system'` so the audit trail captures the reason and source_id.
+
+### Service Wiring
+- **Status:** complete
+- `ExHentaiService.fetch_metadata_for_candidate` now calls `re_evaluate_candidate_metadata_rules` after persisting metadata so newly ingested ExHentai fields immediately apply the source's filters.
+- `ReviewService.set_manual_metadata` triggers the same re-evaluation so operators can fix metadata in place and watch the candidate transition back to `PENDING_REVIEW` without an extra "requeue" step.
+
+### Web Form
+- **Status:** complete
+- Extended `sources.html` with collapsible metadata-rule fieldsets in both the create form and the per-source update form. CSV values round-trip through the existing `configure_source` route.
+- `configure_source` parses the new fields, normalises tags with the same helper used by `_source_from_row`, and rejects malformed `min_rating` values with a localized 400 error.
+
+### Tests
+- **Status:** complete
+- Added `tests/unit/test_metadata_rules.py` with 13 focused cases covering required/forbidden tags, language/category/rating gaps, case-insensitive category matching, multi-line tag lists.
+- Added `tests/integration/test_metadata_rule_evaluation.py` with 5 cases that exercise the database re-evaluation flow end-to-end (required-tag reject, manual-edit unblock, rating threshold, terminal APPROVED, NEEDS_INFO -> PENDING_REVIEW).
+- All 18 new tests pass; the existing Phase 3 regression smoke check still passes end-to-end against the running app.
+
+### Acceptance Notes
+- The full Web flow runs against the live TestClient: configuring metadata rules via `/sources`, editing metadata on a candidate, and watching the candidate's status update automatically is verified end-to-end.
+- `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/unit/test_metadata_rules.py tests/integration/test_metadata_rule_evaluation.py` to confirm parity on their machine.
+

@@ -119,6 +119,9 @@ class ReviewService:
         await self._database.set_manual_metadata(
             candidate_id, operator_name, field_name, cleaned_value
         )
+        await self._database.re_evaluate_candidate_metadata_rules(
+            candidate_id
+        )
 
     async def get_candidate_review_summary(
         self, candidate_id: int

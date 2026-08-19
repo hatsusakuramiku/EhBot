@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 4 code complete; browser visual verification blocked by local plugin initialization
+Implementation phase 4 complete; commit + Phase 5 deferred
 
 ## Phases
 
@@ -97,7 +97,7 @@ Implementation phase 4 code complete; browser visual verification blocked by loc
 - [x] Route missing titles and unknown bounded sizes to `NEEDS_INFO`
 - [x] Add authenticated source-rule UI and separate needs-info queue
 - [x] Pass offline integration and Web regression tests
-- [ ] Add tag, language, category, and rating rules after Ex metadata ingestion exists
+- [x] Add tag, language, category, and rating rules after Ex metadata ingestion exists
 - **Status:** code, automated verification, and two-axis review complete; browser visual verification blocked by local plugin initialization
 
 ## Phase 2 Interface Decisions

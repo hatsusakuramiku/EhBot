@@ -51,6 +51,9 @@ class ExHentaiService:
         await asyncio.to_thread(
             self._persist_metadata_sync, candidate_id, metadata
         )
+        await self._database.re_evaluate_candidate_metadata_rules(
+            candidate_id
+        )
         return metadata
 
     async def download_archive_for_candidate(

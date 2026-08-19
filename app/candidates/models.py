@@ -75,6 +75,11 @@ class TelegramSourceConfig:
     enabled: bool
     allowed_archive_formats: tuple[str, ...]
     max_attachment_size_mb: int
+    required_tags: tuple[str, ...] = ()
+    forbidden_tags: tuple[str, ...] = ()
+    allowed_languages: tuple[str, ...] = ()
+    allowed_categories: tuple[str, ...] = ()
+    min_rating: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

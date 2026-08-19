@@ -220,6 +220,16 @@ def create_app(
             raise HTTPException(status_code=503, detail="Connections are unavailable")
         return manager
 
+    def _parse_csv_tags(raw: object) -> tuple[str, ...]:
+        if raw is None:
+            return ()
+        cleaned: list[str] = []
+        for item in str(raw).replace("\n", ",").split(","):
+            token = item.strip().lower()
+            if token:
+                cleaned.append(token)
+        return tuple(cleaned)
+
     async def _build_telegram_context(secret_store, default_client):
         token = await asyncio.to_thread(
             secret_store.read, "telegram_bot_token"
@@ -682,6 +692,36 @@ def create_app(
             for archive_format in ("zip", "rar", "7z", "cbz")
             if archive_format in submitted_formats
         )
+        required_tags = _parse_csv_tags(
+            form.get("required_tags")
+        )
+        forbidden_tags = _parse_csv_tags(
+            form.get("forbidden_tags")
+        )
+        allowed_languages = _parse_csv_tags(
+            form.get("allowed_languages")
+        )
+        allowed_categories = _parse_csv_tags(
+            form.get("allowed_categories")
+        )
+        min_rating_raw = str(form.get("min_rating") or "").strip()
+        min_rating: float | None = None
+        if min_rating_raw:
+            try:
+                min_rating = float(min_rating_raw)
+            except ValueError:
+                min_rating = -1.0
+        if min_rating is not None and min_rating < 0:
+            return templates.TemplateResponse(
+                request=request,
+                name="sources.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "sources": await database.list_telegram_sources(),
+                    "error": "\u6700\u4f4e\u8bc4\u5206\u683c\u5f0f\u65e0\u6548",
+                },
+                status_code=400,
+            )
         await database.configure_telegram_source(
             source_type=source_type,
             chat_id=chat_id,
@@ -689,6 +729,11 @@ def create_app(
             enabled=form.get("enabled") == "on",
             allowed_archive_formats=allowed_archive_formats,
             max_attachment_size_mb=max_attachment_size_mb,
+            required_tags=required_tags,
+            forbidden_tags=forbidden_tags,
+            allowed_languages=allowed_languages,
+            allowed_categories=allowed_categories,
+            min_rating=min_rating,
         )
         return RedirectResponse(request.url_for("sources_page").path, status_code=303)
 
