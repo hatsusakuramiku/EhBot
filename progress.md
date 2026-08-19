@@ -396,6 +396,16 @@
 - Port 8000 was already held by an older EhBot instance (PID 12960/26656). Stopping it freed the port and the `TELEGRAM_CONFLICT` 409 disappeared, so that stale local process, not an external one, was the second poller. The other Python processes on this machine are VS Code isort/black language servers.
 - Restarted on the new code: startup logged `tag_database_ready version=7 entries=43874 reason=cache_fresh` (the 24 hour window skipped GitHub entirely), `getUpdates` returned 200, and `/healthz`, `/readyz`, `/login` all returned 200.
 
+### Public Release Preparation (2026-08-20)
+- **Status:** local work complete; the remote repository still needs an authenticated `gh auth login`
+- Scanned all 222 blobs in history for credential-shaped strings (Telegram tokens, `ipb_pass_hash`, `igneous`, private keys, AWS keys, GitHub tokens). The only match is the fake `ipb_member_id=10001` fixture in `tests/unit/test_exhentai_api.py`, so history is safe to publish.
+- Confirmed `.gitignore` already covers `.env.local`, `secrets/`, `data/` (database, `data/private/`, the cached tag database) and `work/` (server logs). `.codegraph/` ignores itself and stays local.
+- Added `LICENSE` (MIT, copyright hatsusakuramiku) and declared it in `pyproject.toml` with SPDX `license = "MIT"` plus `license-files = ["LICENSE"]`. Verified with a real wheel build that the metadata is accepted and the artifact carries `License-Expression: MIT` and `dist-info/licenses/LICENSE`.
+- Added a README licence section noting the repository ships no credentials or copyrighted content and that operators are responsible for what they archive.
+- Committed as `3010fd4`. 100 tracked files; no remote configured yet.
+- Installed GitHub CLI 2.97.0 via winget because no `gh`, no `GITHUB_TOKEN`, no SSH key, and no stored GitHub credential existed on this machine. Creating the remote repository requires interactive authentication, which only the operator can complete.
+- `app/candidates/reference.py` is still untracked and therefore will not be published.
+
 ### Open Items
 - Archive hardening (plan sections 8.8, 17.2, 21.9) is still missing: `stream_zip_to_cbz` passes member names straight through, with no path-traversal, zip-bomb, or magic-number checks.
 - `app/candidates/reference.py` parses the operator's Telegram reference format but has no tests yet.
