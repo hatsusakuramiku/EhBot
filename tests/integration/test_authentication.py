@@ -12,6 +12,7 @@ def make_settings(root: Path) -> Settings:
         library_path=root / "library",
         work_path=root / "work",
         app_secret_key="test-secret-key-with-at-least-32-characters",
+        tag_translation_enabled=False,
     )
 
 

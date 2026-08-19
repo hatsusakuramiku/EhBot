@@ -40,7 +40,7 @@ def test_build_comicinfo_xml_includes_fields() -> None:
     ).decode("utf-8")
     assert "<Title>Demo</Title>" in xml
     assert "<LanguageISO>zh</LanguageISO>" in xml
-    assert "<Category>Doujinshi</Category>" in xml
+    assert "<Genre>Doujinshi</Genre>" in xml
     assert "<Tags>tag1, tag2</Tags>" in xml
     assert "<Rating>4.50</Rating>" in xml
     assert "<PageCount>24</PageCount>" in xml

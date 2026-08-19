@@ -183,6 +183,9 @@ p { margin: 6px 0 0; color: var(--muted); }
 .metadata-list { display: grid; gap: 10px; margin-top: 16px; padding: 0; list-style: none; }
 .metadata-item { display: grid; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .metadata-item.is-manual { border-left: 3px solid var(--accent); background: #f5f8fa; }
+.metadata-raw { margin-top: 16px; }
+.metadata-raw > summary { cursor: pointer; color: var(--muted); font-size: 14px; padding: 6px 0; }
+.metadata-raw[open] > summary { color: var(--text); }
 .metadata-meta { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
 .metadata-meta strong { color: var(--ink); font-size: 13px; }
 .metadata-source { color: var(--muted); }

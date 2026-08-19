@@ -35,6 +35,15 @@ docker compose up --build -d
 
 Linux 默认以宿主 UID/GID `1000:1000` 运行。若当前用户不同，请在 `.env` 中将 `EHBOT_UID`、`EHBOT_GID` 改为当前普通用户的数值，确保绑定目录可写。
 
+## 标签翻译
+
+服务启动时会从 EhTagTranslation 的 GitHub Release 下载 `db.text.json.gz`，缓存到 `data/ehtag_db.json`，并在内存中建立 `namespace:tag` 索引，用于把 ExHentai 官方 API 返回的英文元数据翻译成中文。
+
+- 每次启动先用 `ETag` 做条件请求，未变更则直接使用本地缓存；距上次检查不足 24 小时时完全跳过网络请求。
+- 网络不可用时自动降级到本地缓存；没有缓存时跳过翻译，元数据保留英文原文。
+- 中文值写入 `Title`、`Artist`、`Group` 等主字段，英文原文保存在对应的 `*Raw` 字段，审核页可展开查看。
+- 如需关闭该功能（例如离线部署），在 `.env` 中设置 `TAG_TRANSLATION_ENABLED=false`。
+
 ## 验证
 
 ```powershell

@@ -48,6 +48,11 @@ def stream_zip_to_cbz(
     tags: tuple[str, ...] = (),
     rating: float | None = None,
     description: str | None = None,
+    japanese_title: str | None = None,
+    group: str | None = None,
+    parody: str | None = None,
+    character: str | None = None,
+    web: str | None = None,
 ) -> int:
     """Stream the ZIP/CBZ source to a destination CBZ, prepending ComicInfo.xml.
 
@@ -84,6 +89,11 @@ def stream_zip_to_cbz(
                     rating=rating,
                     description=description,
                     page_count=len(entries),
+                    japanese_title=japanese_title,
+                    group=group,
+                    parody=parody,
+                    character=character,
+                    web=web,
                 )
                 zout.writestr("ComicInfo.xml", comicinfo)
                 for info in entries:

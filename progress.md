@@ -338,3 +338,58 @@
 - The full Web flow runs against the live TestClient: configuring metadata rules via `/sources`, editing metadata on a candidate, and watching the candidate's status update automatically is verified end-to-end.
 - `pytest` is not installed in this sandbox (no PyPI access), so the developer must execute `uv run pytest tests/unit/test_metadata_rules.py tests/integration/test_metadata_rule_evaluation.py` to confirm parity on their machine.
 
+## Implementation Session: ExHentai gdata Metadata And Chinese Tags (2026-08-20)
+
+### Scope
+- **Status:** in progress
+- Replace HTML scraping with the official `gdata` API so tags, group, parody, character, and page counts arrive complete (plan section 8.5).
+- Translate every metadata field into Chinese with the EhTagTranslation database while keeping the upstream English values searchable.
+- Classify Telegram polling errors instead of collapsing every HTTP failure into one opaque message.
+
+### Telegram Error Classification
+- **Status:** complete
+- `app/connections/telegram.py`: replaced `raise_for_status()` with `_error_for()`, mapping 409 to `TELEGRAM_CONFLICT`, 429 to `TELEGRAM_RATE_LIMITED` (carrying `retry_after`), 403 to `TELEGRAM_FORBIDDEN`, 401 to `TELEGRAM_UNAUTHORIZED`, 5xx to `TELEGRAM_SERVER_ERROR`, and transport errors to `TELEGRAM_UNREACHABLE`.
+- `app/connections/models.py`: `ProviderConnectionError` now carries `retry_after`.
+- `app/connections/manager.py`: added module-level `_POLL_BACKOFF_SECONDS` (conflict/forbidden 30s, unauthorized 60s, server error 15s); the polling loop prefers `exc.retry_after` when the provider supplies one.
+- `tests/unit/test_telegram_bot_api.py`: 6 new cases, including an assertion that the Token never appears in an error message.
+- Operator note: the 409 seen on this machine is caused by another process polling the same Token elsewhere; no Webhook is configured and only one local instance runs.
+
+### gdata Metadata Ingestion
+- **Status:** complete
+- Added `app/exhentai/gdata.py` (`GalleryTags` grouped by namespace, `GalleryData`, `parse_tag_list`, `parse_gdata_entry`, `gallery_data_to_metadata`, `extract_gallery_ref`). `primary_language` skips the `translated` / `rewrite` / `speechless` markers so the content language wins.
+- Added `app/exhentai/gdata_client.py` (`GdataClient`) honouring the API's 25-gallery batch ceiling (`MAX_GALLERIES_PER_REQUEST`), a 1 second inter-batch pause, and a dedicated `GdataError` for 429.
+- `app/exhentai/service.py`: new `_fetch_metadata()` prefers gdata and falls back to HTML scraping, because expunged galleries are absent from gdata.
+- `app/review/models.py`: `METADATA_FIELDS` grew from 7 to 13 entries (JapaneseTitle, Group, Parody, Character, Pages, Uploader); added `RAW_METADATA_FIELDS` for the seven `*Raw` fields.
+- `app/main.py`: the two hard-coded metadata field lists now reference `METADATA_FIELDS`.
+- `app/conversion/comicinfo.py`: reworked to the plan section 8.4 mapping. Category maps to `Genre` (the previous non-standard tag is gone), group to `Publisher`, parody to `Series`, Japanese title to `LocalizedSeries`, characters to `Characters`, plus `Web` and `Penciller`; `LANGUAGE_ISO_CODES` converts to ISO 639-1 (chinese to zh).
+- `app/conversion/convert.py` and `app/conversion/service.py` pass the new fields through.
+- Tests: added `tests/unit/test_gdata.py` (10 cases); `tests/unit/test_conversion.py` now asserts `<Genre>`.
+
+### EhTagTranslation Chinese Tags
+- **Status:** complete
+- Verified against the live endpoint before coding: the `latest` download URL 404s, so the release API at `https://api.github.com/repos/EhTagTranslation/Database/releases/latest` must be queried first; the asset is `db.text.json.gz` (1.3 MB gzipped, 4.2 MB expanded) and it does serve an `ETag`.
+- Added `app/exhentai/tagdb_sync.py` (`TagDatabaseSync`): release-API asset lookup, `If-None-Match` conditional download, atomic `.part` writes into `data/ehtag_db.json` plus `data/ehtag_db.meta.json`, and a hard `MAX_DOWNLOAD_BYTES` ceiling. Every network or payload failure degrades to the on-disk cache and only raises `TagDatabaseError` when no cache exists at all.
+- Added `MIN_REFRESH_INTERVAL_SECONDS` (24 hours) with a `checked_at` stamp so restarts do not re-check GitHub; `synchronize(force=True)` overrides it.
+- Added `app/exhentai/tagdb.py` (`TagTranslator`): a `namespace:raw` hash index; the pseudo-namespaces `rows` and `reclass` are indexed separately as namespace display names and gallery categories; `lookup()` probes `IMPLICIT_NAMESPACE_ORDER` for tags that arrive without a namespace; the reverse index uses `_reverse_rank()` so a name defined in several namespaces resolves to the conventional one.
+- Added `app/exhentai/enrich.py` (`enrich_metadata`): Chinese text lands in the primary fields while the English original moves to the matching `*Raw` field. Unknown tags stay untranslated and are logged.
+- `app/main.py`: `_load_tag_translator()` runs at startup behind the new `TAG_TRANSLATION_ENABLED` setting and now uses its own `httpx.AsyncClient` (`tagdb_transport` hook) instead of borrowing the ExHentai client, which carries ExHentai cookies and a 15 second timeout.
+- `app/config.py`: added `tag_translation_enabled` (env `TAG_TRANSLATION_ENABLED`, default true).
+- Tests: `tests/unit/test_tagdb.py` now has 20 cases covering the translator, the sync layer via `httpx.MockTransport` (fresh download, 304, offline degradation, `EHTAG_UNAVAILABLE` without a cache, corrupt gzip, missing asset, freshness window), and `enrich_metadata`. Added `tests/integration/test_tag_translation_startup.py` (3 cases) asserting the dedicated client is used, the ExHentai transport is never touched, the feature can be disabled, and a warm cache needs no network.
+- The seven integration `make_settings` helpers now set `tag_translation_enabled=False` so tests never reach GitHub.
+
+### Verification
+- `pytest`: 148 passed (125 before this session).
+- Live end-to-end check against gallery 4116328 matched the operator's reference Telegram message: Category ??? (CategoryRaw Doujinshi), Artist ??? (ArtistRaw kamisiro ryu), Group ???????, Parody ??, Language ?? (LanguageRaw chinese), and 43 translated tags.
+- Consecutive synchronise calls reported `downloaded` then `not_modified`, confirming the ETag path works.
+
+### Review UI Field Presentation
+- **Status:** complete
+- `app/review/models.py`: added `FIELD_LABELS`, `field_label()`, and `split_metadata_entries()`. The label map covers all 13 primary fields plus the 7 `*Raw` fields so the detail page and the manual-edit dropdown stop showing bare English field names.
+- `app/main.py`: both `candidate_detail` and `_render_review_error` now pass `metadata_entries` (translated) and `raw_metadata_entries` (originals) separately, plus `field_label` for the template.
+- `app/web/templates/candidate_detail.html`: the primary metadata list renders Chinese labels; the untranslated originals moved into a collapsed `details` block so a gallery with both no longer interleaves two copies of every field.
+- `app/web/static/app.css`: added `.metadata-raw` styling for the new collapsible block.
+
+### Open Items
+- Archive hardening (plan sections 8.8, 17.2, 21.9) is still missing: `stream_zip_to_cbz` passes member names straight through, with no path-traversal, zip-bomb, or magic-number checks.
+- `app/candidates/reference.py` parses the operator's Telegram reference format but has no tests yet.
+- Source discovery still cannot enumerate the Bot's channels; the Bot API has no such method, so `my_chat_member` handling remains the only viable path and is not implemented.

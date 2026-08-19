@@ -3,10 +3,16 @@ from typing import Literal
 
 
 class ProviderConnectionError(Exception):
-    def __init__(self, code: str, public_message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        public_message: str,
+        retry_after: int | None = None,
+    ) -> None:
         super().__init__(public_message)
         self.code = code
         self.public_message = public_message
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True, slots=True)

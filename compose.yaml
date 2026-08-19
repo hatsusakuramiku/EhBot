@@ -15,6 +15,7 @@ services:
       TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
       TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:-}"
       APP_ROOT_PATH: "${APP_ROOT_PATH:-}"
+      TAG_TRANSLATION_ENABLED: "${TAG_TRANSLATION_ENABLED:-true}"
       TZ: "${TZ:-Asia/Shanghai}"
     secrets:
       - app_secret_key

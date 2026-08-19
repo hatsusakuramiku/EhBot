@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 
@@ -36,13 +36,78 @@ REVIEWABLE_STATUSES: frozenset[str] = frozenset(
 
 METADATA_FIELDS: tuple[str, ...] = (
     "Title",
+    "JapaneseTitle",
     "Artist",
+    "Group",
+    "Parody",
+    "Character",
     "Language",
     "Category",
     "Tags",
     "Rating",
+    "Pages",
+    "Uploader",
     "Description",
 )
+
+# Untranslated upstream values, stored alongside the Chinese fields so
+# operators can still search by the original E-Hentai tag.
+RAW_METADATA_FIELDS: tuple[str, ...] = (
+    "TagsRaw",
+    "ArtistRaw",
+    "GroupRaw",
+    "ParodyRaw",
+    "CharacterRaw",
+    "LanguageRaw",
+    "CategoryRaw",
+)
+
+# Display labels for the review UI, which is otherwise entirely Chinese.
+FIELD_LABELS: dict[str, str] = {
+    "Title": "??",
+    "JapaneseTitle": "????",
+    "Artist": "??",
+    "Group": "??",
+    "Parody": "??",
+    "Character": "??",
+    "Language": "??",
+    "Category": "??",
+    "Tags": "??",
+    "Rating": "??",
+    "Pages": "??",
+    "Uploader": "???",
+    "Description": "??",
+    "FileSize": "????",
+    "Web": "????",
+    "TagsRaw": "??????",
+    "ArtistRaw": "??????",
+    "GroupRaw": "??????",
+    "ParodyRaw": "??????",
+    "CharacterRaw": "??????",
+    "LanguageRaw": "??????",
+    "CategoryRaw": "??????",
+}
+
+
+def field_label(field_name: str) -> str:
+    """Return the Chinese label for a metadata field, or the raw name."""
+    return FIELD_LABELS.get(field_name, field_name)
+
+
+def split_metadata_entries(entries):
+    """Split metadata into translated fields and untranslated originals.
+
+    The review UI shows the Chinese values first and keeps the upstream
+    English values in a secondary list, so a gallery with both does not
+    render two interleaved copies of every field.
+    """
+    primary = tuple(
+        entry for entry in entries if entry.field_name not in RAW_METADATA_FIELDS
+    )
+    raw = tuple(
+        entry for entry in entries if entry.field_name in RAW_METADATA_FIELDS
+    )
+    return primary, raw
 
 
 @dataclass(frozen=True, slots=True)

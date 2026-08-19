@@ -32,6 +32,7 @@ class Settings:
     trust_proxy_headers: bool = False
     trusted_proxy_ips: tuple[str, ...] = ()
     app_root_path: str = ""
+    tag_translation_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -48,6 +49,9 @@ class Settings:
                 if item.strip()
             ),
             app_root_path=os.getenv("APP_ROOT_PATH", ""),
+            tag_translation_enabled=_read_bool(
+                "TAG_TRANSLATION_ENABLED", True
+            ),
         )
 
     def readiness_errors(self) -> list[str]:

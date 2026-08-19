@@ -15,6 +15,9 @@ from app.exhentai.downloader import (
     ExHentaiDownloadError,
     ExHentaiDownloader,
 )
+from app.exhentai.enrich import enrich_metadata
+from app.exhentai.gdata_client import GdataClient, GdataError
+from app.exhentai.tagdb import TagTranslator
 
 
 PROVIDER_NAME = "EXHENTAI"
@@ -28,26 +31,18 @@ class ExHentaiService:
         library_path: Path,
         credentials_provider,
         http_client: httpx.AsyncClient | None = None,
+        translator: TagTranslator | None = None,
     ) -> None:
         self._database = database
         self._work_path = work_path
         self._library_path = library_path
         self._credentials_provider = credentials_provider
         self._http_client = http_client
+        self._translator = translator
 
     async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
-        credentials = await self._credentials_provider()
-        if credentials is None:
-            raise ExHentaiDownloadError(
-                "EXHENTAI_NOT_CONFIG",
-                "ExHentai Cookie 未配置",
-            )
-        async with self._http_session() as client:
-            downloader = ExHentaiDownloader(client)
-            metadata = await downloader.fetch_metadata(
-                credentials, gid, token
-            )
+        metadata = await self._fetch_metadata(gid, token)
         await asyncio.to_thread(
             self._persist_metadata_sync, candidate_id, metadata
         )
@@ -55,6 +50,34 @@ class ExHentaiService:
             candidate_id
         )
         return metadata
+
+    async def _fetch_metadata(self, gid: int, token: str) -> dict:
+        """Prefer the gdata API, falling back to authenticated HTML scraping.
+
+        gdata needs no Cookie and returns namespaced tags, so it yields far
+        more fields than the gallery page. Expunged galleries are missing
+        from gdata, so HTML remains the fallback.
+        """
+        async with self._http_session() as client:
+            try:
+                gallery = await GdataClient(client).fetch_one(gid, token)
+            except GdataError as exc:
+                logging.getLogger(__name__).info(
+                    "exhentai_gdata_fallback",
+                    extra={"error_code": exc.code},
+                )
+            else:
+                return enrich_metadata(gallery, self._translator)
+
+            credentials = await self._credentials_provider()
+            if credentials is None:
+                raise ExHentaiDownloadError(
+                    "EXHENTAI_NOT_CONFIG",
+                    "gdata 未收录该画廊，需要配置 ExHentai Cookie 后重试",
+                )
+            return await ExHentaiDownloader(client).fetch_metadata(
+                credentials, gid, token
+            )
 
     async def download_archive_for_candidate(
         self, candidate_id: int

@@ -61,7 +61,7 @@
     {% for entry in metadata_entries %}
     <li class="metadata-item {% if entry.is_manual %}is-manual{% endif %}">
       <div class="metadata-meta">
-        <strong>{{ entry.field_name }}</strong>
+        <strong>{{ field_label(entry.field_name) }}</strong>
         <span class="metadata-source">{{ entry.value_source }}{% if entry.confidence is not none %} · 信任度 {{ entry.confidence }}{% endif %}</span>
       </div>
       <div class="metadata-value">{{ entry.field_value }}</div>
@@ -72,13 +72,30 @@
   <p class="empty-state">暂无元数据</p>
   {% endif %}
 
+  {% if raw_metadata_entries %}
+  <details class="metadata-raw">
+    <summary>查看原文（未翻译）字段</summary>
+    <ul class="metadata-list">
+      {% for entry in raw_metadata_entries %}
+      <li class="metadata-item">
+        <div class="metadata-meta">
+          <strong>{{ field_label(entry.field_name) }}</strong>
+          <span class="metadata-source">{{ entry.value_source }}</span>
+        </div>
+        <div class="metadata-value">{{ entry.field_value }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
   <form class="metadata-form" method="post" action="{{ url_for('edit_metadata', candidate_id=candidate.candidate_id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <label>
       <span>字段</span>
       <select name="field_name" required>
         {% for field in metadata_fields %}
-        <option value="{{ field }}">{{ field }}</option>
+        <option value="{{ field }}">{{ field_label(field) }}</option>
         {% endfor %}
       </select>
     </label>

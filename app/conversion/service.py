@@ -226,6 +226,11 @@ class ConversionService:
                     else None
                 ),
                 description=_metadata_lookup(metadata, "Description"),
+                japanese_title=_metadata_lookup(metadata, "JapaneseTitle"),
+                group=_metadata_lookup(metadata, "Group"),
+                parody=_metadata_lookup(metadata, "Parody"),
+                character=_metadata_lookup(metadata, "Character"),
+                web=_metadata_lookup(metadata, "Web"),
             )
         except ConversionError as exc:
             await asyncio.to_thread(

@@ -18,6 +18,16 @@ from app.db.database import Database
 from app.secrets import SecretStore
 
 
+# A 409 means another poller holds the token, so back off longer than a
+# transient network error to avoid fighting over getUpdates.
+_POLL_BACKOFF_SECONDS: dict[str, int] = {
+    "TELEGRAM_CONFLICT": 30,
+    "TELEGRAM_FORBIDDEN": 30,
+    "TELEGRAM_UNAUTHORIZED": 60,
+    "TELEGRAM_SERVER_ERROR": 15,
+}
+
+
 class ConnectionManager:
     def __init__(
         self,
@@ -186,7 +196,11 @@ class ConnectionManager:
                 logging.getLogger(__name__).warning(
                     "telegram_poll_failed", extra={"error_code": exc.code}
                 )
-                await asyncio.sleep(5)
+                await asyncio.sleep(
+                    exc.retry_after
+                    if exc.retry_after is not None
+                    else _POLL_BACKOFF_SECONDS.get(exc.code, 5)
+                )
 
     async def _cancel_telegram_task(self) -> None:
         if self._telegram_task is None:

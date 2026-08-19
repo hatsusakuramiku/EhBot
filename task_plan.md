@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 4 complete; commit + Phase 5 deferred
+Implementation phase 5 (ExHentai metadata) code complete; phase 6 not started
 
 ## Phases
 
@@ -105,3 +105,22 @@ Implementation phase 4 complete; commit + Phase 5 deferred
 - Raw Telegram Token and ExHentai Cookies are stored only in private files under the data directory, never in ordinary database fields or rendered HTML.
 - Telegram updates are durably stored before later candidate parsing is introduced.
 - ExHentai connection in this phase validates authenticated site access; metadata and archive download remain later adapters.
+
+### Implementation Phase 5: ExHentai Metadata And Chinese Tags
+- [x] Classify Telegram polling errors (409/429/403/401/5xx) instead of one opaque message
+- [x] Switch metadata ingestion to the official `gdata` API with HTML fallback for expunged galleries
+- [x] Expand stored metadata to title, Japanese title, artist, group, parody, character, language, category, tags, rating, pages, uploader
+- [x] Rebuild the ComicInfo mapping to match plan section 8.4, including ISO 639-1 language codes
+- [x] Sync, cache, and index the EhTagTranslation database with ETag validation and offline degradation
+- [x] Translate metadata into Chinese while keeping the upstream English values in `*Raw` fields
+- [x] Show Chinese field labels in the review UI and collapse the untranslated originals
+- [x] Pass the complete automated test suite (148 tests)
+- [ ] Operator acceptance run against live Telegram and ExHentai traffic
+- **Status:** code and automated verification complete; live operator acceptance pending
+
+### Implementation Phase 6: Hardening And Release
+- [ ] Add archive safety checks: path traversal, zip bombs, magic-number validation, atomic `.part` publishing (plan sections 8.8, 17.2, 21.9)
+- [ ] Add tests for `app/candidates/reference.py`
+- [ ] Handle `my_chat_member` so sources appear without requiring a qualifying message first
+- [ ] Verify the low-memory profile and the Docker runtime on a host with Docker installed
+- **Status:** not started

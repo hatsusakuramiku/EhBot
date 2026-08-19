@@ -27,25 +27,65 @@ class TelegramBotApi:
             response = await self._client.get(
                 f"/bot{self._token}/{method}", params=params
             )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError:
             raise ProviderConnectionError(
                 "TELEGRAM_UNREACHABLE", "暂时无法连接 Telegram"
             ) from None
-        if not payload.get("ok"):
-            code = (
-                "TELEGRAM_UNAUTHORIZED"
-                if payload.get("error_code") == 401
-                else "TELEGRAM_REJECTED"
-            )
-            message = (
-                "Bot Token 无效或已被撤销"
-                if code == "TELEGRAM_UNAUTHORIZED"
-                else "Telegram 拒绝了连接请求"
-            )
-            raise ProviderConnectionError(code, message)
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if response.status_code != 200 or not payload.get("ok"):
+            raise self._error_for(response.status_code, payload)
         return payload
+
+    @staticmethod
+    def _error_for(
+        status_code: int, payload: dict
+    ) -> ProviderConnectionError:
+        """Map a Telegram error response to a specific connection error."""
+        error_code = payload.get("error_code")
+        if isinstance(error_code, int):
+            status_code = error_code
+        parameters = payload.get("parameters")
+        retry_after = None
+        if isinstance(parameters, dict):
+            raw_retry = parameters.get("retry_after")
+            if isinstance(raw_retry, int):
+                retry_after = raw_retry
+        if status_code == 401:
+            return ProviderConnectionError(
+                "TELEGRAM_UNAUTHORIZED", "Bot Token 无效或已被撤销"
+            )
+        if status_code == 409:
+            return ProviderConnectionError(
+                "TELEGRAM_CONFLICT",
+                "该 Bot Token 正被其他程序轮询或已设置 Webhook。"
+                "请关闭另一个 EhBot 实例，或删除 Webhook 后重试",
+            )
+        if status_code == 429:
+            wait_hint = (
+                f"，请等待约 {retry_after} 秒" if retry_after else ""
+            )
+            return ProviderConnectionError(
+                "TELEGRAM_RATE_LIMITED",
+                f"Telegram 触发限流{wait_hint}",
+                retry_after=retry_after,
+            )
+        if status_code == 403:
+            return ProviderConnectionError(
+                "TELEGRAM_FORBIDDEN",
+                "Telegram 拒绝访问，请确认 Bot 仍在该频道且具备权限",
+            )
+        if status_code >= 500:
+            return ProviderConnectionError(
+                "TELEGRAM_SERVER_ERROR", "Telegram 服务端暂时不可用"
+            )
+        return ProviderConnectionError(
+            "TELEGRAM_REJECTED", "Telegram 拒绝了连接请求"
+        )
 
     async def verify(self) -> TelegramBotIdentity:
         payload = await self._request("getMe")

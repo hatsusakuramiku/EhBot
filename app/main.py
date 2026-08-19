@@ -27,6 +27,11 @@ from app.db.database import Database
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
 
+from app.review.models import (
+    METADATA_FIELDS,
+    field_label,
+    split_metadata_entries,
+)
 from app.review.service import ReviewError, ReviewService
 from app.downloads.service import DownloadError, DownloadService
 from app.conversion.service import (
@@ -38,15 +43,47 @@ from app.conversion.service import (
     CONVERSION_STATE_RUNNING,
 )
 from app.exhentai.service import ExHentaiDownloadError, ExHentaiService
+from app.exhentai.tagdb import TagTranslator
+from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.secrets import SecretStore
 from app.storage.readiness import ensure_writable_directory
 
+
+
+async def _load_tag_translator(data_path, client):
+    """Synchronize and index the EhTagTranslation database.
+
+    Returns None when no translation data is available so metadata ingestion
+    keeps working with untranslated English tags.
+    """
+    sync = TagDatabaseSync(data_path, client)
+    reason = "cache_only"
+    try:
+        reason = (await sync.synchronize()).reason
+    except TagDatabaseError as exc:
+        logging.getLogger(__name__).warning(
+            "tag_database_unavailable", extra={"error_code": exc.code}
+        )
+        return None
+    payload = await asyncio.to_thread(sync.load_cached)
+    if payload is None:
+        return None
+    translator = TagTranslator()
+    await asyncio.to_thread(translator.load, payload)
+    logging.getLogger(__name__).info(
+        "tag_database_ready version=%s entries=%d reason=%s",
+        translator.version,
+        translator.entry_count,
+        reason,
+    )
+    return translator
 
 def create_app(
     settings: Settings | None = None,
     *,
     telegram_transport: httpx.AsyncBaseTransport | None = None,
     exhentai_transport: httpx.AsyncBaseTransport | None = None,
+    tagdb_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     configure_logging()
     app_settings = settings or Settings.from_env()
@@ -59,6 +96,7 @@ def create_app(
         connection_manager: ConnectionManager | None = None
         telegram_client: httpx.AsyncClient | None = None
         exhentai_client: httpx.AsyncClient | None = None
+        tagdb_client: httpx.AsyncClient | None = None
         try:
             for path in (
                 app_settings.data_path,
@@ -124,6 +162,17 @@ def create_app(
             )
             application.state.conversion_service = conversion_service
             await conversion_service.start()
+            tag_translator = None
+            if app_settings.tag_translation_enabled:
+                tagdb_client = httpx.AsyncClient(
+                    timeout=60,
+                    follow_redirects=True,
+                    transport=tagdb_transport,
+                )
+                tag_translator = await _load_tag_translator(
+                    app_settings.data_path, tagdb_client
+                )
+            application.state.tag_translator = tag_translator
             exhentai_service = ExHentaiService(
                 database,
                 app_settings.work_path,
@@ -132,6 +181,7 @@ def create_app(
                     lambda: _build_exhentai_credentials(secret_store)
                 ),
                 http_client=exhentai_client,
+                translator=tag_translator,
             )
             application.state.exhentai_service = exhentai_service
         except (OSError, ValueError, sqlite3.Error) as exc:
@@ -154,6 +204,8 @@ def create_app(
                 await telegram_client.aclose()
             if exhentai_client is not None:
                 await exhentai_client.aclose()
+            if tagdb_client is not None:
+                await tagdb_client.aclose()
 
     app = FastAPI(
         title="EhBot", lifespan=lifespan, root_path=app_settings.app_root_path
@@ -164,6 +216,7 @@ def create_app(
     app.state.download_service = None
     app.state.conversion_service = None
     app.state.exhentai_service = None
+    app.state.tag_translator = None
     app.add_exception_handler(AppError, app_error_handler)
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
@@ -346,20 +399,18 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "candidate": candidate,
-                "metadata_entries": summary.metadata,
+                "metadata_entries": split_metadata_entries(
+                    summary.metadata
+                )[0],
+                "raw_metadata_entries": split_metadata_entries(
+                    summary.metadata
+                )[1],
                 "review_history": summary.review_history,
                 "download_jobs": jobs,
                 "download_eligible": download_eligible,
                 "archive_ready": archive_ready,
-                "metadata_fields": (
-                    "Title",
-                    "Artist",
-                    "Language",
-                    "Category",
-                    "Tags",
-                    "Rating",
-                    "Description",
-                ),
+                "metadata_fields": METADATA_FIELDS,
+                "field_label": field_label,
                 "current_user": request.session.get("username", "admin"),
             },
         )
@@ -618,21 +669,17 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "candidate": candidate,
-                "metadata_entries": (
+                "metadata_entries": split_metadata_entries(
                     summary.metadata if summary is not None else ()
-                ),
+                )[0],
+                "raw_metadata_entries": split_metadata_entries(
+                    summary.metadata if summary is not None else ()
+                )[1],
                 "review_history": (
                     summary.review_history if summary is not None else ()
                 ),
-                "metadata_fields": (
-                    "Title",
-                    "Artist",
-                    "Language",
-                    "Category",
-                    "Tags",
-                    "Rating",
-                    "Description",
-                ),
+                "metadata_fields": METADATA_FIELDS,
+                "field_label": field_label,
                 "current_user": request.session.get("username", "admin"),
                 "error": message,
             },
