@@ -52,3 +52,9 @@ docker compose config
 ```
 
 所有秘密文件、`.env`、数据库和运行目录均被 Git 忽略。不要将 Telegram session、Token、API Hash 或 ExHentai Cookie 写入仓库或日志。
+
+## 许可证
+
+本项目以 MIT 许可证发布，详见 [LICENSE](LICENSE)。
+
+本仓库只提供自托管的归档工具，不附带任何凭据、Cookie 或版权内容。使用者需自行遵守 Telegram、E-Hentai 的服务条款以及当地法律法规，并对所归档的内容自负其责。
