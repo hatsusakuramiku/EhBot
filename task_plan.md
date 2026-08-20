@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 9 (automatic approval rules) complete; phase 6 remains deferred
+Implementation phase 9 (automatic approval rules) complete; phase 6 remains deferred; phase 10 archive-processing proposal drafted and awaiting approval
 
 ## Phases
 
@@ -177,3 +177,23 @@ Implementation phase 9 (automatic approval rules) complete; phase 6 remains defe
 - Version 1 supports the proposal's text, numeric, collection, existence, boolean, and `LIKE` operators; no regex, functions, field-to-field calculation, SQL, or Python execution.
 - Evaluation is restricted to `PENDING_REVIEW` candidates with at least one usable download source and complete available metadata. Failure to fetch metadata or evaluate a rule leaves the candidate for manual review.
 - First enabled matching rule by ascending priority wins; the action is always `AUTO_APPROVE`.
+
+### Implementation Phase 10: Extensible Archive Processing (Proposal Only)
+- [ ] Add `ArchiveBackend` and `ArchiveProcessor` interfaces with backend selection by task snapshot
+- [ ] Implement ZIP/CBZ backend using the existing Python ZIP path
+- [ ] Implement 7zz subprocess backend for RAR, 7Z, split archives, and fallback encrypted ZIP
+- [ ] Add isolated external-tool/DLL bridge boundary with registered tool profiles
+- [ ] Add split-volume inspection and `WAITING_VOLUMES` recovery
+- [ ] Add encrypted archive password vault and `WAITING_PASSWORD` recovery
+- [ ] Add pre-extraction safety manifest and limits
+- [ ] Use the selected backend for both extraction and CBZ packing
+- [ ] Add authenticated settings pages for paths, tool profiles, safety limits, and password entries
+- [ ] Add unit, integration, subprocess-fixture, and recovery tests
+- **Status:** proposal drafted; implementation awaits user approval
+
+## Phase 10 Assumptions And Boundaries
+- The main process never loads arbitrary DLLs; DLL-capable tools run behind a controlled bridge subprocess.
+- Users select registered tool profiles; they cannot submit arbitrary executable paths or command lines.
+- The first implementation supports common RAR/7Z/ZIP split naming and delegates format semantics to the selected backend.
+- The selected backend performs both extraction and CBZ packing for a task.
+- Passwords are encrypted at rest and are never written to logs or audit payloads.

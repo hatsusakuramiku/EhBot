@@ -65,6 +65,16 @@
 - The existing Windows SID/Linux mode hardening in `private_files.py` should back a generic atomic private-text writer shared by bootstrap passwords and external credentials.
 - The existing database class uses short `asyncio.to_thread` SQLite operations, so Telegram update persistence should follow that established boundary without introducing an ORM.
 
+## 2026-08-20 Extensible Archive Processing Proposal
+- The requested canonical pipeline is: download archive, check split volumes, try passwords, run safety tests, extract with a format-specific tool, then pack CBZ with the same backend.
+- `app/conversion/convert.py` currently supports only ZIP/CBZ through `zipfile`; RAR and 7Z are detected but not supported. This is the primary conversion seam for the new backend interface.
+- `DownloadService` and `ConversionService` already provide durable worker boundaries. The archive backend selection should be stored in the task details snapshot so retries use the same tool profile.
+- 7zz should be invoked as a controlled subprocess with argument arrays and timeouts. Direct `ctypes` loading of arbitrary DLLs in the Web process is unsafe; DLL-capable formats should use a dedicated bridge subprocess implementing the same backend contract.
+- Common split names include `.partN.rar`, `.rar/.r00`, `.7z.NNN`, and `.zip.NNN`. Missing volumes should be recoverable (`WAITING_VOLUMES`) rather than terminal failure.
+- Passwords must be decryptable for retry, so hashes alone are insufficient. Store encrypted password values in a private vault and keep only password-entry IDs and attempt outcomes in task/audit data.
+- Safety checks must happen after archive listing/password validation but before full extraction: traversal, magic number, file count, expanded size, compression ratio, timeout, temporary-directory isolation, and atomic `.part` publication.
+- The detailed design and phase checklist are in `ARCHIVE_PROCESSING_PROPOSAL.md`; no implementation code was changed in this planning session.
+
 ## 2026-08-20 Review And Queue Workflow Intake
 - The current project log says review transitions require reasons and downloads are triggered manually after approval; both contracts must change for this request.
 - The current project already has persistent `download_jobs`, idempotent Telegram enqueueing, ExHentai metadata fetching, Chinese tag enrichment, and source metadata rules. The implementation should compose these services instead of adding a second queue or metadata store.

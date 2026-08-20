@@ -557,4 +557,26 @@
 - **Status:** complete
 - Focused AST and workflow tests passed: 17 tests.
 - Full regression suite passed.
+
+## Planning Session: Extensible Archive Processing (2026-08-20)
+
+### Scope
+- **Status:** proposal drafted; no runtime code changed
+- Define an extensible archive processor supporting ZIP/CBZ, RAR, 7Z, encrypted archives, split volumes, 7zz tool profiles, and future DLL-backed tools.
+- Align the pipeline with the user's required order: download -> split check -> password attempts -> safety test -> extraction -> same-backend CBZ packing.
+
+### Decisions
+- Add a single `ArchiveProcessor` orchestration object and pluggable `ArchiveBackend` implementations.
+- Use Python `zipfile` for ZIP/CBZ and a controlled 7zz subprocess for RAR/7Z and fallback encrypted ZIP.
+- Keep DLL integrations outside the Web process behind a bridge subprocess.
+- Persist task backend/profile/path snapshots for deterministic retries.
+- Use encrypted password storage and recoverable `WAITING_VOLUMES` / `WAITING_PASSWORD` states.
+
+### Files
+- Added `ARCHIVE_PROCESSING_PROPOSAL.md`.
+- Updated `task_plan.md`, `findings.md`, and `progress.md` with Phase 10.
+
+### Verification
+- No code or database changes were made.
+- Plan explicitly remains awaiting user approval before implementation.
 - `git diff --check` passed; only the repository's existing LF-to-CRLF notices remain.
