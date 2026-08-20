@@ -252,3 +252,21 @@ p { margin: 6px 0 0; color: var(--muted); }
   .batch-actions { align-items: stretch; flex-direction: column; }
   .batch-actions span { margin: 0 0 2px; }
 }
+
+.download-queue .queue-header,
+.download-queue .queue-row { grid-template-columns: minmax(200px, 1fr) 120px 110px 64px minmax(190px, auto); }
+.download-queue .queue-row { min-height: 78px; }
+.download-queue .error-text { display: block; margin-top: 5px; color: var(--danger, #b3261e); font-size: 11px; }
+.download-queue .row-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.download-queue .row-actions form { margin: 0; }
+.download-queue .row-actions button { padding: 6px 12px; font-size: 12px; }
+
+@media (max-width: 720px) {
+  .download-queue .queue-row { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 16px; }
+  .download-queue .queue-row > span:nth-child(2),
+  .download-queue .queue-row > span:nth-child(3),
+  .download-queue .queue-row > span:nth-child(4) { display: block; }
+  .download-queue .row-actions { justify-content: flex-start; }
+}
+.form-hint { margin: 0; color: var(--muted); font-size: 12px; }
+.field-group input:disabled { background: #f3f5f6; color: var(--muted); cursor: not-allowed; }

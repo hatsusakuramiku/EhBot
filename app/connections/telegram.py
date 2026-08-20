@@ -83,6 +83,23 @@ class TelegramBotApi:
             return ProviderConnectionError(
                 "TELEGRAM_SERVER_ERROR", "Telegram 服务端暂时不可用"
             )
+        description = payload.get("description")
+        description = description if isinstance(description, str) else ""
+        if "file is too big" in description.lower():
+            # The Bot API cannot download files larger than 20 MB. This is a
+            # hard protocol ceiling, not a transient fault, so retrying can
+            # never succeed and the job must say so.
+            return ProviderConnectionError(
+                "TELEGRAM_FILE_TOO_BIG",
+                "文件超过 Telegram Bot API 的 20 MB 下载上限，Bot 无法取回该文件；请改用 ExHentai 源下载，或由上传者分卷后重发",
+            )
+        if description:
+            # Preserve Telegram's own wording. The bare fallback used to hide
+            # the real reason and made every 400 look like a network problem.
+            return ProviderConnectionError(
+                "TELEGRAM_REJECTED",
+                f"Telegram 拒绝了请求：{description}",
+            )
         return ProviderConnectionError(
             "TELEGRAM_REJECTED", "Telegram 拒绝了连接请求"
         )

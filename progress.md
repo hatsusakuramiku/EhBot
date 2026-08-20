@@ -580,3 +580,265 @@
 - No code or database changes were made.
 - Plan explicitly remains awaiting user approval before implementation.
 - `git diff --check` passed; only the repository's existing LF-to-CRLF notices remain.
+
+## Implementation Session: Extensible Archive Processing (2026-08-20)
+
+### Scope
+- **Status:** complete
+- Implement Phase 10 from `ARCHIVE_PROCESSING_PROPOSAL.md`: one orchestrated archive pipeline with pluggable backends, registered tool profiles, split-volume and password recovery, pre-extraction safety limits, and an operator settings page.
+
+### Handover Map
+| Concern | File |
+|---------|------|
+| Value objects, limits, profiles, snapshots | `app/archive/models.py` |
+| Stable error codes | `app/archive/errors.py` |
+| Magic-number/extension detection, split-volume resolution | `app/archive/formats.py` |
+| Path, size, ratio, depth, magic-number validation, page naming | `app/archive/safety.py` |
+| Password encryption envelope | `app/archive/vault.py` |
+| Profiles, limits, keep-original, password vault | `app/archive/service.py` |
+| Pipeline orchestration | `app/archive/processor.py` |
+| Streaming ZIP/CBZ backend | `app/archive/backends/zip_backend.py` |
+| Controlled 7zz subprocess backend | `app/archive/backends/seven_zip.py` |
+| Task wiring, recoverable states, keep-original cleanup | `app/conversion/service.py` |
+| Library filename sanitisation | `app/conversion/naming.py` |
+| Schema for profiles, passwords, settings | `app/db/migrations/009_archive_processing.sql` |
+| Settings routes | `app/main.py` (`/archive-settings*`) |
+| Settings page | `app/web/templates/archive_settings.html` |
+| Shared archive fixtures | `tests/unit/archive_fixtures.py` |
+| Unit coverage | `tests/unit/test_archive_processing.py` |
+| Workflow and Web coverage | `tests/integration/test_archive_workflow.py` |
+
+### Implementation
+- Added `ArchiveProcessor`, which runs the proposal's fixed order for one task: resolve volumes, inspect, resolve password, validate safety, extract or stream, pack the CBZ with the same backend, then atomically rename `<name>.cbz.part`. Failures delete the partial file and the task's temporary directory.
+- Added `ZipfileBackend`, which streams members straight from the source ZIP into the CBZ. This is the preferred backend for ZIP so the 512 MB profile keeps a guaranteed path with no full extraction, and CBZ output uses `ZIP_STORED` to avoid recompressing images.
+- Added `SevenZipBackend` for RAR, 7Z, split archives, and encrypted ZIP that `zipfile` cannot open. It spawns the profile's executable with a fixed argument vector (`shell=False`, per-profile timeout, no shell string) and parses `l -slt` output. Password failures are mapped to `ARCHIVE_PASSWORD_REQUIRED`; everything else becomes `ARCHIVE_TOOL_FAILED` or `ARCHIVE_TOOL_TIMEOUT`.
+- Added format detection that prefers the magic number and falls back to the file name, because later volumes of a split archive have no signature of their own.
+- Added split-volume resolution for `.partN.rar`, `.rar` + `.rNN`, and `.zip/.7z/.rar` + `.NNN`, including ordered volume lists and named gap reporting.
+- Added pre-extraction safety validation over the listing only: absolute paths, `..`, symlinks, nested archives, member count, member size, total size, compression ratio, directory depth, and image magic-number cross-checks. Pages are emitted as `0001.jpg`-style stable names, so duplicate or non-ASCII member names cannot collide.
+- Added migration `009_archive_processing.sql` with `archive_tool_profiles`, `archive_passwords`, and `archive_settings`, seeded with `zipfile-default` (BUILTIN, streaming) and `7zz-default` (CLI).
+- Added an encrypted password vault using scrypt key derivation with an HMAC-SHA256 keystream and authentication tag, so no new third-party crypto dependency was required. The master key lives in `data/private/archive_password_key` through the existing private-file helper. Attempt order is `last successful -> priority -> empty password`, and only the entry ID is ever recorded.
+- Added `CONVERSION_WAITING_VOLUMES` and `CONVERSION_WAITING_PASSWORD`. Re-enqueueing the same candidate resets an existing parked job to `CONVERSION_PENDING` rather than creating a duplicate, so the `convert:{candidate_id}` idempotency contract is unchanged.
+- Completed conversion tasks now persist the backend, tool profile, source format, resolved paths, page count, volume count, skipped members, and password entry ID in `details_json` for deterministic retries.
+- Added `/archive-settings` with runtime paths, safety limits, keep-original, per-profile executable/timeout/enable state, and password-vault management. The page never echoes a stored password.
+- Made keep-original an operator setting; the original archive is deleted only after the CBZ artifact row is committed.
+- Removed the superseded `stream_zip_to_cbz` helper so exactly one archive path exists. `app/conversion/convert.py` now only defines `ConversionError`.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | `app.archive` re-exported `ArchiveSettingsService`, which imports `Database`, which imports the archive models, producing a circular import | 1 | Removed that single re-export and documented why in `app/archive/__init__.py`; importers use `app.archive.service` directly |
+| 2026-08-20 | Chinese literals passed to Python through a PowerShell here-string pipe were written as `?????` | 1 | Stopped piping source through stdin; patches are now written to a UTF-8 file and executed, and affected strings were rewritten with escapes |
+| 2026-08-20 | The rewritten conversion tests expected `ConversionError` where the pipeline raises `ArchiveError` | 1 | Asserted on `ArchiveError` and its stable `code`, which is the contract the worker maps to task state |
+| 2026-08-20 | Existing migration contract asserted 8 migrations | 1 | Updated it to 9 and asserted the three new archive tables |
+| 2026-08-20 | `7zz -snld` was included in the extraction argument list but is not a valid switch for this use | 1 | Removed it; symlink safety is enforced by the manifest check plus a post-extraction `is_symlink` check |
+
+### Verification
+- **Status:** complete
+- New unit suite passes: 34 tests across format detection, volume resolution, safety limits, both backends, `-slt` parsing, processor selection/recovery, and the password vault.
+- New integration suite passes: 13 tests across the settings page, limit validation, encrypted password storage, CBZ publication, keep-original deletion, split-volume parking and requeue, encrypted-archive parking, path-traversal rejection, and unsupported-format rejection.
+- Full regression suite passes: 211 tests.
+- Verified against a live application instance on isolated data: `/healthz` and `/readyz` return 200, `/archive-settings` returns 200 and lists both seeded profiles, and the new navigation entry renders.
+- `git diff --check` passes; only the repository's existing LF-to-CRLF notices remain.
+- The user-owned `.gitignore` modification and the untracked `app/candidates/reference.py` remain untouched.
+
+### Open Items For The Next Agent
+- Real RAR/7Z end-to-end verification requires a host with `7zz` installed; the subprocess boundary is currently proven with injected runners and recorded `-slt` output only.
+- No recorded encrypted RAR/7Z fixture exists. Encrypted handling is proven through the ZIP encryption flag and the vault attempt order.
+- `BRIDGE` profiles are accepted by the schema and settings page but no bridge executable protocol is implemented yet.
+- Library layout is still `<library>/<title>.cbz`. `app/conversion/naming.py` sanitises one segment; the plan's `{category}/{artist}/{title}` template is not exposed.
+- Docker image build/acceptance and the deferred phase 6 low-resource pass are still outstanding.
+
+## Implementation Session: 7-Zip Toolchain Provisioning (2026-08-20)
+
+### Scope
+- **Status:** complete
+- Remove the host/distribution dependency for 7-Zip. The application must fetch the official upstream binary itself, verify it, and keep working on Linux and Docker, which are the real deployment targets.
+
+### Confirmed Upstream Facts
+- Official releases live in the GitHub repository `ip7z/7zip`; the newest tag at implementation time is `26.02` and each asset exposes a `sha256` digest.
+- Linux and macOS assets are `.tar.xz`, which Python's built-in `tarfile` unpacks. There is therefore no bootstrap problem where an archiver would be needed to install the archiver.
+- Each Linux archive contains both `7zz` (dynamically linked) and `7zzs` (statically linked). `7zzs` is preferred because `python:3.12-slim` ships no `libstdc++`.
+- PyPI has no usable official binary distribution: `7zip-bin`, `py-7zip`, and `sevenzip` do not exist, and `py7zr` is pure Python without RAR support. Downloading the pinned upstream asset is the only option that covers RAR.
+- A real 7-Zip build confirms `Rar` and `Rar5` are both listed as supported formats.
+
+### Implementation
+- **Status:** complete
+- Added `app/archive/toolchain.py`: pinned `SEVEN_ZIP_VERSION`, one `ReleaseAsset` per supported `(system, machine)` pair with a hard-coded SHA-256, digest verification, allowlist extraction, and an idempotent versioned install.
+- The install directory is `<data>/tools/7zip/<version>/`, so upgrading the pinned version never overwrites a running binary in place. Downloads land in a `.incoming` staging directory and are promoted with `replace()`; a digest mismatch is discarded without touching an existing install.
+- `extract_binaries()` matches member names against the fixed `PREFERRED_BINARIES` allowlist instead of joining archive-controlled names onto the destination, so a crafted tarball cannot write outside the install directory.
+- Toolchain failures use stable codes: `TOOLCHAIN_PLATFORM_UNSUPPORTED`, `TOOLCHAIN_DIGEST_MISMATCH`, `TOOLCHAIN_DOWNLOAD_FAILED`, `TOOLCHAIN_EXTRACT_FAILED`, `TOOLCHAIN_BINARY_MISSING`.
+- `resolve_seven_zip_executable(configured, tools_path)` now prefers the managed install, then `PATH`, then the Windows default directory, and `SevenZipBackend`/`ArchiveProcessor` accept `tools_path` so the resolution order is identical in the worker.
+- `ArchiveSettingsService` gained `tools_path`, `toolchain_status()`, `install_toolchain(force)`, and `ensure_toolchain()`. Startup calls `ensure_toolchain()` when `ARCHIVE_TOOLCHAIN_AUTO_INSTALL` is on; a failure only warns, because an unavailable archiver must not stop the whole service.
+- Added `POST /archive-settings/toolchain/install` and a toolchain block on the archive settings page showing ready/missing state, the resolved path, whether it came from the host, and the expected asset name. The download button only appears on platforms upstream actually publishes.
+- The Dockerfile no longer installs the distribution `7zip` package; it copies `scripts/` instead, and `scripts/install_seven_zip.py` can pre-seed the binary during a build or provisioning step.
+- `.env.example` and `compose.yaml` now document `ARCHIVE_TOOLCHAIN_AUTO_INSTALL`, and migration 009 records `managed_install` in the `7zz-default` capabilities.
+
+### Bugs Found By Real-Binary Testing
+- A header-encrypted archive (`-mhe=on`) fails at `inspect` rather than at extraction, so the pipeline never reached password resolution. `process()` now catches `ArchivePasswordRequired` around inspection and resolves the password with an inspect probe; `_resolve_password` accepts a custom `probe`.
+- 7-Zip stored the full staging path inside the produced CBZ. Packing now runs with `cwd=staging` and a `"*"` argument, and `_run_subprocess`/`_invoke` accept `working_directory`.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | Sandboxed network calls failed with `WinError 10013` | 1 | Verified upstream release facts through escalated commands only; runtime downloads stay behind the pinned asset table |
+| 2026-08-20 | Header-encrypted 7z failed during `inspect`, before any password was tried | 1 | Added the inspect probe path so `CONVERSION_WAITING_PASSWORD` and vault attempts also cover header encryption |
+| 2026-08-20 | CBZ produced by `7zz` contained full staging paths as member names | 1 | Packed with `cwd=staging` and `"*"`; added `working_directory` to the subprocess boundary |
+| 2026-08-20 | The unit suite would have hit the network through `toolchain._download` | 1 | Added `tests/conftest.py` with a session-level auto-install switch off plus an autouse `_download` guard |
+
+### Verification
+- **Status:** complete
+- New `tests/unit/test_toolchain.py`: 16 offline tests that build a real `tar.xz` in memory and inject the download, covering platform mapping, digest rejection, allowlist extraction, idempotency, force reinstall, and staging cleanup.
+- New `tests/integration/test_seven_zip_real.py`: 12 end-to-end tests against a real 7-Zip binary, skipped automatically when none is present.
+- Real-binary QA on this host (7-Zip 26.00): plain, nested, password-protected, header-encrypted, split, missing-volume, and corrupted archives all behave as specified; the official `tar.xz` install, its idempotency, tamper rejection, and version directory were exercised directly.
+- Full regression suite passes: 241 tests.
+- `git diff --check` passes; only the repository's existing LF-to-CRLF notices remain.
+- The user-owned `.gitignore` change and the untracked `app/candidates/reference.py` remain untouched.
+
+### Handover Map
+| Concern | Entry point |
+|---------|-------------|
+| Pinned version, asset table, digests | `app/archive/toolchain.py` |
+| Executable resolution order | `app/archive/backends/seven_zip.py::resolve_seven_zip_executable` |
+| Startup provisioning and status | `app/archive/service.py::ensure_toolchain`, `toolchain_status` |
+| Operator install action | `POST /archive-settings/toolchain/install` in `app/main.py` |
+| Build/provision pre-seed | `scripts/install_seven_zip.py` |
+| Auto-install switch | `ARCHIVE_TOOLCHAIN_AUTO_INSTALL` in `app/config.py` |
+
+### Upgrading The Pinned 7-Zip Version
+1. Read the digests from the upstream release assets for the new tag.
+2. Update `SEVEN_ZIP_VERSION` and every `RELEASE_ASSETS` entry together; a stale digest fails closed with `TOOLCHAIN_DIGEST_MISMATCH`.
+3. Run `tests/unit/test_toolchain.py`, then let a real host install and inspect one archive.
+4. The old version directory stays on disk; delete it only after the new one is confirmed.
+
+### Open Items For The Next Agent
+- The first-boot download inside a real Linux container is still unverified; this host has no Docker, so Docker acceptance remains outstanding.
+- No recorded encrypted RAR fixture exists. RAR handling is proven only through 7-Zip's reported format support and 7z equivalents.
+- `BRIDGE` profiles remain schema-only; no bridge executable protocol is implemented.
+- The library layout is still `<library>/<title>.cbz`; `app/conversion/naming.py` sanitises a single segment and no operator-editable template is exposed.
+- The pinned version must be refreshed manually; nothing polls upstream for new releases.
+
+## Implementation Session: Docker Linux Verification (2026-08-20)
+
+### Scope
+- **Status:** complete
+- The user asked to verify on Docker whatever Windows cannot prove. Windows can never exercise the managed 7-Zip install, because the pinned assets are Linux `.tar.xz` builds and `asset_for_platform()` refuses Windows by design.
+- Added `scripts/verify_docker_linux.py` so this verification is one repeatable command instead of ad-hoc container invocations.
+
+### What The Script Checks
+| Stage | Flag | Proves |
+|-------|------|--------|
+| Managed install on Linux | default | No 7-Zip at start, pinned asset resolution, digest-verified download, version-isolated path, `7zzs` preferred, idempotent reinstall, managed install wins resolution, binary runs on slim, version matches the pin, RAR/RAR5 supported, real 7z round trip, no host paths in member names, tampered payload rejected and installs nothing |
+| Fails closed offline | `--offline` | With `--network none` the install raises `TOOLCHAIN_DOWNLOAD_FAILED` and leaves nothing behind |
+| Full suite on Linux | `--suite` | The whole pytest suite on Linux, with dependencies resolved from `uv.lock` rather than a hand-written list |
+| Image build | `--build` | `docker build` succeeds and `scripts.install_seven_zip` installs `7zzs` inside the real image |
+
+### Bugs Found By Running On Linux
+- **Startup aborted when provisioning failed.** `ensure_toolchain()` only caught `ArchiveSettingsError`, so any other exception escaped the lifespan and took down the entire application. On Windows this never fired because the platform check returns early. On Linux with auto-install on and no reachable download, 35 tests failed and the app would not start. `ensure_toolchain()` now contains every failure mode and logs `TOOLCHAIN_PROVISION_FAILED`; a host that cannot fetch 7-Zip keeps every other feature.
+- **The test download guard was bypassable and unrealistic.** The session fixture used `os.environ.setdefault`, so an operator shell exporting `ARCHIVE_TOOLCHAIN_AUTO_INSTALL=true` would let the suite reach the network. It now overwrites the variable with `MonkeyPatch.setenv`. The guard also raised `AssertionError`, which is not a failure the application can ever see; it now raises `ToolchainError("TOOLCHAIN_DOWNLOAD_FAILED")` so the startup path exercises its real degraded branch.
+- Added `test_startup_survives_a_failing_toolchain_install`, which starts the app with auto-install on and an unreachable download and asserts `/healthz` and `/archive-settings` still serve.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | Docker engine unreachable; `dockerDesktopLinuxEngine` pipe missing and `docker desktop start` timed out | 1 | The host was on the Hyper-V backend with no Linux VM; the user switched Docker Desktop to WSL2 |
+| 2026-08-20 | `docker pull` failed with `context deadline exceeded`, then a mirror returned `toomanyrequests` | 2 | The user enabled a proxy; Docker Hub then resolved normally. Note `daemon.json` still lists a misspelled mirror, `doocker.1ms.run` |
+| 2026-08-20 | The container script failed with `SyntaxError: bytes can only contain ASCII literal characters` | 1 | `\xff` inside the non-raw triple-quoted script was resolved by the outer Python; switched to `bytes([0xFF, ...])` |
+| 2026-08-20 | The container had no `httpx`, so `install()` raised `ModuleNotFoundError` | 1 | Built a small verification base image with only that dependency, which also lets the offline stage run with no network |
+| 2026-08-20 | The Linux suite hit 12 collection errors from a missing `pwdlib` | 1 | Replaced the hand-written dependency list with `uv sync --frozen --all-groups`, so the check cannot drift from `pyproject.toml` |
+| 2026-08-20 | The Linux suite then reported 35 failures | 1 | A real defect, not an environment issue; see the startup fix above |
+
+### Verification
+- **Status:** complete
+- `python scripts/verify_docker_linux.py --offline --suite --build`: **5/5 stages pass** against Docker engine 29.2.1 (linux/amd64).
+- All 15 managed-install checks pass inside a bare `python:3.12-slim-bookworm` container that starts with no 7-Zip: the real download of `7z2602-linux-x64.tar.xz`, `/tmp/ehbot-tools/7zip/26.02/7zzs`, real RAR support, and digest rejection.
+- Windows regression suite: **242 passed** (241 before, plus the new startup test).
+- `git diff --check` passes; only the repository's existing LF-to-CRLF notices remain.
+
+### Open Items For The Next Agent
+- Verified: first-boot download on real Linux, the offline degraded path, image build, and in-image provisioning. This closes the phase 10/11 Docker acceptance gap.
+- Not verified: a full `docker compose up` run with real Telegram/ExHentai credentials, and the phase 6 low-resource pass.
+- The host's `daemon.json` has a typo in its first registry mirror (`doocker.1ms.run`); pulls only worked through the proxy. Not a repository issue, but it will bite the next agent on this machine.
+- No recorded encrypted RAR fixture still applies; RAR support is proven by the binary's reported format list, not by a real RAR archive.
+
+## Implementation Session: Bootstrap Credential Visibility (2026-08-20)
+
+### Scope
+- **Status:** complete
+- Operator report during container testing: the first-run admin password was written only to `data/bootstrap_admin_password`, and the log line printed the *path* instead of the value. In Docker the data directory is a bind mount or a volume, so the operator has to hunt through the filesystem for a credential they need immediately.
+
+### Implementation
+- Added `format_bootstrap_banner()` in `app/bootstrap.py` and printed it from the startup path in `app/main.py` before the existing warning log.
+- The banner is written with `print(..., flush=True)` rather than through the logger on purpose: `JsonFormatter` would escape the newlines and bury the value inside one long JSON string.
+- The existing `bootstrap_admin_password_created path=...` log line and the private password file are both kept, so nothing that relied on them breaks.
+- The banner only appears on a genuine first boot, or after a rotation when the password was never changed. Once `password_changed` is set, the file is removed and nothing is printed again.
+
+### Security Reasoning
+- The value is single use: the account cannot reach any page except `/change-password` until it is rotated, and the file is deleted at that point.
+- Printing it is not a new disclosure. It was already written to disk in the same data directory the logs describe, and anyone who can read container logs can already read that bind mount.
+- The banner is deliberately excluded from the redaction filter: `redact_sensitive_values` only guards the JSON log path, and the credential must remain readable here.
+
+### Verification
+- **Status:** complete
+- Added `test_bootstrap_password_is_printed_to_the_console`, asserting the password, the username, and the backup path all reach stdout.
+- Added `test_console_banner_is_absent_once_the_password_is_changed`, asserting a steady-state restart reprints nothing.
+- Rebuilt the image and started a container against an empty data directory: the banner appears at the top of `docker compose logs`, ahead of the toolchain and tag-database lines.
+- Full regression suite: **244 passed**.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | The new steady-state test failed, still seeing a banner after the change | 1 | My test omitted `log_in()` before posting to `/change-password`, so the change was rejected. Test defect, not a product defect |
+| 2026-08-20 | A later login with the printed password returned 401 and the password file was gone | 1 | Not a defect: the operator had already logged in and rotated the password, which is exactly the designed single-use behavior |
+
+## Implementation Session: Download Queue Controls And Configurable Paths (2026-08-20)
+
+### Scope
+- **Status:** complete
+- Operator report after the container test: channel and group messages are picked up correctly, but **the download failed**. Three requests followed: find out why, give download jobs **retry / pause / cancel** controls, and let the operator **change the directories** instead of being locked to environment variables.
+
+### Handover Map
+| Area | Entry point | Note |
+|------|-------------|------|
+| Download states | `app/downloads/models.py` | `PAUSED` state, `OPEN_DOWNLOAD_STATES`, `PERMANENT_DOWNLOAD_ERRORS`, `is_retryable` / `is_pausable` / `is_cancellable` |
+| Job transitions | `app/downloads/service.py::retry_job` | Plus `pause_job` / `resume_job` / `cancel_job`, each with a `_..._sync` body run in the DB thread |
+| Routes | `app/main.py::_download_action` | Backs `POST /downloads/{job_id}/retry|pause|resume|cancel`; failures come back as `/downloads?error=` |
+| Queue UI | `app/web/templates/downloads.html` | Buttons render from the `is_*` properties; failed jobs show `error_message` |
+| Path overrides | `app/archive/service.py::save_paths` | Stored in the existing `archive_settings` table under `library_path` / `work_path` |
+| Path consumers | `ConversionService::_effective_paths` | Also `DownloadService::_effective_work_path` and `ExHentaiService::_effective_work_path` |
+| Path UI | `app/web/templates/archive_settings.html` | The data directory stays read-only, because relocating it would move the settings database itself |
+
+### Root Cause Of The Download Failure
+- `download_jobs` row 1 was `FAILED` with `error_code='TELEGRAM_REJECTED'` and the message "Telegram 拒绝了连接请求", which describes a transport problem that had not happened.
+- Replaying `getFile` with the container's own token returned **HTTP 400 `Bad Request: file is too big`**. This is the Telegram **Bot API 20 MB download ceiling**, not a bug in this project and not something a retry can fix.
+- The real cause was hidden by `app/connections/telegram.py::_error_for`, whose fallback branch discarded Telegram's `description` and reported a generic connection error. Two changes: a dedicated `TELEGRAM_FILE_TOO_BIG` code whose message tells the operator what to do (use the ExHentai source, or ask the uploader to re-post in volumes), and a fallback that now preserves Telegram's own text.
+- Separate observation, still open: the log shows repeated `TELEGRAM_CONFLICT`, which only happens when a second process polls the same bot token. One stale uvicorn on port 8000 was killed (PIDs 16776 and 31140); if the conflict persists, something outside this repository is still polling.
+
+### Implementation
+- **Retry** reuses the same job row rather than inserting a new one, which keeps the `idempotency_key` contract intact and preserves the attempt history; it also resets the candidate from `FAILED`/`PROCESSING` back to `APPROVED` so the pipeline can pick it up again.
+- **Pause** is only offered for `PENDING`. An in-flight HTTP stream cannot be suspended and resumed safely, so a `DOWNLOADING` job can only be cancelled. The worker claims `PENDING` rows exclusively, so a paused job is skipped without any extra worker logic.
+- **Cancel** returns the candidate to `PENDING_REVIEW` so it reappears in the review queue instead of vanishing; a `COMPLETED` job cannot be cancelled.
+- Failed jobs now stay on the page: `_list_active_jobs_sync` selects `OPEN_DOWNLOAD_STATES`, because a failure the operator cannot see is a failure they cannot retry.
+- **Paths** reuse the existing key/value `archive_settings` table instead of adding a table or new environment variables. `save_paths` requires an absolute path (`PATH_NOT_ABSOLUTE`) and proves it is writable via `ensure_writable_directory` (`PATH_NOT_WRITABLE`), creating it when needed. Clearing a field removes the override and falls back to the environment default.
+- Overrides take effect **without a restart**: the three services resolve the path per task through a provider callable rather than capturing it at construction time. `app/main.py` therefore builds `ArchiveSettingsService` before `DownloadService` and injects `work_path_provider=archive_settings_service.work_path`.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | Assumed the download failure was a proxy or network problem, based on the stored "拒绝了连接请求" message | 1 | The message was wrong, not the diagnosis path. Replaying `getFile` gave the real answer; a fallback error branch that drops the upstream description is actively harmful |
+| 2026-08-20 | Typed the new error message as "拒绍" instead of "拒绝" | 1 | The escape `\u7ecd` was written where `\u7edd` was meant. Escaped Chinese must be re-read with `Select-String` after writing, because a wrong codepoint is invisible in the patch script |
+| 2026-08-20 | An existing test asserted the page title "活跃下载任务" | 1 | Expected: the page now lists failed jobs too, so the title became "下载任务". Updated the assertion deliberately, not to make it pass |
+| 2026-08-20 | Could not log in to the running container to verify | 1 | Not a defect: the operator had already rotated the bootstrap password. Verification moved to a throwaway database inside the container, which is a better check anyway because it touches no operator data |
+| 2026-08-20 | Left `work/_verify.py`, `work/_probe.py` and `work/_page.html` behind while iterating | 1 | Removed. `work/` should only hold the compose override, the two server logs and the `docker-*` directories |
+
+### Verification
+- **Status:** complete
+- Windows regression suite: **255 passed** (244 before this session).
+- New coverage in `tests/integration/test_downloads.py` (7 cases): retry does not create a second job, a permanently failed job refuses retry, a paused job is skipped by the worker and runs after resume, a `DOWNLOADING` job cannot be paused, cancel returns the candidate to `PENDING_REVIEW`, a `COMPLETED` job cannot be cancelled, and failed jobs still appear on the page.
+- New coverage in `tests/integration/test_archive_workflow.py` (4 cases): a path can be changed, a relative path is rejected, clearing restores the default, and an override reaches `ConversionService` immediately.
+- Linux side: a throwaway database inside the running container exercised the same transitions and path rules, **16/16 pass**, covering pause/resume/cancel/retry, the permanent-failure block, failed jobs remaining listed, and the four path outcomes.
+- The image was rebuilt and `ehbot-ehbot-1` restarted healthy.
+
+### Open Items For The Next Agent
+- **Files larger than 20 MB cannot be fetched through the Bot API at all.** The only real fix is MTProto (Telethon), which is neither installed nor declared in `pyproject.toml`. Until the operator decides, the ExHentai source is the documented workaround.
+- `SevenZipBackend.pack_cbz` in `app/archive/backends/seven_zip.py:244` calls `comicinfo_path.write_bytes()` on a value that may be `str`, which raises `TypeError`. The production caller passes bytes, so it never fires; the boundary should still be tightened. The operator was asked and has not answered.
+- `TELEGRAM_CONFLICT` needs the operator to confirm no other deployment polls the same token.

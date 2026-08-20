@@ -11,10 +11,14 @@ from app.connections.telegram import TelegramBotApi
 from app.db.database import Database
 from app.downloads.models import (
     ACTIVE_DOWNLOAD_STATES,
+    DOWNLOAD_STATE_CANCELLED,
     DOWNLOAD_STATE_COMPLETED,
     DOWNLOAD_STATE_DOWNLOADING,
     DOWNLOAD_STATE_FAILED,
+    DOWNLOAD_STATE_PAUSED,
     DOWNLOAD_STATE_PENDING,
+    OPEN_DOWNLOAD_STATES,
+    PERMANENT_DOWNLOAD_ERRORS,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
     DownloadEnqueueResult,
@@ -37,12 +41,22 @@ class DownloadService:
         work_path: Path,
         telegram_client_factory=None,
         exhentai_download=None,
+        work_path_provider=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
         self._exhentai_download = exhentai_download
+        # Resolved per job so an operator directory change applies without a
+        # restart; the constructor value stays the default.
+        self._work_path_provider = work_path_provider
         self._worker_task: asyncio.Task[None] | None = None
+
+    async def _effective_work_path(self) -> Path:
+        if self._work_path_provider is None:
+            return self._work_path
+        resolved = await self._work_path_provider()
+        return resolved or self._work_path
 
     async def enqueue_telegram_download(
         self, candidate_id: int, attachment: dict
@@ -161,13 +175,144 @@ class DownloadService:
         return await asyncio.to_thread(self._list_active_jobs_sync)
 
     def _list_active_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
-        placeholders = ",".join("?" for _ in ACTIVE_DOWNLOAD_STATES)
+        states = tuple(sorted(OPEN_DOWNLOAD_STATES))
+        placeholders = ",".join("?" for _ in states)
         return self._fetch_jobs(
             "WHERE state IN ("
             + placeholders
             + ") ORDER BY id DESC LIMIT 50",
-            tuple(ACTIVE_DOWNLOAD_STATES),
+            states,
         )
+
+    async def retry_job(self, job_id: int) -> str:
+        """Requeue a failed or paused job without creating a duplicate.
+
+        The original row is reused so the `idempotency_key` contract holds and
+        the attempt history is preserved.
+        """
+        return await asyncio.to_thread(self._retry_job_sync, job_id)
+
+    def _retry_job_sync(self, job_id: int) -> str:
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state, error_code, candidate_id FROM download_jobs "
+                "WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            state = str(row[0])
+            if state not in {
+                DOWNLOAD_STATE_FAILED,
+                DOWNLOAD_STATE_PAUSED,
+                DOWNLOAD_STATE_CANCELLED,
+            }:
+                raise DownloadError(
+                    "JOB_NOT_RETRYABLE",
+                    "只有已失败、已暂停或已取消的任务可以重试",
+                )
+            if row[1] is not None and str(row[1]) in PERMANENT_DOWNLOAD_ERRORS:
+                raise DownloadError(
+                    "JOB_PERMANENTLY_FAILED",
+                    "该任务的失败原因无法通过重试解决",
+                )
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, error_code = NULL, "
+                "error_message = NULL, lease_owner = NULL, "
+                "lease_expires_at = NULL, retry_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (DOWNLOAD_STATE_PENDING, job_id),
+            )
+            # The candidate went to FAILED when the job did, so it has to be
+            # eligible again or the worker would refuse to process the retry.
+            connection.execute(
+                "UPDATE candidates SET status = 'APPROVED', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status IN ('FAILED', 'PROCESSING')",
+                (int(row[2]),),
+            )
+        return DOWNLOAD_STATE_PENDING
+
+    async def pause_job(self, job_id: int) -> str:
+        """Hold a queued job so the worker skips it until it is resumed."""
+        return await asyncio.to_thread(self._pause_job_sync, job_id)
+
+    def _pause_job_sync(self, job_id: int) -> str:
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            if str(row[0]) != DOWNLOAD_STATE_PENDING:
+                # An in-flight transfer cannot be suspended mid-stream; the
+                # honest options are to let it finish or to cancel it.
+                raise DownloadError(
+                    "JOB_NOT_PAUSABLE",
+                    "只有排队中的任务可以暂停；"
+                    "正在下载的任务请使用取消",
+                )
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
+                "lease_expires_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (DOWNLOAD_STATE_PAUSED, job_id),
+            )
+        return DOWNLOAD_STATE_PAUSED
+
+    async def resume_job(self, job_id: int) -> str:
+        """Return a paused job to the queue."""
+        return await asyncio.to_thread(self._resume_job_sync, job_id)
+
+    def _resume_job_sync(self, job_id: int) -> str:
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            if str(row[0]) != DOWNLOAD_STATE_PAUSED:
+                raise DownloadError(
+                    "JOB_NOT_PAUSED", "只有已暂停的任务可以继续"
+                )
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (DOWNLOAD_STATE_PENDING, job_id),
+            )
+        return DOWNLOAD_STATE_PENDING
+
+    async def cancel_job(self, job_id: int) -> str:
+        """Cancel a job and release its candidate back to manual review."""
+        return await asyncio.to_thread(self._cancel_job_sync, job_id)
+
+    def _cancel_job_sync(self, job_id: int) -> str:
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state, candidate_id FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            if str(row[0]) == DOWNLOAD_STATE_COMPLETED:
+                raise DownloadError(
+                    "JOB_ALREADY_COMPLETED", "已完成的任务无法取消"
+                )
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
+                "lease_expires_at = NULL, retry_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (DOWNLOAD_STATE_CANCELLED, job_id),
+            )
+            connection.execute(
+                "UPDATE candidates SET status = 'PENDING_REVIEW', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status IN ('APPROVED', 'PROCESSING', 'FAILED')",
+                (int(row[1]),),
+            )
+        return DOWNLOAD_STATE_CANCELLED
 
     def _fetch_jobs(self, where_sql: str, params) -> tuple[DownloadJobSummary, ...]:
         with self._database._connect() as connection:
@@ -328,8 +473,9 @@ class DownloadService:
                 )
                 return
             file_info = await api.get_file(file_id)
+            work_path = await self._effective_work_path()
             destination = (
-                self._work_path
+                work_path
                 / "downloads"
                 / f"job-{job['job_id']}-{Path(file_name).name}"
             )

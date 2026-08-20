@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}归档设置 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">归档</span>
+    <h1>归档处理设置</h1>
+    <p>工具 profile、安全限制与密码库；密码只加密保存，页面不回显。</p>
+  </div>
+</div>
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+
+<section class="source-item" aria-label="归档工具链">
+  <header>
+    <div>
+      <strong>7-Zip 官方二进制</strong>
+      <span>版本 {{ toolchain.version }}（RAR / 7Z / 分卷 / 加密归档依赖它）</span>
+    </div>
+    <span class="status status-{{ 'connected' if toolchain.available else 'not_configured' }}"><i></i>{{ '已就绪' if toolchain.available else '未安装' }}</span>
+  </header>
+  {% if toolchain.resolved_path %}
+  <p class="source-summary">当前使用：{{ toolchain.resolved_path }}{% if not toolchain.managed_path %}（宿主环境自带）{% endif %}</p>
+  {% elif toolchain.platform_supported %}
+  <p class="source-summary">尚未找到可用二进制。启动时会自动从官方发布拉取 {{ toolchain.asset_name }} 并校验 SHA-256；也可在此手动重新安装。</p>
+  {% else %}
+  <p class="source-summary">官方未为当前平台发布二进制，请自行安装后在下方 profile 中填写绝对路径。</p>
+  {% endif %}
+  {% if toolchain.platform_supported %}
+  <form method="post" action="{{ url_for('install_archive_toolchain') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-actions"><button class="secondary-button" type="submit">{{ '重新下载并校验' if toolchain.managed_path else '从官方下载并校验' }}</button></div>
+  </form>
+  {% endif %}
+</section>
+
+<section class="source-create" aria-label="运行目录">
+  <div class="section-heading">
+    <div>
+      <h2>运行目录</h2>
+      <p>修改后立即生效，下一个任务就会使用新目录；已完成的文件不会自动迁移。</p>
+    </div>
+  </div>
+  <form class="settings-form" method="post" action="{{ url_for('save_archive_paths') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-group">
+      <label>数据目录</label>
+      <input value="{{ paths.data }}" disabled>
+      <small>数据库与密钥位置，只能通过 DATA_PATH 环境变量修改</small>
+    </div>
+    <div class="field-group">
+      <label>书库目录</label>
+      <input name="library_path" value="{{ paths.library }}" placeholder="{{ default_paths.library }}">
+      <small>CBZ 发布位置{% if paths.library_overridden %}（已自定义，默认 {{ default_paths.library }}）{% else %}（当前为默认值）{% endif %}</small>
+    </div>
+    <div class="field-group">
+      <label>工作目录</label>
+      <input name="work_path" value="{{ paths.work }}" placeholder="{{ default_paths.work }}">
+      <small>下载与解压的临时位置{% if paths.work_overridden %}（已自定义，默认 {{ default_paths.work }}）{% else %}（当前为默认值）{% endif %}</small>
+    </div>
+    <p class="form-hint">必须是绝对路径；保存前会先验证目录可写入。置空则恢复为环境变量默认值。</p>
+    <div class="form-actions"><button class="primary-button" type="submit">保存目录</button></div>
+  </form>
+</section>
+
+<div class="source-layout">
+  <section class="source-create">
+    <div class="section-heading"><div><h2>安全限制</h2><p>在全量解压之前生效，任何超限压缩包都会直接失败。</p></div></div>
+    <form class="settings-form" method="post" action="{{ url_for('save_archive_limits') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-group"><label>最大成员数</label><input name="max_members" type="number" min="1" value="{{ limits.max_members }}"></div>
+      <div class="field-group"><label>解压总大小上限（字节）</label><input name="max_total_bytes" type="number" min="1" value="{{ limits.max_total_bytes }}"></div>
+      <div class="field-group"><label>单成员大小上限（字节）</label><input name="max_member_bytes" type="number" min="1" value="{{ limits.max_member_bytes }}"></div>
+      <div class="field-group"><label>最大压缩率</label><input name="max_compression_ratio" type="number" step="0.1" min="0.1" value="{{ limits.max_compression_ratio }}"></div>
+      <div class="field-group"><label>最大目录层级</label><input name="max_depth" type="number" min="1" value="{{ limits.max_depth }}"></div>
+      <label class="toggle-row"><input name="keep_original" type="checkbox" {% if keep_original %}checked{% endif %}><span>CBZ 发布成功后保留原始压缩包</span></label>
+      <div class="form-actions"><button class="primary-button" type="submit">保存安全限制</button></div>
+    </form>
+  </section>
+
+  <section class="source-list">
+    <div class="section-heading"><div><h2>工具 profile</h2><p>{{ profiles|length }} 项，只能选择已登记的 profile，不接受任意命令行。</p></div></div>
+    <div class="source-items">{% for profile in profiles %}
+      <article class="source-item">
+        <header>
+          <div><strong>{{ profile.name }}</strong><span>{{ profile.backend }} · {{ profile.kind }} · 支持 {{ profile.supported_formats|join('、')|upper }}</span></div>
+          <span class="status status-{{ 'connected' if profile.enabled else 'not_configured' }}"><i></i>{{ '已启用' if profile.enabled else '已停用' }}</span>
+        </header>
+        <form class="settings-form" method="post" action="{{ url_for('save_archive_tool_profile', name=profile.name) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% if profile.kind != 'BUILTIN' %}
+          <div class="field-group"><label>可执行文件或桥接程序</label><input name="executable_path" value="{{ profile.executable_path or '' }}" placeholder="7zz"></div>
+          {% endif %}
+          <div class="field-group"><label>超时（秒）</label><input name="timeout_seconds" type="number" min="1" value="{{ profile.timeout_seconds }}"></div>
+          <label class="toggle-row"><input name="enabled" type="checkbox" {% if profile.enabled %}checked{% endif %}><span>启用该 profile</span></label>
+          <div class="form-actions"><button class="quiet-button" type="submit">保存</button></div>
+        </form>
+      </article>
+    {% else %}<div class="empty-state"><strong>暂无工具 profile</strong></div>{% endfor %}</div>
+  </section>
+</div>
+
+<div class="source-layout">
+  <section class="source-create">
+    <div class="section-heading"><div><h2>新增密码条目</h2><p>加密后保存；解压时按“上次成功 → 优先级 → 空密码”尝试。</p></div></div>
+    <form class="settings-form" method="post" action="{{ url_for('add_archive_password') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field-group"><label>条目名称</label><input name="name" required maxlength="80"></div>
+      <div class="field-group"><label>密码</label><input name="password" type="password" required autocomplete="new-password"></div>
+      <div class="field-group"><label>优先级</label><input name="priority" type="number" value="100"></div>
+      <label class="toggle-row"><input name="enabled" type="checkbox" checked><span>保存后启用</span></label>
+      <div class="form-actions"><button class="primary-button" type="submit">保存密码条目</button></div>
+    </form>
+  </section>
+
+  <section class="source-list">
+    <div class="section-heading"><div><h2>密码库</h2><p>{{ passwords|length }} 项</p></div></div>
+    <div class="source-items">{% for entry in passwords %}
+      <article class="source-item">
+        <header>
+          <div><strong>{{ entry.name }}</strong><span>优先级 {{ entry.priority }} · {% if entry.last_success_at %}上次成功 {{ entry.last_success_at }}{% else %}尚未成功{% endif %}</span></div>
+          <span class="status status-{{ 'connected' if entry.enabled else 'not_configured' }}"><i></i>{{ '已启用' if entry.enabled else '已停用' }}</span>
+        </header>
+        <form method="post" action="{{ url_for('delete_archive_password', password_id=entry.password_id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="form-actions"><button class="quiet-button" type="submit">删除</button></div>
+        </form>
+      </article>
+    {% else %}<div class="empty-state"><strong>暂无密码条目</strong><p>加密归档会进入待补充密码状态，补充后可重新入队。</p></div>{% endfor %}</div>
+  </section>
+</div>
+{% endblock %}

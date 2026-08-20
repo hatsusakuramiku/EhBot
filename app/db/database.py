@@ -6,6 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from app.archive.models import ArchivePasswordEntry, ToolProfile
 from app.auto_approval.models import AutoApprovalRule
 from app.candidates.models import (
     CandidateDetail,
@@ -1483,6 +1484,240 @@ class Database:
             )
             for row in rows
         )
+
+
+    async def list_archive_tool_profiles(
+        self, *, enabled_only: bool = False
+    ) -> tuple[ToolProfile, ...]:
+        return await asyncio.to_thread(
+            self._list_archive_tool_profiles_sync, enabled_only
+        )
+
+
+    def _list_archive_tool_profiles_sync(
+        self, enabled_only: bool
+    ) -> tuple[ToolProfile, ...]:
+        where_sql = "WHERE enabled = 1 " if enabled_only else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, name, backend, kind, executable_path, "
+                "supported_formats, timeout_seconds, capabilities, enabled "
+                "FROM archive_tool_profiles " + where_sql + "ORDER BY id"
+            ).fetchall()
+        return tuple(self._tool_profile_from_row(row) for row in rows)
+
+
+    @staticmethod
+    def _tool_profile_from_row(row) -> ToolProfile:
+        return ToolProfile(
+            profile_id=int(row[0]),
+            name=str(row[1]),
+            backend=str(row[2]),
+            kind=str(row[3]),
+            executable_path=str(row[4]) if row[4] is not None else None,
+            supported_formats=tuple(json.loads(str(row[5]))),
+            timeout_seconds=int(row[6]),
+            capabilities=tuple(json.loads(str(row[7]))),
+            enabled=bool(row[8]),
+        )
+
+
+    async def get_archive_tool_profile(self, name: str) -> ToolProfile | None:
+        return await asyncio.to_thread(self._get_archive_tool_profile_sync, name)
+
+
+    def _get_archive_tool_profile_sync(self, name: str) -> ToolProfile | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, name, backend, kind, executable_path, "
+                "supported_formats, timeout_seconds, capabilities, enabled "
+                "FROM archive_tool_profiles WHERE name = ?",
+                (name,),
+            ).fetchone()
+        return self._tool_profile_from_row(row) if row is not None else None
+
+
+    async def set_archive_tool_profile_state(
+        self,
+        name: str,
+        *,
+        enabled: bool | None = None,
+        executable_path: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_archive_tool_profile_state_sync,
+            name,
+            enabled,
+            executable_path,
+            timeout_seconds,
+        )
+
+
+    def _set_archive_tool_profile_state_sync(
+        self,
+        name: str,
+        enabled: bool | None,
+        executable_path: str | None,
+        timeout_seconds: int | None,
+    ) -> None:
+        assignments: list[str] = []
+        params: list[object] = []
+        if enabled is not None:
+            assignments.append("enabled = ?")
+            params.append(int(enabled))
+        if executable_path is not None:
+            assignments.append("executable_path = ?")
+            params.append(executable_path)
+        if timeout_seconds is not None:
+            if timeout_seconds <= 0:
+                raise ValueError("timeout_seconds must be positive")
+            assignments.append("timeout_seconds = ?")
+            params.append(int(timeout_seconds))
+        if not assignments:
+            return
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(name)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE archive_tool_profiles SET "
+                + ", ".join(assignments)
+                + " WHERE name = ?",
+                tuple(params),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"Archive tool profile {name!r} does not exist")
+
+
+    async def list_archive_passwords(
+        self, *, enabled_only: bool = False
+    ) -> tuple[ArchivePasswordEntry, ...]:
+        return await asyncio.to_thread(
+            self._list_archive_passwords_sync, enabled_only
+        )
+
+
+    def _list_archive_passwords_sync(
+        self, enabled_only: bool
+    ) -> tuple[ArchivePasswordEntry, ...]:
+        where_sql = "WHERE enabled = 1 " if enabled_only else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, name, priority, enabled, last_success_at, created_at "
+                "FROM archive_passwords "
+                + where_sql
+                + "ORDER BY last_success_at IS NULL, last_success_at DESC, "
+                "priority, id"
+            ).fetchall()
+        return tuple(
+            ArchivePasswordEntry(
+                password_id=int(row[0]),
+                name=str(row[1]),
+                priority=int(row[2]),
+                enabled=bool(row[3]),
+                last_success_at=str(row[4]) if row[4] is not None else None,
+                created_at=str(row[5]),
+            )
+            for row in rows
+        )
+
+
+    async def list_archive_password_secrets(self) -> tuple[tuple[int, str], ...]:
+        """Return `(id, ciphertext)` for enabled passwords in attempt order."""
+        return await asyncio.to_thread(self._list_archive_password_secrets_sync)
+
+
+    def _list_archive_password_secrets_sync(self) -> tuple[tuple[int, str], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, secret_json FROM archive_passwords "
+                "WHERE enabled = 1 "
+                "ORDER BY last_success_at IS NULL, last_success_at DESC, "
+                "priority, id"
+            ).fetchall()
+        return tuple((int(row[0]), str(row[1])) for row in rows)
+
+
+    async def save_archive_password(
+        self, *, name: str, secret_json: str, priority: int, enabled: bool
+    ) -> int:
+        return await asyncio.to_thread(
+            self._save_archive_password_sync, name, secret_json, priority, enabled
+        )
+
+
+    def _save_archive_password_sync(
+        self, name: str, secret_json: str, priority: int, enabled: bool
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO archive_passwords "
+                "(name, secret_json, priority, enabled) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET secret_json = excluded.secret_json, "
+                "priority = excluded.priority, enabled = excluded.enabled, "
+                "updated_at = CURRENT_TIMESTAMP",
+                (name, secret_json, int(priority), int(enabled)),
+            )
+            if cursor.lastrowid:
+                row = connection.execute(
+                    "SELECT id FROM archive_passwords WHERE name = ?",
+                    (name,),
+                ).fetchone()
+                return int(row[0])
+        raise LookupError(f"Archive password {name!r} could not be saved")
+
+
+    async def delete_archive_password(self, password_id: int) -> None:
+        await asyncio.to_thread(self._delete_archive_password_sync, password_id)
+
+
+    def _delete_archive_password_sync(self, password_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM archive_passwords WHERE id = ?", (password_id,)
+            )
+
+
+    async def mark_archive_password_success(self, password_id: int) -> None:
+        await asyncio.to_thread(
+            self._mark_archive_password_success_sync, password_id
+        )
+
+
+    def _mark_archive_password_success_sync(self, password_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE archive_passwords SET last_success_at = CURRENT_TIMESTAMP, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (password_id,),
+            )
+
+
+    async def archive_settings(self) -> dict[str, str]:
+        return await asyncio.to_thread(self._archive_settings_sync)
+
+
+    def _archive_settings_sync(self) -> dict[str, str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM archive_settings"
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+
+    async def save_archive_settings(self, values: dict[str, str]) -> None:
+        await asyncio.to_thread(self._save_archive_settings_sync, values)
+
+
+    def _save_archive_settings_sync(self, values: dict[str, str]) -> None:
+        with self._connect() as connection:
+            for key, value in values.items():
+                connection.execute(
+                    "INSERT INTO archive_settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (str(key), str(value)),
+                )
 
 
     @staticmethod

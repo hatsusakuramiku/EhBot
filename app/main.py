@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from urllib.parse import quote_plus
 import hmac
 import json
 import logging
@@ -25,8 +26,17 @@ from app.auto_approval.rules import (
     validate_rule_ast,
 )
 from app.auto_approval.service import AutomaticApprovalService
+from app.archive.service import (
+    LIMIT_KEYS as ARCHIVE_LIMIT_KEYS,
+    ArchiveSettingsError,
+    ArchiveSettingsService,
+)
 from app.config import Settings
-from app.bootstrap import remove_bootstrap_password, write_bootstrap_password
+from app.bootstrap import (
+    format_bootstrap_banner,
+    remove_bootstrap_password,
+    write_bootstrap_password,
+)
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
 from app.connections.models import ProviderConnectionError
@@ -125,6 +135,10 @@ def create_app(
                     app_settings.data_path,
                     bootstrap_password,
                 )
+                print(
+                    format_bootstrap_banner(bootstrap_password, password_file),
+                    flush=True,
+                )
                 logging.getLogger(__name__).warning(
                     "bootstrap_admin_password_created path=%s", password_file
                 )
@@ -152,6 +166,12 @@ def create_app(
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
+            archive_settings_service = ArchiveSettingsService(
+                database,
+                app_settings.data_path,
+                default_library_path=app_settings.library_path,
+                default_work_path=app_settings.work_path,
+            )
             download_service = DownloadService(
                 database,
                 app_settings.work_path,
@@ -164,12 +184,20 @@ def create_app(
                     lambda candidate_id: application.state.exhentai_service
                     .download_archive_for_candidate(candidate_id)
                 ),
+                work_path_provider=archive_settings_service.work_path,
             )
             application.state.download_service = download_service
+            application.state.archive_settings_service = archive_settings_service
+            # Linux and Docker images ship no archiver, so fetch the pinned
+            # official 7-Zip build once per version if it is missing.
+            if app_settings.archive_toolchain_auto_install:
+                await archive_settings_service.ensure_toolchain()
             conversion_service = ConversionService(
                 database,
                 app_settings.work_path,
                 app_settings.library_path,
+                settings_service=archive_settings_service,
+                data_path=app_settings.data_path,
             )
             application.state.conversion_service = conversion_service
             await conversion_service.start()
@@ -193,6 +221,7 @@ def create_app(
                 ),
                 http_client=exhentai_client,
                 translator=tag_translator,
+                work_path_provider=archive_settings_service.work_path,
             )
             application.state.exhentai_service = exhentai_service
             await download_service.start()
@@ -227,6 +256,7 @@ def create_app(
     app.state.connection_manager = None
     app.state.download_service = None
     app.state.conversion_service = None
+    app.state.archive_settings_service = None
     app.state.exhentai_service = None
     app.state.tag_translator = None
     app.add_exception_handler(AppError, app_error_handler)
@@ -243,6 +273,12 @@ def create_app(
 
     def _status_label(status: str) -> str:
         labels = {
+            "CONVERSION_PENDING": "待转换",
+            "CONVERSION_RUNNING": "转换中",
+            "CONVERSION_COMPLETED": "已转换",
+            "CONVERSION_FAILED": "转换失败",
+            "CONVERSION_WAITING_VOLUMES": "待补分卷",
+            "CONVERSION_WAITING_PASSWORD": "待补密码",
             "PENDING_REVIEW": "待审核",
             "NEEDS_INFO": "待补充",
             "APPROVED": "已通过",
@@ -312,6 +348,14 @@ def create_app(
         service = app.state.conversion_service
         if service is None:
             raise HTTPException(status_code=503, detail="Conversion is unavailable")
+        return service
+
+    def archive_settings_service() -> ArchiveSettingsService:
+        service = app.state.archive_settings_service
+        if service is None:
+            raise HTTPException(
+                status_code=503, detail="Archive settings are unavailable"
+            )
         return service
 
     def exhentai_service() -> ExHentaiService:
@@ -871,7 +915,7 @@ def create_app(
         )
 
     @app.get("/downloads")
-    async def downloads_dashboard(request: Request):
+    async def downloads_dashboard(request: Request, error: str | None = None):
         redirect = require_authenticated(request)
         if redirect:
             return redirect
@@ -882,7 +926,58 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "active_jobs": active,
+                "error": error,
             },
+        )
+
+    async def _download_action(
+        request: Request, csrf_token: str, action, job_id: int
+    ):
+        """Run one queue action and return to the dashboard either way."""
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        target_url = request.url_for("downloads_dashboard").path
+        try:
+            await action(job_id)
+        except DownloadError as exc:
+            return RedirectResponse(
+                f"{target_url}?error={quote_plus(exc.public_message)}",
+                status_code=303,
+            )
+        return RedirectResponse(target_url, status_code=303)
+
+    @app.post("/downloads/{job_id}/retry")
+    async def retry_download(
+        request: Request, job_id: int, csrf_token: str = Form()
+    ):
+        return await _download_action(
+            request, csrf_token, download_service().retry_job, job_id
+        )
+
+    @app.post("/downloads/{job_id}/pause")
+    async def pause_download(
+        request: Request, job_id: int, csrf_token: str = Form()
+    ):
+        return await _download_action(
+            request, csrf_token, download_service().pause_job, job_id
+        )
+
+    @app.post("/downloads/{job_id}/resume")
+    async def resume_download(
+        request: Request, job_id: int, csrf_token: str = Form()
+    ):
+        return await _download_action(
+            request, csrf_token, download_service().resume_job, job_id
+        )
+
+    @app.post("/downloads/{job_id}/cancel")
+    async def cancel_download(
+        request: Request, job_id: int, csrf_token: str = Form()
+    ):
+        return await _download_action(
+            request, csrf_token, download_service().cancel_job, job_id
         )
 
     @app.post("/candidates/{candidate_id}/exhentai-metadata")
@@ -1075,6 +1170,178 @@ def create_app(
             min_rating=min_rating,
         )
         return RedirectResponse(request.url_for("sources_page").path, status_code=303)
+
+    async def _archive_settings_context(
+        request: Request, error: str | None = None
+    ) -> dict:
+        service = archive_settings_service()
+        return {
+            "csrf_token": request.session["csrf_token"],
+            "profiles": await service.profiles(),
+            "limits": await service.limits(),
+            "passwords": await service.passwords(),
+            "keep_original": await service.keep_original(),
+            "toolchain": await service.toolchain_status(),
+            "paths": await service.paths(),
+            "default_paths": {
+                "library": str(app_settings.library_path),
+                "work": str(app_settings.work_path),
+            },
+            "error": error,
+        }
+
+    async def _render_archive_settings(
+        request: Request, error: str | None = None, status_code: int = 200
+    ):
+        return templates.TemplateResponse(
+            request=request,
+            name="archive_settings.html",
+            context=await _archive_settings_context(request, error),
+            status_code=status_code,
+        )
+
+    @app.get("/archive-settings")
+    async def archive_settings_page(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_archive_settings(request)
+
+    @app.post("/archive-settings/paths")
+    async def save_archive_paths(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        try:
+            await archive_settings_service().save_paths(
+                {
+                    "library_path": str(form.get("library_path") or ""),
+                    "work_path": str(form.get("work_path") or ""),
+                }
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/limits")
+    async def save_archive_limits(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        try:
+            await archive_settings_service().save_limits(
+                {key: str(form.get(key) or "") for key in ARCHIVE_LIMIT_KEYS}
+            )
+            await archive_settings_service().save_keep_original(
+                form.get("keep_original") == "on"
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/profiles/{name}")
+    async def save_archive_tool_profile(
+        request: Request, name: str, csrf_token: str = Form()
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        timeout_raw = str(form.get("timeout_seconds") or "").strip()
+        try:
+            timeout_seconds = int(timeout_raw) if timeout_raw else None
+        except ValueError:
+            return await _render_archive_settings(
+                request, "超时时长必须是整数", status_code=400
+            )
+        executable_raw = str(form.get("executable_path") or "").strip()
+        try:
+            await archive_settings_service().set_profile_state(
+                name,
+                enabled=form.get("enabled") == "on",
+                executable_path=executable_raw or None,
+                timeout_seconds=timeout_seconds,
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/toolchain/install")
+    async def install_archive_toolchain(
+        request: Request, csrf_token: str = Form()
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            await archive_settings_service().install_toolchain(force=True)
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/passwords")
+    async def add_archive_password(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        priority_raw = str(form.get("priority") or "100").strip()
+        try:
+            priority = int(priority_raw)
+        except ValueError:
+            return await _render_archive_settings(
+                request, "优先级必须是整数", status_code=400
+            )
+        try:
+            await archive_settings_service().add_password(
+                name=str(form.get("name") or ""),
+                password=str(form.get("password") or ""),
+                priority=priority,
+                enabled=form.get("enabled") == "on",
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/passwords/{password_id}/delete")
+    async def delete_archive_password(
+        request: Request, password_id: int, csrf_token: str = Form()
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        await archive_settings_service().delete_password(password_id)
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
 
     @app.get("/connections")
     async def connections_page(request: Request):

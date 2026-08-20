@@ -1,32 +1,31 @@
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 import zipfile
 
 import pytest
 
+from app.archive.errors import ArchiveError
+from app.archive.formats import detect_source_format
+from app.archive.models import SafetyLimits
+from app.archive.processor import ArchiveProcessor
 from app.conversion.comicinfo import build_comicinfo_xml
-from app.conversion.convert import (
-    ConversionError,
-    detect_format,
-    is_supported,
-    stream_zip_to_cbz,
-)
+from app.conversion.naming import safe_library_name
 from app.conversion.service import _metadata_tags
 
+from tests.unit.archive_fixtures import (
+    ZIP_ONLY_PROFILES,
+    write_image_zip,
+)
 
-def _write_fake_zip(path: Path, names: tuple[str, ...]) -> None:
-    with zipfile.ZipFile(path, "w") as zout:
-        for name in names:
-            zout.writestr(name, b"x" * 32)
 
-
-def test_detect_format_recognises_archives(tmp_path: Path) -> None:
-    assert detect_format(tmp_path / "a.zip") == "zip"
-    assert detect_format(tmp_path / "a.cbz") == "zip"
-    assert detect_format(tmp_path / "a.rar") == "rar"
-    assert detect_format(tmp_path / "a.7z") == "7z"
-    assert detect_format(tmp_path / "a.unknown") == "unknown"
+def test_detect_source_format_recognises_archives(tmp_path: Path) -> None:
+    zip_path = tmp_path / "a.zip"
+    write_image_zip(zip_path, ("01.jpg",))
+    assert detect_source_format(zip_path) == "zip"
+    assert detect_source_format(tmp_path / "a.cbz") == "zip"
+    assert detect_source_format(tmp_path / "a.rar") == "rar"
+    assert detect_source_format(tmp_path / "a.7z") == "7z"
+    assert detect_source_format(tmp_path / "a.unknown") == "unknown"
 
 
 def test_build_comicinfo_xml_includes_fields() -> None:
@@ -55,7 +54,7 @@ def test_comicinfo_includes_original_and_chinese_tags_without_duplicates() -> No
             field_name="TagsRaw",
             field_value="female:big breasts, language:chinese",
         ),
-        SimpleNamespace(field_name="Tags", field_value="巨乳, 汉语, 巨乳"),
+        SimpleNamespace(field_name="Tags", field_value="\u5de8\u4e73, \u6c49\u8bed, \u5de8\u4e73"),
     ]
     xml = build_comicinfo_xml(
         title="Bilingual",
@@ -63,55 +62,72 @@ def test_comicinfo_includes_original_and_chinese_tags_without_duplicates() -> No
     ).decode("utf-8")
 
     assert (
-        "<Tags>female:big breasts, language:chinese, 巨乳, 汉语</Tags>"
+        "<Tags>female:big breasts, language:chinese, \u5de8\u4e73, \u6c49\u8bed</Tags>"
         in xml
     )
 
 
-def test_stream_zip_to_cbz_writes_comicinfo(tmp_path: Path) -> None:
+def _process(source: Path, destination: Path, tmp_path: Path):
+    processor = ArchiveProcessor(
+        profiles=ZIP_ONLY_PROFILES, limits=SafetyLimits()
+    )
+    return processor.process(
+        source,
+        destination=destination,
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda page_count: build_comicinfo_xml(
+            title="Streamed", page_count=page_count
+        ),
+    )
+
+
+def test_zip_pipeline_writes_comicinfo_and_orders_pages(tmp_path: Path) -> None:
     source = tmp_path / "src.zip"
     destination = tmp_path / "out.cbz"
-    _write_fake_zip(
-        source,
-        ("01.jpg", "02.jpg", "03.jpg", "ComicInfo.xml"),
-    )
+    write_image_zip(source, ("10.jpg", "2.jpg", "01.jpg", "ComicInfo.xml"))
 
-    page_count = stream_zip_to_cbz(
-        source,
-        destination,
-        title="Streamed",
-    )
-    assert page_count == 3  # ComicInfo.xml skipped
+    result = _process(source, destination, tmp_path)
+
+    assert result.page_count == 3
     assert destination.exists()
-
-    with zipfile.ZipFile(destination, "r") as zin:
-        names = zin.namelist()
-        assert "ComicInfo.xml" in names
-        assert "01.jpg" in names
-        assert "02.jpg" in names
-        assert "03.jpg" in names
-        comicinfo = zin.read("ComicInfo.xml").decode("utf-8")
+    with zipfile.ZipFile(destination, "r") as archive:
+        names = archive.namelist()
+        comicinfo = archive.read("ComicInfo.xml").decode("utf-8")
+    assert names == ["ComicInfo.xml", "0001.jpg", "0002.jpg", "0003.jpg"]
     assert "<Title>Streamed</Title>" in comicinfo
+    assert "<PageCount>3</PageCount>" in comicinfo
 
 
-def test_stream_zip_to_cbz_requires_different_paths(tmp_path: Path) -> None:
+def test_zip_pipeline_rejects_identical_source_and_destination(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "src.zip"
-    _write_fake_zip(source, ("01.jpg",))
-    with pytest.raises(ConversionError):
-        stream_zip_to_cbz(source, source, title="conflict")
+    write_image_zip(source, ("01.jpg",))
+    with pytest.raises(ArchiveError):
+        _process(source, source, tmp_path)
 
 
-def test_stream_zip_to_cbz_fails_on_missing_source(tmp_path: Path) -> None:
-    with pytest.raises(ConversionError):
-        stream_zip_to_cbz(
-            tmp_path / "missing.zip",
-            tmp_path / "out.cbz",
-            title="x",
-        )
+def test_zip_pipeline_fails_on_missing_source(tmp_path: Path) -> None:
+    with pytest.raises(ArchiveError):
+        _process(tmp_path / "missing.zip", tmp_path / "out.cbz", tmp_path)
 
 
-def test_is_supported_zip_only() -> None:
-    assert is_supported(Path("a.zip"))
-    assert is_supported(Path("a.cbz"))
-    assert not is_supported(Path("a.rar"))
-    assert not is_supported(Path("a.7z"))
+def test_zip_pipeline_removes_partial_output_on_failure(tmp_path: Path) -> None:
+    source = tmp_path / "src.zip"
+    destination = tmp_path / "out.cbz"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("notes.txt", b"no images here")
+
+    with pytest.raises(ArchiveError):
+        _process(source, destination, tmp_path)
+
+    assert not destination.exists()
+    assert not destination.with_name(f"{destination.name}.part").exists()
+
+
+def test_safe_library_name_sanitises_segments() -> None:
+    assert safe_library_name("[Artist] Title", fallback="x") == "[Artist] Title"
+    assert safe_library_name("a/b:c*d", fallback="x") == "a b c d"
+    assert safe_library_name("   ", fallback="candidate-7") == "candidate-7"
+    assert safe_library_name("con", fallback="x") == "con-archive"
+    assert len(safe_library_name("z" * 400, fallback="x")) == 120

@@ -6,8 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
+# 7-Zip is not installed from the distribution: the application fetches the
+# pinned official upstream build into /app/data/tools and verifies its
+# SHA-256, so the archiver version is identical on every platform.
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes 7zip ca-certificates tzdata \
+    && apt-get install --no-install-recommends --yes ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /bin/
@@ -17,6 +20,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY scripts ./scripts
 
 RUN groupadd --system --gid 10001 ehbot \
     && useradd --system --uid 10001 --gid ehbot --home-dir /app ehbot \

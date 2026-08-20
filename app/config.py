@@ -33,6 +33,7 @@ class Settings:
     trusted_proxy_ips: tuple[str, ...] = ()
     app_root_path: str = ""
     tag_translation_enabled: bool = True
+    archive_toolchain_auto_install: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -51,6 +52,9 @@ class Settings:
             app_root_path=os.getenv("APP_ROOT_PATH", ""),
             tag_translation_enabled=_read_bool(
                 "TAG_TRANSLATION_ENABLED", True
+            ),
+            archive_toolchain_auto_install=_read_bool(
+                "ARCHIVE_TOOLCHAIN_AUTO_INSTALL", True
             ),
         )
 

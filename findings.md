@@ -134,3 +134,54 @@
 - Rules are stored in `auto_approval_rules` migration 008. The server validates and normalizes the AST before storage and derives the DSL snapshot itself, so submitted display text cannot change execution.
 - The executor runs after pending-review queue enrichment. It verifies the candidate is still reviewable and delegates source validation, approval, and idempotent job creation to the existing orchestration path.
 - `AUTO_APPROVE` is an additional review action after normal approval; its payload contains rule identity/version, AST and DSL, evaluated conditions, effective metadata precedence snapshot, and download job IDs.
+
+## 2026-08-20 Extensible Archive Processing Implementation
+- The proposal in `ARCHIVE_PROCESSING_PROPOSAL.md` is now implemented as Phase 10 runtime code; the document remains the design record.
+- `ArchiveProcessor` owns the fixed order: resolve volumes, inspect, resolve password, validate safety, extract or stream, pack CBZ with the same backend, then atomically rename `.part` into the library.
+- The registered profile decides the backend. `zipfile-default` is preferred for ZIP because it streams members into the CBZ without a full extraction, which keeps the 512 MB profile's guaranteed path intact. `7zz-default` handles RAR/7Z, split volumes, and encrypted ZIP that `zipfile` cannot open.
+- `SevenZipBackend` spawns the registered executable with a fixed argument vector (`shell=False`, per-profile timeout) and parses `l -slt` output. The main process still loads no third-party DLL; a DLL-backed tool would be registered as a `BRIDGE` profile pointing at a bridge executable.
+- Format detection prefers the magic number and falls back to the file name, because later volumes of a split archive carry no signature of their own. A ZIP renamed to `.rar` is therefore handled by the streaming ZIP path.
+- Safety validation runs entirely on the listing before any bytes are written: absolute paths, `..`, symlinks, nested archives, member/total size, compression ratio, directory depth, and image magic-number cross-checks. Pages are renamed to `0001.jpg`-style stable names, so duplicate or non-ASCII member names cannot collide.
+- Passwords are attempted as `last successful -> priority -> empty`, matching the proposal. Vault entries use scrypt key derivation plus an HMAC-SHA256 keystream and tag, so no new third-party crypto dependency was added. Plaintext never enters logs, audits, or task details; only the entry ID is recorded.
+- `CONVERSION_WAITING_VOLUMES` and `CONVERSION_WAITING_PASSWORD` are recoverable: re-enqueueing the same candidate resets the existing job to `CONVERSION_PENDING` instead of creating a duplicate, so the idempotency key contract is unchanged.
+- `KEEP_ORIGINAL` is now an operator setting rather than an environment variable. The original archive is only deleted after the CBZ artifact row is committed.
+- `app/archive/__init__.py` deliberately does not re-export `ArchiveSettingsService`, because that module imports `Database`, which imports the archive models; re-exporting it creates a circular import.
+
+## 2026-08-20 Managed 7-Zip Toolchain
+- Requirement correction from the user, twice: do not rely on a pre-installed host 7-Zip, fetch the newest official binary automatically at install time, and design for Linux/Docker rather than adding Windows bootstrap complexity.
+- Upstream releases are published in `ip7z/7zip` on GitHub with per-asset SHA-256 digests. `26.02` is the pinned version.
+- Linux and macOS assets are `.tar.xz`, unpackable by the standard-library `tarfile`, so no external archiver is needed to install the archiver. The Windows assets are self-extracting executables, which is exactly the bootstrap problem avoided by not targeting Windows here.
+- Linux assets contain `7zz` and `7zzs`. `7zzs` is statically linked and is preferred because `python:3.12-slim` has no `libstdc++`.
+- PyPI offers no usable official binary package: `7zip-bin`, `py-7zip`, and `sevenzip` are absent, and `py7zr` is pure Python with no RAR support. Pinned upstream assets are the only route that covers RAR.
+- Trust is pinned in source, not discovered at runtime: the version plus one digest per platform. A mismatch raises `TOOLCHAIN_DIGEST_MISMATCH` and leaves any existing install intact, so a compromised mirror or truncated transfer cannot install an executable.
+- Extraction matches member names against a fixed allowlist instead of joining archive-controlled names onto the destination, which removes tar path traversal from the threat model entirely.
+- Installs are version-isolated (`<data>/tools/7zip/<version>/`) and idempotent, staged in `.incoming`, then promoted with `replace()`. Upgrading the pin never overwrites the binary a running worker is using.
+- Resolution order is managed install, then `PATH`, then the Windows default directory. This keeps a developer host with its own 7-Zip working while a container always gets the pinned build.
+- Startup provisioning is best effort: `ensure_toolchain()` warns instead of raising, because the built-in streaming ZIP path must keep working when the archiver is unavailable.
+- Real-binary QA was worth the effort: it exposed that header-encrypted archives fail at `inspect` rather than at extraction, and that `7zz` stores full staging paths unless it is invoked with `cwd` set.
+- Tests stay offline by construction. `tests/unit/test_toolchain.py` builds a real `tar.xz` in memory and injects the download; `tests/conftest.py` disables auto-install and blocks `toolchain._download` for every test.
+
+## 2026-08-20 Docker Linux Verification
+- Windows structurally cannot verify the managed 7-Zip install: the pinned assets are Linux `.tar.xz` builds and `asset_for_platform()` refuses Windows on purpose. Docker is not a convenience here, it is the only place the contract can be proven.
+- Running on Linux immediately exposed a defect Windows had been hiding. `ensure_toolchain()` caught only `ArchiveSettingsError`, so any other exception escaped the FastAPI lifespan and killed startup. Windows never reached that code because the platform check returns early. The lesson is that a "best effort" startup step must contain every exception, not just the one it expects.
+- A test guard that cannot trigger in production is a weak guard. The download blocker raised `AssertionError`, which the application would never see, so it masked the real degraded branch. Raising the production error type (`TOOLCHAIN_DOWNLOAD_FAILED`) made the startup bug visible.
+- `os.environ.setdefault` is the wrong tool for test isolation: an operator shell exporting the variable silently re-enabled network access for the whole suite. Overwriting with `MonkeyPatch.setenv` is the correct behavior.
+- Never hand-write a dependency list for a container check. The first attempt missed `pwdlib` and produced 12 collection errors that looked like code failures; `uv sync --frozen --all-groups` keeps the check tied to `pyproject.toml`.
+- Escaping matters when a Python script is embedded in another Python script: `\xff` in a non-raw triple-quoted string is resolved by the outer interpreter and reaches the container as a non-ASCII byte. `bytes([0xFF, ...])` is escape-proof.
+- Installing the toolchain's one dependency into a small base image, rather than with `pip install` at run time, is what makes the `--network none` offline stage possible.
+- Confirmed on real Linux: `7zzs` is the extracted binary, it runs on `python:3.12-slim-bookworm` with no extra runtime library, it reports both `Rar` and `Rar5`, the install lands in `/tmp/ehbot-tools/7zip/26.02/`, and a tampered payload is rejected with `TOOLCHAIN_DIGEST_MISMATCH` without installing anything.
+- Host note for the next agent: Docker Desktop needed the WSL2 backend (the Hyper-V backend had no Linux VM), and `daemon.json` still lists a misspelled mirror `doocker.1ms.run`, so pulls depend on the proxy.
+
+## 2026-08-20 Download Queue Controls And Configurable Paths
+- The reported "download failed" was not a network or proxy problem. Telegram's Bot API refuses `getFile` for anything over **20 MB** with `Bad Request: file is too big`, and that ceiling belongs to the API, not to the deployment. No retry policy, proxy or timeout change can move it; only MTProto can.
+- **A fallback error branch that discards the upstream description is worse than no error handling.** `_error_for` turned a precise `file is too big` into "Telegram 拒绝了连接请求", which pointed the investigation straight at the proxy. A generic branch must always carry the original text through.
+- Distinguishing permanent from transient failures is what makes a retry button honest. `PERMANENT_DOWNLOAD_ERRORS` hides retry for causes that cannot change, so the operator is not invited to repeat a guaranteed failure.
+- A failed job that disappears from the queue cannot be retried. The listing query moved from `ACTIVE_DOWNLOAD_STATES` to `OPEN_DOWNLOAD_STATES` because "what the worker will pick up" and "what the operator can act on" are two different sets.
+- `PAUSED` is intentionally neither active nor terminal. Because the worker claims only `PENDING`, pause needs no worker-side logic at all; the state itself is the mechanism. This is also why pause is refused for `DOWNLOADING`: suspending a live HTTP stream and resuming it correctly is a much larger contract than cancelling it.
+- Retry reuses the existing job row instead of inserting a new one. Inserting would either collide with the `idempotency_key` or require weakening it, and it would scatter the attempt history across rows.
+- Cancel has to think about the candidate, not just the job. Returning it to `PENDING_REVIEW` keeps it in the review queue; leaving it `APPROVED` would strand it with no job and no way back.
+- Configurable directories reused the existing `archive_settings` key/value table rather than adding a table or new environment variables, which kept the change to two keys plus validation.
+- **Resolve a configurable path per task, not at construction time.** The first instinct was to pass the path into each service's `__init__`, which would have required a restart for every change. A provider callable (`work_path_provider`) makes the override effective immediately and keeps the environment value as the fallback.
+- Validating a directory means proving it is writable, not just parsing it. `save_paths` requires an absolute path and calls `ensure_writable_directory`, so a typo fails at save time instead of at the next download.
+- The data directory is deliberately not editable from the page that stores the setting: the setting lives in the database inside that directory.
+- Verifying against the operator's running container was the wrong move once they had rotated the bootstrap password. A throwaway database inside the same container proved the same transitions without touching their data, and is the pattern to reuse.

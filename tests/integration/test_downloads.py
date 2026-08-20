@@ -11,8 +11,10 @@ from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
 from app.downloads.models import (
+    DOWNLOAD_STATE_CANCELLED,
     DOWNLOAD_STATE_COMPLETED,
     DOWNLOAD_STATE_FAILED,
+    DOWNLOAD_STATE_PAUSED,
     DOWNLOAD_STATE_PENDING,
 )
 from app.downloads.service import DownloadError, DownloadService
@@ -26,6 +28,7 @@ def make_settings(root: Path) -> Settings:
         work_path=root / "work",
         app_secret_key="test-secret-key-with-at-least-32-characters",
         tag_translation_enabled=False,
+        archive_toolchain_auto_install=False,
     )
 
 
@@ -288,4 +291,154 @@ def test_downloads_dashboard_renders(tmp_path: Path) -> None:
         )
         response = client.get("/downloads")
         assert response.status_code == 200
-        assert "活跃下载任务" in response.text
+        assert "下载任务" in response.text
+
+
+async def approved_job(database: Database, service: DownloadService) -> tuple[int, int]:
+    """Seed an approved candidate with one queued Telegram job."""
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'APPROVED' WHERE id = ?",
+            (candidate_id,),
+        )
+    result = await service.enqueue_telegram_download(
+        candidate_id,
+        {"file_id": "x", "file_name": "x.cbz"},
+    )
+    return candidate_id, result.job_id
+
+
+def job_state(database: Database, job_id: int) -> str:
+    with database._connect() as connection:  # noqa: SLF001
+        row = connection.execute(
+            "SELECT state FROM download_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    return str(row[0])
+
+
+@pytest.mark.asyncio
+async def test_retry_requeues_a_failed_job_without_duplicating_it(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    candidate_id, job_id = await approved_job(database, service)
+
+    assert await service._process_one() is True  # noqa: SLF001
+    assert job_state(database, job_id) == DOWNLOAD_STATE_FAILED
+
+    assert await service.retry_job(job_id) == DOWNLOAD_STATE_PENDING
+    assert job_state(database, job_id) == DOWNLOAD_STATE_PENDING
+
+    with database._connect() as connection:  # noqa: SLF001
+        count = connection.execute(
+            "SELECT COUNT(*) FROM download_jobs WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()[0]
+    assert count == 1
+
+    candidate = await database.get_candidate(candidate_id)
+    assert candidate is not None
+    assert candidate.status == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_retry_is_refused_when_the_failure_is_permanent(
+    tmp_path: Path,
+) -> None:
+    """A file over the Bot API size ceiling can never succeed on a retry."""
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    _, job_id = await approved_job(database, service)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = ?, error_code = ? WHERE id = ?",
+            (DOWNLOAD_STATE_FAILED, "TELEGRAM_FILE_TOO_BIG", job_id),
+        )
+
+    with pytest.raises(DownloadError) as caught:
+        await service.retry_job(job_id)
+    assert caught.value.code == "JOB_PERMANENTLY_FAILED"
+    assert job_state(database, job_id) == DOWNLOAD_STATE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_paused_job_is_skipped_by_the_worker_until_resumed(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    _, job_id = await approved_job(database, service)
+
+    assert await service.pause_job(job_id) == DOWNLOAD_STATE_PAUSED
+    assert await service._process_one() is False  # noqa: SLF001
+    assert job_state(database, job_id) == DOWNLOAD_STATE_PAUSED
+
+    assert await service.resume_job(job_id) == DOWNLOAD_STATE_PENDING
+    assert await service._process_one() is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_running_job_cannot_be_paused(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    _, job_id = await approved_job(database, service)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = 'DOWNLOADING' WHERE id = ?",
+            (job_id,),
+        )
+
+    with pytest.raises(DownloadError) as caught:
+        await service.pause_job(job_id)
+    assert caught.value.code == "JOB_NOT_PAUSABLE"
+
+
+@pytest.mark.asyncio
+async def test_cancel_releases_the_candidate_back_to_review(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    candidate_id, job_id = await approved_job(database, service)
+
+    assert await service.cancel_job(job_id) == DOWNLOAD_STATE_CANCELLED
+    assert job_state(database, job_id) == DOWNLOAD_STATE_CANCELLED
+    assert await service._process_one() is False  # noqa: SLF001
+
+    candidate = await database.get_candidate(candidate_id)
+    assert candidate is not None
+    assert candidate.status == "PENDING_REVIEW"
+
+
+@pytest.mark.asyncio
+async def test_completed_job_cannot_be_cancelled(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    _, job_id = await approved_job(database, service)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = ? WHERE id = ?",
+            (DOWNLOAD_STATE_COMPLETED, job_id),
+        )
+
+    with pytest.raises(DownloadError) as caught:
+        await service.cancel_job(job_id)
+    assert caught.value.code == "JOB_ALREADY_COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_failed_job_stays_visible_on_the_dashboard(tmp_path: Path) -> None:
+    """A failed job must remain listed, because that is where it is retried."""
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    _, job_id = await approved_job(database, service)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    listed = await service.list_active_jobs()
+    assert [job.job_id for job in listed] == [job_id]
+    assert listed[0].state == DOWNLOAD_STATE_FAILED
+    assert listed[0].is_retryable is True
+    assert listed[0].is_cancellable is True
+    assert listed[0].is_pausable is False

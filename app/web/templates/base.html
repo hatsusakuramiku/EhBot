@@ -18,6 +18,7 @@
         <a class="nav-link {% if request.url.path.startswith(url_for('candidate_queue').path) %}is-active{% endif %}" href="{{ url_for('candidate_queue') }}">候选队列</a>
         <a class="nav-link {% if request.url.path == url_for('sources_page').path %}is-active{% endif %}" href="{{ url_for('sources_page') }}">来源规则</a>
         <a class="nav-link {% if request.url.path == url_for('auto_approval_rules_page').path %}is-active{% endif %}" href="{{ url_for('auto_approval_rules_page') }}">自动审批</a>
+        <a class="nav-link {% if request.url.path.startswith(url_for('archive_settings_page').path) %}is-active{% endif %}" href="{{ url_for('archive_settings_page') }}">归档设置</a>
         <a class="nav-link {% if request.url.path == url_for('connections_page').path %}is-active{% endif %}" href="{{ url_for('connections_page') }}">外部连接</a>
         <a class="nav-link {% if request.url.path == url_for('downloads_dashboard').path %}is-active{% endif %}" href="{{ url_for('downloads_dashboard') }}">下载任务</a>
       </nav>
@@ -40,6 +41,7 @@
           <a href="{{ url_for('candidate_queue') }}">候选</a>
           <a href="{{ url_for('sources_page') }}">来源</a>
           <a href="{{ url_for('auto_approval_rules_page') }}">审批</a>
+          <a href="{{ url_for('archive_settings_page') }}">归档</a>
           <a href="{{ url_for('connections_page') }}">连接</a>
           <a href="{{ url_for('downloads_dashboard') }}">下载</a>
         </nav>

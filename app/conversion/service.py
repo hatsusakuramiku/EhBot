@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
-from app.conversion.convert import (
-    ConversionError,
-    detect_format,
-    is_supported,
-    stream_zip_to_cbz,
+from app.archive.errors import (
+    ArchiveError,
+    ArchivePasswordRequired,
+    ArchiveVolumesMissing,
 )
+from app.archive.models import SafetyLimits
+from app.archive.processor import ArchiveProcessor
+from app.archive.service import ArchiveSettingsService
+from app.conversion.comicinfo import build_comicinfo_xml
+from app.conversion.convert import ConversionError
+from app.conversion.naming import safe_library_name
 from app.db.database import Database
 from app.downloads.models import (
     DOWNLOAD_STATE_COMPLETED,
@@ -27,6 +33,17 @@ CONVERSION_STATE_PENDING = "CONVERSION_PENDING"
 CONVERSION_STATE_RUNNING = "CONVERSION_RUNNING"
 CONVERSION_STATE_COMPLETED = "CONVERSION_COMPLETED"
 CONVERSION_STATE_FAILED = "CONVERSION_FAILED"
+# Recoverable states: the operator can supply the missing volume or password
+# and requeue the same task without losing the backend snapshot.
+CONVERSION_STATE_WAITING_VOLUMES = "CONVERSION_WAITING_VOLUMES"
+CONVERSION_STATE_WAITING_PASSWORD = "CONVERSION_WAITING_PASSWORD"
+
+RECOVERABLE_CONVERSION_STATES: frozenset[str] = frozenset(
+    {
+        CONVERSION_STATE_WAITING_VOLUMES,
+        CONVERSION_STATE_WAITING_PASSWORD,
+    }
+)
 
 
 def _metadata_lookup(metadata, field_name: str) -> str | None:
@@ -55,11 +72,30 @@ class ConversionService:
         database: Database,
         work_path: Path,
         library_path: Path,
+        settings_service: ArchiveSettingsService | None = None,
+        data_path: Path | None = None,
     ) -> None:
         self._database = database
         self._work_path = work_path
         self._library_path = library_path
+        self._settings = settings_service or ArchiveSettingsService(
+            database,
+            data_path or work_path,
+            default_library_path=library_path,
+            default_work_path=work_path,
+        )
         self._worker_task: asyncio.Task[None] | None = None
+
+    async def _effective_paths(self) -> tuple[Path, Path]:
+        """Read the directories per job so an operator change applies at once.
+
+        The environment values remain the defaults; a stored override wins.
+        Resolving here instead of in `__init__` means the setting takes effect
+        on the next job rather than only after a restart.
+        """
+        library = await self._settings.library_path()
+        work = await self._settings.work_path()
+        return (library or self._library_path, work or self._work_path)
 
     async def enqueue_for_candidate(self, candidate_id: int) -> int:
         return await asyncio.to_thread(
@@ -108,11 +144,25 @@ class ConversionService:
                 ),
             )
             created = connection.total_changes > before
+            if not created:
+                # A task parked for missing volumes or an unknown password can
+                # be requeued once the operator supplies what was missing.
+                connection.execute(
+                    "UPDATE download_jobs SET state = ?, error_code = NULL, "
+                    "error_message = NULL, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE idempotency_key = ? AND state IN (?, ?)",
+                    (
+                        CONVERSION_STATE_PENDING,
+                        f"convert:{candidate_id}",
+                        CONVERSION_STATE_WAITING_VOLUMES,
+                        CONVERSION_STATE_WAITING_PASSWORD,
+                    ),
+                )
             row = connection.execute(
                 "SELECT id FROM download_jobs WHERE idempotency_key = ?",
                 (f"convert:{candidate_id}",),
             ).fetchone()
-            return int(row[0]) if created else int(row[0])
+            return int(row[0])
 
     async def start(self) -> None:
         if self._worker_task is not None:
@@ -201,14 +251,6 @@ class ConversionService:
                 "Archive file was removed before conversion",
             )
             return
-        if not is_supported(source_path):
-            await asyncio.to_thread(
-                self._mark_failed_sync,
-                job["job_id"],
-                "FORMAT_UNSUPPORTED",
-                f"压缩格式 {detect_format(source_path)} 暂不支持转换",
-            )
-            return
 
         metadata = await asyncio.to_thread(
             self._fetch_metadata_sync, job["candidate_id"]
@@ -217,32 +259,44 @@ class ConversionService:
             _metadata_lookup(metadata, "Title")
             or f"Candidate {job['candidate_id']}"
         )
-        library_target = (
-            self._library_path / f"{title}.cbz"
+        file_stem = safe_library_name(
+            title, fallback=f"candidate-{job['candidate_id']}"
         )
+        library_path, work_path = await self._effective_paths()
+        library_target = library_path / f"{file_stem}.cbz"
+        processor = await self._build_processor()
         try:
-            page_count = await asyncio.to_thread(
-                stream_zip_to_cbz,
+            result = await asyncio.to_thread(
+                processor.process,
                 source_path,
-                library_target,
-                title=title,
-                artist=_metadata_lookup(metadata, "Artist"),
-                language=_metadata_lookup(metadata, "Language"),
-                category=_metadata_lookup(metadata, "Category"),
-                tags=_metadata_tags(metadata),
-                rating=(
-                    float(_metadata_lookup(metadata, "Rating"))
-                    if _metadata_lookup(metadata, "Rating")
-                    else None
+                destination=library_target,
+                work_directory=work_path / "conversion",
+                comicinfo_builder=lambda page_count: self._build_comicinfo(
+                    metadata, title, page_count
                 ),
-                description=_metadata_lookup(metadata, "Description"),
-                japanese_title=_metadata_lookup(metadata, "JapaneseTitle"),
-                group=_metadata_lookup(metadata, "Group"),
-                parody=_metadata_lookup(metadata, "Parody"),
-                character=_metadata_lookup(metadata, "Character"),
-                web=_metadata_lookup(metadata, "Web"),
+                library_path=library_path,
             )
-        except ConversionError as exc:
+        except ArchiveVolumesMissing as exc:
+            await asyncio.to_thread(
+                self._mark_waiting_sync,
+                job["job_id"],
+                CONVERSION_STATE_WAITING_VOLUMES,
+                exc.code,
+                exc.public_message,
+                {"missing_volumes": list(exc.missing)},
+            )
+            return
+        except ArchivePasswordRequired as exc:
+            await asyncio.to_thread(
+                self._mark_waiting_sync,
+                job["job_id"],
+                CONVERSION_STATE_WAITING_PASSWORD,
+                exc.code,
+                exc.public_message,
+                {},
+            )
+            return
+        except (ArchiveError, ConversionError) as exc:
             await asyncio.to_thread(
                 self._mark_failed_sync,
                 job["job_id"],
@@ -250,15 +304,72 @@ class ConversionService:
                 exc.public_message,
             )
             return
+        if result.password_id is not None:
+            await self._settings.mark_password_success(result.password_id)
         await asyncio.to_thread(
             self._record_cbz_artifact_sync,
             job["job_id"],
-            library_target,
-            page_count,
+            result.cbz_path,
+            result.page_count,
         )
         await asyncio.to_thread(
-            self._mark_completed_sync, job["job_id"]
+            self._mark_completed_sync,
+            job["job_id"],
+            {
+                **result.snapshot.as_dict(),
+                "page_count": result.page_count,
+                "volume_count": result.volume_count,
+                "skipped_members": list(result.skipped_members),
+                "password_entry_id": result.password_id,
+            },
         )
+        if not await self._settings.keep_original():
+            await asyncio.to_thread(self._remove_original_sync, source_path)
+
+    async def _build_processor(self) -> ArchiveProcessor:
+        profiles = await self._settings.profiles(enabled_only=True)
+        limits = await self._settings.limits()
+        passwords = await self._settings.password_attempts()
+        return ArchiveProcessor(
+            profiles=profiles,
+            limits=limits,
+            passwords=passwords,
+            tools_path=self._settings.tools_path,
+        )
+
+    @staticmethod
+    def _build_comicinfo(metadata, title: str, page_count: int) -> bytes:
+        rating_value = _metadata_lookup(metadata, "Rating")
+        try:
+            rating = float(rating_value) if rating_value else None
+        except ValueError:
+            rating = None
+        return build_comicinfo_xml(
+            title=title,
+            artist=_metadata_lookup(metadata, "Artist"),
+            language=_metadata_lookup(metadata, "Language"),
+            category=_metadata_lookup(metadata, "Category"),
+            tags=_metadata_tags(metadata),
+            rating=rating,
+            description=_metadata_lookup(metadata, "Description"),
+            page_count=page_count,
+            japanese_title=_metadata_lookup(metadata, "JapaneseTitle"),
+            group=_metadata_lookup(metadata, "Group"),
+            parody=_metadata_lookup(metadata, "Parody"),
+            character=_metadata_lookup(metadata, "Character"),
+            web=_metadata_lookup(metadata, "Web"),
+        )
+
+    @staticmethod
+    def _remove_original_sync(source_path: Path) -> None:
+        """Delete the original archive only after the CBZ record is committed."""
+        try:
+            source_path.unlink(missing_ok=True)
+        except OSError:
+            logging.getLogger(__name__).warning(
+                "original_archive_removal_failed",
+                extra={"error_code": "ARCHIVE_CLEANUP_FAILED"},
+            )
 
     def _fetch_source_artifact_sync(
         self, candidate_id: int
@@ -306,13 +417,40 @@ class ConversionService:
                 ),
             )
 
-    def _mark_completed_sync(self, job_id: int) -> None:
+    def _mark_completed_sync(self, job_id: int, details: dict) -> None:
         with self._database._connect() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
-                "error_message = NULL, updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ?",
-                (CONVERSION_STATE_COMPLETED, job_id),
+                "error_message = NULL, details_json = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    CONVERSION_STATE_COMPLETED,
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    job_id,
+                ),
+            )
+
+    def _mark_waiting_sync(
+        self,
+        job_id: int,
+        state: str,
+        code: str,
+        message: str,
+        details: dict,
+    ) -> None:
+        """Park a task in a recoverable state without losing its snapshot."""
+        with self._database._connect() as connection:
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, error_code = ?, "
+                "error_message = ?, details_json = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    state,
+                    code,
+                    message,
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    job_id,
+                ),
             )
 
     def _mark_failed_sync(
@@ -334,4 +472,7 @@ __all__ = [
     "CONVERSION_STATE_RUNNING",
     "CONVERSION_STATE_COMPLETED",
     "CONVERSION_STATE_FAILED",
+    "CONVERSION_STATE_WAITING_PASSWORD",
+    "CONVERSION_STATE_WAITING_VOLUMES",
+    "RECOVERABLE_CONVERSION_STATES",
 ]

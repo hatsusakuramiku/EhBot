@@ -16,6 +16,7 @@ services:
       TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:-}"
       APP_ROOT_PATH: "${APP_ROOT_PATH:-}"
       TAG_TRANSLATION_ENABLED: "${TAG_TRANSLATION_ENABLED:-true}"
+      ARCHIVE_TOOLCHAIN_AUTO_INSTALL: "${ARCHIVE_TOOLCHAIN_AUTO_INSTALL:-true}"
       TZ: "${TZ:-Asia/Shanghai}"
     secrets:
       - app_secret_key

@@ -32,6 +32,7 @@ class ExHentaiService:
         credentials_provider,
         http_client: httpx.AsyncClient | None = None,
         translator: TagTranslator | None = None,
+        work_path_provider=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -39,6 +40,15 @@ class ExHentaiService:
         self._credentials_provider = credentials_provider
         self._http_client = http_client
         self._translator = translator
+        # Resolved per download so an operator directory change applies
+        # without a restart; the constructor value stays the default.
+        self._work_path_provider = work_path_provider
+
+    async def _effective_work_path(self) -> Path:
+        if self._work_path_provider is None:
+            return self._work_path
+        resolved = await self._work_path_provider()
+        return resolved or self._work_path
 
     async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
@@ -162,8 +172,9 @@ class ExHentaiService:
             archive_url = await downloader.request_archive_url(
                 credentials, gid, token
             )
+            work_path = await self._effective_work_path()
             destination = (
-                self._work_path
+                work_path
                 / "exhentai"
                 / f"gallery-{gid}.zip"
             )

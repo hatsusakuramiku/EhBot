@@ -172,3 +172,52 @@ def test_repeated_login_failures_are_temporarily_blocked(tmp_path: Path) -> None
         429,
     ]
     assert responses[-1].json() == {"detail": "Too many login attempts"}
+
+
+def test_bootstrap_password_is_printed_to_the_console(
+    tmp_path: Path, capsys
+) -> None:
+    """The first-run password must be readable from the console.
+
+    Operators run this in Docker, where the data directory is a bind mount or a
+    volume. Telling them to open a file inside the container is not a usable
+    handover, so `docker compose logs` has to show the value itself.
+    """
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)):
+        password = read_bootstrap_password(settings)
+
+    printed = capsys.readouterr().out
+    assert password in printed
+    assert "admin" in printed
+    assert str(settings.data_path / "bootstrap_admin_password") in printed
+
+
+def test_console_banner_is_absent_once_the_password_is_changed(
+    tmp_path: Path, capsys
+) -> None:
+    """A steady-state restart must not reprint credentials."""
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        password = read_bootstrap_password(settings)
+        log_in(client, password)
+        change_page = client.get("/change-password")
+        new_password = "rotated-console-password-2026"
+        client.post(
+            "/change-password",
+            data={
+                "current_password": password,
+                "new_password": new_password,
+                "confirmation": new_password,
+                "csrf_token": change_page.context["csrf_token"],
+            },
+            follow_redirects=False,
+        )
+
+    capsys.readouterr()
+    with TestClient(create_app(settings)):
+        pass
+
+    restart_output = capsys.readouterr().out
+    assert new_password not in restart_output
+    assert "\u521d\u59cb\u5bc6\u7801" not in restart_output
