@@ -42,7 +42,11 @@ def enrich_metadata(
     raw_tags = gallery.tags.flat()
     if raw_tags:
         metadata["TagsRaw"] = ", ".join(raw_tags)
-        translated_tags = translator.translate_tags(raw_tags)
+        translated_tags: list[str] = []
+        for tag in raw_tags:
+            found = translator.translate_tag(tag)
+            if found is not None and found.name not in translated_tags:
+                translated_tags.append(found.name)
         if translated_tags:
             metadata["Tags"] = ", ".join(translated_tags)
 

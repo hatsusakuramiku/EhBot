@@ -36,6 +36,19 @@ def _metadata_lookup(metadata, field_name: str) -> str | None:
     return None
 
 
+def _metadata_tags(metadata) -> tuple[str, ...]:
+    tags: list[str] = []
+    for field_name in ("TagsRaw", "Tags"):
+        value = _metadata_lookup(metadata, field_name)
+        if not value:
+            continue
+        for item in value.replace("\n", ",").split(","):
+            tag = item.strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tuple(tags)
+
+
 class ConversionService:
     def __init__(
         self,
@@ -64,7 +77,7 @@ class ConversionService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
-            if str(candidate_row[0]) != STATUS_APPROVED:
+            if str(candidate_row[0]) not in {STATUS_APPROVED, "DOWNLOADED"}:
                 raise ConversionError(
                     "CANDIDATE_NOT_READY",
                     "Only approved candidates can be converted",
@@ -150,7 +163,8 @@ class ConversionService:
         with self._database._connect() as connection:
             row = connection.execute(
                 "SELECT id, candidate_id FROM download_jobs "
-                "WHERE state = ? ORDER BY id LIMIT 1",
+                "WHERE state = ? AND provider = 'CONVERSION' "
+                "ORDER BY id LIMIT 1",
                 (CONVERSION_STATE_PENDING,),
             ).fetchone()
             if row is None:
@@ -215,11 +229,7 @@ class ConversionService:
                 artist=_metadata_lookup(metadata, "Artist"),
                 language=_metadata_lookup(metadata, "Language"),
                 category=_metadata_lookup(metadata, "Category"),
-                tags=(
-                        _metadata_lookup(metadata, "Tags").split(", ")
-                        if _metadata_lookup(metadata, "Tags")
-                        else ()
-                    ),
+                tags=_metadata_tags(metadata),
                 rating=(
                     float(_metadata_lookup(metadata, "Rating"))
                     if _metadata_lookup(metadata, "Rating")

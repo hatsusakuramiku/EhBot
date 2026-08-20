@@ -374,15 +374,20 @@ def test_enrich_metadata_translates_fields_and_keeps_raw() -> None:
     assert metadata["Pages"] == "24"
 
 
-def test_enrich_metadata_preserves_untranslated_tags() -> None:
+def test_enrich_metadata_separates_raw_and_matched_chinese_tags() -> None:
     gallery = parse_gdata_entry(SAMPLE_ENTRY)
     assert gallery is not None
     metadata = enrich_metadata(gallery, _translator())
 
-    tags = metadata["Tags"].split(", ")
-    assert "巨乳" in tags
-    assert "female:unmapped tag" in tags
-    assert "language:chinese" in metadata["TagsRaw"]
+    assert metadata["TagsRaw"].split(", ") == SAMPLE_ENTRY["tags"]
+    assert metadata["Tags"].split(", ") == [
+        "汉语",
+        "翻译",
+        "原创",
+        "黒ねこ赤リボン",
+        "神代龙",
+        "巨乳",
+    ]
 
 
 def test_enrich_metadata_without_translator_returns_raw_metadata() -> None:

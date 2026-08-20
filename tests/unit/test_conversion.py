@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -11,6 +12,7 @@ from app.conversion.convert import (
     is_supported,
     stream_zip_to_cbz,
 )
+from app.conversion.service import _metadata_tags
 
 
 def _write_fake_zip(path: Path, names: tuple[str, ...]) -> None:
@@ -45,6 +47,25 @@ def test_build_comicinfo_xml_includes_fields() -> None:
     assert "<Rating>4.50</Rating>" in xml
     assert "<PageCount>24</PageCount>" in xml
     assert xml.startswith("<?xml")
+
+
+def test_comicinfo_includes_original_and_chinese_tags_without_duplicates() -> None:
+    metadata = [
+        SimpleNamespace(
+            field_name="TagsRaw",
+            field_value="female:big breasts, language:chinese",
+        ),
+        SimpleNamespace(field_name="Tags", field_value="巨乳, 汉语, 巨乳"),
+    ]
+    xml = build_comicinfo_xml(
+        title="Bilingual",
+        tags=_metadata_tags(metadata),
+    ).decode("utf-8")
+
+    assert (
+        "<Tags>female:big breasts, language:chinese, 巨乳, 汉语</Tags>"
+        in xml
+    )
 
 
 def test_stream_zip_to_cbz_writes_comicinfo(tmp_path: Path) -> None:

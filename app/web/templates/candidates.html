@@ -10,17 +10,36 @@
   <span class="queue-count">{{ candidates|length }} 项</span>
 </div>
 
-<section class="queue-table" aria-label="{{ queue_title }}">
-  <div class="queue-header"><span>候选</span><span>来源消息</span><span>状态</span><span></span></div>
+{% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ url_for('batch_review') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+<section class="queue-table candidate-queue" aria-label="{{ queue_title }}">
+  <div class="queue-header"><span>{{ "选择" if batch_enabled else "" }}</span><span>候选</span><span>元数据</span><span>消息</span><span>状态</span><span></span></div>
   {% for candidate in candidates %}
-  <a class="queue-row" href="{{ url_for('candidate_detail', candidate_id=candidate.candidate_id) }}">
-    <span class="candidate-title"><strong>{{ candidate.title or "未命名候选" }}</strong>{% if candidate.ex_gid %}<small>ExHentai #{{ candidate.ex_gid }}</small>{% endif %}</span>
+  <div class="queue-row">
+    <span class="candidate-select">{% if batch_enabled %}<input type="checkbox" name="candidate_ids" value="{{ candidate.candidate_id }}" aria-label="选择候选 {{ candidate.title or candidate.candidate_id }}" />{% endif %}</span>
+    <a class="candidate-title" href="{{ url_for('candidate_detail', candidate_id=candidate.candidate_id) }}"><strong>{{ candidate.title or "未命名候选" }}</strong>{% if candidate.ex_gid %}<small>ExHentai #{{ candidate.ex_gid }}</small>{% endif %}</a>
+    <span class="candidate-metadata">
+      <strong>{{ candidate.artist or "作者待补充" }}</strong>
+      <small>{{ candidate.category or "分类待补充" }}{% if candidate.language %} · {{ candidate.language }}{% endif %}</small>
+      {% if candidate.raw_tags %}<small class="candidate-tags"><b>原始</b>{% for tag in candidate.raw_tags.split(", ") %}<span>{{ tag }}</span>{% endfor %}</small>{% endif %}
+      {% if candidate.tags %}<small class="candidate-tags"><b>中文</b>{% for tag in candidate.tags.split(", ") %}<span>{{ tag }}</span>{% endfor %}</small>{% endif %}
+    </span>
     <span>{{ candidate.message_count }} 条</span>
-    <span><span class="status status-connecting"><i></i>{{ "待审核" if candidate.status == "PENDING_REVIEW" else "待补充" if candidate.status == "NEEDS_INFO" else candidate.status }}</span></span>
+    <span><span class="status status-connecting"><i></i>{{ status_label(candidate.status) }}</span></span>
     <span class="row-arrow" aria-hidden="true">›</span>
-  </a>
+  </div>
   {% else %}
   <div class="empty-state"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p></div>
   {% endfor %}
 </section>
+{% if batch_enabled and candidates %}
+<div class="batch-actions" aria-label="批量审核操作">
+  <span>对已选择记录执行</span>
+  <button type="submit" name="action" value="reject" class="danger-button">批量驳回</button>
+  <button type="submit" name="action" value="approve" class="primary-button">批量通过并下载</button>
+</div>
+{% endif %}
+</form>
 {% endblock %}

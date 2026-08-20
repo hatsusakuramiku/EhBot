@@ -6,6 +6,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+from app.auto_approval.models import AutoApprovalRule
 from app.candidates.models import (
     CandidateDetail,
     CandidateListItem,
@@ -900,6 +901,21 @@ class Database:
                 "(SELECT mv.field_value FROM metadata_values mv "
                 " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
                 " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Artist' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Tags' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'TagsRaw' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Category' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
                 "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
                 "c.ex_gallery_token "
                 "FROM candidates c LEFT JOIN candidate_messages cm "
@@ -913,10 +929,15 @@ class Database:
                 status=str(row[1]),
                 filter_result=str(row[2]),
                 title=str(row[3]) if row[3] is not None else None,
-                message_count=int(row[4]),
-                updated_at=str(row[5]),
-                ex_gid=int(row[6]) if row[6] is not None else None,
-                ex_gallery_token=str(row[7]) if row[7] is not None else None,
+                message_count=int(row[9]),
+                updated_at=str(row[10]),
+                ex_gid=int(row[11]) if row[11] is not None else None,
+                ex_gallery_token=str(row[12]) if row[12] is not None else None,
+                artist=str(row[4]) if row[4] is not None else None,
+                tags=str(row[5]) if row[5] is not None else None,
+                raw_tags=str(row[6]) if row[6] is not None else None,
+                category=str(row[7]) if row[7] is not None else None,
+                language=str(row[8]) if row[8] is not None else None,
             )
             for row in rows
         ]
@@ -1109,7 +1130,201 @@ class Database:
                 ),
             )
 
+    async def effective_metadata(self, candidate_id: int) -> dict[str, str]:
+        return await asyncio.to_thread(self._effective_metadata_sync, candidate_id)
 
+    def _effective_metadata_sync(self, candidate_id: int) -> dict[str, str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT field_name, field_value FROM metadata_values "
+                "WHERE candidate_id = ? ORDER BY is_manual DESC, "
+                "CASE value_source WHEN 'TELEGRAM' THEN 3 "
+                "WHEN 'EXHENTAI' THEN 2 WHEN 'FILENAME' THEN 1 ELSE 0 END DESC, "
+                "confidence DESC, created_at DESC",
+                (candidate_id,),
+            ).fetchall()
+        metadata: dict[str, str] = {}
+        for field_name, field_value in rows:
+            metadata.setdefault(str(field_name), str(field_value))
+        return metadata
+
+    async def pending_candidate_ids(self, limit: int = 100) -> tuple[int, ...]:
+        return await asyncio.to_thread(self._pending_candidate_ids_sync, limit)
+
+    def _pending_candidate_ids_sync(self, limit: int) -> tuple[int, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM candidates WHERE status = 'PENDING_REVIEW' "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    @staticmethod
+    def _auto_approval_rule_from_row(row: sqlite3.Row | tuple) -> AutoApprovalRule:
+        condition = json.loads(str(row[5]))
+        if not isinstance(condition, dict):
+            raise ValueError("automatic approval rule condition must be an object")
+        return AutoApprovalRule(
+            rule_id=int(row[0]),
+            name=str(row[1]),
+            enabled=bool(row[2]),
+            priority=int(row[3]),
+            version=int(row[4]),
+            condition=condition,
+            dsl_snapshot=str(row[6]),
+            created_at=str(row[7]),
+            updated_at=str(row[8]),
+        )
+
+    async def list_auto_approval_rules(
+        self, *, enabled_only: bool = False
+    ) -> tuple[AutoApprovalRule, ...]:
+        return await asyncio.to_thread(
+            self._list_auto_approval_rules_sync, enabled_only
+        )
+
+    def _list_auto_approval_rules_sync(
+        self, enabled_only: bool
+    ) -> tuple[AutoApprovalRule, ...]:
+        where_sql = "WHERE enabled = 1 " if enabled_only else ""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, name, enabled, priority, version, condition_json, "
+                "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
+                + where_sql
+                + "ORDER BY priority, id"
+            ).fetchall()
+        return tuple(self._auto_approval_rule_from_row(row) for row in rows)
+
+    async def get_auto_approval_rule(
+        self, rule_id: int
+    ) -> AutoApprovalRule | None:
+        return await asyncio.to_thread(self._get_auto_approval_rule_sync, rule_id)
+
+    def _get_auto_approval_rule_sync(
+        self, rule_id: int
+    ) -> AutoApprovalRule | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, name, enabled, priority, version, condition_json, "
+                "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
+                "WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+        return self._auto_approval_rule_from_row(row) if row is not None else None
+
+    async def save_auto_approval_rule(
+        self,
+        *,
+        rule_id: int | None,
+        name: str,
+        enabled: bool,
+        priority: int,
+        condition: dict,
+        dsl_snapshot: str,
+    ) -> AutoApprovalRule:
+        return await asyncio.to_thread(
+            self._save_auto_approval_rule_sync,
+            rule_id,
+            name,
+            enabled,
+            priority,
+            condition,
+            dsl_snapshot,
+        )
+
+    def _save_auto_approval_rule_sync(
+        self,
+        rule_id: int | None,
+        name: str,
+        enabled: bool,
+        priority: int,
+        condition: dict,
+        dsl_snapshot: str,
+    ) -> AutoApprovalRule:
+        with self._connect() as connection:
+            if rule_id is None:
+                cursor = connection.execute(
+                    "INSERT INTO auto_approval_rules "
+                    "(name, enabled, priority, condition_json, dsl_snapshot) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        int(enabled),
+                        priority,
+                        json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
+                        dsl_snapshot,
+                    ),
+                )
+                rule_id = int(cursor.lastrowid)
+            else:
+                cursor = connection.execute(
+                    "UPDATE auto_approval_rules SET name = ?, enabled = ?, "
+                    "priority = ?, condition_json = ?, dsl_snapshot = ?, "
+                    "version = version + 1, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?",
+                    (
+                        name,
+                        int(enabled),
+                        priority,
+                        json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
+                        dsl_snapshot,
+                        rule_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LookupError(f"Automatic approval rule {rule_id} does not exist")
+        result = self._get_auto_approval_rule_sync(rule_id)
+        if result is None:
+            raise LookupError(f"Automatic approval rule {rule_id} does not exist")
+        return result
+
+    async def set_auto_approval_rule_enabled(
+        self, rule_id: int, enabled: bool
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_auto_approval_rule_enabled_sync, rule_id, enabled
+        )
+
+    def _set_auto_approval_rule_enabled_sync(
+        self, rule_id: int, enabled: bool
+    ) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE auto_approval_rules SET enabled = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (int(enabled), rule_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"Automatic approval rule {rule_id} does not exist")
+
+    async def record_review_action(
+        self, candidate_id: int, action: str, operator_name: str, details: dict
+    ) -> None:
+        await asyncio.to_thread(
+            self._record_review_action_sync,
+            candidate_id,
+            action,
+            operator_name,
+            details,
+        )
+
+    def _record_review_action_sync(
+        self, candidate_id: int, action: str, operator_name: str, details: dict
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO review_actions "
+                "(candidate_id, action, operator_name, details_json) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    candidate_id,
+                    action,
+                    operator_name,
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
     async def list_metadata(
         self, candidate_id: int
     ) -> tuple[MetadataEntry, ...]:

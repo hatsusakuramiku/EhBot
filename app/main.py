@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 import hmac
+import json
 import logging
 from pathlib import Path
 import secrets
@@ -18,6 +19,12 @@ from pwdlib.exceptions import PwdlibError
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.candidates.ingestor import CandidateIngestor
+from app.auto_approval.rules import (
+    RuleValidationError,
+    render_rule_dsl,
+    validate_rule_ast,
+)
+from app.auto_approval.service import AutomaticApprovalService
 from app.config import Settings
 from app.bootstrap import remove_bootstrap_password, write_bootstrap_password
 from app.connections.exhentai import ExHentaiCredentials
@@ -29,6 +36,7 @@ from app.logging import configure_logging
 
 from app.review.models import (
     METADATA_FIELDS,
+    REVIEWABLE_STATUSES,
     field_label,
     split_metadata_entries,
 )
@@ -152,9 +160,12 @@ def create_app(
                         secret_store, telegram_client
                     )
                 ),
+                exhentai_download=(
+                    lambda candidate_id: application.state.exhentai_service
+                    .download_archive_for_candidate(candidate_id)
+                ),
             )
             application.state.download_service = download_service
-            await download_service.start()
             conversion_service = ConversionService(
                 database,
                 app_settings.work_path,
@@ -184,6 +195,7 @@ def create_app(
                 translator=tag_translator,
             )
             application.state.exhentai_service = exhentai_service
+            await download_service.start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             app.state.startup_errors.append(str(exc))
             logging.getLogger(__name__).error(
@@ -238,6 +250,7 @@ def create_app(
             "NEEDS_REVISION": "需要修订",
             "PROCESSING": "处理中",
             "FAILED": "失败",
+            "DOWNLOADED": "已下载",
         }
         return labels.get(status, status)
 
@@ -321,6 +334,225 @@ def create_app(
     def review_service() -> ReviewService:
         return ReviewService(database)
 
+    async def _approve_candidates_and_enqueue(
+        candidate_ids: list[int], operator: str
+    ) -> tuple[int, ...]:
+        targets: list[tuple[int, str, dict | None]] = []
+        for candidate_id in candidate_ids:
+            candidate = await database.get_candidate(candidate_id)
+            if candidate is None:
+                raise ReviewError(
+                    "CANDIDATE_NOT_FOUND", "候选不存在或已被删除"
+                )
+            if candidate.status not in REVIEWABLE_STATUSES:
+                raise ReviewError(
+                    "REVIEW_INVALID_TRANSITION",
+                    f"候选 #{candidate_id} 当前状态不可审核",
+                )
+            attachment = next(
+                (
+                    attachment
+                    for message in candidate.messages
+                    for attachment in message.attachments
+                    if attachment.get("type") == "archive"
+                ),
+                None,
+            )
+            if attachment is not None:
+                targets.append((candidate_id, "TELEGRAM", attachment))
+            elif candidate.ex_gid is not None:
+                targets.append((candidate_id, "EXHENTAI", None))
+            else:
+                raise ReviewError(
+                    "CANDIDATE_NOT_DOWNLOADABLE",
+                    f"候选 #{candidate_id} 没有 Telegram 压缩包或 ExHentai 引用",
+                )
+
+        job_ids: list[int] = []
+        for candidate_id, provider, attachment in targets:
+            await review_service().approve_candidate(candidate_id, operator)
+            try:
+                if provider == "TELEGRAM":
+                    result = await download_service().enqueue_telegram_download(
+                        candidate_id, attachment or {}
+                    )
+                else:
+                    result = await download_service().enqueue_exhentai_download(
+                        candidate_id
+                    )
+                job_ids.append(result.job_id)
+            except DownloadError as exc:
+                raise ReviewError(exc.code, exc.public_message) from exc
+        return tuple(job_ids)
+
+    async def _apply_automatic_approval(candidate_id: int) -> bool:
+        match = await AutomaticApprovalService(database).matching_rule(candidate_id)
+        if match is None:
+            return False
+        try:
+            job_ids = await _approve_candidates_and_enqueue(
+                [candidate_id], "自动审批"
+            )
+        except ReviewError:
+            return False
+        await database.record_review_action(
+            candidate_id,
+            "AUTO_APPROVE",
+            "自动审批",
+            {
+                "rule_id": match.rule.rule_id,
+                "rule_name": match.rule.name,
+                "rule_version": match.rule.version,
+                "dsl_snapshot": match.rule.dsl_snapshot,
+                "condition": match.rule.condition,
+                "conditions": match.conditions,
+                "metadata": match.metadata,
+                "download_job_ids": list(job_ids),
+            },
+        )
+        return True
+
+    async def _reject_candidates(
+        candidate_ids: list[int], operator: str
+    ) -> None:
+        for candidate_id in candidate_ids:
+            candidate = await database.get_candidate(candidate_id)
+            if candidate is None:
+                raise ReviewError(
+                    "CANDIDATE_NOT_FOUND", "候选不存在或已被删除"
+                )
+            if candidate.status not in REVIEWABLE_STATUSES:
+                raise ReviewError(
+                    "REVIEW_INVALID_TRANSITION",
+                    f"候选 #{candidate_id} 当前状态不可审核",
+                )
+        for candidate_id in candidate_ids:
+            await review_service().reject_candidate(candidate_id, operator)
+
+    async def _render_candidate_queue(
+        request: Request,
+        *,
+        status: str,
+        queue_title: str,
+        queue_description: str,
+        empty_title: str,
+        empty_text: str,
+        batch_enabled: bool = False,
+        error: str | None = None,
+        status_code: int = 200,
+    ):
+        candidates = await database.list_candidates(status=status)
+        if batch_enabled:
+            await exhentai_service().enrich_candidates_for_review(candidates)
+            candidates = await database.list_candidates(status=status)
+            for candidate in candidates:
+                await _apply_automatic_approval(candidate.candidate_id)
+            candidates = await database.list_candidates(status=status)
+        return templates.TemplateResponse(
+            request=request,
+            name="candidates.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "candidates": candidates,
+                "queue_title": queue_title,
+                "queue_description": queue_description,
+                "empty_title": empty_title,
+                "empty_text": empty_text,
+                "batch_enabled": batch_enabled,
+                "error": error,
+            },
+            status_code=status_code,
+        )
+
+    @app.get("/auto-approval-rules")
+    async def auto_approval_rules_page(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="auto_approval_rules.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "rules": await database.list_auto_approval_rules(),
+                "preview_ids": (),
+                "error": None,
+            },
+        )
+
+    @app.post("/auto-approval-rules")
+    async def save_auto_approval_rule(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        try:
+            name = str(form.get("name") or "").strip()
+            if not name:
+                raise RuleValidationError("规则名称不能为空")
+            priority = int(str(form.get("priority") or "100"))
+            ast = validate_rule_ast(json.loads(str(form.get("ast_json") or "")))
+            await database.save_auto_approval_rule(
+                rule_id=None,
+                name=name,
+                enabled=form.get("enabled") == "on",
+                priority=priority,
+                condition=ast,
+                dsl_snapshot=render_rule_dsl(ast),
+            )
+        except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="auto_approval_rules.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "rules": await database.list_auto_approval_rules(),
+                    "preview_ids": (),
+                    "error": str(exc),
+                },
+                status_code=400,
+            )
+        return RedirectResponse(
+            request.url_for("auto_approval_rules_page").path, status_code=303
+        )
+
+    @app.post("/auto-approval-rules/{rule_id}/toggle")
+    async def toggle_auto_approval_rule(rule_id: int, request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        await database.set_auto_approval_rule_enabled(
+            rule_id, form.get("enabled") == "on"
+        )
+        return RedirectResponse(
+            request.url_for("auto_approval_rules_page").path, status_code=303
+        )
+
+    @app.post("/auto-approval-rules/{rule_id}/preview")
+    async def preview_auto_approval_rule(rule_id: int, request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        rule = await database.get_auto_approval_rule(rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="规则不存在")
+        return templates.TemplateResponse(
+            request=request,
+            name="auto_approval_rules.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "rules": await database.list_auto_approval_rules(),
+                "preview_ids": await AutomaticApprovalService(database).preview(rule),
+                "preview_rule_id": rule_id,
+                "error": None,
+            },
+        )
+
     @app.get("/")
     async def dashboard(request: Request):
         redirect = require_authenticated(request)
@@ -341,17 +573,14 @@ def create_app(
         redirect = require_authenticated(request)
         if redirect:
             return redirect
-        return templates.TemplateResponse(
-            request=request,
-            name="candidates.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "candidates": await database.list_candidates(),
-                "queue_title": "待审核队列",
-                "queue_description": "由 Telegram 消息自动归并的漫画候选",
-                "empty_title": "暂无待审核候选",
-                "empty_text": "白名单来源的新候选会显示在这里",
-            },
+        return await _render_candidate_queue(
+            request,
+            status="PENDING_REVIEW",
+            queue_title="待审核队列",
+            queue_description="确认元数据后可批量加入下载队列",
+            empty_title="暂无待审核候选",
+            empty_text="白名单来源的新候选会显示在这里",
+            batch_enabled=True,
         )
 
     @app.get("/candidates/needs-info")
@@ -359,17 +588,91 @@ def create_app(
         redirect = require_authenticated(request)
         if redirect:
             return redirect
-        return templates.TemplateResponse(
-            request=request,
-            name="candidates.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "candidates": await database.list_candidates(status="NEEDS_INFO"),
-                "queue_title": "待补充队列",
-                "queue_description": "需要补全标题或附件信息的漫画候选",
-                "empty_title": "暂无待补充候选",
-                "empty_text": "信息不足的候选会显示在这里",
-            },
+        return await _render_candidate_queue(
+            request,
+            status="NEEDS_INFO",
+            queue_title="待补充队列",
+            queue_description="需要补全标题或附件信息的漫画候选",
+            empty_title="暂无待补充候选",
+            empty_text="信息不足的候选会显示在这里",
+        )
+
+    @app.get("/candidates/processing")
+    async def processing_queue(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidate_queue(
+            request,
+            status="PROCESSING",
+            queue_title="处理中队列",
+            queue_description="已审核并正在下载的候选",
+            empty_title="暂无处理中候选",
+            empty_text="下载 Worker 领取任务后会显示在这里",
+        )
+
+    @app.get("/candidates/failed")
+    async def failed_queue(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidate_queue(
+            request,
+            status="FAILED",
+            queue_title="失败队列",
+            queue_description="下载失败、需要检查后重新处理的候选",
+            empty_title="暂无失败候选",
+            empty_text="下载失败的候选会显示在这里",
+        )
+
+    @app.post("/candidates/batch-review")
+    async def batch_review(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        action = str(form.get("action") or "")
+        try:
+            candidate_ids = list(
+                dict.fromkeys(
+                    int(value) for value in form.getlist("candidate_ids")
+                )
+            )
+        except ValueError:
+            candidate_ids = []
+        if not candidate_ids or action not in {"approve", "reject"}:
+            return await _render_candidate_queue(
+                request,
+                status="PENDING_REVIEW",
+                queue_title="待审核队列",
+                queue_description="确认元数据后可批量加入下载队列",
+                empty_title="暂无待审核候选",
+                empty_text="白名单来源的新候选会显示在这里",
+                batch_enabled=True,
+                error="请选择至少一条候选并指定审核操作",
+                status_code=400,
+            )
+        operator = request.session.get("username", "admin")
+        try:
+            if action == "approve":
+                await _approve_candidates_and_enqueue(candidate_ids, operator)
+            else:
+                await _reject_candidates(candidate_ids, operator)
+        except ReviewError as exc:
+            return await _render_candidate_queue(
+                request,
+                status="PENDING_REVIEW",
+                queue_title="待审核队列",
+                queue_description="确认元数据后可批量加入下载队列",
+                empty_title="暂无待审核候选",
+                empty_text="白名单来源的新候选会显示在这里",
+                batch_enabled=True,
+                error=exc.public_message,
+                status_code=400,
+            )
+        return RedirectResponse(
+            request.url_for("candidate_queue").path, status_code=303
         )
 
     @app.get("/candidates/{candidate_id}")
@@ -388,11 +691,6 @@ def create_app(
             job.provider == "TELEGRAM" and job.state == "COMPLETED"
             for job in jobs
         )
-        download_eligible = any(
-            attachment.get("type") == "archive"
-            for message in candidate.messages
-            for attachment in message.attachments
-        )
         return templates.TemplateResponse(
             request=request,
             name="candidate_detail.html",
@@ -407,7 +705,6 @@ def create_app(
                 )[1],
                 "review_history": summary.review_history,
                 "download_jobs": jobs,
-                "download_eligible": download_eligible,
                 "archive_ready": archive_ready,
                 "metadata_fields": METADATA_FIELDS,
                 "field_label": field_label,
@@ -426,10 +723,8 @@ def create_app(
             return redirect
         validate_csrf(request, csrf_token)
         operator = request.session.get("username", "admin")
-        form = await request.form()
-        note = str(form.get("note") or "").strip() or None
         try:
-            await review_service().approve_candidate(candidate_id, operator, note)
+            await _approve_candidates_and_enqueue([candidate_id], operator)
         except ReviewError as exc:
             return await _render_review_error(
                 request,
@@ -446,7 +741,6 @@ def create_app(
         request: Request,
         candidate_id: int,
         csrf_token: str = Form(),
-        reason: str = Form(""),
     ):
         redirect = require_authenticated(request)
         if redirect:
@@ -454,9 +748,7 @@ def create_app(
         validate_csrf(request, csrf_token)
         operator = request.session.get("username", "admin")
         try:
-            await review_service().reject_candidate(
-                candidate_id, operator, reason
-            )
+            await review_service().reject_candidate(candidate_id, operator)
         except ReviewError as exc:
             return await _render_review_error(
                 request, candidate_id, exc.public_message

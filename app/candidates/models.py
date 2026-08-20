@@ -35,6 +35,11 @@ class CandidateListItem:
     updated_at: str
     ex_gid: int | None
     ex_gallery_token: str | None
+    artist: str | None = None
+    tags: str | None = None
+    raw_tags: str | None = None
+    category: str | None = None
+    language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

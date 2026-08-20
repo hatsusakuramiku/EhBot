@@ -102,6 +102,28 @@ async def test_enqueue_after_approval_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_failure_updates_candidate_status(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'APPROVED' WHERE id = ?",
+            (candidate_id,),
+        )
+    service = DownloadService(database, tmp_path / "work")
+    await service.enqueue_telegram_download(
+        candidate_id,
+        {"file_id": "x", "file_name": "x.cbz"},
+    )
+
+    assert await service._process_one() is True  # noqa: SLF001
+
+    candidate = await database.get_candidate(candidate_id)
+    assert candidate is not None
+    assert candidate.status == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_rejects_non_archive_attachment(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_archive(database, file_name="comic.cbz")
@@ -228,6 +250,9 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         assert hashlib.sha256(path.read_bytes()).hexdigest() == (
             hashlib.sha256(payload).hexdigest()
         )
+        candidate = asyncio.run(database.get_candidate(candidate_id))
+        assert candidate is not None
+        assert candidate.status == "DOWNLOADED"
 
 
 def test_downloads_dashboard_renders(tmp_path: Path) -> None:

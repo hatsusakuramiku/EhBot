@@ -22,10 +22,6 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <button type="submit" class="quiet-button">拉取元数据</button>
     </form>
-    <form method="post" action="{{ url_for('download_exhentai_archive', candidate_id=candidate.candidate_id) }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <button type="submit" class="quiet-button">下载原档</button>
-    </form>
   </div>
 </section>
 {% endif %}
@@ -64,7 +60,11 @@
         <strong>{{ field_label(entry.field_name) }}</strong>
         <span class="metadata-source">{{ entry.value_source }}{% if entry.confidence is not none %} · 信任度 {{ entry.confidence }}{% endif %}</span>
       </div>
+      {% if entry.field_name in ('TagsRaw', 'Tags') %}
+      <div class="metadata-value metadata-tags">{% for tag in entry.field_value.split(", ") %}<span>{{ tag }}</span>{% endfor %}</div>
+      {% else %}
       <div class="metadata-value">{{ entry.field_value }}</div>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>
@@ -114,14 +114,6 @@
       <p>将压缩附件下载到本地工作目录，再转换为标准 CBZ</p>
     </div>
   </div>
-  {% if download_eligible %}
-  <form class="download-form" method="post" action="{{ url_for('download_candidate', candidate_id=candidate.candidate_id) }}">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <button type="submit" class="primary-button">触发下载</button>
-  </form>
-  {% else %}
-  <p class="empty-state">当前候选没有可下载的压缩附件</p>
-  {% endif %}
   {% if archive_ready %}
   <form class="download-form" method="post" action="{{ url_for('convert_candidate', candidate_id=candidate.candidate_id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -142,7 +134,7 @@
     {% endfor %}
   </ol>
   {% else %}
-  <p class="empty-state">暂无下载任务</p>
+  <p class="empty-state">审核通过后会自动创建下载任务</p>
   {% endif %}
 </section>
 
@@ -155,21 +147,14 @@
   </div>
 
   <div class="review-actions">
+    {% if candidate.status in ('PENDING_REVIEW', 'NEEDS_INFO') %}
     <form method="post" action="{{ url_for('approve_candidate', candidate_id=candidate.candidate_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <label>
-        <span>备注</span>
-        <input name="note" type="text" maxlength="240" />
-      </label>
-      <button type="submit" class="primary-button">通过审核</button>
+      <button type="submit" class="primary-button">通过并加入下载队列</button>
     </form>
 
     <form method="post" action="{{ url_for('reject_candidate', candidate_id=candidate.candidate_id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <label>
-        <span>驳回理由</span>
-        <input name="reason" type="text" required maxlength="240" />
-      </label>
       <button type="submit" class="danger-button">驳回</button>
     </form>
 
@@ -181,6 +166,7 @@
       </label>
       <button type="submit" class="secondary-button">需要修改</button>
     </form>
+    {% endif %}
 
     {% if candidate.status in ('REJECTED', 'NEEDS_REVISION') %}
     <form method="post" action="{{ url_for('requeue_candidate', candidate_id=candidate.candidate_id) }}">

@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 5 (ExHentai metadata) code complete; phase 6 not started
+Implementation phase 9 (automatic approval rules) complete; phase 6 remains deferred
 
 ## Phases
 
@@ -124,3 +124,56 @@ Implementation phase 5 (ExHentai metadata) code complete; phase 6 not started
 - [ ] Handle `my_chat_member` so sources appear without requiring a qualifying message first
 - [ ] Verify the low-memory profile and the Docker runtime on a host with Docker installed
 - **Status:** not started
+
+### Implementation Phase 7: Review And Download Queue Workflow
+- [x] Make the Processing and Failed download status controls display their matching job queues
+- [x] Remove approval/rejection reason input from the review workflow
+- [x] Add multi-candidate approve and reject operations
+- [x] Make approval automatically enqueue the candidate's available Telegram or ExHentai download
+- [x] Synchronize candidate `PROCESSING` / `FAILED` states with download worker progress so the dashboard queues contain meaningful records
+- [x] Automatically fetch available ExHentai metadata before candidates are presented for review
+- [x] Show the fetched title, author, tags, and related metadata in the review queue for bulk confirmation
+- [x] Add focused regression tests for filters, batch review, automatic enqueue, and metadata presentation
+- [x] Record an implementation-neutral proposal for user-defined automatic approval rules; do not implement it before user review
+- **Status:** code and automated verification complete; in-app Browser visual QA blocked by plugin trusted-path initialization
+
+## Phase 7 Assumptions And Boundaries
+- `PROCESSING` and `FAILED` refer to candidate states counted on the dashboard. The dashboard controls must link to candidate queues filtered by those states.
+- Approval means the selected candidate should be placed into the download queue immediately. The existing idempotency contract must prevent duplicate jobs.
+- Rejection only excludes a candidate from downloading; neither approval nor rejection requires a human-entered reason. System-generated failure and rule reasons remain part of the audit trail.
+- Automatic metadata acquisition applies when entering or refreshing the review queue and a candidate has an ExHentai reference. Telegram-derived metadata remains the first available source; ExHentai enriches it.
+- Automatic approval syntax and execution are proposal-only in this phase because the user explicitly requested a scheme for review first.
+- Existing user changes to `.gitignore` are out of scope and must be preserved.
+
+### Implementation Phase 8: Metadata Labels And Bilingual Tags
+- [x] Add a red-capable test proving every known metadata field has a real Chinese label rather than `?`
+- [x] Add a red-capable test proving original tags and matched Chinese tags remain separate
+- [x] Restore Chinese field labels without changing metadata field keys
+- [x] Keep every upstream tag in `TagsRaw` and only successfully matched Chinese names in `Tags`
+- [x] Display original and matched Chinese tags as two tag rows in review views
+- [x] Ensure metadata rules and ComicInfo treat both original and matched Chinese values as tags
+- [x] Run focused and full regression tests
+- [x] Update handover findings and progress
+- **Status:** complete; automated HTML verification passed, screenshot QA blocked by the local Browser plugin trust-path error
+
+## Phase 8 Assumptions And Boundaries
+- “原 Tag” means the complete upstream `namespace:value` set from E-Hentai/ExHentai.
+- “匹配出的中文” means only successful EhTagTranslation matches; unmatched upstream values must not be copied into the Chinese row.
+- Both rows remain tag semantics for filtering/export; they are not general metadata notes.
+- Metadata field keys and stored source contracts remain unchanged.
+
+### Implementation Phase 9: Automatic Approval Rules
+- [x] Persist rule name, enabled state, priority, version, structured condition AST, and DSL snapshot
+- [x] Evaluate only the allowlisted AST operators and metadata fields, including the merged `{TAG}` collection
+- [x] Add authenticated configuration, preview, and enable/disable management UI
+- [x] Evaluate eligible enriched candidates by priority and auto-approve only the first matching rule
+- [x] Reuse existing approval and download enqueue idempotency; record rule, snapshot, condition result, and job IDs in review history
+- [x] Add focused unit/integration/Web regression coverage and run the full suite
+- [x] Update handover records
+- **Status:** complete; full regression passed
+
+## Phase 9 Assumptions And Boundaries
+- Rules are server-stored JSON ASTs. The DSL text is a readable snapshot only and is never evaluated.
+- Version 1 supports the proposal's text, numeric, collection, existence, boolean, and `LIKE` operators; no regex, functions, field-to-field calculation, SQL, or Python execution.
+- Evaluation is restricted to `PENDING_REVIEW` candidates with at least one usable download source and complete available metadata. Failure to fetch metadata or evaluate a rule leaves the candidate for manual review.
+- First enabled matching rule by ascending priority wins; the action is always `AUTO_APPROVE`.

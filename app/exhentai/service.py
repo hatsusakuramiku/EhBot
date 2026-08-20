@@ -51,6 +51,74 @@ class ExHentaiService:
         )
         return metadata
 
+    async def enrich_candidates_for_review(self, candidates: list) -> int:
+        refs = await asyncio.to_thread(
+            self._missing_metadata_refs_sync, candidates
+        )
+        if not refs:
+            return 0
+
+        async with self._http_session() as client:
+            try:
+                galleries = await GdataClient(client).fetch_many(
+                    [(gid, token) for _, gid, token in refs]
+                )
+            except GdataError as exc:
+                logging.getLogger(__name__).warning(
+                    "review_metadata_enrichment_failed",
+                    extra={"error_code": exc.code},
+                )
+                return 0
+
+        enriched = 0
+        for candidate_id, gid, token in refs:
+            gallery = galleries.get(gid)
+            if gallery is not None:
+                metadata = enrich_metadata(gallery, self._translator)
+            else:
+                try:
+                    metadata = await self._fetch_metadata(gid, token)
+                except ExHentaiDownloadError as exc:
+                    logging.getLogger(__name__).warning(
+                        "review_metadata_fallback_failed",
+                        extra={"error_code": exc.code},
+                    )
+                    continue
+            await asyncio.to_thread(
+                self._persist_metadata_sync, candidate_id, metadata
+            )
+            await self._database.re_evaluate_candidate_metadata_rules(
+                candidate_id
+            )
+            enriched += 1
+        return enriched
+
+    def _missing_metadata_refs_sync(
+        self, candidates: list
+    ) -> list[tuple[int, int, str]]:
+        refs = [
+            (
+                int(candidate.candidate_id),
+                int(candidate.ex_gid),
+                str(candidate.ex_gallery_token),
+            )
+            for candidate in candidates
+            if candidate.ex_gid is not None and candidate.ex_gallery_token
+        ]
+        if not refs:
+            return []
+        placeholders = ",".join("?" for _ in refs)
+        with self._database._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT candidate_id FROM metadata_values "
+                "WHERE value_source = 'EXHENTAI' AND candidate_id IN ("
+                + placeholders
+                + ")",
+                tuple(candidate_id for candidate_id, _, _ in refs),
+            ).fetchall()
+        existing = {int(row[0]) for row in rows}
+        return [ref for ref in refs if ref[0] not in existing]
+
     async def _fetch_metadata(self, gid: int, token: str) -> dict:
         """Prefer the gdata API, falling back to authenticated HTML scraping.
 

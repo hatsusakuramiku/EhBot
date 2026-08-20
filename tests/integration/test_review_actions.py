@@ -1,11 +1,14 @@
 import asyncio
+import json
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
+from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.service import ReviewError, ReviewService
 
@@ -44,7 +47,14 @@ def authenticate(client: TestClient, settings: Settings) -> None:
     )
 
 
-async def seed_candidate(database: Database) -> int:
+async def seed_candidate(
+    database: Database,
+    *,
+    update_id: int = 900,
+    message_id: int = 1,
+    title: str = "Original Title",
+    gallery_ref: str = "",
+) -> int:
     await database.initialize()
     await database.configure_telegram_source(
         source_type="CHANNEL",
@@ -57,20 +67,19 @@ async def seed_candidate(database: Database) -> int:
     await database.save_telegram_updates(
         [
             {
-                "update_id": 900,
+                "update_id": update_id,
                 "channel_post": {
-                    "message_id": 1,
+                    "message_id": message_id,
                     "date": 1_700_000_300,
                     "chat": {"id": -100456, "title": "Review Channel"},
-                    "caption": "Original Title",
-                    "photo": [
-                        {
-                            "file_id": "photo-a",
-                            "file_unique_id": "photo-a-uniq",
-                            "width": 800,
-                            "height": 1200,
-                        }
-                    ],
+                    "caption": f"{title}\n{gallery_ref}".strip(),
+                    "document": {
+                        "file_id": f"archive-{update_id}",
+                        "file_unique_id": f"archive-{update_id}-uniq",
+                        "file_name": f"archive-{update_id}.zip",
+                        "mime_type": "application/zip",
+                        "file_size": 4096,
+                    },
                 },
             }
         ]
@@ -81,7 +90,45 @@ async def seed_candidate(database: Database) -> int:
     return candidates[0].candidate_id
 
 
-def test_approve_moves_candidate_to_approved_state(tmp_path: Path) -> None:
+def replace_candidate_with_photo(
+    database: Database, candidate_id: int
+) -> None:
+    attachment_json = json.dumps(
+        [
+            {
+                "type": "photo",
+                "file_id": f"photo-{candidate_id}",
+                "file_unique_id": f"photo-{candidate_id}-uniq",
+                "width": 800,
+                "height": 1200,
+                "size_bytes": 0,
+            }
+        ]
+    )
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE source_messages SET attachment_json = ? WHERE id IN ("
+            "SELECT source_message_id FROM candidate_messages "
+            "WHERE candidate_id = ?)",
+            (attachment_json, candidate_id),
+        )
+
+
+def persist_bilingual_tags(database: Database, candidate_id: int) -> None:
+    with database._connect() as connection:  # noqa: SLF001
+        for field_name, field_value in (
+            ("TagsRaw", "female:big breasts, language:chinese"),
+            ("Tags", "巨乳, 汉语"),
+        ):
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, "
+                "confidence, is_manual) VALUES (?, ?, ?, 'EXHENTAI', 0.6, 0)",
+                (candidate_id, field_name, field_value),
+            )
+
+
+def test_approve_automatically_enqueues_download(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
@@ -93,15 +140,19 @@ def test_approve_moves_candidate_to_approved_state(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": csrf, "note": "Looks good"},
+            data={"csrf_token": csrf},
         )
         assert response.status_code == 303
-        refreshed = client.get(f"/candidates/{candidate_id}")
-        assert refreshed.status_code == 200
-        assert "APPROVED" in refreshed.text or chr(24050) in refreshed.text
 
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert len(jobs) == 1
+    assert jobs[0].provider == "TELEGRAM"
 
-def test_reject_requires_reason(tmp_path: Path) -> None:
+def test_reject_does_not_require_reason(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
@@ -112,9 +163,67 @@ def test_reject_requires_reason(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/reject",
-            data={"csrf_token": csrf, "reason": ""},
+            data={"csrf_token": csrf},
+        )
+        assert response.status_code == 303
+
+    candidate = asyncio.run(database.get_candidate(candidate_id))
+    assert candidate is not None
+    assert candidate.status == "REJECTED"
+
+
+def test_approve_without_download_source_keeps_candidate_pending(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_candidate(database))
+    replace_candidate_with_photo(database, candidate_id)
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        detail = client.get(f"/candidates/{candidate_id}")
+        response = client.post(
+            f"/candidates/{candidate_id}/approve",
+            data={"csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 400
+        assert "没有 Telegram 压缩包或 ExHentai 引用" in response.text
+
+    candidate = asyncio.run(database.get_candidate(candidate_id))
+    assert candidate is not None
+    assert candidate.status == "PENDING_REVIEW"
+
+
+def test_approve_exhentai_candidate_creates_exhentai_job(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(
+        seed_candidate(
+            database,
+            gallery_ref="https://exhentai.org/g/4116328/c722b9009c/",
+        )
+    )
+    replace_candidate_with_photo(database, candidate_id)
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        detail = client.get(f"/candidates/{candidate_id}")
+        response = client.post(
+            f"/candidates/{candidate_id}/approve",
+            data={"csrf_token": detail.context["csrf_token"]},
+        )
+        assert response.status_code == 303
+
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert len(jobs) == 1
+    assert jobs[0].provider == "EXHENTAI"
 
 
 def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
@@ -176,7 +285,7 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         client.post(
             f"/candidates/{candidate_id}/reject",
-            data={"csrf_token": csrf, "reason": "spam"},
+            data={"csrf_token": csrf},
         )
         rejected_detail = client.get(f"/candidates/{candidate_id}")
         rejected_csrf = rejected_detail.context["csrf_token"]
@@ -254,3 +363,196 @@ def test_rating_field_requires_numeric_value(tmp_path: Path) -> None:
         raise AssertionError("expected ReviewError for non-numeric rating")
 
     asyncio.run(run())
+
+
+def test_batch_review_approves_and_rejects_multiple_candidates(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    approve_ids = [
+        asyncio.run(
+            seed_candidate(
+                database,
+                update_id=910 + index,
+                message_id=10 + index,
+                title=f"Approve {index}",
+            )
+        )
+        for index in range(2)
+    ]
+    reject_ids = [
+        asyncio.run(
+            seed_candidate(
+                database,
+                update_id=920 + index,
+                message_id=20 + index,
+                title=f"Reject {index}",
+            )
+        )
+        for index in range(2)
+    ]
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        queue = client.get("/candidates")
+        csrf = queue.context["csrf_token"]
+        approved = client.post(
+            "/candidates/batch-review",
+            data={
+                "csrf_token": csrf,
+                "action": "approve",
+                "candidate_ids": [str(value) for value in approve_ids],
+            },
+        )
+        assert approved.status_code == 303
+        rejected = client.post(
+            "/candidates/batch-review",
+            data={
+                "csrf_token": csrf,
+                "action": "reject",
+                "candidate_ids": [str(value) for value in reject_ids],
+            },
+        )
+        assert rejected.status_code == 303
+
+    for candidate_id in approve_ids:
+        jobs = asyncio.run(
+            DownloadService(
+                database, settings.work_path
+            ).list_jobs_for_candidate(candidate_id)
+        )
+        assert len(jobs) == 1
+    for candidate_id in reject_ids:
+        candidate = asyncio.run(database.get_candidate(candidate_id))
+        assert candidate is not None
+        assert candidate.status == "REJECTED"
+
+
+def test_review_queue_fetches_and_caches_exhentai_metadata(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(
+        seed_candidate(
+            database,
+            update_id=930,
+            message_id=30,
+            title="Gallery Candidate",
+            gallery_ref="https://exhentai.org/g/4116328/c722b9009c/",
+        )
+    )
+    requests = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "gmetadata": [
+                    {
+                        "gid": 4116328,
+                        "token": "c722b9009c",
+                        "title": "Gallery Candidate",
+                        "category": "Doujinshi",
+                        "uploader": "tester",
+                        "filecount": "12",
+                        "rating": "4.5",
+                        "tags": [
+                            "artist:kamisiro ryu",
+                            "language:chinese",
+                            "female:big breasts",
+                        ],
+                    }
+                ]
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings,
+            exhentai_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        authenticate(client, settings)
+        first = client.get("/candidates")
+        assert first.status_code == 200
+        assert "kamisiro ryu" in first.text
+        assert "Doujinshi" in first.text
+        assert "female:big breasts" in first.text
+        second = client.get("/candidates")
+        assert second.status_code == 200
+
+    assert requests == 1
+
+
+def test_review_views_show_original_and_chinese_tag_rows(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_candidate(database))
+    persist_bilingual_tags(database, candidate_id)
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        queue = client.get("/candidates")
+        assert queue.status_code == 200
+        assert queue.text.index("female:big breasts") < queue.text.index("巨乳")
+        assert '<b>原始</b>' in queue.text
+        assert '<b>中文</b>' in queue.text
+
+        detail = client.get(f"/candidates/{candidate_id}")
+        assert detail.status_code == 200
+        assert [
+            entry.field_name for entry in detail.context["metadata_entries"][-2:]
+        ] == ["TagsRaw", "Tags"]
+        assert all(
+            entry.field_name != "TagsRaw"
+            for entry in detail.context["raw_metadata_entries"]
+        )
+        assert 'class="metadata-value metadata-tags"' in detail.text
+
+
+def test_processing_and_failed_dashboard_queues_filter_candidates(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    processing_id = asyncio.run(
+        seed_candidate(
+            database,
+            update_id=940,
+            message_id=40,
+            title="Processing Candidate",
+        )
+    )
+    failed_id = asyncio.run(
+        seed_candidate(
+            database,
+            update_id=941,
+            message_id=41,
+            title="Failed Candidate",
+        )
+    )
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'PROCESSING' WHERE id = ?",
+            (processing_id,),
+        )
+        connection.execute(
+            "UPDATE candidates SET status = 'FAILED' WHERE id = ?",
+            (failed_id,),
+        )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        dashboard = client.get("/")
+        assert "/candidates/processing" in dashboard.text
+        assert "/candidates/failed" in dashboard.text
+        processing = client.get("/candidates/processing")
+        assert "Processing Candidate" in processing.text
+        assert "Failed Candidate" not in processing.text
+        failed = client.get("/candidates/failed")
+        assert "Failed Candidate" in failed.text
+        assert "Processing Candidate" not in failed.text

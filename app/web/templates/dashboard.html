@@ -13,8 +13,8 @@
 <section class="metrics" aria-label="任务概览">
   <a class="metric" href="{{ url_for('candidate_queue') }}"><strong>{{ candidate_counts.pending_review }}</strong><span>待审核</span></a>
   <a class="metric" href="{{ url_for('needs_info_queue') }}"><strong>{{ candidate_counts.needs_info }}</strong><span>待补充</span></a>
-  <div class="metric"><strong>{{ candidate_counts.processing }}</strong><span>处理中</span></div>
-  <div class="metric metric-alert"><strong>{{ candidate_counts.failed }}</strong><span>失败</span></div>
+  <a class="metric" href="{{ url_for('processing_queue') }}"><strong>{{ candidate_counts.processing }}</strong><span>处理中</span></a>
+  <a class="metric metric-alert" href="{{ url_for('failed_queue') }}"><strong>{{ candidate_counts.failed }}</strong><span>失败</span></a>
 </section>
 
 <section class="section-block" aria-labelledby="connection-heading">

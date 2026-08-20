@@ -46,20 +46,14 @@ class ReviewService:
         )
 
     async def reject_candidate(
-        self, candidate_id: int, operator_name: str, reason: str
+        self, candidate_id: int, operator_name: str
     ) -> None:
-        reason = reason.strip()
-        if not reason:
-            raise ReviewError(
-                "REVIEW_REASON_REQUIRED",
-                "Reject reason is required",
-            )
         await self._apply_status_transition(
             candidate_id,
             operator_name,
             REVIEW_REJECT,
             STATUS_REJECTED,
-            reason,
+            None,
         )
 
     async def request_revision(

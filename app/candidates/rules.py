@@ -41,7 +41,9 @@ def evaluate_metadata_rules(
     source: "TelegramSourceConfig",
     metadata: "dict[str, str]",
 ) -> "RuleDecision":
-    tags_raw = metadata.get("Tags", "")
+    tags_raw = ",".join(
+        (metadata.get("TagsRaw", ""), metadata.get("Tags", ""))
+    )
     candidate_tags = {
         tag.strip().lower()
         for tag in tags_raw.replace("\n", ",").split(",")

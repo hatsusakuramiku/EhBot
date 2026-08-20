@@ -39,7 +39,8 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(source_messages)")
         }
 
-    assert migration_count == 7
+    assert migration_count == 8
+    assert "auto_approval_rules" in tables
     assert journal_mode == "wal"
     assert {
         "telegram_accounts",

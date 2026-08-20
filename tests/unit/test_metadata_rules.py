@@ -39,6 +39,15 @@ def test_required_tag_present_accepts() -> None:
     assert decision.result == "ACCEPT"
 
 
+def test_required_tag_can_match_original_tag_row() -> None:
+    source = _source(required_tags=("female:big breasts",))
+    decision = evaluate_metadata_rules(
+        source,
+        {"TagsRaw": "female:big breasts", "Tags": "巨乳"},
+    )
+    assert decision.result == "ACCEPT"
+
+
 def test_forbidden_tag_ignores() -> None:
     source = _source(forbidden_tags=("male:only",))
     decision = evaluate_metadata_rules(

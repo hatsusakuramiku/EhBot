@@ -64,28 +64,28 @@ RAW_METADATA_FIELDS: tuple[str, ...] = (
 
 # Display labels for the review UI, which is otherwise entirely Chinese.
 FIELD_LABELS: dict[str, str] = {
-    "Title": "??",
-    "JapaneseTitle": "????",
-    "Artist": "??",
-    "Group": "??",
-    "Parody": "??",
-    "Character": "??",
-    "Language": "??",
-    "Category": "??",
-    "Tags": "??",
-    "Rating": "??",
-    "Pages": "??",
-    "Uploader": "???",
-    "Description": "??",
-    "FileSize": "????",
-    "Web": "????",
-    "TagsRaw": "??????",
-    "ArtistRaw": "??????",
-    "GroupRaw": "??????",
-    "ParodyRaw": "??????",
-    "CharacterRaw": "??????",
-    "LanguageRaw": "??????",
-    "CategoryRaw": "??????",
+    "Title": "标题",
+    "JapaneseTitle": "日文标题",
+    "Artist": "作者",
+    "Group": "社团",
+    "Parody": "原作",
+    "Character": "角色",
+    "Language": "语言",
+    "Category": "分类",
+    "Tags": "中文标签",
+    "Rating": "评分",
+    "Pages": "页数",
+    "Uploader": "上传者",
+    "Description": "简介",
+    "FileSize": "文件大小",
+    "Web": "来源网址",
+    "TagsRaw": "原始标签",
+    "ArtistRaw": "原始作者",
+    "GroupRaw": "原始社团",
+    "ParodyRaw": "原始原作",
+    "CharacterRaw": "原始角色",
+    "LanguageRaw": "原始语言",
+    "CategoryRaw": "原始分类",
 }
 
 
@@ -101,11 +101,23 @@ def split_metadata_entries(entries):
     English values in a secondary list, so a gallery with both does not
     render two interleaved copies of every field.
     """
-    primary = tuple(
-        entry for entry in entries if entry.field_name not in RAW_METADATA_FIELDS
+    tag_entries = tuple(
+        entry
+        for field_name in ("TagsRaw", "Tags")
+        for entry in entries
+        if entry.field_name == field_name
     )
+    primary = tuple(
+        entry
+        for entry in entries
+        if entry.field_name not in RAW_METADATA_FIELDS
+        and entry.field_name != "Tags"
+    ) + tag_entries
     raw = tuple(
-        entry for entry in entries if entry.field_name in RAW_METADATA_FIELDS
+        entry
+        for entry in entries
+        if entry.field_name in RAW_METADATA_FIELDS
+        and entry.field_name != "TagsRaw"
     )
     return primary, raw
 

@@ -410,3 +410,151 @@
 - Archive hardening (plan sections 8.8, 17.2, 21.9) is still missing: `stream_zip_to_cbz` passes member names straight through, with no path-traversal, zip-bomb, or magic-number checks.
 - `app/candidates/reference.py` parses the operator's Telegram reference format but has no tests yet.
 - Source discovery still cannot enumerate the Bot's channels; the Bot API has no such method, so `my_chat_member` handling remains the only viable path and is not implemented.
+
+## Implementation Session: Review And Download Queue Workflow (2026-08-20)
+
+### Scope
+- **Status:** in progress
+- Fix the Processing and Failed download status filters.
+- Replace single-item reason-based review with reasonless batch approve/reject actions.
+- Automatically enqueue approved candidates for download using the existing persistent job service.
+- Enrich review candidates from Telegram/ExHentai metadata and expose the useful fields in the queue.
+- Produce, but do not implement, a proposal for user-authored automatic approval conditions.
+
+### Verification Targets
+- Processing and Failed controls return only their corresponding download jobs and preserve the active state in the UI.
+- One request can approve or reject multiple selected candidates without requiring a reason.
+- Every successfully approved downloadable candidate has exactly one queued download job; repeated approval does not duplicate it.
+- Review queue rows expose title, author, tags, and available supporting metadata after enrichment.
+- Focused tests and the full regression suite pass.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | `CreateProcessAsUserW failed: 1920` while starting parallel PowerShell reads | 1 | Switched to sequential commands with `login=false` |
+| 2026-08-20 | The same process-start error recurred during memory registry lookup | 2 | Stopped retrying the same lookup; repository records are the source of truth for this task |
+| 2026-08-20 | `app/candidates/reference.py` mentioned by an older progress entry does not exist | 1 | Verified it is absent from both the filesystem and CodeGraph; continue with the tracked Telegram parser |
+| 2026-08-20 | A line-range `Get-Content` command hit `CreateProcessAsUserW failed: 1920` again | 3 | Used one full raw read after process creation recovered; no code command was repeated |
+| 2026-08-20 | A targeted development-plan search hit the same process-start failure | 4 | Stopped the search; CodeGraph already proved the current executable code has no candidate-status synchronization |
+| 2026-08-20 | Migration-directory listing hit the intermittent process-start failure | 5 | Deferred the nonessential listing; schema behavior is covered through current database methods and tests |
+| 2026-08-20 | Another line-range database read hit the intermittent process-start failure | 6 | Used CodeGraph's exact-symbol query to obtain the complete method body |
+| 2026-08-20 | Both direct-venv and `uv run` compile checks could not start because PowerShell returned error 1920 | 7 | Paused command execution and continued with deterministic test updates; verification will be retried after the runner recovers |
+| 2026-08-20 | `git diff --check` found whitespace on two blank test lines | 1 | Collapsed the duplicate blank lines and scheduled a repeat check |
+| 2026-08-20 | Browser-QA server used `app.server:app`, but that module has no ASGI `app` attribute | 1 | Corrected the local launch entry to `app.main:app` |
+
+### Workspace State
+- `.gitignore` was already modified before this session; preserve it and do not include it in this implementation.
+
+### Discovery
+- **Status:** in progress
+- CodeGraph traced the current review routes, database transition, download enqueue, and worker claim path.
+- Confirmed approval currently changes only candidate status; automatic enqueue is absent.
+- Confirmed existing Telegram enqueue is idempotent and requires an approved candidate.
+- Confirmed review queue loading does not include stored metadata.
+- Corrected the initial queue assumption: dashboard Processing/Failed are candidate-state counters, so the fix belongs in candidate queue routing rather than download-job filtering.
+
+### Implementation
+- **Status:** in progress
+- Extended candidate queue rows with author, tags, category, and language metadata.
+- Added best-effort batch ExHentai metadata enrichment for the pending review page.
+- Added reasonless rejection and shared single/batch approve-and-enqueue orchestration.
+- Added ExHentai pending jobs and provider-specific worker claiming.
+- Synchronized download jobs to candidate `PROCESSING`, `FAILED`, and `DOWNLOADED` states.
+- Added Processing/Failed candidate routes and linked dashboard metrics.
+- Reworked the review queue for checkbox selection and batch actions; simplified detail approval/rejection controls.
+- Added `AUTO_APPROVAL_PROPOSAL.md`; no automatic-approval runtime code or schema was added.
+
+### Verification
+- **Status:** automated verification complete; in-app visual verification blocked
+- Python compile check passed for `app` and `tests`.
+- Focused suite passed after adding source-selection and worker-state cases: `tests/integration/test_review_actions.py` plus `tests/integration/test_downloads.py` = 18 passed.
+- Pytest emitted a non-failing Windows ACL warning while cleaning an older temporary `data/private` directory; no current test failed.
+- Added direct worker assertions for `FAILED` and `DOWNLOADED` candidate-state synchronization.
+- Full regression suite passed: 154 tests.
+- `git diff --check` still reports two logically empty lines in `test_review_actions.py`; direct character inspection shows both lines have length zero, so the remaining issue is mixed newline encoding rather than spaces in source text.
+- Browser QA will use an isolated `work/browser-qa` data/library/work tree with tag translation disabled, leaving the operator's real `data` directory and credentials untouched.
+- Isolated QA server is healthy at `http://127.0.0.1:8010/healthz`.
+- In-app Browser visual QA is blocked by the plugin's trusted-code-path rejection for `browser-service.mjs`. The required troubleshooting service was unavailable because runtime initialization failed before `agent.documentation` existed. No alternate browser-control surface was used.
+- `git diff --check` passes; only the repository's expected `core.autocrlf` LF-to-CRLF notices remain.
+- User-owned `.gitignore` changes remain untouched.
+- Final post-review verification passed again: 18 focused tests and all 154 tests.
+- Final `git diff --check` passes; LF-to-CRLF notices are informational and match the repository's Windows Git configuration.
+- Final isolated QA server checks: `/healthz` 200, `/readyz` 200, and the private bootstrap password file exists without its contents being logged.
+- Final workspace audit shows only the implementation/record files plus the user's pre-existing `.gitignore` modification; `work/browser-qa` remains ignored.
+
+## Bugfix Session: Metadata Labels And Bilingual Tags (2026-08-20)
+
+### Scope
+- **Status:** diagnosis in progress
+- Replace question-mark field labels with real Chinese labels.
+- Separate complete original tags from successfully matched Chinese tags.
+- Show both as tag rows and include both in ComicInfo tag output.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | Parallel memory/context lookup hit `CreateProcessAsUserW failed: 1920` | 1 | Switched to CodeGraph for the indexed source path |
+| 2026-08-20 | Serial `CONTEXT.md` / ADR lookup hit the same runner error | 2 | Stopped retrying; no context file is required to build the focused regression loop |
+| 2026-08-20 | Memory registry lookup again hit `CreateProcessAsUserW failed: 1920` during session recovery | 3 | Stopped the lookup and used current repository records plus CodeGraph evidence |
+
+### Current Evidence
+- `FIELD_LABELS` contains literal `?` values on disk.
+- The tag enrichment seam is `enrich_metadata()` and already has unit-test coverage in `tests/unit/test_tagdb.py`.
+- Preserve `TagTranslator.translate_tags()` compatibility; filter successful `translate_tag()` results only at the enrichment boundary.
+- `TagsRaw` must be promoted out of the collapsed raw-field section and added to the queue projection as `raw_tags`.
+- ComicInfo currently receives only `Tags`; conversion input must merge `TagsRaw` then `Tags` with stable de-duplication.
+
+### Reproduction
+- **Status:** complete
+- Added `tests/unit/test_review_models.py` with exact Chinese-label expectations.
+- Replaced the old “unknown tags fall back into translated tags” enrichment assertion with the requested split contract.
+- Focused command failed deterministically with exactly two failures: question-mark labels and one unmapped raw tag leaking into the Chinese list.
+
+### Implementation
+- **Status:** complete
+- Restored every metadata display label to the expected Chinese text without changing field keys.
+- `enrich_metadata()` now preserves all upstream values in `TagsRaw` and writes only successful translation matches to `Tags`; the shared translator fallback behavior remains unchanged.
+- Promoted `TagsRaw` into the visible metadata section, added `raw_tags` to candidate queue summaries, and rendered original then Chinese values as separate tag-chip rows.
+- Metadata rules and ComicInfo conversion now combine `TagsRaw` and `Tags`; ComicInfo uses stable order and removes duplicates.
+
+### Verification
+- **Status:** automated verification complete; screenshot QA blocked
+- Original red-capable command is green: 21 tests passed.
+- Expanded Phase 8 suite is green: 56 tests passed across review models, tag translation, metadata rules, conversion, and review Web integration.
+- Full regression suite is green: 159 tests passed.
+- `git diff --check` passed; only the repository's expected LF-to-CRLF notices were emitted.
+- Started the current code against isolated `work/browser-qa` data at `http://127.0.0.1:8011/`; `/healthz` returned 200.
+- In-app Browser screenshot QA remains unavailable because `browser-service.mjs` fails the plugin trusted-code-path check and the required `agent.documentation` troubleshooting surface did not initialize. No alternate browser controller was used.
+- The user-owned `.gitignore` modification remains untouched.
+
+## Implementation Session: Automatic Approval Rules (2026-08-20)
+
+### Scope
+- **Status:** discovery in progress
+- Implement the user-approved `AUTO_APPROVAL_PROPOSAL.md` with persisted AST rules, safe evaluation, preview, priority ordering, audit records, and reuse of the current approval/download queue path.
+
+### Confirmed Contract
+- Rule text is an auditable DSL snapshot; the server evaluates only structured JSON AST and never calls `eval` or composes SQL from conditions.
+- `{TAG}` combines `TagsRaw` and `Tags`, normalised and de-duplicated.
+- Only auto-approval is supported. Invalid rules, missing data, unavailable download sources, and no-match outcomes remain in the manual queue.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-20 | `rg --files` process creation returned `CreateProcessAsUserW failed: 1920` | 1 | Switched to single-file reads and CodeGraph symbol queries; no source command was repeated |
+| 2026-08-20 | Full pytest found the migration-count assertion still expected 7 migrations | 1 | Updated the existing migration contract to 8 and asserted the new `auto_approval_rules` table |
+| 2026-08-20 | First auto-approval audit write raised `NameError` from misplaced manual-metadata audit code | 1 | Restored the existing audit write to `_set_manual_metadata_sync` and kept `record_review_action` independent |
+
+### Implementation
+- **Status:** complete
+- Added migration `008_auto_approval_rules.sql` and persisted rule names, enabled state, priority, version, validated AST, and server-rendered DSL snapshots.
+- Added safe AST evaluation for boolean groups, text/numeric/collection/existence operations, and restricted `%`/`_` `LIKE`; no SQL, Python, regex input, or `eval` is accepted.
+- Added the authenticated `/auto-approval-rules` page with a condition builder, live DSL preview, rule enable/disable, and non-mutating match preview.
+- Pending-review queue enrichment now evaluates enabled rules by ascending priority and applies only the first matching rule through the existing approval/download enqueue path.
+- `AUTO_APPROVE` audit actions store rule ID/version/DSL/AST, evaluated conditions, effective metadata snapshots, and resulting download-job IDs.
+
+### Verification
+- **Status:** complete
+- Focused AST and workflow tests passed: 17 tests.
+- Full regression suite passed.
+- `git diff --check` passed; only the repository's existing LF-to-CRLF notices remain.

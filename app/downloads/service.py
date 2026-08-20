@@ -15,6 +15,7 @@ from app.downloads.models import (
     DOWNLOAD_STATE_DOWNLOADING,
     DOWNLOAD_STATE_FAILED,
     DOWNLOAD_STATE_PENDING,
+    PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
     DownloadEnqueueResult,
     DownloadJobSummary,
@@ -35,10 +36,12 @@ class DownloadService:
         database: Database,
         work_path: Path,
         telegram_client_factory=None,
+        exhentai_download=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
+        self._exhentai_download = exhentai_download
         self._worker_task: asyncio.Task[None] | None = None
 
     async def enqueue_telegram_download(
@@ -64,6 +67,16 @@ class DownloadService:
             PROVIDER_TELEGRAM,
             idempotency_key,
             json.dumps(details, separators=(",", ":")),
+        )
+
+    async def enqueue_exhentai_download(
+        self, candidate_id: int
+    ) -> DownloadEnqueueResult:
+        return await self._enqueue(
+            candidate_id,
+            PROVIDER_EXHENTAI,
+            f"exhentai:{candidate_id}",
+            "{}",
         )
 
     async def _enqueue(
@@ -236,8 +249,13 @@ class DownloadService:
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
-                "WHERE state = ? ORDER BY id LIMIT 1",
-                (DOWNLOAD_STATE_PENDING,),
+                "WHERE state = ? AND provider IN (?, ?) "
+                "ORDER BY id LIMIT 1",
+                (
+                    DOWNLOAD_STATE_PENDING,
+                    PROVIDER_TELEGRAM,
+                    PROVIDER_EXHENTAI,
+                ),
             ).fetchone()
             if row is None:
                 return None
@@ -249,6 +267,12 @@ class DownloadService:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (DOWNLOAD_STATE_DOWNLOADING, int(row[0])),
             )
+            connection.execute(
+                "UPDATE candidates SET status = 'PROCESSING', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (int(row[1]),),
+            )
             return {
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
@@ -259,6 +283,29 @@ class DownloadService:
             }
 
     async def _handle_job(self, job: dict) -> None:
+        if job["provider"] == PROVIDER_EXHENTAI:
+            if self._exhentai_download is None:
+                await asyncio.to_thread(
+                    self._mark_job_failed_sync,
+                    job["job_id"],
+                    "EXHENTAI_NOT_CONFIG",
+                    "ExHentai 下载服务未配置",
+                )
+                return
+            try:
+                await self._exhentai_download(job["candidate_id"])
+            except Exception as exc:  # noqa: BLE001 - provider boundary
+                await asyncio.to_thread(
+                    self._mark_job_failed_sync,
+                    job["job_id"],
+                    str(getattr(exc, "code", "EXHENTAI_DOWNLOAD_FAILED")),
+                    str(getattr(exc, "public_message", exc)),
+                )
+                return
+            await asyncio.to_thread(
+                self._mark_job_completed_sync, job["job_id"]
+            )
+            return
         if job["provider"] != PROVIDER_TELEGRAM:
             await asyncio.to_thread(
                 self._mark_job_failed_sync,
@@ -324,6 +371,13 @@ class DownloadService:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (DOWNLOAD_STATE_COMPLETED, job_id),
             )
+            connection.execute(
+                "UPDATE candidates SET status = 'DOWNLOADED', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = (SELECT candidate_id FROM download_jobs "
+                "WHERE id = ?)",
+                (job_id,),
+            )
 
     def _record_artifact_sync(
         self,
@@ -365,6 +419,13 @@ class DownloadService:
                 "lease_expires_at = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (DOWNLOAD_STATE_FAILED, code, message, job_id),
+            )
+            connection.execute(
+                "UPDATE candidates SET status = 'FAILED', "
+                "filter_reason = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = (SELECT candidate_id FROM download_jobs "
+                "WHERE id = ?)",
+                (message, job_id),
             )
 
 
