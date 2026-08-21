@@ -156,6 +156,10 @@ qBittorrent 的地址与凭据在「归档设置」页登记，凭据按现有�
 
 ## 6. Telegraph 预览页兜底
 
+> 本节只给链路视角的要点。TELEGRAPH 一环的**细化设计见 `TELEGRAPH_PREVIEW_PROPOSAL.md`**
+> （模块划分、SSRF 门禁细则、错误码、配置项、测试清单）。该文件的第 7 节路由表与第 9 节迁移文件名
+> 已被本文件取代，那两处在原文中就地标注。
+
 ### 6.1 流水线复用
 
 `ConversionService._enqueue_sync` 取的是「最近一个 `COMPLETED` 下载任务的 `ARCHIVE` artifact」。因此预览页来源只需产出 ZIP 并登记 artifact，其后的安全校验、CBZ 打包、ComicInfo 注入与原子发布**完全复用**（`zipfile-default` profile 本就是流式 `ZIP_STORED` 转写）。
