@@ -1,10 +1,10 @@
-# Task Plan: EhBot Development Plan
+﻿# Task Plan: EhBot Development Plan
 
 ## Goal
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 13 (download queue controls and configurable paths) complete; phase 14 (download source chain: EH torrent original archives with a Telegraph preview fallback) is planned and its design is recorded in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials is still outstanding
+Implementation phase 14 (download source chain: EH torrent original archives with a Telegraph preview fallback) is code complete on all four levels; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials and a real-network pass against a live qBittorrent are still outstanding
 
 ## Phases
 
@@ -296,17 +296,27 @@ Implementation phase 13 (download queue controls and configurable paths) complet
 - Still outstanding from earlier phases: the full `docker compose up` acceptance run with real credentials, the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
 
 ### Implementation Phase 14: Download Source Chain
-- [ ] Extract preview page URLs from `text_link` entities, persist `preview_url`, and accept preview-only messages as candidates
-- [ ] Persist `torrent_count` and `torrent_hash` from the gdata response so routing needs no extra request
-- [ ] Add `app/torrent/`: torrent selection, `.torrent` retrieval, local infohash verification, and a qBittorrent WebAPI adapter
-- [ ] Add the `WAITING_TORRENT` job state with a poller that reports progress, seeds and stall time without auto-failing
-- [ ] Take delivery by hard-linking or copying out of the seeding directory, never moving it
-- [ ] Add `app/telegraph/`: page client, URL guard, bounded image fetcher, and ZIP packer
-- [ ] Add the `EH_TORRENT` and `TELEGRAPH` providers and stop the worker from hard-coding its provider list
-- [ ] Route approvals through `TELEGRAM` → `EH_TORRENT` → `TELEGRAPH` and demote ExHentai Archive Download to a manual button
-- [ ] Park a preview page-count mismatch in `NEEDS_INFO` instead of publishing a partial book
-- [ ] Record source-grade provenance in `details_json` and ComicInfo `ScanInformation`
-- **Status:** planned; design recorded in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`
+- [x] Extract preview page URLs from `text_link` entities, persist `preview_url`, and accept preview-only messages as candidates
+- [x] Persist `torrent_count` and `torrent_hash` from the gdata response so routing needs no extra request
+- [x] Add `app/torrent/`: torrent selection, `.torrent` retrieval, local infohash verification, and a qBittorrent WebAPI adapter
+- [x] Add the `WAITING_TORRENT` job state with a poller that reports progress, seeds and stall time without auto-failing
+- [x] Take delivery by hard-linking or copying out of the seeding directory, never moving it
+- [x] Add the qBittorrent settings block with an encrypted password, two save paths and a connectivity test
+- [x] Offer manual source switching on a stalled torrent rather than degrading automatically
+- [x] Add `app/telegraph/`: page client, URL guard, bounded image fetcher, and ZIP packer
+- [x] Add the `TELEGRAPH` and `EH_TORRENT` providers and stop the worker from hard-coding its provider list
+- [x] Route approvals through `TELEGRAM` → `EH_TORRENT` → `TELEGRAPH` and demote ExHentai Archive Download to a manual button
+- [x] Park a preview page-count mismatch in `NEEDS_INFO` instead of publishing a partial book
+- [x] Record source-grade provenance in `details_json` and ComicInfo `ScanInformation`
+- **Status:** code complete. The live chain is `TELEGRAM → EH_TORRENT → TELEGRAPH`, with ExHentai Archive Download as a manual button only. 392 tests pass (66 new for the torrent branch). Design in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`; only real-network verification against a live qBittorrent remains.
+
+## Phase 14 Delivered Behavior (TELEGRAPH branch)
+- `app/telegraph/` holds `models.py`, `guard.py` (scheme, literal address, DNS-resolved address, per-hop redirect checks), `client.py` (getPage API first, HTML fallback, document-order dedupe, `/embed/` skipped, `/file/` completion), `fetcher.py` (bounded concurrency, per-image retry with a Telegraph referer, magic-number check, zero-padded names) and `packer.py` (`ZIP_STORED`, `.part`-then-rename; `pack_directory` exists for the torrent branch to reuse).
+- `TelegraphService.download_for_candidate()` produces a ZIP, registers it as an `ARCHIVE` artifact on a `COMPLETED` `telegraph:<candidate_id>` job, and writes a `ScanInformation` metadata row. Everything after that is the existing conversion pipeline unchanged.
+- `_route_download_source()` in `app/main.py` is the four-level router; it skips an attachment above the 20 MB Bot API limit instead of queueing a job that can only fail.
+- `DownloadService._claim_pending_job_sync` now expands `SUPPORTED_PROVIDERS` into its placeholder list, and the ExHentai/Telegraph branches share one `_run_delegated_provider` helper.
+- `NEEDS_INFO_DOWNLOAD_ERRORS` routes a page-count mismatch to a reviewable candidate state while the job row stays `FAILED` and retryable.
+- `build_comicinfo_xml` takes `scan_information`; `<ScanInformation>` is emitted for every source that records one.
 
 ## Phase 14 Measured Basis
 - The gdata response already carries `torrentcount` and `torrents[{hash, added, name, tsize, fsize}]`, so discovering a torrent costs no extra request and no cookie.
@@ -318,6 +328,23 @@ Implementation phase 13 (download queue controls and configurable paths) complet
 - The images are not on `telegra.ph/file/`; each channel runs its own Telegram file proxy (`image.dangernsfw.win`, `pic.850123.xyz`) behind Cloudflare, and both require a `User-Agent` and a `Referer` or answer 403.
 - Preview page coverage is complete: 22/22, 15/15 and 78/78 against the ExHentai gdata `filecount` on the sampled galleries.
 - Preview quality is not: gid 1655718 is 145,185,851 B over 15 pages at the source and 7,895,214 B over the same 15 pages on the preview page, normalized to 1280 px wide. The preview route is reading-grade, roughly 5–10 % of the original bytes.
+
+## Phase 14 Delivered Behavior (EH_TORRENT branch)
+- `app/torrent/` holds `models.py`, `bencode.py` (strict decoder so a canonical round-trip yields the infohash a client computes), `fetcher.py` (`gallerytorrents.php` link parsed off the page, never hard-coded, infohash verified before pushing), `client.py` (qBittorrent WebAPI with one silent re-login on 403), `delivery.py` (client-to-EhBot path translation, hard link then copy, never move) and `service.py` (push, poll, delivery, provenance).
+- `EH_TORRENT` is the only provider whose transfer runs outside this process, so `DownloadService._push_torrent_job` parks it in `WAITING_TORRENT` and releases the concurrency slot; `TorrentService.poll_once` advances it.
+- Restart recovery needed no separate path: the poller reads parked jobs from the database each pass, so a new process re-attaches by hash.
+- A stall is never resolved automatically. `DownloadService.switch_source` is the operator's explicit action, and it removes the torrent from the client before queueing the replacement.
+- qBittorrent settings live in `archive_settings` with the password in the existing vault; `save_torrent_client` verifies the EhBot-side save path is readable at save time.
+- The client adapter tolerates both WebAPI generations, because a real instance disagreed with the fakes on two points: login may answer `204` rather than `200 Ok.`, and `torrents/add` answers a JSON report on 2.11+ with `409 Conflict` for a hash the client already holds. A duplicate is not an error but is reported to the operator, since the pre-existing entry decides the save path and category.
+- The poller logs `torrent_poll_started` and a `torrent_progress` line per observation, so progress can be followed without opening the dashboard.
+- A `COMPLETED` torrent that is still seeding stays on the downloads dashboard with its upload speed, and `POST /downloads/{job_id}/stop-seeding` ends it without deleting files. Seeding is the one thing that outlives a finished job, so it is the one thing a finished job still shows.
+- The dashboard self-refreshes at the poll interval while anything is downloading or seeding, and not at all otherwise.
+- `torrent_auto_pack` (default **off**) hands a finished delivery straight to `ConversionService`. Enabling it requires `local_save_path` and requires that directory to be listable rather than merely present, because an unattended pack must not discover a permission problem hours later. A failed pack leaves the download `COMPLETED` and logs `TORRENT_AUTO_PACK_FAILED`.
+
+## Phase 14 Deferred Items
+- The qBittorrent side of §14 step 8 is **done**: a live `v5.2.3` / WebAPI `2.15.1` instance ran real galleries end to end, which is what exposed the login, add-body and duplicate-hash mismatches. `telegra.ph` and `gallerytorrents.php` remain fakes in the suite.
+- **Deployment step still open:** `local_save_path` is unset in the live install, so EhBot cannot read payloads the client saves on another host. Auto-pack cannot be enabled until that directory is mounted and registered.
+- Selection scoring lives in `app/exhentai/gdata.py::select_torrent` and is exercised through gdata unit tests rather than the torrent service.
 
 ## Phase 14 Assumptions And Boundaries
 - This phase reverses two approved boundaries in `DEVELOPMENT_PLAN.md` 3.2 and needs that confirmed on approval: torrents become the preferred route for oversized books, and bounded preview-page image fetching is allowed. The EH gallery itself is still never scraped page by page.

@@ -51,6 +51,12 @@ from app.review.models import (
     split_metadata_entries,
 )
 from app.review.service import ReviewError, ReviewService
+from app.downloads.models import (
+    PROVIDER_EH_TORRENT,
+    PROVIDER_EXHENTAI,
+    PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAPH,
+)
 from app.downloads.service import DownloadError, DownloadService
 from app.conversion.service import (
     ConversionError,
@@ -62,10 +68,20 @@ from app.conversion.service import (
 )
 from app.exhentai.service import ExHentaiDownloadError, ExHentaiService
 from app.exhentai.tagdb import TagTranslator
+from app.telegraph.fetcher import FetchLimits
+from app.telegraph.models import TelegraphError
+from app.telegraph.service import TelegraphService
+from app.torrent.models import TorrentError
+from app.torrent.service import TorrentService
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.secrets import SecretStore
 from app.storage.readiness import ensure_writable_directory
 
+
+
+#: Telegram Bot API `getFile` refuses anything larger, permanently. Routing
+#: past an oversized attachment is what makes the rest of the chain useful.
+TELEGRAM_FILE_LIMIT = 20 * 1024 * 1024
 
 
 async def _load_tag_translator(data_path, client):
@@ -102,6 +118,9 @@ def create_app(
     telegram_transport: httpx.AsyncBaseTransport | None = None,
     exhentai_transport: httpx.AsyncBaseTransport | None = None,
     tagdb_transport: httpx.AsyncBaseTransport | None = None,
+    telegraph_transport: httpx.AsyncBaseTransport | None = None,
+    telegraph_resolver=None,
+    torrent_client_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     configure_logging()
     app_settings = settings or Settings.from_env()
@@ -115,6 +134,8 @@ def create_app(
         telegram_client: httpx.AsyncClient | None = None
         exhentai_client: httpx.AsyncClient | None = None
         tagdb_client: httpx.AsyncClient | None = None
+        telegraph_client: httpx.AsyncClient | None = None
+        torrent_client: httpx.AsyncClient | None = None
         try:
             for path in (
                 app_settings.data_path,
@@ -171,7 +192,78 @@ def create_app(
                 app_settings.data_path,
                 default_library_path=app_settings.library_path,
                 default_work_path=app_settings.work_path,
+                default_torrent_category=app_settings.torrent_category,
+                default_torrent_keep_seeding=(
+                    app_settings.torrent_keep_seeding
+                ),
             )
+            if app_settings.telegraph_enabled:
+                # A dedicated client with no cookies or auth headers: the page
+                # images come from third-party hosts that must never see a
+                # credential belonging to this deployment.
+                telegraph_client = httpx.AsyncClient(
+                    timeout=60,
+                    follow_redirects=False,
+                    transport=telegraph_transport,
+                )
+                application.state.telegraph_service = TelegraphService(
+                    database,
+                    app_settings.work_path,
+                    http_client=telegraph_client,
+                    limits=FetchLimits(
+                        concurrency=app_settings.telegraph_concurrency,
+                        max_images=app_settings.telegraph_max_images,
+                        max_image_bytes=(
+                            app_settings.telegraph_max_image_bytes
+                        ),
+                        max_total_bytes=(
+                            app_settings.telegraph_max_total_bytes
+                        ),
+                        timeout_seconds=float(
+                            app_settings.telegraph_timeout_seconds
+                        ),
+                    ),
+                    require_filecount_match=(
+                        app_settings.telegraph_require_filecount_match
+                    ),
+                    work_path_provider=archive_settings_service.work_path,
+                    resolver=telegraph_resolver,
+                )
+            if app_settings.torrent_enabled:
+                # qBittorrent is a local service on a private network, so this
+                # client follows redirects and keeps its own SID cookie; the
+                # ExHentai client is reused for the `.torrent` fetch because
+                # that request needs the gallery Cookie.
+                torrent_client = httpx.AsyncClient(
+                    timeout=30,
+                    follow_redirects=True,
+                    transport=torrent_client_transport,
+                )
+                application.state.torrent_service = TorrentService(
+                    database,
+                    app_settings.work_path,
+                    config_provider=(
+                        archive_settings_service.torrent_client
+                    ),
+                    credentials_provider=(
+                        lambda: _build_exhentai_credentials(secret_store)
+                    ),
+                    http_client=exhentai_client,
+                    client_http_client=torrent_client,
+                    poll_seconds=float(app_settings.torrent_poll_seconds),
+                    work_path_provider=archive_settings_service.work_path,
+                    # Read off app.state per delivery: the conversion service
+                    # is constructed further down in this same scope, so the
+                    # name is not bound yet and the module-level accessor is
+                    # shadowed by that local. This also means a settings change
+                    # applies without a restart.
+                    auto_pack=(
+                        lambda candidate_id: (
+                            application.state.conversion_service
+                            .enqueue_for_candidate(candidate_id)
+                        )
+                    ),
+                )
             download_service = DownloadService(
                 database,
                 app_settings.work_path,
@@ -183,6 +275,17 @@ def create_app(
                 exhentai_download=(
                     lambda candidate_id: application.state.exhentai_service
                     .download_archive_for_candidate(candidate_id)
+                ),
+                telegraph_download=(
+                    lambda candidate_id: telegraph_service()
+                    .download_for_candidate(candidate_id)
+                ),
+                torrent_push=(
+                    lambda candidate_id: torrent_service()
+                    .push_for_candidate(candidate_id)
+                ),
+                torrent_abandon=(
+                    lambda job_id: torrent_service().abandon(job_id)
                 ),
                 work_path_provider=archive_settings_service.work_path,
             )
@@ -225,6 +328,11 @@ def create_app(
             )
             application.state.exhentai_service = exhentai_service
             await download_service.start()
+            if application.state.torrent_service is not None:
+                # Parked jobs are read from the database each pass, so this
+                # also re-attaches to whatever the client kept working on
+                # while EhBot was down.
+                await application.state.torrent_service.start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             app.state.startup_errors.append(str(exc))
             logging.getLogger(__name__).error(
@@ -241,12 +349,19 @@ def create_app(
             conversion_service = application.state.conversion_service
             if conversion_service is not None:
                 await conversion_service.stop()
+            torrent_service_instance = application.state.torrent_service
+            if torrent_service_instance is not None:
+                await torrent_service_instance.stop()
             if telegram_client is not None:
                 await telegram_client.aclose()
             if exhentai_client is not None:
                 await exhentai_client.aclose()
             if tagdb_client is not None:
                 await tagdb_client.aclose()
+            if telegraph_client is not None:
+                await telegraph_client.aclose()
+            if torrent_client is not None:
+                await torrent_client.aclose()
 
     app = FastAPI(
         title="EhBot", lifespan=lifespan, root_path=app_settings.app_root_path
@@ -258,6 +373,8 @@ def create_app(
     app.state.conversion_service = None
     app.state.archive_settings_service = None
     app.state.exhentai_service = None
+    app.state.telegraph_service = None
+    app.state.torrent_service = None
     app.state.tag_translator = None
     app.add_exception_handler(AppError, app_error_handler)
     login_attempts: dict[str, tuple[int, float]] = {}
@@ -364,6 +481,22 @@ def create_app(
             raise HTTPException(status_code=503, detail="ExHentai is unavailable")
         return service
 
+    def telegraph_service() -> TelegraphService:
+        service = app.state.telegraph_service
+        if service is None:
+            raise HTTPException(
+                status_code=503, detail="Telegraph source is unavailable"
+            )
+        return service
+
+    def torrent_service() -> TorrentService:
+        service = app.state.torrent_service
+        if service is None:
+            raise HTTPException(
+                status_code=503, detail="Torrent source is unavailable"
+            )
+        return service
+
     async def _build_exhentai_credentials(secret_store):
         cookies_json = await asyncio.to_thread(
             secret_store.read, "exhentai_cookies"
@@ -377,6 +510,47 @@ def create_app(
 
     def review_service() -> ReviewService:
         return ReviewService(database)
+
+    def _route_download_source(candidate) -> tuple[str | None, dict | None]:
+        """Pick the best available source for a candidate.
+
+        The order is quality first, cost second:
+
+        1. `TELEGRAM` — the uploader's own archive, original quality and free,
+           but Bot API `getFile` caps a single file at 20 MB.
+        2. `EH_TORRENT` — original quality and free, routed whenever gdata
+           reported a torrent and a client is configured. This is the route
+           an oversized book normally takes.
+        3. `TELEGRAPH` — the preview page, complete but re-encoded to 1280 px,
+           so roughly 5–10 % of the original bytes. Last resort.
+
+        ExHentai Archive Download is deliberately absent: it spends GP, and
+        spending a limited resource is an operator decision rather than a
+        routing default. The review page offers it as a button.
+        """
+        attachment = next(
+            (
+                item
+                for message in candidate.messages
+                for item in message.attachments
+                if item.get("type") == "archive"
+                and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
+            ),
+            None,
+        )
+        if attachment is not None:
+            return PROVIDER_TELEGRAM, attachment
+        if (
+            candidate.torrent_hash
+            and app.state.torrent_service is not None
+        ):
+            return PROVIDER_EH_TORRENT, None
+        if (
+            candidate.preview_url
+            and app.state.telegraph_service is not None
+        ):
+            return PROVIDER_TELEGRAPH, None
+        return None, None
 
     async def _approve_candidates_and_enqueue(
         candidate_ids: list[int], operator: str
@@ -393,32 +567,29 @@ def create_app(
                     "REVIEW_INVALID_TRANSITION",
                     f"候选 #{candidate_id} 当前状态不可审核",
                 )
-            attachment = next(
-                (
-                    attachment
-                    for message in candidate.messages
-                    for attachment in message.attachments
-                    if attachment.get("type") == "archive"
-                ),
-                None,
-            )
-            if attachment is not None:
-                targets.append((candidate_id, "TELEGRAM", attachment))
-            elif candidate.ex_gid is not None:
-                targets.append((candidate_id, "EXHENTAI", None))
-            else:
+            provider, attachment = _route_download_source(candidate)
+            if provider is None:
                 raise ReviewError(
                     "CANDIDATE_NOT_DOWNLOADABLE",
-                    f"候选 #{candidate_id} 没有 Telegram 压缩包或 ExHentai 引用",
+                    f"候选 #{candidate_id} 没有可用的下载来源",
                 )
+            targets.append((candidate_id, provider, attachment))
 
         job_ids: list[int] = []
         for candidate_id, provider, attachment in targets:
             await review_service().approve_candidate(candidate_id, operator)
             try:
-                if provider == "TELEGRAM":
+                if provider == PROVIDER_TELEGRAM:
                     result = await download_service().enqueue_telegram_download(
                         candidate_id, attachment or {}
+                    )
+                elif provider == PROVIDER_EH_TORRENT:
+                    result = await download_service().enqueue_torrent_download(
+                        candidate_id
+                    )
+                elif provider == PROVIDER_TELEGRAPH:
+                    result = await download_service().enqueue_telegraph_download(
+                        candidate_id
                     )
                 else:
                     result = await download_service().enqueue_exhentai_download(
@@ -731,8 +902,11 @@ def create_app(
         if summary is None:
             raise HTTPException(status_code=404, detail="Candidate not found")
         jobs = await download_service().list_jobs_for_candidate(candidate_id)
+        # Any provider that finished leaves an ARCHIVE artifact, and that is
+        # all conversion needs. Testing for TELEGRAM specifically used to hide
+        # the button for every other source.
         archive_ready = any(
-            job.provider == "TELEGRAM" and job.state == "COMPLETED"
+            job.state == "COMPLETED" and job.artifact_path
             for job in jobs
         )
         return templates.TemplateResponse(
@@ -750,6 +924,15 @@ def create_app(
                 "review_history": summary.review_history,
                 "download_jobs": jobs,
                 "archive_ready": archive_ready,
+                "preview_available": bool(
+                    candidate.preview_url
+                ) and app.state.telegraph_service is not None,
+                # The hash is what makes the route runnable; a count alone
+                # would offer a button that can only fail.
+                "torrent_available": bool(
+                    candidate.torrent_hash
+                ) and app.state.torrent_service is not None,
+                "torrent_enabled": app.state.torrent_service is not None,
                 "metadata_fields": METADATA_FIELDS,
                 "field_label": field_label,
                 "current_user": request.session.get("username", "admin"),
@@ -920,6 +1103,12 @@ def create_app(
         if redirect:
             return redirect
         active = await download_service().list_active_jobs()
+        # Torrent progress is written by a background poller, so the page has to
+        # come back for it. The refresh is armed only while something is
+        # actually moving, so an idle dashboard does not reload forever.
+        live = any(
+            job.is_waiting_for_peers or job.is_seeding for job in active
+        )
         return templates.TemplateResponse(
             request=request,
             name="downloads.html",
@@ -927,6 +1116,9 @@ def create_app(
                 "csrf_token": request.session["csrf_token"],
                 "active_jobs": active,
                 "error": error,
+                "live_refresh_seconds": (
+                    app_settings.torrent_poll_seconds if live else 0
+                ),
             },
         )
 
@@ -980,6 +1172,20 @@ def create_app(
             request, csrf_token, download_service().cancel_job, job_id
         )
 
+    @app.post("/downloads/{job_id}/stop-seeding")
+    async def stop_seeding(
+        request: Request, job_id: int, csrf_token: str = Form()
+    ):
+        """Stop sharing a finished torrent, at the operator's choice.
+
+        Seeding continues by default because the payload came from the swarm,
+        so ending it is an explicit action rather than a side effect of the
+        download finishing.
+        """
+        return await _download_action(
+            request, csrf_token, download_service().stop_seeding, job_id
+        )
+
     @app.post("/candidates/{candidate_id}/exhentai-metadata")
     async def fetch_exhentai_metadata(
         request: Request,
@@ -1020,6 +1226,82 @@ def create_app(
         return RedirectResponse(
             request.url_for("candidate_detail", candidate_id=candidate_id).path,
             status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/telegraph")
+    async def download_telegraph_preview(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        """Fetch the preview page on demand.
+
+        Queued rather than run inline: a 78-page book takes far longer than a
+        request should, and the queue already reports progress and failures.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            telegraph_service()
+            await download_service().enqueue_telegraph_download(candidate_id)
+        except (DownloadError, TelegraphError) as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/candidates/{candidate_id}/torrent")
+    async def download_torrent(
+        request: Request,
+        candidate_id: int,
+        csrf_token: str = Form(),
+    ):
+        """Queue the EH torrent route on demand.
+
+        Queued rather than run inline for the same reason as every other
+        source, plus one of its own: the transfer is the client's work and may
+        take hours, so there is nothing useful to return synchronously.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            torrent_service()
+            await download_service().enqueue_torrent_download(candidate_id)
+        except (DownloadError, TorrentError) as exc:
+            return await _render_review_error(
+                request, candidate_id, exc.public_message
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
+        )
+
+    @app.post("/downloads/{job_id}/switch-source")
+    async def switch_download_source(
+        request: Request,
+        job_id: int,
+        csrf_token: str = Form(),
+        provider: str = Form(),
+    ):
+        """Move a stalled torrent to another source at the operator's request.
+
+        A stall is never resolved automatically: dropping to preview grade or
+        spending GP are both choices the service refuses to make for someone.
+        """
+        return await _download_action(
+            request,
+            csrf_token,
+            lambda target: download_service().switch_source(
+                target, provider
+            ),
+            job_id,
         )
 
     @app.post("/candidates/{candidate_id}/convert")
@@ -1172,7 +1454,9 @@ def create_app(
         return RedirectResponse(request.url_for("sources_page").path, status_code=303)
 
     async def _archive_settings_context(
-        request: Request, error: str | None = None
+        request: Request,
+        error: str | None = None,
+        notice: str | None = None,
     ) -> dict:
         service = archive_settings_service()
         return {
@@ -1183,6 +1467,9 @@ def create_app(
             "keep_original": await service.keep_original(),
             "toolchain": await service.toolchain_status(),
             "paths": await service.paths(),
+            "torrent": await service.torrent_client_view(),
+            "torrent_enabled": app.state.torrent_service is not None,
+            "notice": notice,
             "default_paths": {
                 "library": str(app_settings.library_path),
                 "work": str(app_settings.work_path),
@@ -1191,12 +1478,17 @@ def create_app(
         }
 
     async def _render_archive_settings(
-        request: Request, error: str | None = None, status_code: int = 200
+        request: Request,
+        error: str | None = None,
+        status_code: int = 200,
+        notice: str | None = None,
     ):
         return templates.TemplateResponse(
             request=request,
             name="archive_settings.html",
-            context=await _archive_settings_context(request, error),
+            context=await _archive_settings_context(
+                request, error, notice
+            ),
             status_code=status_code,
         )
 
@@ -1227,6 +1519,54 @@ def create_app(
             )
         return RedirectResponse(
             request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/torrent")
+    async def save_torrent_client_settings(
+        request: Request, csrf_token: str = Form()
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        try:
+            await archive_settings_service().save_torrent_client(
+                {
+                    "base_url": form.get("base_url"),
+                    "username": form.get("username"),
+                    "password": form.get("password"),
+                    "category": form.get("category"),
+                    "save_path": form.get("save_path"),
+                    "local_save_path": form.get("local_save_path"),
+                    "keep_seeding": bool(form.get("keep_seeding")),
+                    "auto_pack": bool(form.get("auto_pack")),
+                }
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
+
+    @app.post("/archive-settings/torrent-test")
+    async def test_torrent_client(request: Request, csrf_token: str = Form()):
+        """Prove the stored settings reach a real client before a book needs it."""
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        try:
+            version = await torrent_service().check_connection()
+        except TorrentError as exc:
+            return await _render_archive_settings(
+                request, exc.public_message, status_code=400
+            )
+        return await _render_archive_settings(
+            request,
+            notice=f"qBittorrent \u8fde\u901a\uff0c\u7248\u672c {version}",
         )
 
     @app.post("/archive-settings/limits")

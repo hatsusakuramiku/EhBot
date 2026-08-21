@@ -188,16 +188,23 @@ def test_approve_without_download_source_keeps_candidate_pending(
             data={"csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 400
-        assert "没有 Telegram 压缩包或 ExHentai 引用" in response.text
+        # The message is source-agnostic now that four routes can supply a
+        # candidate; naming only two of them would go stale again.
+        assert "没有可用的下载来源" in response.text
 
     candidate = asyncio.run(database.get_candidate(candidate_id))
     assert candidate is not None
     assert candidate.status == "PENDING_REVIEW"
 
 
-def test_approve_exhentai_candidate_creates_exhentai_job(
+def test_a_gallery_with_a_torrent_routes_to_the_torrent(
     tmp_path: Path,
 ) -> None:
+    """An oversized book takes the free original-quality route, not GP.
+
+    Archive Download used to be the automatic fallback here. It spends GP, so
+    it is a button now and the torrent is what routing picks.
+    """
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(
@@ -207,6 +214,12 @@ def test_approve_exhentai_candidate_creates_exhentai_job(
         )
     )
     replace_candidate_with_photo(database, candidate_id)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET torrent_count = 1, torrent_hash = ? "
+            "WHERE id = ?",
+            ("4acbd66e5d0518977ece30c343eb75c4ca92b031", candidate_id),
+        )
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
@@ -223,7 +236,48 @@ def test_approve_exhentai_candidate_creates_exhentai_job(
         )
     )
     assert len(jobs) == 1
-    assert jobs[0].provider == "EXHENTAI"
+    assert jobs[0].provider == "EH_TORRENT"
+
+
+def test_archive_download_is_never_an_automatic_route(
+    tmp_path: Path,
+) -> None:
+    """A gallery with no torrent and no preview page has no automatic source.
+
+    Spending GP is an operator decision, so approval refuses rather than
+    quietly reaching for Archive Download.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(
+        seed_candidate(
+            database,
+            gallery_ref="https://exhentai.org/g/4116328/c722b9009c/",
+        )
+    )
+    replace_candidate_with_photo(database, candidate_id)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET torrent_count = 0 WHERE id = ?",
+            (candidate_id,),
+        )
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        detail = client.get(f"/candidates/{candidate_id}")
+        response = client.post(
+            f"/candidates/{candidate_id}/approve",
+            data={"csrf_token": detail.context["csrf_token"]},
+        )
+        assert response.status_code == 400
+        assert "\u6ca1\u6709\u53ef\u7528\u7684\u4e0b\u8f7d\u6765\u6e90" in response.text
+
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert jobs == ()
 
 
 def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:

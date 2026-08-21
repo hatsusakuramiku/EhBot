@@ -42,6 +42,7 @@ def build_comicinfo_xml(
     parody: str | None = None,
     character: str | None = None,
     web: str | None = None,
+    scan_information: str | None = None,
 ) -> bytes:
     root = Element("ComicInfo")
     SubElement(root, "Title").text = title
@@ -69,6 +70,9 @@ def build_comicinfo_xml(
         SubElement(root, "PageCount").text = str(page_count)
     if web:
         SubElement(root, "Web").text = web
+    # Source grade, so a reading-grade book can be found and replaced later.
+    if scan_information:
+        SubElement(root, "ScanInformation").text = scan_information
     SubElement(root, "Manga").text = "Yes"
     SubElement(root, "Added").text = datetime.now(UTC).strftime(
         "%Y-%m-%d %H:%M:%S"

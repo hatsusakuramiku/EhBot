@@ -1,4 +1,4 @@
-# Progress Log
+﻿# Progress Log
 
 ## Session: 2026-08-19
 
@@ -900,3 +900,178 @@
 - `tests/integration/test_review_actions.py:226` asserts that an attachment-less candidate auto-enqueues `EXHENTAI`. Demoting Archive Download to manual in step 5 requires deliberately changing that assertion; the reason belongs in this file when it happens.
 - `DEVELOPMENT_PLAN.md` 3.2 now carries annotations recording that this phase reverses 「不默认使用 Torrent 下载」 and partially reverses 「不默认在 Ex 归档失败后无限制逐页抓图」. Do not quietly drop those notes.
 - Preview images are **not** original quality (1280 px, 5–10 % of the original bytes). The chain order exists for that reason; do not promote `TELEGRAPH` above `EH_TORRENT` for convenience.
+
+## Implementation Session: Download Source Chain, Step 3 (2026-08-21)
+
+### Scope
+- **Status:** complete for the TELEGRAPH branch — step 3 (and, out of order, steps 5–7 for that branch) of `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` §14.
+- The preview-page route now works end to end: an approved candidate with a `telegra.ph` link produces a ZIP, an `ARCHIVE` artifact, and a published CBZ carrying its source grade.
+- **The torrent branch (step 4) is untouched.** The live chain is therefore `TELEGRAM → TELEGRAPH → EXHENTAI`, with `EH_TORRENT` still to be inserted between the first two.
+
+### Handover Map
+| Area | Entry point | Note |
+|------|-------------|------|
+| The plan of record | `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` §14 | Step 4 (`app/torrent/`) is what remains |
+| TELEGRAPH detail design | `TELEGRAPH_PREVIEW_PROPOSAL.md` | Implemented as written, including the error-code table |
+| Page reading | `app/telegraph/client.py` | `getPage` API first, HTML fallback; document-order dedupe, `/embed/` skipped, `/file/` completion |
+| Address gate | `app/telegraph/guard.py` | Scheme, literal address, DNS-resolved address, per-hop redirect recheck; `resolver` is injectable so tests never touch DNS |
+| Image retrieval | `app/telegraph/fetcher.py` | `FetchLimits`, bounded concurrency, referer retry, magic-number check, zero-padded names |
+| Packing | `app/telegraph/packer.py` | `pack_images` for this route; **`pack_directory` is already there for the torrent branch to reuse** |
+| Orchestration | `app/telegraph/service.py` | Page-count gate, artifact registration, `ScanInformation` provenance |
+| The router | `app/main.py::_route_download_source` | The one place that decides a provider; add `EH_TORRENT` here |
+| Provider list | `app/downloads/models.py::SUPPORTED_PROVIDERS` | The claim query expands this now; adding a provider anywhere else silently strands its jobs |
+| Needs-info routing | `app/downloads/models.py::NEEDS_INFO_DOWNLOAD_ERRORS` | Failures that need operator input, not a retry loop |
+| Tests | `tests/unit/test_telegraph.py`, `tests/integration/test_telegraph_workflow.py` | 37 + 12 cases |
+
+### Implementation
+- **The archive pipeline was reused with zero changes**, as the proposal predicted: the service registers an `ARCHIVE` artifact on a `COMPLETED` job, and `ConversionService` picks it up like any other download. `test_the_preview_archive_converts_to_a_cbz_with_source_grade` proves the whole path including `<ScanInformation>` in the published CBZ.
+- **The router now skips an oversized attachment instead of failing on it.** Previously any archive attachment queued `TELEGRAM`, so a 138 MB book was guaranteed to die at `TELEGRAM_FILE_TOO_BIG`. `_route_download_source` compares `size_bytes` against the 20 MB Bot API limit and falls through to the preview page. This is the change that makes the whole chain worth having.
+- **`_claim_pending_job_sync` no longer hard-codes `provider IN (?, ?)`.** It expands `SUPPORTED_PROVIDERS`, so `TELEGRAPH` jobs are claimed. The previous agent flagged this as a trap; `test_the_worker_claims_a_telegraph_job` now locks it.
+- The ExHentai and Telegraph worker branches were identical apart from three strings, so they share `_run_delegated_provider`. Both providers own their own transfer and artifact registration; the worker only records the outcome.
+- **A page-count mismatch parks the candidate in `NEEDS_INFO`, not `FAILED`.** `_mark_job_failed_sync` consults `NEEDS_INFO_DOWNLOAD_ERRORS`: the job row still goes `FAILED` so the retry button applies, but the candidate stays reviewable with 「预览页只有 11/22 页」 on display. `_retry_job_sync` had to accept `NEEDS_INFO` as a resettable status, or the retry would have been refused after the operator supplied the missing link.
+- The count is checked **twice**, before fetching and after, because an image host can drop a file mid-run. Only the first check saves the bandwidth; only the second is honest.
+- **Magic numbers are checked on the response body, not on the URL.** The sampled image hosts serve WebP from extension-less paths, so `image_extension` prefers the served content type and the URL suffix is only a fallback. A body starting with `<` is rejected outright, which is what stops an SVG or an HTML error page from being packed as a page.
+- A wrong body raises immediately rather than retrying: a host serving HTML will serve HTML again. Only transport faults, non-200 responses and empty bodies are retried, and only the second attempt carries `Referer: https://telegra.ph/`. The first deliberately does not, so a host that does not need it is never told where the request came from.
+- Redirects are followed **by hand** (`follow_redirects=False` on the client) so every hop is re-checked against the address gate. Letting httpx follow them would have made the DNS check decorative.
+- The Telegraph client is a **separate `httpx.AsyncClient` with no cookies**. Third-party image hosts must never see a credential belonging to this deployment.
+- `_read_int` in `app/config.py` falls back to the default on a malformed or non-positive value instead of raising, so one typo in a limit cannot stop the service from starting.
+
+### Behaviour Changes To Know About
+- **The 「转换为 CBZ」 button was only shown for completed `TELEGRAM` jobs.** Every other provider produces the same `ARCHIVE` artifact, so ExHentai and Telegraph downloads had a hidden button. It now tests for a completed job with an artifact, regardless of provider. This was a pre-existing defect, surfaced by this work.
+- Approval no longer auto-queues `EXHENTAI` for a candidate that has a preview page; the preview page wins because Archive Download costs GP. A candidate with neither an attachment nor a preview page still routes to `EXHENTAI`.
+- `test_review_actions.py:191` asserted the old 「没有 Telegram 压缩包或 ExHentai 引用」 message. With four possible routes, naming two of them would go stale again, so the message is now 「没有可用的下载来源」 and the assertion follows it. This is the deliberate assertion change the previous agent predicted, though it landed on the error message rather than on line 226 as expected — `test_approve_exhentai_candidate_creates_exhentai_job` still passes untouched, because that candidate has no preview link and so still routes to ExHentai.
+- `FIELD_LABELS` gained `ScanInformation` → 「图源等级」, so `test_review_models.py`'s exhaustive label map was updated with it.
+- The review detail page now shows the preview URL, the torrent count when known, and up to two manual source buttons.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-21 | `apply_patch` refused every heredoc on this host: the `.bat` wrapper cannot receive a multi-line argument from PowerShell, so it always reported `The last line of the patch must be '*** End Patch'` | 3 | Abandoned the tool for this session. Files are written with `[IO.File]::WriteAllText` and edits are applied by a small throwaway Python script with `assert old in text` guards, which fails loudly instead of silently not matching. **The next agent on Windows/PowerShell should expect the same.** |
+| 2026-08-21 | Routed on `attachment["file_size"]`, which is always absent | 1 | The ingestor stores the Telegram field as `size_bytes`. Read before writing: the oversized-attachment test would have passed either way, because a missing key reads as 0 and 0 is under the limit — the bug would only have appeared in production. Fixed to `size_bytes` and the test now seeds 138,700,000 to prove the routing decision |
+| 2026-08-21 | The conversion test published nothing at first | 1 | The candidate was left in `APPROVED` while `_enqueue_sync` accepts `APPROVED` or `DOWNLOADED`; the real gap was that the service run needs the candidate in a state the worker will process. Setting `DOWNLOADED`, which is what the real worker leaves behind, made the test mirror production instead of inventing a state |
+
+### Verification
+- **Status:** complete for what is implementable offline.
+- Full suite: **326 passed** (277 before; 49 new). No skips beyond the pre-existing real-binary 7-Zip cases.
+- `tests/unit/test_telegraph.py` 37/37 on the first run; `tests/integration/test_telegraph_workflow.py` 12/12.
+- Coverage includes: document-order dedupe, `/embed/` skipping, protocol-relative and `http` sources, HTML fallback, host allowlist, eight private/loopback/ULA/IPv4-mapped address forms, redirect-into-private-space, SVG/HTML/zero-byte rejection, all three limit classes, referer retry, zero-padded naming, `ZIP_STORED` output, natural page order, entity-only preview extraction, oversized-attachment routing, small-attachment precedence, manual-button idempotency, page-count mismatch to `NEEDS_INFO`, worker claim of the new provider, and CBZ publication with `<ScanInformation>`.
+- **Not verified:** any real network. Every request in the suite is an `httpx.MockTransport`. The four real pages named in the proposal (including the 78-page book) have not been fetched from this session.
+
+### Open Items For The Next Agent
+- **Step 4 is the whole remaining phase:** `app/torrent/` (select, fetch `.torrent` via `gallerytorrents.php`, verify infohash with bencode, qBittorrent WebAPI adapter), the `WAITING_TORRENT` state and its 15-second poller, hard-link delivery, the qBittorrent block on the archive settings page, and `EH_TORRENT` in `_route_download_source`. `candidates.torrent_count` / `torrent_hash` are already populated and already displayed.
+- When `EH_TORRENT` is added, put it **between** `TELEGRAM` and `TELEGRAPH` in `_route_download_source`. Do not promote `TELEGRAPH` for convenience: preview pages are 1280 px re-encodes at 5–10 % of the original bytes.
+- `pack_directory` in `app/telegraph/packer.py` already exists for torrent delivery of a loose image directory. It refuses a directory containing any non-image rather than filtering, because a partial book is worse than a failure — decide deliberately if the torrent branch wants that.
+- Add the new provider to `SUPPORTED_PROVIDERS` and nowhere else; the claim query reads it.
+- A real-network manual pass is still owed for this branch: fetch the sampled pages and record page counts, bytes and elapsed time here, per §14 step 8.
+- The downloads dashboard still has no per-provider progress columns. They were specified for `WAITING_TORRENT`, so they belong with step 4.
+- Still outstanding from earlier phases: the full `docker compose up` acceptance run with real credentials, the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+## Implementation Session: Download Source Chain, Step 4 (2026-08-21)
+
+### Scope
+- **Status:** complete. Step 4 of `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` §14, plus the parts of steps 5–7 that belonged to the torrent branch.
+- The live chain is now the full four levels: `TELEGRAM → EH_TORRENT → TELEGRAPH`, with ExHentai Archive Download as a manual button only.
+- Phase 14 is code complete. What remains is a real-network pass, not more code.
+
+### Handover Map
+| Area | Entry point | Note |
+|------|-------------|------|
+| Selection | `app/exhentai/gdata.py::select_torrent` | Already existed; excludes `resample`, prefers `fsize` nearest `filesize`, then newest |
+| `.torrent` retrieval | `app/torrent/fetcher.py` | Link parsed off `gallerytorrents.php`, never templated; infohash verified before the client sees the file |
+| Infohash | `app/torrent/bencode.py` | Strict decoder: unsorted keys and non-canonical integers are refused, so a file that round-trips is canonical |
+| Client adapter | `app/torrent/client.py` | `add`/`info`/`delete`/`version`/`preferences`; one silent re-login on 403 |
+| Delivery | `app/torrent/delivery.py` | Client→EhBot path translation, hard link then copy, **never move** |
+| Orchestration | `app/torrent/service.py` | `push_for_candidate`, `poll_once`, `abandon`, `check_connection` |
+| Parking | `app/downloads/service.py::_push_torrent_job` | The only provider that does not finish inside a worker turn |
+| Source switching | `app/downloads/service.py::switch_source` | The operator's answer to a stall |
+| Settings | `app/archive/service.py::torrent_client` / `save_torrent_client` | Stored in `archive_settings`, password in the existing vault |
+| Tests | `tests/unit/test_torrent.py`, `tests/integration/test_torrent_workflow.py` | 41 + 22 cases |
+
+### Implementation
+- **The parked state is the whole design difference.** Every other provider finishes inside one worker turn; this one hands the transfer to qBittorrent. `_push_torrent_job` therefore records the push and moves the job to `WAITING_TORRENT`, which is deliberately absent from `ACTIVE_DOWNLOAD_STATES` so a seederless torrent does not sit on a concurrency slot for hours.
+- **Restart recovery needed no separate code path.** `poll_once` reads the parked rows out of the database on every pass, so a fresh `TorrentService` instance picks up whatever the client kept working on. `test_a_restart_reattaches_to_a_parked_torrent` builds a second service object to prove it rather than asserting on a recovery routine that does not exist.
+- **The infohash is verified before the client is told anything.** `TorrentFileFetcher.fetch` compares the locally computed hash against gdata's and raises `TORRENT_FILE_INVALID` on a mismatch, so a mis-parsed page cannot make qBittorrent start fetching the wrong torrent. `test_the_infohash_is_verified_before_anything_is_pushed` asserts `fake.added == []`.
+- **`bencode.py` is strict on purpose.** A lenient parser would accept an unsorted dictionary, re-encode it normalized, and produce a hash no client agrees with — the check would then fail on good files and the cause would be invisible. The test hashes the raw `info` slice out of the original bytes and requires the two to agree.
+- **`autoTMM=false` is load-bearing, so it is asserted on the wire.** With automatic torrent management on, a category rule overrides `savepath` and EhBot would look for the payload in a directory the client never used. `test_the_add_request_carries_the_fields_that_decide_the_save_path` checks the multipart body for `autoTMM`, `savepath`, `category`, `paused`, and for the *absence* of `root_folder`.
+- **A stall is not an error and is not auto-resolved.** `TorrentStatus.is_stalled` is `stalledDL`/`metaDL` *and* zero seeds; the poller records `stalled_since` and leaves the state alone. Dropping to preview grade or spending GP are both operator decisions, so `switch_source` is an explicit action that removes the torrent from the client and queues the replacement. `stalled_since` is stored rather than recomputed so the dashboard can show elapsed time.
+- **Delivery never moves the payload**, because a move breaks seeding. Hard link first, copy on a filesystem boundary, and the seed is asserted still present in four separate tests. A single archive is registered as-is; a directory is packed with the `pack_directory` the previous agent left in `app/telegraph/packer.py`, which keeps page order identical across providers.
+- **`abandon` swallows client failures.** Otherwise a job could not be cancelled precisely when the client is the problem, which is the moment an operator most wants to abandon it. `test_an_unreachable_client_does_not_block_cancelling` locks that.
+- The qBittorrent password reuses the archive vault and the same master key. `torrent_client()` reports an unreadable envelope as an empty password and logs a warning instead of raising: the operator then sees an auth failure they can fix, rather than a crash in a route only some candidates take.
+- `save_torrent_client` validates the EhBot-side save path **at save time**. A typo discovered three hours into a torrent is a wasted transfer.
+- `DownloadJobSummary` gained `details` plus `progress_percent` and `stalled_minutes`, so the dashboard reads provider progress without the queue growing torrent-specific columns.
+
+### Behaviour Changes To Know About
+- **`EXHENTAI` is no longer any part of automatic routing.** Previously a candidate with a gallery reference but no attachment and no preview page fell through to Archive Download. It now reports 「没有可用的下载来源」 instead of quietly spending GP. This is the boundary change the proposal asked to have confirmed (§2 decision 1).
+- **A gallery with a torrent now takes the torrent, not Archive Download**, which is the point of the phase.
+- `_route_download_source` checks that the corresponding service is actually running, so `TORRENT_ENABLED=false` or an unregistered client degrades to the preview page instead of queueing a job that can only fail.
+- The router requires `torrent_hash`, not `torrent_count > 0`: the hash is what makes the route runnable.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-21 | `apply_patch` again refused every multi-line argument from PowerShell, exactly as the previous session recorded | 3 | Same workaround: `[IO.File]::WriteAllText` for new files and a throwaway Python script with single-occurrence anchor guards for edits. **This is now confirmed twice on Windows/PowerShell; do not spend time on it a third time.** |
+| 2026-08-21 | `test_approve_exhentai_candidate_creates_exhentai_job` failed with 400 | 1 | Not a defect — this is the assertion change the proposal predicted (§13). Replaced with two tests that lock the new contract: a gallery with a torrent routes to `EH_TORRENT`, and one without any usable source refuses rather than reaching for GP |
+| 2026-08-21 | Three delivery/cancel tests read an empty hash | 1 | The fake client read `hashes` from the query string, but `torrents/delete` sends it as form data. The fake was wrong, not the adapter; it now parses the body |
+| 2026-08-21 | A bencode "malformed" case was actually valid | 1 | `d4:infod6:lengthi1eee` is a well-formed nested dict. Removed the wrong expectation and added genuinely truncated inputs instead |
+
+### Verification
+- **Status:** complete for what is implementable offline.
+- Full suite: **392 passed** (326 before; 66 new). No new skips.
+- `tests/unit/test_torrent.py` 41/41, `tests/integration/test_torrent_workflow.py` 23/23.
+- Coverage includes: canonical infohash agreement, unsorted-key and non-canonical-integer rejection, size cap, announce URL reading, page link parsing and hash-position matching, the add-request field set, 415/403/unreachable/empty-result client branches, unknown-ETA normalization, nine state mappings, path translation, hard-link delivery with the seed intact, directory packing in natural order, non-image refusal, parking, worker non-reclaim, infohash mismatch, missing torrent, unconfigured client, retryable page failure, progress recording, stall reporting and clearing, delivery digest, keep-seeding on and off, vanished hash, client error state, restart re-attachment, source switching, cancel-removes-torrent, cancel-with-dead-client, CBZ publication with `<ScanInformation>EH_TORRENT original`, the review button, settings save without echo, and save-time path validation.
+- One dashboard test deliberately runs against the application's **own** worker and poller rather than driving them from a second event loop, so the template, the settings round-trip and the two background tasks are all covered together.
+- **Not verified:** any real network. qBittorrent, `gallerytorrents.php` and the tracker are all `httpx.MockTransport` fakes.
+
+### Open Items For The Next Agent
+- **The real-network pass is the one thing this phase still owes** (§14 step 8): run gid 4108964 through a live qBittorrent end to end and gid 1655718 (`torrentcount=0`) through the preview page, and record elapsed time, bytes and seeding state here.
+- Nothing in the chain is stubbed any more, so a failure in production is a real defect rather than an unimplemented level.
+- `select_torrent` cannot rank by seeders because gdata does not publish them. If stalls turn out to be common in practice, the honest fix is to try the next-best torrent after a stall threshold, which is a product decision (currently the operator switches sources by hand).
+- Still outstanding from earlier phases: the full `docker compose up` acceptance run with real credentials, the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+## Implementation Session: Torrent Branch Live Verification (2026-08-21)
+
+### Scope
+- **Status:** complete. The real-network pass §14 step 8 owed, run against a live qBittorrent (`v5.2.3`, WebAPI `2.15.1`) behind Cloudflare, plus the three defects and two features that pass exposed.
+- The branch was code complete but had never met a real client. Every finding below is something no fake could have produced.
+
+### Defects Found Against The Real Client
+| Symptom | Root cause | Fix |
+|---------|-----------|-----|
+| Every call failed `TORRENT_CLIENT_AUTH` although the password was right | `login()` accepted only `200 Ok.`; this client answers **`204 No Content`** with the SID cookie attached | Any 2xx without the `Fails.` marker is a success. `401`/`403` stay `TORRENT_CLIENT_AUTH`; other codes became `TORRENT_CLIENT_UNREACHABLE`, because a proxy 502 is not a wrong password |
+| `TORRENT_PUSH_REJECTED` on torrents the client had in fact started | WebAPI 2.11 replaced the `Ok.` body with a JSON report; the old check treated any non-`Ok.` body as a refusal | `_check_add_body` reads the report: `added_torrent_ids` / `success_count` / `pending_count` mean accepted; only `failure_count > 0` with no successes is a refusal |
+| A re-push after restart would have failed | The modern client answers **`409 Conflict`** for a hash it already holds (older builds answer `Ok.`) | 409 returns normally — the torrent being present is all `add_torrent` promises — and now also reports *that* it was a duplicate |
+| `auto_pack` silently never ran through the real app | `conversion_service = ConversionService(...)` inside `lifespan` shadows the module-level accessor of the same name, so the lambda captured the instance and raised `'ConversionService' object is not callable` | Read `application.state.conversion_service` per delivery. **Only an end-to-end test through `create_app` could catch this**; a stubbed `auto_pack` passes happily |
+
+### Features Added
+- **Progress is observable without opening the page.** `poll_once` logs `torrent_poll_started`, and each observation logs `torrent_progress` with state, percent, seeds and speed. The poller was working the whole time but had no way to prove it, which is why it looked broken.
+- **Seeding is shown and can be ended.** `TorrentStatus` gained `upspeed`; `DownloadJobSummary` gained `is_seeding`, `upload_speed`, `torrent_state` and `was_already_in_client`. A `COMPLETED` torrent still sharing its payload **stays on the dashboard** — every other provider is finished when the job is, but this one is still spending the operator's bandwidth and disk. `POST /downloads/{id}/stop-seeding` removes the client entry and never deletes files, so the archive the library registered survives.
+- **A duplicate push is surfaced, not swallowed.** The entry doing the work was created by someone else, so its save path and category are not the ones EhBot just sent and delivery may read the wrong directory — which is exactly how one of the live jobs failed with `TORRENT_CONTENT_UNREACHABLE`.
+- **The dashboard refreshes itself** every `TORRENT_POLL_SECONDS` while anything is downloading or seeding, and not at all when the queue is idle. Progress is written by a background task, so a static page shows a stale percentage forever.
+- **Optional automatic packing, off by default.** `torrent_auto_pack` in `archive_settings`; when on, delivery hands straight to `ConversionService.enqueue_for_candidate`. Off by default because packing publishes to the library, and that should be a decision rather than a side effect of a download finishing.
+
+### Why Auto-Pack Validates The Path Twice
+Enabling it **requires** `local_save_path` (`TORRENT_LOCAL_PATH_REQUIRED`) and requires that directory to be listable, not merely to exist: `is_dir()` succeeds on a mount EhBot has no read permission for, and that is precisely the case that would strand an unattended pack hours later. A failed pack logs `TORRENT_AUTO_PACK_FAILED` and leaves the download `COMPLETED` — the artifact is registered and still convertible by hand, so reporting the download as failed would misstate what happened and hide a payload that is on disk.
+
+### Live Measurements
+- qBittorrent `v5.2.3`, WebAPI `2.15.1`, reached over HTTPS through Cloudflare; login `204`, `app/version` `200`, `app/preferences` `200`, `torrents/info` `200`, `torrents/delete` `200`, `torrents/add` `200 JSON` for a new hash and `409` for a known one, `415` for a corrupt file.
+- Two real galleries ran end to end: `9acd72c4…` (gid 4126932) reached `stalledUP` at 100 %, and `fb7af4d7…` (gid 4124317) was observed climbing 51.7 % → 70.2 % across successive polls with 1–2 seeds. A third (`811e4b9a…`) reached 92.3 % at 170 KiB/s.
+- The 15-second poller advanced parked jobs within one interval on every observation.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-21 | Container start failed `STARTUP_FAILED`: `Operation not permitted: '/app/data/private'` | 1 | Not a code defect. Windows bind mounts are v9fs owned by root while the image runs as uid 1000, so `chmod 0700` is refused. Ran the container as root locally via a gitignored `.env` (`EHBOT_UID=0`). Linux deployments are unaffected |
+| 2026-08-21 | `compose.yaml` passed no `TORRENT_*` / `TELEGRAPH_*` variables | 1 | Added all eleven passthroughs so the container matches `.env.example` |
+| 2026-08-21 | Adding `upspeed` as a required field broke ten `TorrentStatus` constructions in tests | 1 | Gave it a default and moved it after the required fields; it only matters once a download finishes |
+| 2026-08-21 | `apply_patch` refused multi-line arguments from PowerShell again | 1 | Same workaround as the previous two sessions. **Confirmed a third time; it is not worth another attempt** |
+
+### Verification
+- **Status:** complete, including real network for the client side.
+- Full suite: **409 passed** (392 before; 17 new). No new skips.
+- New coverage: `204` login accepted, `401` as auth failure, `502` as retryable, the JSON add report accepted, a failures-only report refused, `409` absorbed, duplicate flagged to the operator, polling records dashboard progress, a finished torrent stays listed while seeding, stopping the seed removes the entry but keeps the archive, only a finished torrent can be un-seeded, auto-pack off by default and switchable both ways, auto-pack refused without a local path and not left half-enabled, the switch deciding whether conversion is queued, a failed pack leaving the download completed, and auto-pack carrying a delivery into the library **through the real app** rather than a stub.
+- **Still fake in the suite:** `gallerytorrents.php` and the tracker. Those were exercised by hand against the live site during this session.
+
+### Open Items For The Next Agent
+- **`local_save_path` is still unset in the live deployment**, so delivery cannot read finished payloads: the client saves to `/download/R18lib` on another host. One live job already failed this way with `TORRENT_CONTENT_UNREACHABLE`. Mounting that directory into the container and registering the EhBot-side path is the remaining deployment step, and auto-pack cannot be enabled until it is done.
+- The two jobs left `FAILED` by the old add-body misjudgement have live torrents in the client; re-pushing is safe now that 409 is absorbed.
+- `select_torrent` still cannot rank by seeders (gdata does not publish them). Stalls remain an operator decision.
+- Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.

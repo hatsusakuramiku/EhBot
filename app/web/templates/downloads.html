@@ -5,10 +5,18 @@
   <div>
     <span class="eyebrow">下载</span>
     <h1>下载任务</h1>
-    <p>通过 Telegram Bot API 与 ExHentai 直接拉取到工作目录</p>
+    <p>Telegram 附件、EH 种子、Archive Download 与预览页四条来源共用一个队列</p>
   </div>
   <span class="queue-count">{{ active_jobs|length }} 项</span>
 </div>
+
+{% if live_refresh_seconds %}
+{# Torrent progress is written by a background poller, so a static page would
+   show a stale percentage until the operator reloaded by hand. The refresh is
+   only armed while something is actually moving. #}
+<meta http-equiv="refresh" content="{{ live_refresh_seconds }}">
+<p class="queue-hint">页面每 {{ live_refresh_seconds }} 秒自动刷新下载与做种状态</p>
+{% endif %}
 
 {% if error %}
 <p class="form-error" role="alert">{{ error }}</p>
@@ -21,6 +29,19 @@
     <span>
       <strong>#{{ job.job_id }}</strong>
       <small>{{ job.state }}</small>
+      {% if job.is_waiting_for_peers %}
+      <small>{{ job.progress_percent }}%{% if job.torrent_state %} · {{ job.torrent_state }}{% endif %} · 做种者 {{ job.details.get('num_seeds', 0) }} · ↓{{ (job.details.get('dlspeed') or 0) // 1024 }} KiB/s{% if job.details.get('eta') %} · 剩 {{ (job.details['eta'] // 60) }} 分{% endif %}</small>
+      <progress class="torrent-progress" max="100" value="{{ job.progress_percent }}"></progress>
+      {% if job.stalled_minutes is not none %}
+      <small class="error-text">无做种者，已停滞 {{ job.stalled_minutes }} 分钟</small>
+      {% endif %}
+      {% endif %}
+      {% if job.is_seeding %}
+      <small class="seeding-text">下载完成，正在做种 · ↑{{ job.upload_speed // 1024 }} KiB/s{% if job.torrent_state %} · {{ job.torrent_state }}{% endif %}</small>
+      {% endif %}
+      {% if job.was_already_in_client %}
+      <small class="notice-text">该种子已存在于 qBittorrent，未重复加种；保存目录由原有条目决定</small>
+      {% endif %}
       {% if job.error_message %}<small class="error-text">{{ job.error_message }}</small>{% endif %}
     </span>
     <span><a href="{{ url_for('candidate_detail', candidate_id=job.candidate_id) }}">候选 #{{ job.candidate_id }}</a></span>
@@ -37,6 +58,24 @@
       <form method="post" action="{{ url_for('pause_download', job_id=job.job_id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button class="secondary-button" type="submit">暂停</button>
+      </form>
+      {% endif %}
+      {% if job.is_waiting_for_peers %}
+      <form method="post" action="{{ url_for('switch_download_source', job_id=job.job_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="provider" value="TELEGRAPH">
+        <button class="quiet-button" type="submit" title="1280px 重编码，约为原档 5%–10%">改用预览图源</button>
+      </form>
+      <form method="post" action="{{ url_for('switch_download_source', job_id=job.job_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="provider" value="EXHENTAI">
+        <button class="quiet-button" type="submit" title="消耗 GP">用 Archive Download</button>
+      </form>
+      {% endif %}
+      {% if job.is_seeding %}
+      <form method="post" action="{{ url_for('stop_seeding', job_id=job.job_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="quiet-button" type="submit" title="从 qBittorrent 移除条目，不删除已归档的文件">停止做种</button>
       </form>
       {% endif %}
       {% if job.is_cancellable %}

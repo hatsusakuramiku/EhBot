@@ -79,6 +79,7 @@ FIELD_LABELS: dict[str, str] = {
     "Description": "简介",
     "FileSize": "文件大小",
     "Web": "来源网址",
+    "ScanInformation": "图源等级",
     "TagsRaw": "原始标签",
     "ArtistRaw": "原始作者",
     "GroupRaw": "原始社团",

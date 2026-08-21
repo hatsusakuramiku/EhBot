@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from app.archive.models import (
@@ -26,6 +27,7 @@ from app.archive.vault import (
 from app.db.database import Database
 from app.private_files import write_private_text
 from app.storage.readiness import ensure_writable_directory
+from app.torrent.models import TorrentClientConfig
 
 
 MASTER_KEY_NAME = "archive_password_key"
@@ -43,7 +45,32 @@ PATH_SETTING_KEYS: tuple[str, ...] = (
     SETTING_WORK_PATH,
 )
 
+#: qBittorrent connection settings. The password is the only secret here, so
+#: it goes through the same vault the archive passwords use and is never read
+#: back into the page.
+SETTING_TORRENT_URL = "torrent_client_url"
+SETTING_TORRENT_USERNAME = "torrent_client_username"
+SETTING_TORRENT_PASSWORD = "torrent_client_password"
+SETTING_TORRENT_CATEGORY = "torrent_category"
+SETTING_TORRENT_SAVE_PATH = "torrent_save_path"
+SETTING_TORRENT_LOCAL_SAVE_PATH = "torrent_local_save_path"
+SETTING_TORRENT_KEEP_SEEDING = "torrent_keep_seeding"
+SETTING_TORRENT_AUTO_PACK = "torrent_auto_pack"
+
 DEFAULT_LIBRARY_TEMPLATE = "{title}"
+
+
+def _is_readable_directory(path: Path) -> bool:
+    """Prove the directory can actually be listed, not just that it exists.
+
+    `is_dir()` succeeds on a mount EhBot has no permission to read, which is
+    exactly the case that would strand an automatic pack hours later.
+    """
+    try:
+        with os.scandir(path):
+            return True
+    except OSError:
+        return False
 
 LIMIT_KEYS: tuple[str, ...] = (
     "max_members",
@@ -71,11 +98,15 @@ class ArchiveSettingsService:
         *,
         default_library_path: Path | None = None,
         default_work_path: Path | None = None,
+        default_torrent_category: str = "ehbot",
+        default_torrent_keep_seeding: bool = True,
     ) -> None:
         self._database = database
         self._data_path = data_path
         self._default_library_path = default_library_path
         self._default_work_path = default_work_path
+        self._default_torrent_category = default_torrent_category
+        self._default_torrent_keep_seeding = default_torrent_keep_seeding
 
     @property
     def tools_path(self) -> Path:
@@ -185,6 +216,144 @@ class ArchiveSettingsService:
         if cleaned:
             await self._database.save_archive_settings(cleaned)
         return await self.paths()
+
+    async def torrent_client(self) -> TorrentClientConfig:
+        """Assemble the qBittorrent configuration, password decrypted.
+
+        A password that cannot be opened is reported as empty rather than
+        raising: the operator sees an authentication failure they can fix by
+        re-entering it, instead of a startup crash in a route that only some
+        candidates take.
+        """
+        stored = await self._database.archive_settings()
+        password = ""
+        envelope = stored.get(SETTING_TORRENT_PASSWORD, "")
+        if envelope:
+            key = await self.master_key()
+            try:
+                password = await asyncio.to_thread(
+                    decrypt_password, key, envelope
+                )
+            except VaultError:
+                logging.getLogger(__name__).warning(
+                    "torrent_client_password_unreadable",
+                    extra={"error_code": "TORRENT_CLIENT_AUTH"},
+                )
+        return TorrentClientConfig(
+            base_url=stored.get(SETTING_TORRENT_URL, ""),
+            username=stored.get(SETTING_TORRENT_USERNAME, ""),
+            password=password,
+            category=(
+                stored.get(SETTING_TORRENT_CATEGORY, "")
+                or self._default_torrent_category
+            ),
+            save_path=stored.get(SETTING_TORRENT_SAVE_PATH, ""),
+            local_save_path=stored.get(
+                SETTING_TORRENT_LOCAL_SAVE_PATH, ""
+            ),
+            keep_seeding=stored.get(
+                SETTING_TORRENT_KEEP_SEEDING,
+                "1" if self._default_torrent_keep_seeding else "0",
+            )
+            not in {"0", "false", "no"},
+            # Off unless the operator turned it on: packing publishes to the
+            # library, and doing that without being asked would bypass the
+            # review the rest of the pipeline is built around.
+            auto_pack=stored.get(SETTING_TORRENT_AUTO_PACK, "0")
+            in {"1", "true", "yes"},
+        )
+
+    async def torrent_client_view(self) -> dict[str, object]:
+        """What the settings page may display; the password never appears."""
+        config = await self.torrent_client()
+        return {
+            "base_url": config.base_url,
+            "username": config.username,
+            "category": config.category,
+            "save_path": config.save_path,
+            "local_save_path": config.local_save_path,
+            "keep_seeding": config.keep_seeding,
+            "auto_pack": config.auto_pack,
+            "configured": config.is_configured,
+            "password_set": bool(config.password),
+        }
+
+    async def save_torrent_client(self, values: dict[str, str]) -> None:
+        """Store the qBittorrent settings after validating what can be checked.
+
+        The local save path is verified to be readable now rather than at
+        download time, because a typo discovered three hours into a torrent is
+        a wasted transfer. An empty password field leaves the stored one alone
+        so saving an unrelated field does not silently clear it.
+        """
+        base_url = str(values.get("base_url") or "").strip().rstrip("/")
+        if base_url and not base_url.startswith(("http://", "https://")):
+            raise ArchiveSettingsError(
+                "TORRENT_URL_INVALID",
+                "qBittorrent \u5730\u5740\u5fc5\u987b\u4ee5 http:// "
+                "\u6216 https:// \u5f00\u5934",
+            )
+        local_save_path = str(
+            values.get("local_save_path") or ""
+        ).strip()
+        auto_pack = bool(values.get("auto_pack"))
+        if auto_pack and not local_save_path:
+            # Automatic packing reads the finished payload without an operator
+            # present, so the directory it reads from cannot be left unproven.
+            raise ArchiveSettingsError(
+                "TORRENT_LOCAL_PATH_REQUIRED",
+                "\u5f00\u542f\u4e0b\u8f7d\u540e\u81ea\u52a8\u6253\u5305"
+                "\u65f6\uff0c\u5fc5\u987b\u586b\u5199\u4fdd\u5b58\u76ee"
+                "\u5f55\uff08EhBot \u89c6\u89d2\uff09",
+            )
+        if local_save_path:
+            candidate = Path(local_save_path)
+            if not candidate.is_absolute():
+                raise ArchiveSettingsError(
+                    "PATH_NOT_ABSOLUTE",
+                    "\u4fdd\u5b58\u76ee\u5f55\u5fc5\u987b\u4f7f\u7528"
+                    "\u7edd\u5bf9\u8def\u5f84",
+                )
+            if not await asyncio.to_thread(candidate.is_dir):
+                raise ArchiveSettingsError(
+                    "TORRENT_CONTENT_UNREACHABLE",
+                    f"EhBot \u8bfb\u4e0d\u5230\u8be5\u76ee\u5f55\uff1a"
+                    f"{local_save_path}",
+                )
+            if auto_pack and not await asyncio.to_thread(
+                _is_readable_directory, candidate
+            ):
+                raise ArchiveSettingsError(
+                    "TORRENT_CONTENT_UNREACHABLE",
+                    f"\u81ea\u52a8\u6253\u5305\u9700\u8981\u8bfb\u53d6"
+                    f"\u6743\u9650\uff0cEhBot \u65e0\u6cd5\u5217\u51fa"
+                    f"\u8be5\u76ee\u5f55\uff1a{local_save_path}",
+                )
+        cleaned: dict[str, str] = {
+            SETTING_TORRENT_URL: base_url,
+            SETTING_TORRENT_USERNAME: str(
+                values.get("username") or ""
+            ).strip(),
+            SETTING_TORRENT_CATEGORY: str(
+                values.get("category") or ""
+            ).strip()
+            or self._default_torrent_category,
+            SETTING_TORRENT_SAVE_PATH: str(
+                values.get("save_path") or ""
+            ).strip(),
+            SETTING_TORRENT_LOCAL_SAVE_PATH: local_save_path,
+            SETTING_TORRENT_KEEP_SEEDING: (
+                "1" if values.get("keep_seeding") else "0"
+            ),
+            SETTING_TORRENT_AUTO_PACK: "1" if auto_pack else "0",
+        }
+        password = str(values.get("password") or "")
+        if password:
+            key = await self.master_key()
+            cleaned[SETTING_TORRENT_PASSWORD] = await asyncio.to_thread(
+                encrypt_password, key, password
+            )
+        await self._database.save_archive_settings(cleaned)
 
     async def keep_original(self) -> bool:
         stored = await self._database.archive_settings()
@@ -360,5 +529,13 @@ __all__ = [
     "PATH_SETTING_KEYS",
     "SETTING_KEEP_ORIGINAL",
     "SETTING_LIBRARY_PATH",
+    "SETTING_TORRENT_AUTO_PACK",
+    "SETTING_TORRENT_CATEGORY",
+    "SETTING_TORRENT_KEEP_SEEDING",
+    "SETTING_TORRENT_LOCAL_SAVE_PATH",
+    "SETTING_TORRENT_PASSWORD",
+    "SETTING_TORRENT_SAVE_PATH",
+    "SETTING_TORRENT_URL",
+    "SETTING_TORRENT_USERNAME",
     "SETTING_WORK_PATH",
 ]

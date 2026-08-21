@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import time
 
 from app.connections.models import ProviderConnectionError
 from app.connections.telegram import TelegramBotApi
@@ -17,10 +18,15 @@ from app.downloads.models import (
     DOWNLOAD_STATE_FAILED,
     DOWNLOAD_STATE_PAUSED,
     DOWNLOAD_STATE_PENDING,
+    DOWNLOAD_STATE_WAITING_TORRENT,
+    NEEDS_INFO_DOWNLOAD_ERRORS,
     OPEN_DOWNLOAD_STATES,
     PERMANENT_DOWNLOAD_ERRORS,
+    PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAPH,
+    SUPPORTED_PROVIDERS,
     DownloadEnqueueResult,
     DownloadJobSummary,
     DownloadState,
@@ -41,12 +47,20 @@ class DownloadService:
         work_path: Path,
         telegram_client_factory=None,
         exhentai_download=None,
+        telegraph_download=None,
+        torrent_push=None,
+        torrent_abandon=None,
         work_path_provider=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
         self._exhentai_download = exhentai_download
+        self._telegraph_download = telegraph_download
+        # Pushing hands the transfer to qBittorrent; abandoning takes it back
+        # out when the operator cancels or switches sources.
+        self._torrent_push = torrent_push
+        self._torrent_abandon = torrent_abandon
         # Resolved per job so an operator directory change applies without a
         # restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
@@ -90,6 +104,36 @@ class DownloadService:
             candidate_id,
             PROVIDER_EXHENTAI,
             f"exhentai:{candidate_id}",
+            "{}",
+        )
+
+    async def enqueue_telegraph_download(
+        self, candidate_id: int
+    ) -> DownloadEnqueueResult:
+        """Queue the preview-page fallback for a candidate.
+
+        Reading-grade by design: the page images are 1280 px re-encodes, so
+        this route is only entered once the original-quality routes are out.
+        """
+        return await self._enqueue(
+            candidate_id,
+            PROVIDER_TELEGRAPH,
+            f"telegraph:{candidate_id}",
+            "{}",
+        )
+
+    async def enqueue_torrent_download(
+        self, candidate_id: int
+    ) -> DownloadEnqueueResult:
+        """Queue the EH torrent route, the preferred original-quality source.
+
+        Free where Archive Download costs GP, and not subject to the 20 MB Bot
+        API limit, so this is the first choice for an oversized book.
+        """
+        return await self._enqueue(
+            candidate_id,
+            PROVIDER_EH_TORRENT,
+            f"torrent:{candidate_id}",
             "{}",
         )
 
@@ -177,11 +221,17 @@ class DownloadService:
     def _list_active_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
         states = tuple(sorted(OPEN_DOWNLOAD_STATES))
         placeholders = ",".join("?" for _ in states)
+        # A completed torrent whose payload is still being shared is included
+        # even though the job itself is done: the client is still using the
+        # operator's bandwidth and disk for it, so it stays visible until the
+        # seed is removed. Other providers have nothing left running.
         return self._fetch_jobs(
             "WHERE state IN ("
             + placeholders
-            + ") ORDER BY id DESC LIMIT 50",
-            states,
+            + ") OR (state = ? AND provider = ? "
+            "AND details_json LIKE '%\"seeding\":true%') "
+            "ORDER BY id DESC LIMIT 50",
+            states + (DOWNLOAD_STATE_COMPLETED, PROVIDER_EH_TORRENT),
         )
 
     async def retry_job(self, job_id: int) -> str:
@@ -190,6 +240,10 @@ class DownloadService:
         The original row is reused so the `idempotency_key` contract holds and
         the attempt history is preserved.
         """
+        # A retry re-pushes the torrent, and qBittorrent absorbs a duplicate
+        # hash, so the stale entry is removed first to keep one job to one
+        # client entry rather than relying on that.
+        await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._retry_job_sync, job_id)
 
     def _retry_job_sync(self, job_id: int) -> str:
@@ -223,12 +277,14 @@ class DownloadService:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (DOWNLOAD_STATE_PENDING, job_id),
             )
-            # The candidate went to FAILED when the job did, so it has to be
+            # The candidate went to FAILED, or to NEEDS_INFO when the failure
+            # was a missing input, when the job did. Either way it has to be
             # eligible again or the worker would refuse to process the retry.
             connection.execute(
                 "UPDATE candidates SET status = 'APPROVED', "
                 "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN ('FAILED', 'PROCESSING')",
+                "WHERE id = ? AND status IN "
+                "('FAILED', 'PROCESSING', 'NEEDS_INFO')",
                 (int(row[2]),),
             )
         return DOWNLOAD_STATE_PENDING
@@ -286,7 +342,133 @@ class DownloadService:
 
     async def cancel_job(self, job_id: int) -> str:
         """Cancel a job and release its candidate back to manual review."""
+        await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._cancel_job_sync, job_id)
+
+    async def stop_seeding(self, job_id: int) -> str:
+        """Stop sharing a finished torrent, keeping the archived file.
+
+        Seeding is deliberate — it repays the swarm the payload came from — so
+        it ends only when the operator says so. The job stays COMPLETED because
+        the download itself succeeded; only the client entry goes away.
+        """
+        provider, state = await asyncio.to_thread(
+            self._job_provider_state_sync, job_id
+        )
+        if provider != PROVIDER_EH_TORRENT or state != DOWNLOAD_STATE_COMPLETED:
+            raise DownloadError(
+                "JOB_NOT_SEEDING",
+                "只有已完成的种子任务"
+                "可以停止做种",
+            )
+        # Called directly rather than through `_abandon_torrent`, which only
+        # touches parked jobs: here the job is finished and the client entry is
+        # exactly what has to go. Files are never deleted, so the archive the
+        # library already registered survives.
+        if self._torrent_abandon is not None:
+            await self._torrent_abandon(job_id)
+        await asyncio.to_thread(self._clear_seeding_flag_sync, job_id)
+        return DOWNLOAD_STATE_COMPLETED
+
+    def _clear_seeding_flag_sync(self, job_id: int) -> None:
+        """Drop the seeding marker so the job leaves the dashboard."""
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT details_json FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                return
+            details = self._safe_details(row[0])
+            details["seeding"] = False
+            details["seeding_stopped_at"] = time.time()
+            connection.execute(
+                "UPDATE download_jobs SET details_json = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    json.dumps(
+                        details, separators=(",", ":"), ensure_ascii=False
+                    ),
+                    job_id,
+                ),
+            )
+
+    async def _abandon_torrent(self, job_id: int) -> None:
+        """Take a parked torrent back out of the client.
+
+        Leaving it behind would keep a torrent the operator abandoned running
+        in qBittorrent forever. The removal never deletes files, so an
+        already-finished payload the operator wants is still on disk.
+        """
+        if self._torrent_abandon is None:
+            return
+        provider, state = await asyncio.to_thread(
+            self._job_provider_state_sync, job_id
+        )
+        if (
+            provider == PROVIDER_EH_TORRENT
+            and state == DOWNLOAD_STATE_WAITING_TORRENT
+        ):
+            await self._torrent_abandon(job_id)
+
+    def _job_provider_state_sync(
+        self, job_id: int
+    ) -> tuple[str | None, str | None]:
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT provider, state FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None, None
+        return str(row[0]), str(row[1])
+
+    async def switch_source(self, job_id: int, provider: str) -> int:
+        """Abandon a parked torrent and queue a different source instead.
+
+        This is the operator's answer to a stalled torrent. The switch is
+        explicit rather than automatic because dropping to preview grade or
+        spending GP are both decisions a service should not make on its own.
+        """
+        if provider not in {PROVIDER_TELEGRAPH, PROVIDER_EXHENTAI}:
+            raise DownloadError(
+                "PROVIDER_UNSUPPORTED",
+                f"\u4e0d\u652f\u6301\u5207\u6362\u5230 {provider}",
+            )
+        candidate_id = await asyncio.to_thread(
+            self._job_candidate_sync, job_id
+        )
+        await self.cancel_job(job_id)
+        # The candidate went back to PENDING_REVIEW on cancel, and only an
+        # approved candidate can be queued, so the approval is restored here.
+        await asyncio.to_thread(self._reapprove_candidate_sync, candidate_id)
+        if provider == PROVIDER_TELEGRAPH:
+            result = await self.enqueue_telegraph_download(candidate_id)
+        else:
+            result = await self.enqueue_exhentai_download(candidate_id)
+        return result.job_id
+
+    def _job_candidate_sync(self, job_id: int) -> int:
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT candidate_id FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            raise DownloadError(
+                "JOB_NOT_FOUND", "\u4e0b\u8f7d\u4efb\u52a1\u4e0d\u5b58\u5728"
+            )
+        return int(row[0])
+
+    def _reapprove_candidate_sync(self, candidate_id: int) -> None:
+        with self._database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE candidates SET status = 'APPROVED', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status IN "
+                "('PENDING_REVIEW', 'PROCESSING', 'FAILED', 'NEEDS_INFO')",
+                (candidate_id,),
+            )
 
     def _cancel_job_sync(self, job_id: int) -> str:
         with self._database._connect() as connection:
@@ -323,7 +505,8 @@ class DownloadService:
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
                 "(SELECT size_bytes FROM artifacts WHERE job_id = download_jobs.id "
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
-                "created_at, updated_at FROM download_jobs " + where_sql,
+                "created_at, updated_at, details_json FROM download_jobs "
+                + where_sql,
                 params,
             ).fetchall()
         return tuple(
@@ -339,9 +522,19 @@ class DownloadService:
                 artifact_size=int(row[8]) if row[8] is not None else None,
                 created_at=str(row[9]),
                 updated_at=str(row[10]),
+                details=self._safe_details(row[11]),
             )
             for row in rows
         )
+
+    @staticmethod
+    def _safe_details(raw) -> dict:
+        """Details are provider-written, so a bad value must not break the page."""
+        try:
+            parsed = json.loads(str(raw or "{}"))
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     async def start(self) -> None:
         if self._worker_task is not None:
@@ -394,13 +587,10 @@ class DownloadService:
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
-                "WHERE state = ? AND provider IN (?, ?) "
-                "ORDER BY id LIMIT 1",
-                (
-                    DOWNLOAD_STATE_PENDING,
-                    PROVIDER_TELEGRAM,
-                    PROVIDER_EXHENTAI,
-                ),
+                "WHERE state = ? AND provider IN ("
+                + ",".join("?" for _ in SUPPORTED_PROVIDERS)
+                + ") ORDER BY id LIMIT 1",
+                (DOWNLOAD_STATE_PENDING, *SUPPORTED_PROVIDERS),
             ).fetchone()
             if row is None:
                 return None
@@ -428,27 +618,25 @@ class DownloadService:
             }
 
     async def _handle_job(self, job: dict) -> None:
+        if job["provider"] == PROVIDER_EH_TORRENT:
+            await self._push_torrent_job(job)
+            return
         if job["provider"] == PROVIDER_EXHENTAI:
-            if self._exhentai_download is None:
-                await asyncio.to_thread(
-                    self._mark_job_failed_sync,
-                    job["job_id"],
-                    "EXHENTAI_NOT_CONFIG",
-                    "ExHentai 下载服务未配置",
-                )
-                return
-            try:
-                await self._exhentai_download(job["candidate_id"])
-            except Exception as exc:  # noqa: BLE001 - provider boundary
-                await asyncio.to_thread(
-                    self._mark_job_failed_sync,
-                    job["job_id"],
-                    str(getattr(exc, "code", "EXHENTAI_DOWNLOAD_FAILED")),
-                    str(getattr(exc, "public_message", exc)),
-                )
-                return
-            await asyncio.to_thread(
-                self._mark_job_completed_sync, job["job_id"]
+            await self._run_delegated_provider(
+                job,
+                self._exhentai_download,
+                missing_code="EXHENTAI_NOT_CONFIG",
+                missing_message="ExHentai 下载服务未配置",
+                default_error="EXHENTAI_DOWNLOAD_FAILED",
+            )
+            return
+        if job["provider"] == PROVIDER_TELEGRAPH:
+            await self._run_delegated_provider(
+                job,
+                self._telegraph_download,
+                missing_code="TELEGRAPH_NOT_CONFIG",
+                missing_message="预览页下载服务未配置",
+                default_error="TELEGRAPH_PAGE_UNREACHABLE",
             )
             return
         if job["provider"] != PROVIDER_TELEGRAM:
@@ -499,6 +687,109 @@ class DownloadService:
                 exc.code,
                 exc.public_message,
             )
+
+    async def _push_torrent_job(self, job: dict) -> None:
+        """Hand the torrent to the client and park the job on peers.
+
+        This provider is the one that cannot finish inside a worker turn: the
+        transfer belongs to qBittorrent. Parking in `WAITING_TORRENT` releases
+        the concurrency slot so a long, seederless torrent does not block the
+        queue, and `TorrentService`'s poller advances it from there.
+        """
+        if self._torrent_push is None:
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                "TORRENT_CLIENT_NOT_CONFIG",
+                "\u79cd\u5b50\u4e0b\u8f7d\u670d\u52a1\u672a\u914d\u7f6e",
+            )
+            return
+        try:
+            details = await self._torrent_push(job["candidate_id"])
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                str(getattr(exc, "code", "TORRENT_PUSH_REJECTED")),
+                str(getattr(exc, "public_message", exc)),
+            )
+            return
+        await asyncio.to_thread(
+            self._park_job_sync, job["job_id"], details or {}
+        )
+
+    def _park_job_sync(self, job_id: int, details: dict) -> None:
+        """Move a pushed job to WAITING_TORRENT, merging the push details.
+
+        The existing details are merged rather than replaced so a retry keeps
+        whatever the previous attempt learned, and the infohash is what the
+        poller re-attaches by after a restart.
+        """
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT details_json FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            merged: dict = {}
+            if row is not None:
+                try:
+                    existing = json.loads(str(row[0] or "{}"))
+                except ValueError:
+                    existing = {}
+                if isinstance(existing, dict):
+                    merged.update(existing)
+            merged.update(details)
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, details_json = ?, "
+                "error_code = NULL, error_message = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    DOWNLOAD_STATE_WAITING_TORRENT,
+                    json.dumps(
+                        merged, separators=(",", ":"), ensure_ascii=False
+                    ),
+                    job_id,
+                ),
+            )
+
+    async def _run_delegated_provider(
+        self,
+        job: dict,
+        handler,
+        *,
+        missing_code: str,
+        missing_message: str,
+        default_error: str,
+    ) -> None:
+        """Run a provider that owns its own transfer and artifact registration.
+
+        ExHentai and Telegraph both register the finished archive themselves,
+        so the worker only has to record the outcome. The error code is lifted
+        off the exception because every provider error carries `code` and
+        `public_message`; anything else falls back to the provider default.
+        """
+        if handler is None:
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                missing_code,
+                missing_message,
+            )
+            return
+        try:
+            await handler(job["candidate_id"])
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                str(getattr(exc, "code", default_error)),
+                str(getattr(exc, "public_message", exc)),
+            )
+            return
+        await asyncio.to_thread(
+            self._mark_job_completed_sync, job["job_id"]
+        )
 
     async def _telegram_api(self) -> TelegramBotApi | None:
         if self._telegram_client_factory is None:
@@ -558,6 +849,17 @@ class DownloadService:
     def _mark_job_failed_sync(
         self, job_id: int, code: str, message: str
     ) -> None:
+        """Record a failure, routing "needs a human" apart from "broken".
+
+        A short preview page is not a defect the service can retry its way out
+        of: someone has to supply the second page link. Those candidates go to
+        NEEDS_INFO, which is a reviewable state, while everything else goes to
+        FAILED as before. The job row itself is FAILED either way so the retry
+        button still applies once the input has been supplied.
+        """
+        candidate_status = (
+            "NEEDS_INFO" if code in NEEDS_INFO_DOWNLOAD_ERRORS else "FAILED"
+        )
         with self._database._connect() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
@@ -567,11 +869,11 @@ class DownloadService:
                 (DOWNLOAD_STATE_FAILED, code, message, job_id),
             )
             connection.execute(
-                "UPDATE candidates SET status = 'FAILED', "
+                "UPDATE candidates SET status = ?, "
                 "filter_reason = ?, updated_at = CURRENT_TIMESTAMP "
                 "WHERE id = (SELECT candidate_id FROM download_jobs "
                 "WHERE id = ?)",
-                (message, job_id),
+                (candidate_status, message, job_id),
             )
 
 

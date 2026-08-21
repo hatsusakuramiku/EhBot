@@ -358,6 +358,7 @@ class ConversionService:
             parody=_metadata_lookup(metadata, "Parody"),
             character=_metadata_lookup(metadata, "Character"),
             web=_metadata_lookup(metadata, "Web"),
+            scan_information=_metadata_lookup(metadata, "ScanInformation"),
         )
 
     @staticmethod

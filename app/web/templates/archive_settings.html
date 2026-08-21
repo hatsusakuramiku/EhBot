@@ -9,6 +9,54 @@
   </div>
 </div>
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+{% if notice %}<p class="form-hint" role="status">{{ notice }}</p>{% endif %}
+
+<section class="source-create" aria-label="qBittorrent">
+  <div class="section-heading">
+    <div>
+      <h2>qBittorrent 客户端</h2>
+      <p>EH 种子是免费的原档来源，下载由外部 qBittorrent 完成，本进程不跑 P2P。</p>
+    </div>
+    <span class="status status-{{ 'connected' if torrent.configured else 'not_configured' }}"><i></i>{{ '已登记' if torrent.configured else '未登记' }}</span>
+  </div>
+  {% if not torrent_enabled %}
+  <p class="source-summary">种子路线已通过 TORRENT_ENABLED=false 关闭，下方设置仍可保存但不会生效。</p>
+  {% endif %}
+  <form class="settings-form" method="post" action="{{ url_for('save_torrent_client_settings') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-group">
+      <label>WebUI 地址</label>
+      <input name="base_url" value="{{ torrent.base_url }}" placeholder="http://127.0.0.1:8080">
+      <small>置空则跳过种子这一级，候选会直接降到预览页</small>
+    </div>
+    <div class="field-group"><label>用户名</label><input name="username" value="{{ torrent.username }}"></div>
+    <div class="field-group">
+      <label>密码</label>
+      <input name="password" type="password" autocomplete="new-password" placeholder="{{ '已保存，置空则不修改' if torrent.password_set else '未设置' }}">
+      <small>加密保存在 data/private/，页面不回显</small>
+    </div>
+    <div class="field-group"><label>分类</label><input name="category" value="{{ torrent.category }}" placeholder="ehbot"></div>
+    <div class="field-group">
+      <label>保存目录（客户端视角）</label>
+      <input name="save_path" value="{{ torrent.save_path }}" placeholder="/downloads/ehbot">
+      <small>随加种请求下发，关掉 autoTMM 以免被分类规则覆盖</small>
+    </div>
+    <div class="field-group">
+      <label>保存目录（EhBot 视角）</label>
+      <input name="local_save_path" value="{{ torrent.local_save_path }}" placeholder="/downloads/ehbot">
+      <small>EhBot 从这里读完成的文件；客户端在其他容器或 NAS 时两边路径不同。保存前会校验可读</small>
+    </div>
+    <label class="toggle-row"><input name="keep_seeding" type="checkbox" {% if torrent.keep_seeding %}checked{% endif %}><span>完成后继续做种（收货用硬链接，绞不动原文件）</span></label>
+    <label class="toggle-row"><input name="auto_pack" type="checkbox" {% if torrent.auto_pack %}checked{% endif %}><span>下载后自动打包漫画（默认关闭；开启后必须填写上方「保存目录（EhBot 视角）」，保存时会验证可读）</span></label>
+    <div class="form-actions"><button class="primary-button" type="submit">保存客户端设置</button></div>
+  </form>
+  {% if torrent.configured and torrent_enabled %}
+  <form method="post" action="{{ url_for('test_torrent_client') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="form-actions"><button class="secondary-button" type="submit">测试连通性</button></div>
+  </form>
+  {% endif %}
+</section>
 
 <section class="source-item" aria-label="归档工具链">
   <header>

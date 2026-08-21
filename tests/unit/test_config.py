@@ -41,3 +41,20 @@ def test_settings_loads_explicit_proxy_configuration(
     assert settings.trust_proxy_headers is True
     assert settings.trusted_proxy_ips == ("10.0.0.1", "10.0.0.2")
     assert settings.app_root_path == "/ehbot"
+
+def test_torrent_settings_fall_back_to_safe_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator typo in a bound must not take the service down."""
+    monkeypatch.setenv("TORRENT_POLL_SECONDS", "not-a-number")
+    monkeypatch.setenv("TORRENT_CATEGORY", "   ")
+    monkeypatch.setenv("TORRENT_ENABLED", "false")
+    monkeypatch.setenv("TORRENT_KEEP_SEEDING", "false")
+
+    settings = Settings.from_env()
+
+    assert settings.torrent_poll_seconds == 15
+    assert settings.torrent_category == "ehbot"
+    assert settings.torrent_enabled is False
+    # Not defaulted: dropping a seed is only ever done when asked.
+    assert settings.torrent_keep_seeding is False

@@ -120,6 +120,31 @@
     <button type="submit" class="primary-button">转换为 CBZ</button>
   </form>
   {% endif %}
+
+  <div class="review-actions">
+    {% if torrent_available %}
+    <form method="post" action="{{ url_for('download_torrent', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="secondary-button" title="免费原档，由 qBittorrent 下载">用种子取原档</button>
+    </form>
+    {% endif %}
+    {% if candidate.ex_gid %}
+    <form method="post" action="{{ url_for('download_exhentai_archive', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="secondary-button" title="消耗 GP，不参与自动选路">用 Archive Download 取原档</button>
+    </form>
+    {% endif %}
+    {% if preview_available %}
+    <form method="post" action="{{ url_for('download_telegraph_preview', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="quiet-button" title="1280px 重编码，约为原档 5%–10%">用预览页下载</button>
+    </form>
+    {% endif %}
+  </div>
+  <p class="empty-state">
+    {% if candidate.preview_url %}预览页：<a href="{{ candidate.preview_url }}" rel="noreferrer">{{ candidate.preview_url }}</a> · {% endif %}
+    {% if candidate.torrent_count %}画廊有 {{ candidate.torrent_count }} 个种子{% if not torrent_enabled %}（未登记 qBittorrent）{% endif %}{% elif candidate.torrent_count == 0 %}画廊无种子{% else %}种子情况未知，先拉取元数据{% endif %}
+  </p>
   {% if download_jobs %}
   <h3 class="subsection-heading">任务历史</h3>
   <ol class="review-history">
@@ -129,6 +154,14 @@
         <strong>#{{ job.job_id }} · {{ job.provider }} · {{ job.state }}</strong>
         <span>{{ job.created_at }}</span>
       </div>
+      {% if job.is_waiting_for_peers %}
+      <p class="review-entry-note">等待 qBittorrent 下载：{{ job.progress_percent }}% · 做种者 {{ job.details.get('num_seeds', 0) }} · ↓{{ (job.details.get('dlspeed') or 0) // 1024 }} KiB/s{% if job.stalled_minutes is not none %} · 已停滞 {{ job.stalled_minutes }} 分钟{% endif %}</p>
+      {% elif job.is_seeding %}
+      <p class="review-entry-note">已下载完成，正在做种 · ↑{{ job.upload_speed // 1024 }} KiB/s</p>
+      {% endif %}
+      {% if job.was_already_in_client %}
+      <p class="review-entry-note">该种子已存在于 qBittorrent，未重复加种</p>
+      {% endif %}
       <pre class="review-entry-details">{{ {"attempt": job.attempt_count, "artifact": job.artifact_path, "size_bytes": job.artifact_size, "error_code": job.error_code, "error_message": job.error_message} | tojson(indent=2) }}</pre>
     </li>
     {% endfor %}
