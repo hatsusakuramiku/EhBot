@@ -1113,3 +1113,40 @@ Enabling it **requires** `local_save_path` (`TORRENT_LOCAL_PATH_REQUIRED`) and r
 - The Telegraph/torrent loose-image packer (`app/telegraph/packer.py`) still packs at source quality. It feeds the same processor, so those books get re-encoded at conversion time anyway; applying the level twice would compound the loss and was deliberately not done.
 - Still open from the previous session: **`local_save_path` is unset in the live deployment** (client saves to `/download/R18lib` on another host), so `torrent_auto_pack` cannot be enabled until that directory is mounted and registered.
 - Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+## Implementation Session: Remove The Manual Secret Step (2026-08-22)
+
+### Scope
+- **Status:** complete. Triggered by a fair complaint: why must an operator hand-create `secrets/app_secret_key` before a container will start? The answer was that there was no good reason, so the requirement is gone. Deploying is now `docker compose up -d` and nothing else.
+- Packaging the AMD64 image for `hsmk/ehbot` exposed the problem: the deployment instructions opened with a `docker run ... > ./secrets/app_secret_key` incantation for a value that is random either way.
+
+### Root Cause
+The session key had two contradictory behaviours. `readiness_errors()` reported a missing `APP_SECRET_KEY` as **not ready**, but `create_app` fell back to `secrets.token_urlsafe(32)` and started anyway — so the process ran with a **fresh key on every restart**, silently invalidating every session, while `/readyz` returned 503. The manual file was the only way out of a state the application had created for itself, even though the bootstrap admin password and the archive vault master key were already generated and persisted automatically.
+
+### Implementation
+- **`app/session_secret.py` (new).** `resolve_session_secret` returns the configured key, else a key stored at `<data>/private/session_secret_key`, else a freshly generated and persisted one. An explicit `APP_SECRET_KEY` still wins so multi-replica deployments can share one key from their own secret manager.
+- **`readiness_errors`** now only validates a key that was *supplied*. An absent key is normal; a configured key shorter than 32 characters is still an operator error worth reporting.
+- **`create_secrets.py`** no longer writes secrets; it only creates the runtime directories, and says why in its docstring.
+- **`compose.yaml` and `compose.deploy.yaml`** dropped the `secrets:` block, the `app_secret_key` secret and `APP_SECRET_KEY_FILE` entirely.
+- **`compose.deploy.yaml` (new)** targets `hsmk/ehbot:latest` with the operator's three bind mounts: qBittorrent downloads to `/work`, the Komga library to `/library`, and `./data` to `/app/data`. Runs as `0:0` because both host paths live under `/root`.
+
+### The Bug This Uncovered
+Persisting the key on first start hung the process at **100% CPU, forever**. `write_private_text` used `tempfile.mkstemp`, which on Windows treats *every* `PermissionError` as "a directory of that name already exists" and retries up to `TMP_MAX` = 2**31-1 times, because its `os.access(dir, W_OK)` guard only sees the read-only attribute and not the ACL. A `<data>/private` directory left behind by a container running as root is exactly that case. `write_private_text` now uses a bounded 16-attempt `os.open(O_CREAT | O_EXCL)` loop and raises immediately: the same directory that used to spin indefinitely now fails in 0.0 s. This affected the Telegram token, the ExHentai cookies and the vault key too — any private write against a directory owned by another account would have hung the whole service, not just this new one.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-22 | Test run hung with no output; 453 s of CPU burned in one python process | 1 | Not a network stall. `faulthandler.dump_traceback_later` pinned it to `tempfile.mkstemp` inside `write_private_text`, called during `create_app` at import time |
+| 2026-08-22 | `icacls data\private` itself returns `Access is denied` | 1 | Confirmed the directory is ACL-locked to another SID (a leftover from the root container), which is what made `mkstemp` spin. Fixed the retry loop rather than the directory, because the directory is a legitimate production state |
+| 2026-08-22 | Anchored replace against README failed on Chinese text | 2 | The file reads as mojibake in the console but is valid UTF-8; switched to line-index edits instead of matching Chinese literals |
+
+### Verification
+- Full suite: **432 passed** (422 before; 10 new). No new skips.
+- New coverage: a configured key is used and never persisted; a missing key is generated and stored; a stored key is reused across restarts; an empty `APP_SECRET_KEY=` falls back to generation; a truncated stored key is replaced; an unwritable private directory still starts but reports it through readiness; a directory that refuses every create fails after at most 16 attempts rather than 2**31-1; `/readyz` is ready with no configured secret; a too-short configured secret is still 503; and the generated key survives a restart.
+- **Live container run**, with the operator's `compose.deploy.yaml` (host paths redirected to a scratch directory): `docker compose up -d` with **no pre-created secret** reached `healthy` in 12 s, `/readyz` returned `{"status":"ready"}`, `/app/data/private/session_secret_key` was created `-rw-------` with 64 bytes, the bootstrap banner printed, and after `docker compose restart` the key was byte-identical and the service came back healthy.
+- Image rebuilt for `linux/amd64` as `hsmk/ehbot:0.1.0` and `:latest` (296 MB).
+
+### Open Items For The Next Agent
+- **The image is built but not pushed.** The local Docker credential store is empty (`auths: {}`), so `docker push hsmk/ehbot` returns `denied`. The operator has to `docker login` once; both tags are already built locally.
+- Still open: **`local_save_path` is unset in the live deployment** (the client saves to `/download/R18lib` on another host). `compose.deploy.yaml` mounts the intended directory at `/work`, but qBittorrent must actually write there before `torrent_auto_pack` can be enabled.
+- Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.

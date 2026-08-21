@@ -108,8 +108,15 @@ class Settings:
         )
 
     def readiness_errors(self) -> list[str]:
+        """Report only what an operator must fix; the session key is not one.
+
+        `APP_SECRET_KEY` is optional: when it is unset the application generates
+        and persists one under `<data>/private`. It is still validated when
+        supplied, because a deliberately configured key that is too short is a
+        mistake worth reporting rather than silently accepting.
+        """
         errors: list[str] = []
-        if not self.app_secret_key or len(self.app_secret_key) < 32:
+        if self.app_secret_key is not None and len(self.app_secret_key) < 32:
             errors.append("APP_SECRET_KEY must contain at least 32 characters")
         if self.trust_proxy_headers and not self.trusted_proxy_ips:
             errors.append("TRUSTED_PROXY_IPS is required when proxy headers are trusted")

@@ -1,19 +1,22 @@
 from pathlib import Path
 
-import pytest
-
-from scripts.create_secrets import create_secret_files
+from scripts.create_secrets import RUNTIME_DIRECTORIES, create_runtime_directories
 
 
-def test_secret_creation_refuses_to_replace_existing_credentials(
-    tmp_path: Path,
-) -> None:
-    output_dir = tmp_path / "secrets"
-    output_dir.mkdir()
-    existing_file = output_dir / "app_secret_key"
-    existing_file.write_text("keep-this-value", encoding="utf-8")
+def test_runtime_directories_are_created(tmp_path: Path) -> None:
+    created = create_runtime_directories(tmp_path)
 
-    with pytest.raises(FileExistsError):
-        create_secret_files(output_dir)
+    assert {path.name for path in created} == set(RUNTIME_DIRECTORIES)
+    assert all(path.is_dir() for path in created)
 
-    assert existing_file.read_text(encoding="utf-8") == "keep-this-value"
+
+def test_running_twice_leaves_existing_content_alone(tmp_path: Path) -> None:
+    """The script is setup, not a reset; it must never clear a live data directory."""
+    existing = tmp_path / "data" / "ehbot.db"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("database", encoding="utf-8")
+
+    create_runtime_directories(tmp_path)
+    create_runtime_directories(tmp_path)
+
+    assert existing.read_text(encoding="utf-8") == "database"

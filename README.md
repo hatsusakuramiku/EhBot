@@ -23,15 +23,14 @@ Telegram Token 和 ExHentai Cookie 保存在 `data/private/` 下的私密文件�
 
 ## Docker
 
-先生成本地秘密文件，再启动服务：
-
 ```powershell
-python -m uv run python scripts/create_secrets.py
 Copy-Item .env.example .env
 docker compose up --build -d
 ```
 
 默认访问地址为 `http://127.0.0.1:8080`。数据、书库和工作目录通过 Compose 绑定到宿主机；重新创建容器不会删除这些目录。
+
+会话签名密钥在首次启动时自动生成并保存到 `data/private/session_secret_key`，无需手工创建任何秘密文件；只有多副本共用一把密钥时才需要自行设置 `APP_SECRET_KEY`。请务必保留 `data/` 目录：删除它意味着会话密钥、密码库与所有凭据全部丢失。
 
 Linux 默认以宿主 UID/GID `1000:1000` 运行。若当前用户不同，请在 `.env` 中将 `EHBOT_UID`、`EHBOT_GID` 改为当前普通用户的数值，确保绑定目录可写。
 

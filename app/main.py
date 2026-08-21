@@ -75,6 +75,7 @@ from app.torrent.models import TorrentError
 from app.torrent.service import TorrentService
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.secrets import SecretStore
+from app.session_secret import resolve_session_secret
 from app.storage.readiness import ensure_writable_directory
 
 
@@ -126,10 +127,17 @@ def create_app(
     app_settings = settings or Settings.from_env()
     database = Database(app_settings.data_path / "ehbot.db")
     password_hasher = PasswordHash.recommended()
+    # Generated and persisted on first start when not configured, so a fresh
+    # deployment needs no hand-created secret file to come up.
+    session_secret = resolve_session_secret(
+        app_settings.data_path, app_settings.app_secret_key
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         app.state.startup_errors = app_settings.readiness_errors()
+        if session_secret.error:
+            app.state.startup_errors.append(session_secret.error)
         connection_manager: ConnectionManager | None = None
         telegram_client: httpx.AsyncClient | None = None
         exhentai_client: httpx.AsyncClient | None = None
@@ -380,7 +388,7 @@ def create_app(
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
         SessionMiddleware,
-        secret_key=app_settings.app_secret_key or secrets.token_urlsafe(32),
+        secret_key=session_secret.key,
         https_only=app_settings.session_cookie_secure,
         same_site="lax",
     )

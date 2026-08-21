@@ -1,47 +1,39 @@
+"""Create the runtime directories a local checkout needs.
+
+This script used to generate `secrets/app_secret_key` as well. It no longer
+does: the session signing key is generated and persisted by the application on
+first start (see `app/session_secret.py`), because requiring a hand-created
+random file bought nothing -- the value is random either way -- and turned a
+missing file into an obstacle between an operator and a running service.
+
+Set `APP_SECRET_KEY` yourself only when several replicas must share one key.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
-import secrets
-import tempfile
-
-from app.private_files import restrict_private_path
 
 
-def write_private_file(path: Path, value: str) -> None:
-    path.write_text(value, encoding="utf-8")
-    restrict_private_path(path)
+RUNTIME_DIRECTORIES: tuple[str, ...] = ("data", "library", "work")
 
 
-def create_secret_files(output_dir: Path) -> None:
-    if output_dir.exists():
-        raise FileExistsError(
-            f"{output_dir} already exists; refusing to replace credentials"
-        )
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    temporary_dir = Path(
-        tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent)
-    )
-    try:
-        restrict_private_path(temporary_dir, directory=True)
-        write_private_file(
-            temporary_dir / "app_secret_key", secrets.token_urlsafe(48)
-        )
-        temporary_dir.rename(output_dir)
-    except BaseException:
-        shutil.rmtree(temporary_dir, ignore_errors=True)
-        raise
+def create_runtime_directories(root: Path = Path(".")) -> tuple[Path, ...]:
+    created: list[Path] = []
+    for name in RUNTIME_DIRECTORIES:
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        created.append(directory)
+    return tuple(created)
 
 
 def main() -> None:
-    output_dir = Path("secrets")
-    try:
-        create_secret_files(output_dir)
-    except FileExistsError as exc:
-        raise SystemExit("secrets 目录已存在；为避免轮换凭据，已停止。") from exc
-    for runtime_dir in (Path("data"), Path("library"), Path("work")):
-        runtime_dir.mkdir(exist_ok=True)
-    print("应用秘密及运行目录已创建；秘密内容不会显示。")
+    create_runtime_directories()
+    print(
+        "\u8fd0\u884c\u76ee\u5f55\u5df2\u5c31\u7eea\u3002"
+        "\u4f1a\u8bdd\u5bc6\u94a5\u4e0e\u7ba1\u7406\u5458\u521d\u59cb"
+        "\u5bc6\u7801\u5747\u5728\u9996\u6b21\u542f\u52a8\u65f6"
+        "\u81ea\u52a8\u751f\u6210\u3002"
+    )
 
 
 if __name__ == "__main__":

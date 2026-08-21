@@ -10,7 +10,6 @@ services:
       DATA_PATH: /app/data
       LIBRARY_PATH: /library
       WORK_PATH: /work
-      APP_SECRET_KEY_FILE: /run/secrets/app_secret_key
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
       TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
       TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:-}"
@@ -29,8 +28,6 @@ services:
       TORRENT_CATEGORY: "${TORRENT_CATEGORY:-ehbot}"
       TORRENT_KEEP_SEEDING: "${TORRENT_KEEP_SEEDING:-true}"
       TZ: "${TZ:-Asia/Shanghai}"
-    secrets:
-      - app_secret_key
     volumes:
       - ./data:/app/data
       - "${LIBRARY_PATH:-./library}:/library"
@@ -41,7 +38,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-secrets:
-  app_secret_key:
-    file: ./secrets/app_secret_key

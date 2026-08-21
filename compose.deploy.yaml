@@ -1,0 +1,67 @@
+# EhBot deployment compose file.
+#
+# Uses the published AMD64 image, so the deployment host needs neither the
+# source tree nor a build toolchain.
+#
+#   docker compose -f compose.deploy.yaml up -d
+#   docker compose -f compose.deploy.yaml logs | tail -40
+#
+# That is the whole procedure. The session signing key is generated and stored
+# under ./data/private on first start, and the initial admin password is printed
+# to the log as a banner (also saved to ./data/bootstrap_admin_password). Log in
+# with it and change it immediately; it stops working once you do.
+
+services:
+  ehbot:
+    image: hsmk/ehbot:latest
+    container_name: ehbot
+    init: true
+    # Must read the qBittorrent download directory and write the Komga library.
+    # Both live under /root here, so root is used; switch to a real uid:gid if
+    # you chown those directories.
+    user: "0:0"
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DATA_PATH: /app/data
+      LIBRARY_PATH: /library
+      WORK_PATH: /work
+      # Set to true only when EhBot is served over HTTPS; otherwise the session
+      # cookie is dropped and login fails without an obvious reason.
+      SESSION_COOKIE_SECURE: "false"
+      TRUST_PROXY_HEADERS: "false"
+      TRUSTED_PROXY_IPS: ""
+      APP_ROOT_PATH: ""
+      TAG_TRANSLATION_ENABLED: "true"
+      # Fetches the pinned official 7-Zip build into /app/data/tools on first
+      # start and verifies its SHA-256; required for RAR and 7z archives.
+      ARCHIVE_TOOLCHAIN_AUTO_INSTALL: "true"
+      TELEGRAPH_ENABLED: "true"
+      TELEGRAPH_CONCURRENCY: "3"
+      TELEGRAPH_MAX_IMAGES: "400"
+      TELEGRAPH_MAX_IMAGE_BYTES: "20971520"
+      TELEGRAPH_MAX_TOTAL_BYTES: "1073741824"
+      TELEGRAPH_TIMEOUT_SECONDS: "600"
+      TELEGRAPH_REQUIRE_FILECOUNT_MATCH: "true"
+      TORRENT_ENABLED: "true"
+      TORRENT_POLL_SECONDS: "15"
+      TORRENT_CATEGORY: "ehbot"
+      TORRENT_KEEP_SEEDING: "true"
+      TZ: "Asia/Shanghai"
+    volumes:
+      # Finished qBittorrent payloads are read from here. Enter this same host
+      # path as the qBittorrent local save path on the archive settings page,
+      # because that field is what EhBot sees rather than what the client sees.
+      - /root/DockerServer/openlist/downloads/qbittorrent/Ehbot:/work
+      # Published CBZ files, read by Komga.
+      - /root/DockerServer/komga/data:/library
+      # Database, session key, encrypted password vault and the 7-Zip install.
+      # Losing this directory means re-entering every credential, so keep it.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

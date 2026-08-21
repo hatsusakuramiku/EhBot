@@ -211,6 +211,7 @@ Implementation phase 14 (download source chain: EH torrent original archives wit
 - The selected backend performs both extraction and CBZ packing for a task, and CBZ output uses `ZIP_STORED` so already-compressed images are not recompressed.
 - Page bytes are published unchanged unless the operator selects an image quality level (`original` / `high` / `medium` / `low`); `original` is the default because a lossy re-encode is irreversible. Only JPEG pages are re-encoded, and a result that is not smaller is discarded in favour of the original.
 - Passwords are encrypted at rest with a private-file master key and are never written to logs, task details, or audit payloads.
+- The session signing key is generated and persisted under `<data>/private` on first start; `APP_SECRET_KEY` is optional and only needed when several replicas share one key. Private-file writes use a bounded exclusive-create loop, never `tempfile.mkstemp`, which retries indefinitely on a Windows directory it cannot open.
 - Every published CBZ is written as `<name>.cbz.part` first and atomically renamed; failures delete the partial file and the task's temporary directory.
 
 ### Implementation Phase 11: Managed 7-Zip Toolchain

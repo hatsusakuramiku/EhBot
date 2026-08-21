@@ -27,11 +27,35 @@ def test_readyz_reports_database_and_storage_are_ready(tmp_path: Path) -> None:
     assert (settings.data_path / "ehbot.db").is_file()
 
 
-def test_readyz_rejects_missing_application_secret(tmp_path: Path) -> None:
+def test_readyz_is_ready_without_a_configured_secret(tmp_path: Path) -> None:
+    """A fresh deployment must come up without a hand-created secret file."""
     settings = Settings(
         data_path=tmp_path / "data",
         library_path=tmp_path / "library",
         work_path=tmp_path / "work",
+        tag_translation_enabled=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+    assert (
+        settings.data_path / "private" / "session_secret_key"
+    ).is_file()
+
+
+def test_readyz_rejects_a_configured_secret_that_is_too_short(
+    tmp_path: Path,
+) -> None:
+    """An explicit key is still validated; a truncated one is an operator error."""
+    settings = Settings(
+        data_path=tmp_path / "data",
+        library_path=tmp_path / "library",
+        work_path=tmp_path / "work",
+        app_secret_key="too-short",
+        tag_translation_enabled=False,
     )
 
     with TestClient(create_app(settings)) as client:
@@ -39,6 +63,33 @@ def test_readyz_rejects_missing_application_secret(tmp_path: Path) -> None:
 
     assert response.status_code == 503
     assert response.json()["status"] == "not_ready"
+
+
+def test_sessions_survive_a_restart_without_a_configured_secret(
+    tmp_path: Path,
+) -> None:
+    """The generated key is reused, otherwise every restart logs everyone out."""
+    settings = Settings(
+        data_path=tmp_path / "data",
+        library_path=tmp_path / "library",
+        work_path=tmp_path / "work",
+        tag_translation_enabled=False,
+    )
+
+    with TestClient(create_app(settings)):
+        pass
+    stored = (
+        settings.data_path / "private" / "session_secret_key"
+    ).read_text(encoding="utf-8")
+
+    with TestClient(create_app(settings)):
+        pass
+    reused = (
+        settings.data_path / "private" / "session_secret_key"
+    ).read_text(encoding="utf-8")
+
+    assert stored == reused
+    assert len(stored) >= 32
 
 
 def test_readyz_detects_storage_becoming_unwritable(tmp_path: Path) -> None:
