@@ -1146,7 +1146,11 @@ Persisting the key on first start hung the process at **100% CPU, forever**. `wr
 - **Live container run**, with the operator's `compose.deploy.yaml` (host paths redirected to a scratch directory): `docker compose up -d` with **no pre-created secret** reached `healthy` in 12 s, `/readyz` returned `{"status":"ready"}`, `/app/data/private/session_secret_key` was created `-rw-------` with 64 bytes, the bootstrap banner printed, and after `docker compose restart` the key was byte-identical and the service came back healthy.
 - Image rebuilt for `linux/amd64` as `hsmk/ehbot:0.1.0` and `:latest` (296 MB).
 
+### Release (2026-08-22, after operator `docker login`)
+- Published to Docker Hub as **`hsmk/ehbot:0.1.0`** and **`hsmk/ehbot:latest`**, both `linux/amd64`, digest `sha256:a2180eff73f19536f5c361eddc55a4c7968ae3b5c5742d62d087258265efa804`.
+- Built with `org.opencontainers.image.revision=8f89618550c77b41e6f58a328134081281d05c75` and `org.opencontainers.image.source`, so a running container can be traced back to its commit without guessing which build it came from.
+- **Verified from the registry, not from the local build:** the local tags were deleted, `docker pull hsmk/ehbot:latest` returned the same digest, and that pulled image was started through the operator's `compose.deploy.yaml` (host paths redirected to a scratch directory). It reached `healthy` in 14 s with no pre-created secret, `/readyz` returned `{"status":"ready"}`, and `/app/data/private/session_secret_key` was created `-rw-------` with 64 bytes.
+
 ### Open Items For The Next Agent
-- **The image is built but not pushed.** The local Docker credential store is empty (`auths: {}`), so `docker push hsmk/ehbot` returns `denied`. The operator has to `docker login` once; both tags are already built locally.
 - Still open: **`local_save_path` is unset in the live deployment** (the client saves to `/download/R18lib` on another host). `compose.deploy.yaml` mounts the intended directory at `/work`, but qBittorrent must actually write there before `torrent_auto_pack` can be enabled.
 - Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
