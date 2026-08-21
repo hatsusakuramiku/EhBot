@@ -25,6 +25,19 @@
 - ComicPacker is MIT-licensed and models useful ComicInfo fields.
 - ComicPacker currently creates the complete CBZ as bytes before writing, which is unsuitable for large files under tight memory limits.
 - ComicPacker's current compressed-file implementation handles ZIP only despite README claims for RAR and 7Z.
+- Channel preview links are `telegra.ph` pages, and the URL is carried in a caption `text_link` entity rather than in the message text.
+- `api.telegra.ph/getPage/<path>?return_content=true` returns an ordered node tree for any published page, so images can be read from the official API instead of scraped HTML. gallery-dl's `telegraph.py` scrapes `<figure>`/`<img>` from HTML and is a usable fallback shape.
+- The preview images are not hosted on `telegra.ph/file/`. Each channel runs its own Telegram file proxy — `image.dangernsfw.win` serves `<sha256>.webp`, `pic.850123.xyz` uses the base64 `file_id` as the path — both behind Cloudflare, and both answer 403 without a browser `User-Agent` and a `Referer`.
+- Preview pages carry the complete page set: 22/22, 15/15 and 78/78 measured against the ExHentai gdata `filecount` on 2026-08-21.
+- Preview images are re-encoded, not originals. Gallery 1655718 is 145,185,851 B over 15 pages at the source versus 7,895,214 B over the same 15 pages on the preview page, normalized to 1280 px wide. That is roughly 5–10 % of the original bytes.
+- A `file_id` taken from a third-party proxy URL cannot be handed to this project's own bot: `getFile` only serves files the calling bot has access to.
+- The ExHentai gdata response already returns `torrentcount` and `torrents[{hash, added, name, tsize, fsize}]`, so a torrent can be discovered with no extra request and no cookie.
+- Torrent availability is not guaranteed: gallery 1655718 reports `torrentcount=0` while galleries 4108964 and 4076223 each report 1 (measured 2026-08-21).
+- A torrent's `fsize` differs from the gallery `filesize` — 126,838,245 B versus 139,262,241 B on gallery 4108964 — because the torrent holds the uploader's original `.zip` rather than the re-derived gallery pages.
+- `torrents[].hash` is an infohash, not a link. The `.torrent` file has to be resolved through `gallerytorrents.php?gid=&t=` with a logged-in session, and the file embeds the account passkey in its announce URL, which makes it a credential.
+- EH trackers require that passkey and are typically flagged private, so a bare magnet link built from the infohash cannot announce.
+- `POST /api/v2/torrents/add` accepts the `.torrent` body as a multipart file field, so no shared directory or watch folder is needed to enqueue one. It answers `Ok.` without returning a hash, so the locally computed infohash is the only way to look the torrent back up.
+- `autoTMM` must be sent as `false` on add, otherwise qBittorrent's category rules override the `savepath` passed in the same request.
 
 ## Technical Decisions
 | Decision | Rationale |
@@ -35,6 +48,18 @@
 | Store source and job identity keys | Prevents duplicate candidates and duplicate downloads after restarts |
 | Keep one download and one conversion active in low-resource mode | Preserves Web UI responsiveness and limits memory peaks |
 | Store metadata provenance per field | Allows manual values to override Telegram and Ex-derived values safely |
+| Treat the Telegraph preview page as a fallback source, never the default | It clears the Bot API 20 MB ceiling with complete page coverage, but delivers a 1280 px re-encode at 5–10 % of the original bytes |
+| Route oversized books to the EH torrent before anything else | It is the only free original-quality source; Archive Download costs GP and the preview page costs quality |
+| Demote ExHentai Archive Download to a manual button | Spending a limited GP balance is an operator decision, not a routing default |
+| Delegate BitTorrent to an external qBittorrent over its WebAPI | Keeps P2P code and unbounded memory out of the main process and preserves the 1C/512 MB target |
+| Verify the `.torrent` infohash locally against the gdata `hash` before pushing it | Catches a mis-parsed or stale `gallerytorrents.php` row before it becomes a wrong download |
+| Hard-link or copy out of the torrent save directory, never move | Moving the payload breaks seeding, and the client keeps seeding by default |
+| Leave a stalled torrent in `WAITING_TORRENT` instead of auto-falling back | Silent degradation would hand the operator a 1280 px book that looks like an original; the stall is surfaced with the seed count and the choice stays manual |
+| Apply the page-count consistency gate to the preview route only | Torrent `fsize` legitimately differs from gallery `filesize`, so the same check would reject valid originals |
+| Have the Telegraph provider emit a `ZIP_STORED` archive rather than a CBZ | `ConversionService` already consumes the `ARCHIVE` artifact, so safety checks, ComicInfo injection and atomic publication are reused unchanged |
+| Park a Telegraph page-count mismatch in `NEEDS_INFO` | A split preview page or a lossy image host would otherwise publish a silently incomplete book |
+| Record preview provenance in ComicInfo `ScanInformation`, not in the file name | Keeps the door open for replacing a preview-grade CBZ with the original later without breaking library indexes |
+| Write a `ScanInformation` line for every source, not just the preview route | Makes preview-grade books queryable so they can be back-filled once a torrent appears |
 
 ## Issues Encountered
 | Issue | Resolution |

@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-import re
 
+from app.candidates import links
 from app.candidates.models import IngestSummary, ParsedSourceMessage
 from app.candidates.rules import evaluate_source_rules
 from app.db.database import Database
@@ -42,7 +42,7 @@ class CandidateIngestor:
                         (
                             "编辑后不再包含候选内容"
                             if edited_identity is not None
-                            else "未包含图片预览、ExHentai 链接或压缩包附件"
+                            else "未包含图片预览、ExHentai 链接、预览页链接或压缩包附件"
                         ),
                     )
                     processed += 1
@@ -95,11 +95,9 @@ class CandidateIngestor:
         if not isinstance(message, dict):
             return None
         text = str(message.get("caption") or message.get("text") or "").strip()
-        gallery_match = re.search(
-            r"https?://(?:exhentai\.org|e-hentai\.org)/g/(\d+)/([A-Za-z0-9]+)/?",
-            text,
-            flags=re.IGNORECASE,
-        )
+        urls = links.message_urls(message, text)
+        gallery_ref = links.find_gallery_ref(urls, text)
+        page_urls = links.preview_urls(urls)
         photo = None
         if message.get("photo"):
             photo = max(
@@ -113,7 +111,7 @@ class CandidateIngestor:
             file_name = str(document.get("file_name") or "")
             if Path(file_name).suffix.lower() in {".zip", ".rar", ".7z", ".cbz"}:
                 archive = document
-        if photo is None and gallery_match is None and archive is None:
+        if photo is None and gallery_ref is None and archive is None and not page_urls:
             return None
         explicit_title = next(
             (
@@ -123,7 +121,7 @@ class CandidateIngestor:
             ),
             None,
         )
-        ex_gid = int(gallery_match.group(1)) if gallery_match else None
+        ex_gid = gallery_ref[0] if gallery_ref is not None else None
         title = explicit_title
         title_source = "TELEGRAM" if explicit_title is not None else None
         title_confidence = 0.9 if explicit_title is not None else None
@@ -198,7 +196,12 @@ class CandidateIngestor:
                 else "包含压缩包附件"
                 if archive is not None
                 else "包含 ExHentai 画廊链接"
+                if gallery_ref is not None
+                else "包含预览页链接"
             ),
             ex_gid=ex_gid,
-            ex_gallery_token=gallery_match.group(2) if gallery_match else None,
+            ex_gallery_token=(
+                gallery_ref[1] if gallery_ref is not None else None
+            ),
+            preview_urls=page_urls,
         )

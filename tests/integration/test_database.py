@@ -38,8 +38,11 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         source_message_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(source_messages)")
         }
+        candidate_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(candidates)")
+        }
 
-    assert migration_count == 9
+    assert migration_count == 10
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -64,6 +67,8 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     assert {"processed_at", "processing_result", "processing_reason"} <= update_columns
     assert "idx_telegram_bot_updates_pending" in update_indexes
     assert {"filter_result", "filter_reason"} <= source_message_columns
+    assert "preview_urls_json" in source_message_columns
+    assert {"preview_url", "torrent_count", "torrent_hash"} <= candidate_columns
 
 
 @pytest.mark.asyncio

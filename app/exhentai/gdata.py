@@ -113,6 +113,25 @@ def _to_float(value) -> float | None:
 
 
 @dataclass(frozen=True, slots=True)
+class GalleryTorrent:
+    """One torrent offered for a gallery, as listed by the gdata API.
+
+    ``hash`` is the infohash only. The ``.torrent`` file itself lives behind
+    ``gallerytorrents.php`` and needs a logged-in session.
+    """
+
+    hash: str
+    name: str
+    added: int | None
+    tsize: int | None
+    fsize: int | None
+
+    @property
+    def is_resample(self) -> bool:
+        return "resample" in self.name.lower()
+
+
+@dataclass(frozen=True, slots=True)
 class GalleryData:
     """Structured metadata for one gallery, as returned by the gdata API."""
 
@@ -129,6 +148,8 @@ class GalleryData:
     expunged: bool
     thumb: str | None
     tags: GalleryTags
+    torrent_count: int = 0
+    torrents: tuple[GalleryTorrent, ...] = ()
 
     @property
     def artists(self) -> tuple[str, ...]:
@@ -161,6 +182,66 @@ class GalleryData:
     def gallery_url(self) -> str:
         return f"https://exhentai.org/g/{self.gid}/{self.token}/"
 
+    @property
+    def best_torrent(self) -> GalleryTorrent | None:
+        return select_torrent(self.torrents, self.file_size)
+
+
+def _parse_torrent_list(value: object) -> tuple[GalleryTorrent, ...]:
+    """Read the ``torrents`` array, dropping entries without an infohash."""
+    if not isinstance(value, list):
+        return ()
+    torrents: list[GalleryTorrent] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        digest = str(entry.get("hash") or "").strip().lower()
+        if len(digest) != 40 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            continue
+        torrents.append(
+            GalleryTorrent(
+                hash=digest,
+                name=str(entry.get("name") or "").strip(),
+                added=_to_int(entry.get("added")),
+                tsize=_to_int(entry.get("tsize")),
+                fsize=_to_int(entry.get("fsize")),
+            )
+        )
+    return tuple(torrents)
+
+
+def select_torrent(
+    torrents: tuple[GalleryTorrent, ...], file_size: int | None
+) -> GalleryTorrent | None:
+    """Pick the torrent most likely to hold the original files.
+
+    Resampled uploads are downscaled re-encodes, so they lose to any full
+    torrent. Among the rest the one whose ``fsize`` sits closest to the
+    gallery's own ``filesize`` wins; the two never match exactly, because a
+    torrent carries the uploader's archive rather than the gallery pages.
+    Ties fall back to the most recently added entry.
+    """
+    if not torrents:
+        return None
+    preferred = [item for item in torrents if not item.is_resample] or list(
+        torrents
+    )
+
+    def rank(item: GalleryTorrent) -> tuple[int, int, int]:
+        if file_size is None or item.fsize is None:
+            distance = 1
+        else:
+            distance = abs(item.fsize - file_size)
+        return (
+            0 if item.fsize is not None else 1,
+            distance,
+            -(item.added or 0),
+        )
+
+    return min(preferred, key=rank)
+
 
 def parse_gdata_entry(entry: dict) -> GalleryData | None:
     """Convert one ``gmetadata`` entry into a GalleryData.
@@ -187,6 +268,8 @@ def parse_gdata_entry(entry: dict) -> GalleryData | None:
         expunged=bool(entry.get("expunged")),
         thumb=_clean_title(entry.get("thumb")),
         tags=parse_tag_list(entry.get("tags")),
+        torrent_count=_to_int(entry.get("torrentcount")) or 0,
+        torrents=_parse_torrent_list(entry.get("torrents")),
     )
 
 
@@ -222,9 +305,11 @@ __all__ = [
     "GALLERY_URL_RE",
     "GalleryData",
     "GalleryTags",
+    "GalleryTorrent",
     "TAG_NAMESPACES",
     "extract_gallery_ref",
     "gallery_data_to_metadata",
     "parse_gdata_entry",
+    "select_torrent",
     "parse_tag_list",
 ]

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sqlite3
 from pathlib import Path
 
 from app.archive.models import ArchivePasswordEntry, ToolProfile
 from app.auto_approval.models import AutoApprovalRule
+from app.candidates.links import GALLERY_URL_PATTERN
 from app.candidates.models import (
     CandidateDetail,
     CandidateListItem,
@@ -471,7 +471,8 @@ class Database:
             ]
             connection.execute(
                 "UPDATE source_messages SET message_state = 'INACTIVE', "
-                "message_text = '', attachment_json = '[]', file_unique_id = NULL "
+                "message_text = '', attachment_json = '[]', "
+                "file_unique_id = NULL, preview_urls_json = '[]' "
                 "WHERE id = ?",
                 (source_message_id,),
             )
@@ -481,7 +482,8 @@ class Database:
             )
             for candidate_id in candidate_ids:
                 remaining_messages = connection.execute(
-                    "SELECT sm.message_text, sm.attachment_json "
+                    "SELECT sm.message_text, sm.attachment_json, "
+                    "sm.preview_urls_json "
                     "FROM candidate_messages cm JOIN source_messages sm "
                     "ON sm.id = cm.source_message_id WHERE cm.candidate_id = ? "
                     "ORDER BY sm.message_date DESC, sm.id DESC",
@@ -497,18 +499,24 @@ class Database:
                 best_title_confidence = -1.0
                 ex_gid = None
                 ex_gallery_token = None
+                preview_url = None
                 filter_reason = "包含候选内容"
-                for message_text, attachment_json in remaining_messages:
+                for (
+                    message_text,
+                    attachment_json,
+                    preview_urls_json,
+                ) in remaining_messages:
                     text = str(message_text or "").strip()
-                    gallery_match = re.search(
-                        r"https?://(?:exhentai\.org|e-hentai\.org)/g/"
-                        r"(\d+)/([A-Za-z0-9]+)/?",
-                        text,
-                        flags=re.IGNORECASE,
-                    )
+                    gallery_match = GALLERY_URL_PATTERN.search(text)
                     if gallery_match is not None and ex_gid is None:
                         ex_gid = int(gallery_match.group(1))
                         ex_gallery_token = gallery_match.group(2)
+                    if preview_url is None:
+                        remaining_previews = json.loads(
+                            preview_urls_json or "[]"
+                        )
+                        if remaining_previews:
+                            preview_url = str(remaining_previews[0])
                     attachments = json.loads(attachment_json)
                     explicit_title = next(
                         (
@@ -540,7 +548,9 @@ class Database:
                         title_source = "INFERRED"
                         title_confidence = 0.2
                     else:
-                        continue
+                        title = None
+                        title_source = None
+                        title_confidence = -1.0
                     if title and title_confidence > best_title_confidence:
                         best_title = title
                         best_title_source = title_source
@@ -551,11 +561,13 @@ class Database:
                         filter_reason = "包含压缩包附件"
                     elif gallery_match is not None and filter_reason == "包含候选内容":
                         filter_reason = "包含 ExHentai 画廊链接"
+                    elif preview_url is not None and filter_reason == "包含候选内容":
+                        filter_reason = "包含预览页链接"
                 connection.execute(
                     "UPDATE candidates SET ex_gid = NULL, ex_gallery_token = NULL, "
-                    "filter_reason = ?, "
+                    "filter_reason = ?, preview_url = ?, "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (filter_reason, candidate_id),
+                    (filter_reason, preview_url, candidate_id),
                 )
                 connection.execute(
                     "DELETE FROM metadata_values WHERE candidate_id = ? "
@@ -612,7 +624,8 @@ class Database:
                 "(account_id, chat_id, message_id, sender_id, "
                 "reply_to_message_id, media_group_id, message_text, "
                 "attachment_json, file_unique_id, message_date, filter_result, "
-                "filter_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "filter_reason, preview_urls_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     account_id,
                     message.chat_id,
@@ -630,6 +643,11 @@ class Database:
                     message.message_date,
                     message.filter_result,
                     message.filter_reason,
+                    json.dumps(
+                        list(message.preview_urls),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                 ),
             )
             created_message = cursor.rowcount == 1
@@ -639,6 +657,7 @@ class Database:
                     "reply_to_message_id = ?, message_text = ?, "
                     "attachment_json = ?, file_unique_id = ?, "
                     "filter_result = ?, filter_reason = ?, "
+                    "preview_urls_json = ?, "
                     "message_state = 'ACTIVE' WHERE account_id = ? "
                     "AND chat_id = ? AND message_id = ?",
                     (
@@ -653,6 +672,11 @@ class Database:
                         message.file_unique_id,
                         message.filter_result,
                         message.filter_reason,
+                        json.dumps(
+                            list(message.preview_urls),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         account_id,
                         message.chat_id,
                         message.message_id,
@@ -667,6 +691,9 @@ class Database:
             )
             created_candidate = False
             if created_message or message.is_edit:
+                preview_url = (
+                    message.preview_urls[0] if message.preview_urls else None
+                )
                 candidate_id = None
                 existing_candidate_id = None
                 if message.is_edit and not created_message:
@@ -798,13 +825,14 @@ class Database:
                     candidate_cursor = connection.execute(
                         "INSERT INTO candidates "
                         "(status, ex_gid, ex_gallery_token, filter_result, "
-                        "filter_reason) VALUES (?, ?, ?, ?, ?)",
+                        "filter_reason, preview_url) VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             candidate_status,
                             message.ex_gid,
                             message.ex_gallery_token,
                             message.filter_result,
                             message.filter_reason,
+                            preview_url,
                         ),
                     )
                     candidate_id = int(candidate_cursor.lastrowid)
@@ -812,24 +840,38 @@ class Database:
                 elif message.is_edit and existing_candidate_id is not None:
                     connection.execute(
                         "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
+                        "preview_url = ?, "
                         "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (
                             message.ex_gid,
                             message.ex_gallery_token,
+                            preview_url,
                             candidate_id,
                         ),
                     )
-                elif message.ex_gid is not None:
-                    connection.execute(
-                        "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
-                        "AND ex_gid IS NULL",
-                        (
-                            message.ex_gid,
-                            message.ex_gallery_token,
-                            candidate_id,
-                        ),
-                    )
+                else:
+                    if message.ex_gid is not None:
+                        connection.execute(
+                            "UPDATE candidates SET ex_gid = ?, "
+                            "ex_gallery_token = ?, "
+                            "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
+                            "AND ex_gid IS NULL",
+                            (
+                                message.ex_gid,
+                                message.ex_gallery_token,
+                                candidate_id,
+                            ),
+                        )
+                    if preview_url is not None:
+                        # A later message in the same group may carry the
+                        # preview link the first one lacked; the first link
+                        # seen wins so a re-post cannot silently replace it.
+                        connection.execute(
+                            "UPDATE candidates SET preview_url = ?, "
+                            "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
+                            "AND preview_url IS NULL",
+                            (preview_url, candidate_id),
+                        )
                 connection.execute(
                     "INSERT OR IGNORE INTO candidate_messages "
                     "(candidate_id, source_message_id) VALUES (?, ?)",
@@ -979,7 +1021,9 @@ class Database:
                 "(SELECT mv.field_value FROM metadata_values mv "
                 " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
                 " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "c.ex_gid, c.ex_gallery_token FROM candidates c WHERE c.id = ?",
+                "c.ex_gid, c.ex_gallery_token, c.preview_url, c.torrent_count, "
+                "c.torrent_hash FROM candidates c WHERE c.id = ?",
+
                 (candidate_id,),
             ).fetchone()
             if row is None:
@@ -1013,6 +1057,9 @@ class Database:
             ex_gid=int(row[5]) if row[5] is not None else None,
             ex_gallery_token=str(row[6]) if row[6] is not None else None,
             messages=messages,
+            preview_url=str(row[7]) if row[7] is not None else None,
+            torrent_count=int(row[8]) if row[8] is not None else None,
+            torrent_hash=str(row[9]) if row[9] is not None else None,
         )
 
 

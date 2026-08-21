@@ -842,3 +842,61 @@
 - **Files larger than 20 MB cannot be fetched through the Bot API at all.** The only real fix is MTProto (Telethon), which is neither installed nor declared in `pyproject.toml`. Until the operator decides, the ExHentai source is the documented workaround.
 - `SevenZipBackend.pack_cbz` in `app/archive/backends/seven_zip.py:244` calls `comicinfo_path.write_bytes()` on a value that may be `str`, which raises `TypeError`. The production caller passes bytes, so it never fires; the boundary should still be tightened. The operator was asked and has not answered.
 - `TELEGRAM_CONFLICT` needs the operator to confirm no other deployment polls the same token.
+
+## Implementation Session: Download Source Chain, Step 2 (2026-08-21)
+
+### Scope
+- **Status:** in progress — step 2 of 8 in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` §14. Stopped at the operator's request at end of day.
+- The phase reworks download routing into a four-level chain: `TELEGRAM` (attachment ≤20 MB) → `EH_TORRENT` (free original archive via an external qBittorrent) → `TELEGRAPH` (1280 px preview fallback), with ExHentai Archive Download demoted to a manual button because it costs GP.
+- This step delivers only the **data** the router will read: preview links out of Telegram entities, and torrent availability out of gdata. **No routing, no new provider, no new download code yet.**
+
+### Handover Map
+| Area | Entry point | Note |
+|------|-------------|------|
+| The plan of record | `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` | 15 sections; §14 is the delivery order this session follows |
+| Phase checklist | `task_plan.md` "Implementation Phase 14" | 10 boxes; the first two are done |
+| URL extraction | `app/candidates/links.py` | New. `message_urls` / `preview_urls` / `find_gallery_ref`; shared by the ingestor and `Database` so both agree on what a link is |
+| Ingestion | `app/candidates/ingestor.py::_parse_message` | Now reads `entities` / `caption_entities`; a preview-only message is a candidate |
+| Persistence | `app/db/database.py::_save_candidate_message_sync` | Writes `source_messages.preview_urls_json` and backfills `candidates.preview_url` |
+| Recomputation | `app/db/database.py::_deactivate_candidate_message_sync` | Rebuilds `preview_url` from the surviving messages' stored links |
+| Torrent discovery | `app/exhentai/gdata.py::select_torrent` | Plus `GalleryTorrent` and `GalleryData.best_torrent`; reused by `app/torrent/` in step 4 |
+| Torrent persistence | `app/exhentai/service.py::_persist_torrents_sync` | Writes `candidates.torrent_count` / `torrent_hash` |
+| Schema | `app/db/migrations/010_download_sources.sql` | 4 columns; migration count is now 10 |
+
+### Implementation
+- **The preview URL was invisible, not absent.** Channels hyperlink the word 「预览」, so the URL lives in a `text_link` entity and the text-only regex in `_parse_message` could never see it. `links.message_urls` reads entity targets first, then bare URLs in the text; entity targets win so a hyperlinked link beats a bare one lower in the caption.
+- The same change also picks up **hyperlinked ExHentai links**, which the old text regex missed for the same reason.
+- `normalize_preview_url` canonicalizes to `https://<host>/<path>` on `telegra.ph` / `graph.org` only, dropping `www.`, the query and the fragment, so one page cannot be stored twice. Pathless hosts, `javascript:` URLs and lookalike hosts such as `evil.telegra.ph.example.com` are rejected here rather than at fetch time.
+- The bare-URL regex excludes the two CJK punctuation blocks (U+3000–U+303F and U+FF00–U+FFEF), because channels wrap links in full-width brackets and the URL would otherwise absorb the closing character.
+- **`source_messages.preview_urls_json` exists because the recomputation path cannot re-derive the links.** When an edit strips a message, `_deactivate_candidate_message_sync` rebuilds the candidate from the *stored* rows, and entities are not stored — only `message_text` is. The column is the only way that path can see a hyperlinked preview URL.
+- `candidates.preview_url` keeps the **first** link seen across a media group; an edit to the owning message overwrites it, including clearing it, which matches how `ex_gid` already behaves.
+- **gdata already returns `torrentcount` and `torrents`**, so torrent discovery costs no extra request and no cookie. `GalleryData` now carries them, and `select_torrent` implements the policy: drop `resample` re-encodes, then take the `fsize` closest to the gallery `filesize`, then the newest `added`.
+- Torrent availability lands on **`candidates`, not `metadata_values`**, because it decides which provider runs and a router should not parse strings out of a metadata table. `torrent_count` is **nullable on purpose**: NULL means gdata has not answered, `0` means the gallery genuinely has no torrent (gid 1655718 really does). The router must not confuse the two.
+- `_fetch_metadata` now returns `(metadata, GalleryData | None)`. The HTML scraping fallback cannot supply torrents, so it returns None there rather than pretending `torrent_count` is 0.
+
+### Behaviour Changes To Know About
+- A message carrying **only** a preview link is now a candidate. With no title text it lands in `NEEDS_INFO` 「缺少可识别标题」 through the existing rule, and the link is still stored so the fallback works once the title is filled in.
+- The ignore reason string is now 「未包含图片预览、ExHentai 链接、预览页链接或压缩包附件」.
+- In `_deactivate_candidate_message_sync` the title loop no longer `continue`s when a surviving message yields no title. That `continue` also skipped the `filter_reason` computation, so a caption-less photo message used to leave 「包含候选内容」 where 「包含图片预览」 was correct. The suite agreed with the new behaviour.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-21 | Wrote the proposal for the preview route only, missing the torrent route entirely | 1 | Reworked into the full four-level chain and renamed the document to `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`; the old `TELEGRAPH_PREVIEW_PROPOSAL.md` was deleted so there is one source of truth |
+| 2026-08-21 | Described "qBittorrent has no file-content download API" as a hard constraint in three places | 2 | A self-inflicted non-problem: nothing ever needed the API to return file bytes. qBittorrent downloads to `savepath` and EhBot reads that path. The framing was removed; only the plain path-mapping requirement remains |
+| 2026-08-21 | The bare-URL regex swallowed the closing full-width bracket of a wrapped link | 1 | Excluded the two CJK punctuation blocks. Found by a test written for exactly this case, not in review |
+| 2026-08-21 | Expected a bare preview link with no title to be `ACCEPT` 「包含预览页链接」 | 1 | The test was wrong, not the code: `evaluate_source_rules` returns `NEEDS_INFO` 「缺少可识别标题」 for any titleless message. The assertion was corrected to the real behaviour instead of loosening the rule |
+
+### Verification
+- **Status:** partial. **The next agent must run the full suite first.**
+- Targeted runs all pass: `tests/unit/test_candidate_links.py` 9/9, `tests/unit/test_gdata.py` 16/16, `tests/integration/test_candidate_ingestion.py` 20/20, `tests/integration/test_exhentai_torrents.py` 2/2.
+- The **full** suite has not been re-run since `CandidateDetail` gained three fields and `_get_candidate_sync` changed. The last full run was 242 passed / 1 failed, and that single failure was the migration-count assertion, which has since been updated to 10 along with new column assertions in `tests/integration/test_database.py`.
+- No networked verification was done this session. Nothing in this step talks to qBittorrent or telegra.ph yet.
+
+### Open Items For The Next Agent
+- **Run `.venv/Scripts/python.exe -m pytest` before anything else.** See above.
+- Continue at `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md` §14 step 3 (`app/telegraph/`) or step 4 (`app/torrent/`); the data both need is now in the database.
+- `DownloadService._claim_pending_job_sync` still hard-codes `provider IN (?, ?)`. A new provider's jobs will be **silently never claimed** until that is expanded from `SUPPORTED_PROVIDERS`. This is a trap, not a preference.
+- `tests/integration/test_review_actions.py:226` asserts that an attachment-less candidate auto-enqueues `EXHENTAI`. Demoting Archive Download to manual in step 5 requires deliberately changing that assertion; the reason belongs in this file when it happens.
+- `DEVELOPMENT_PLAN.md` 3.2 now carries annotations recording that this phase reverses 「不默认使用 Torrent 下载」 and partially reverses 「不默认在 Ex 归档失败后无限制逐页抓图」. Do not quietly drop those notes.
+- Preview images are **not** original quality (1280 px, 5–10 % of the original bytes). The chain order exists for that reason; do not promote `TELEGRAPH` above `EH_TORRENT` for convenience.

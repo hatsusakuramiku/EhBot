@@ -16,6 +16,7 @@ from app.exhentai.downloader import (
     ExHentaiDownloader,
 )
 from app.exhentai.enrich import enrich_metadata
+from app.exhentai.gdata import GalleryData
 from app.exhentai.gdata_client import GdataClient, GdataError
 from app.exhentai.tagdb import TagTranslator
 
@@ -52,10 +53,14 @@ class ExHentaiService:
 
     async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
-        metadata = await self._fetch_metadata(gid, token)
+        metadata, gallery = await self._fetch_metadata(gid, token)
         await asyncio.to_thread(
             self._persist_metadata_sync, candidate_id, metadata
         )
+        if gallery is not None:
+            await asyncio.to_thread(
+                self._persist_torrents_sync, candidate_id, gallery
+            )
         await self._database.re_evaluate_candidate_metadata_rules(
             candidate_id
         )
@@ -87,7 +92,7 @@ class ExHentaiService:
                 metadata = enrich_metadata(gallery, self._translator)
             else:
                 try:
-                    metadata = await self._fetch_metadata(gid, token)
+                    metadata, gallery = await self._fetch_metadata(gid, token)
                 except ExHentaiDownloadError as exc:
                     logging.getLogger(__name__).warning(
                         "review_metadata_fallback_failed",
@@ -97,6 +102,10 @@ class ExHentaiService:
             await asyncio.to_thread(
                 self._persist_metadata_sync, candidate_id, metadata
             )
+            if gallery is not None:
+                await asyncio.to_thread(
+                    self._persist_torrents_sync, candidate_id, gallery
+                )
             await self._database.re_evaluate_candidate_metadata_rules(
                 candidate_id
             )
@@ -129,12 +138,19 @@ class ExHentaiService:
         existing = {int(row[0]) for row in rows}
         return [ref for ref in refs if ref[0] not in existing]
 
-    async def _fetch_metadata(self, gid: int, token: str) -> dict:
+    async def _fetch_metadata(
+        self, gid: int, token: str
+    ) -> tuple[dict, GalleryData | None]:
         """Prefer the gdata API, falling back to authenticated HTML scraping.
 
         gdata needs no Cookie and returns namespaced tags, so it yields far
         more fields than the gallery page. Expunged galleries are missing
         from gdata, so HTML remains the fallback.
+
+        The GalleryData is returned alongside the flattened metadata because
+        it carries the torrent list, which is routing state rather than
+        bibliographic metadata. HTML scraping cannot supply it, so the second
+        element is None on that path.
         """
         async with self._http_session() as client:
             try:
@@ -145,7 +161,7 @@ class ExHentaiService:
                     extra={"error_code": exc.code},
                 )
             else:
-                return enrich_metadata(gallery, self._translator)
+                return enrich_metadata(gallery, self._translator), gallery
 
             credentials = await self._credentials_provider()
             if credentials is None:
@@ -153,9 +169,10 @@ class ExHentaiService:
                     "EXHENTAI_NOT_CONFIG",
                     "gdata 未收录该画廊，需要配置 ExHentai Cookie 后重试",
                 )
-            return await ExHentaiDownloader(client).fetch_metadata(
+            metadata = await ExHentaiDownloader(client).fetch_metadata(
                 credentials, gid, token
             )
+            return metadata, None
 
     async def download_archive_for_candidate(
         self, candidate_id: int
@@ -244,6 +261,28 @@ class ExHentaiService:
                     "WHERE metadata_values.is_manual = 0",
                     (candidate_id, field_name, str(value), confidence),
                 )
+
+    def _persist_torrents_sync(
+        self, candidate_id: int, gallery: GalleryData
+    ) -> None:
+        """Store the torrent availability the router needs.
+
+        This lands on the candidate rather than in ``metadata_values`` because
+        it decides which download provider runs, and a router should not have
+        to parse strings out of a metadata table. ``torrent_count`` stays NULL
+        until gdata answers, so 「未查询」 and 「确认无种」 stay distinguishable.
+        """
+        best = gallery.best_torrent
+        with self._database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    gallery.torrent_count,
+                    best.hash if best is not None else None,
+                    candidate_id,
+                ),
+            )
 
     def _record_artifact_sync(
         self,

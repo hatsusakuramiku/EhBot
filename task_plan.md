@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 13 (download queue controls and configurable paths) complete; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials is still outstanding
+Implementation phase 13 (download queue controls and configurable paths) complete; phase 14 (download source chain: EH torrent original archives with a Telegraph preview fallback) is planned and its design is recorded in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials is still outstanding
 
 ## Phases
 
@@ -294,3 +294,39 @@ Implementation phase 13 (download queue controls and configurable paths) complet
 - MTProto (Telethon) large-file downloads: not installed, not declared, and a product decision the operator has not made.
 - `SevenZipBackend.pack_cbz` still accepts a `str` ComicInfo payload that would raise `TypeError`; unreachable from production callers, but the boundary is loose.
 - Still outstanding from earlier phases: the full `docker compose up` acceptance run with real credentials, the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+### Implementation Phase 14: Download Source Chain
+- [ ] Extract preview page URLs from `text_link` entities, persist `preview_url`, and accept preview-only messages as candidates
+- [ ] Persist `torrent_count` and `torrent_hash` from the gdata response so routing needs no extra request
+- [ ] Add `app/torrent/`: torrent selection, `.torrent` retrieval, local infohash verification, and a qBittorrent WebAPI adapter
+- [ ] Add the `WAITING_TORRENT` job state with a poller that reports progress, seeds and stall time without auto-failing
+- [ ] Take delivery by hard-linking or copying out of the seeding directory, never moving it
+- [ ] Add `app/telegraph/`: page client, URL guard, bounded image fetcher, and ZIP packer
+- [ ] Add the `EH_TORRENT` and `TELEGRAPH` providers and stop the worker from hard-coding its provider list
+- [ ] Route approvals through `TELEGRAM` → `EH_TORRENT` → `TELEGRAPH` and demote ExHentai Archive Download to a manual button
+- [ ] Park a preview page-count mismatch in `NEEDS_INFO` instead of publishing a partial book
+- [ ] Record source-grade provenance in `details_json` and ComicInfo `ScanInformation`
+- **Status:** planned; design recorded in `DOWNLOAD_SOURCE_CHAIN_PROPOSAL.md`
+
+## Phase 14 Measured Basis
+- The gdata response already carries `torrentcount` and `torrents[{hash, added, name, tsize, fsize}]`, so discovering a torrent costs no extra request and no cookie.
+- Torrents are not always there: gid 1655718 reports `torrentcount=0` while gid 4108964 and gid 4076223 each report 1. Every level of the chain is load-bearing.
+- A torrent's `fsize` does not equal the gallery `filesize` (126,838,245 B vs 139,262,241 B on gid 4108964), so the page-count consistency gate cannot be applied to the torrent route.
+- `torrents[].hash` is only an infohash; the `.torrent` file must be resolved through `gallerytorrents.php` with a logged-in session, and it embeds the account passkey.
+- The preview link is a `telegra.ph` page whose URL lives in a caption `text_link` entity, so the current text-only regex in `CandidateIngestor._parse_message` cannot see it.
+- `api.telegra.ph/getPage?return_content=true` returns an ordered node tree, so the images can be read from the official API rather than scraped from HTML.
+- The images are not on `telegra.ph/file/`; each channel runs its own Telegram file proxy (`image.dangernsfw.win`, `pic.850123.xyz`) behind Cloudflare, and both require a `User-Agent` and a `Referer` or answer 403.
+- Preview page coverage is complete: 22/22, 15/15 and 78/78 against the ExHentai gdata `filecount` on the sampled galleries.
+- Preview quality is not: gid 1655718 is 145,185,851 B over 15 pages at the source and 7,895,214 B over the same 15 pages on the preview page, normalized to 1280 px wide. The preview route is reading-grade, roughly 5–10 % of the original bytes.
+
+## Phase 14 Assumptions And Boundaries
+- This phase reverses two approved boundaries in `DEVELOPMENT_PLAN.md` 3.2 and needs that confirmed on approval: torrents become the preferred route for oversized books, and bounded preview-page image fetching is allowed. The EH gallery itself is still never scraped page by page.
+- The archive pipeline is reused unchanged: every provider produces or registers an `ARCHIVE` artifact, which is exactly what `ConversionService` already consumes.
+- Original-quality downloads stay the priority; the preview source is the last resort, never the default route.
+- BitTorrent runs in an external qBittorrent instance reached over its WebAPI. The main process loads no P2P library, so the 1C/512 MB target is unaffected.
+- qBittorrent downloads into its configured `savepath` and EhBot reads the finished payload from that path, so the client-side and EhBot-side views of it are configured separately for split-host deployments.
+- A stalled torrent is not an error. It stays in `WAITING_TORRENT` with its stall time on display and waits for an operator decision rather than silently degrading to preview grade.
+- Archive Download stays manual because it costs GP; spending a limited resource is an operator decision, not a routing default.
+- Image URLs come from untrusted third-party content, so scheme, host, resolved address, redirect depth, byte caps and image magic numbers are all enforced before anything is written. Torrent contents still pass the existing archive safety gates.
+- MTProto (Telethon) remains out of scope; it is the only real route to original files above 20 MB straight from Telegram and is a separate product decision.
+- Channels that post only an archive plus a `t.me/c/...` link gain nothing from this phase.

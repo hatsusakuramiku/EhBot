@@ -746,3 +746,234 @@ async def test_edit_removal_rebuilds_metadata_from_remaining_message(
     assert candidate.ex_gid == 33333
     assert candidate.ex_gallery_token == "survivorToken"
     assert len(candidate.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hyperlinked_preview_only_message_becomes_a_candidate(
+    tmp_path: Path,
+) -> None:
+    # The channel hyperlinks the word 「预览」, so the URL exists only in a
+    # caption entity. A text-only regex sees nothing here.
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, -100555)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 300,
+                "channel_post": {
+                    "message_id": 500,
+                    "date": 1_700_010_000,
+                    "chat": {"id": -100555, "title": "Preview Channel"},
+                    "caption": "Preview Only Book\n预览 | 原始地址",
+                    "caption_entities": [
+                        {
+                            "type": "text_link",
+                            "offset": 18,
+                            "length": 2,
+                            "url": "https://telegra.ph/Preview-Only-Book-08-21",
+                        },
+                        {
+                            "type": "text_link",
+                            "offset": 23,
+                            "length": 4,
+                            "url": "https://exhentai.org/g/4108964/previewtoken/",
+                        },
+                    ],
+                },
+            }
+        ]
+    )
+
+    result = await CandidateIngestor(database).process_pending_updates()
+    candidate = await database.get_candidate(1)
+
+    assert result.created_candidates == 1
+    assert candidate is not None
+    assert candidate.title == "Preview Only Book"
+    assert candidate.preview_url == "https://telegra.ph/Preview-Only-Book-08-21"
+    # The gallery link was hyperlinked too, and must still be picked up.
+    assert candidate.ex_gid == 4108964
+    assert candidate.ex_gallery_token == "previewtoken"
+
+
+@pytest.mark.asyncio
+async def test_a_preview_link_with_no_other_content_is_still_accepted(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, -100556)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 310,
+                "channel_post": {
+                    "message_id": 510,
+                    "date": 1_700_010_100,
+                    "chat": {"id": -100556, "title": "Bare Preview"},
+                    "text": "Bare Preview Book\nhttps://graph.org/Bare-Preview-08-21",
+                },
+            },
+            {
+                "update_id": 311,
+                "channel_post": {
+                    "message_id": 511,
+                    "date": 1_700_010_110,
+                    "chat": {"id": -100556, "title": "Bare Preview"},
+                    "text": "https://graph.org/Untitled-08-21",
+                },
+            },
+        ]
+    )
+
+    result = await CandidateIngestor(database).process_pending_updates()
+    titled = await database.get_candidate(1)
+    untitled = await database.get_candidate(2)
+
+    assert result.created_candidates == 2
+    assert result.ignored_updates == 0
+    assert titled is not None
+    assert titled.filter_reason == "包含预览页链接"
+    assert titled.preview_url == "https://graph.org/Bare-Preview-08-21"
+    # A link with no title still needs an operator, but the link is kept so
+    # the fallback stays available once the title is filled in.
+    assert untitled is not None
+    assert untitled.status == "NEEDS_INFO"
+    assert untitled.filter_reason == "缺少可识别标题"
+    assert untitled.preview_url == "https://graph.org/Untitled-08-21"
+
+
+@pytest.mark.asyncio
+async def test_a_message_without_any_candidate_content_is_still_ignored(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, -100557)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 320,
+                "channel_post": {
+                    "message_id": 520,
+                    "date": 1_700_010_200,
+                    "chat": {"id": -100557, "title": "Chatter"},
+                    "text": "明天更新 https://example.com/blog",
+                },
+            }
+        ]
+    )
+
+    result = await CandidateIngestor(database).process_pending_updates()
+
+    assert result.created_candidates == 0
+    assert result.ignored_updates == 1
+    assert await database.list_candidates() == []
+
+
+@pytest.mark.asyncio
+async def test_the_first_preview_link_in_a_group_is_kept(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, -100558)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 330,
+                "channel_post": {
+                    "message_id": 530,
+                    "date": 1_700_010_300,
+                    "chat": {"id": -100558, "title": "Group Channel"},
+                    "media_group_id": "preview-group",
+                    "caption": "Grouped Book",
+                    "caption_entities": [
+                        {
+                            "type": "text_link",
+                            "offset": 0,
+                            "length": 4,
+                            "url": "https://telegra.ph/First-Page-08-21",
+                        }
+                    ],
+                },
+            },
+            {
+                "update_id": 331,
+                "channel_post": {
+                    "message_id": 531,
+                    "date": 1_700_010_310,
+                    "chat": {"id": -100558, "title": "Group Channel"},
+                    "media_group_id": "preview-group",
+                    "caption": "Grouped Book",
+                    "caption_entities": [
+                        {
+                            "type": "text_link",
+                            "offset": 0,
+                            "length": 4,
+                            "url": "https://telegra.ph/Second-Page-08-21",
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+
+    await CandidateIngestor(database).process_pending_updates()
+    candidate = await database.get_candidate(1)
+
+    assert candidate is not None
+    assert len(candidate.messages) == 2
+    assert candidate.preview_url == "https://telegra.ph/First-Page-08-21"
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_drops_the_preview_link_clears_it(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, -100559)
+    original = {
+        "message_id": 540,
+        "date": 1_700_010_400,
+        "chat": {"id": -100559, "title": "Edited Channel"},
+        "caption": "Edited Book",
+        "caption_entities": [
+            {
+                "type": "text_link",
+                "offset": 0,
+                "length": 5,
+                "url": "https://telegra.ph/Edited-Book-08-21",
+            }
+        ],
+        "document": {
+            "file_id": "edited-archive",
+            "file_unique_id": "edited-archive-unique",
+            "file_name": "Edited Book.zip",
+        },
+    }
+    await database.save_telegram_updates(
+        [{"update_id": 340, "channel_post": original}]
+    )
+    await CandidateIngestor(database).process_pending_updates()
+    before = await database.get_candidate(1)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 341,
+                "edited_channel_post": {
+                    **original,
+                    "caption": "Edited Book",
+                    "caption_entities": [],
+                },
+            }
+        ]
+    )
+
+    await CandidateIngestor(database).process_pending_updates()
+    after = await database.get_candidate(1)
+
+    assert before is not None
+    assert before.preview_url == "https://telegra.ph/Edited-Book-08-21"
+    assert after is not None
+    assert after.preview_url is None

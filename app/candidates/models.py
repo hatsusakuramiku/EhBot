@@ -23,6 +23,7 @@ class ParsedSourceMessage:
     filter_reason: str
     ex_gid: int | None = None
     ex_gallery_token: str | None = None
+    preview_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,11 @@ class CandidateDetail:
     ex_gid: int | None
     ex_gallery_token: str | None
     messages: tuple[CandidateMessage, ...]
+    preview_url: str | None = None
+    # NULL until gdata has answered, so 「未查询」 stays distinguishable from
+    # 「确认无种」; the router treats only an explicit 0 as「无种」.
+    torrent_count: int | None = None
+    torrent_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

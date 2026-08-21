@@ -2,10 +2,12 @@ import httpx
 import pytest
 
 from app.exhentai.gdata import (
+    GalleryTorrent,
     extract_gallery_ref,
     gallery_data_to_metadata,
     parse_gdata_entry,
     parse_tag_list,
+    select_torrent,
 )
 from app.exhentai.gdata_client import (
     GDATA_ENDPOINT,
@@ -170,3 +172,108 @@ async def test_gdata_client_reports_missing_gallery() -> None:
             await GdataClient(client).fetch_one(1, "t")
 
     assert captured.value.code == "EXHENTAI_GDATA_NOT_FOUND"
+
+
+# Measured 2026-08-21 against gid 4108964: the torrent holds the uploader's
+# own archive, so its fsize does not match the gallery filesize.
+TORRENT_ENTRY = {
+    "gid": 4108964,
+    "token": "a1b2c3d4e5",
+    "title": "Sample Gallery",
+    "filecount": "78",
+    "filesize": 139262241,
+    "torrentcount": "1",
+    "torrents": [
+        {
+            "hash": "4acbd66e5d0518977ece30c343eb75c4ca92b031",
+            "added": "1786287412",
+            "name": "[Sample] Book.zip",
+            "tsize": "10119",
+            "fsize": "126838245",
+        }
+    ],
+    "tags": ["artist:sample"],
+}
+
+
+def test_parse_gdata_entry_reads_the_torrent_list() -> None:
+    gallery = parse_gdata_entry(TORRENT_ENTRY)
+    assert gallery is not None
+    assert gallery.torrent_count == 1
+    assert len(gallery.torrents) == 1
+    torrent = gallery.torrents[0]
+    assert torrent.hash == "4acbd66e5d0518977ece30c343eb75c4ca92b031"
+    assert torrent.added == 1786287412
+    assert torrent.fsize == 126838245
+    assert gallery.best_torrent is torrent
+
+
+def test_a_gallery_without_torrents_reports_zero() -> None:
+    # gid 1655718 really answers torrentcount 0, so this is not a corner case.
+    gallery = parse_gdata_entry(SAMPLE_ENTRY)
+    assert gallery is not None
+    assert gallery.torrent_count == 0
+    assert gallery.torrents == ()
+    assert gallery.best_torrent is None
+
+
+def test_malformed_torrent_hashes_are_dropped() -> None:
+    gallery = parse_gdata_entry(
+        {
+            **TORRENT_ENTRY,
+            "torrents": [
+                {"hash": "short", "name": "a.zip"},
+                {"hash": "z" * 40, "name": "b.zip"},
+                {"name": "c.zip"},
+                "not-a-dict",
+                {"hash": "A" * 40, "name": "d.zip", "fsize": "1"},
+            ],
+        }
+    )
+    assert gallery is not None
+    assert [torrent.hash for torrent in gallery.torrents] == ["a" * 40]
+
+
+def test_resampled_torrents_lose_to_a_full_one() -> None:
+    resample = GalleryTorrent(
+        hash="a" * 40,
+        name="[Sample] Book (resample).zip",
+        added=2_000_000_000,
+        tsize=100,
+        fsize=139_262_241,
+    )
+    full = GalleryTorrent(
+        hash="b" * 40,
+        name="[Sample] Book.zip",
+        added=1_000_000_000,
+        tsize=100,
+        fsize=126_838_245,
+    )
+
+    # The resample is both newer and closer in size, and still loses.
+    assert select_torrent((resample, full), 139_262_241) is full
+
+
+def test_the_closest_file_size_wins_then_the_newest() -> None:
+    far = GalleryTorrent(
+        hash="a" * 40, name="a.zip", added=2_000_000_000, tsize=1, fsize=1_000
+    )
+    near = GalleryTorrent(
+        hash="b" * 40, name="b.zip", added=1_000_000_000, tsize=1, fsize=99_000
+    )
+    assert select_torrent((far, near), 100_000) is near
+
+    older = GalleryTorrent(
+        hash="c" * 40, name="c.zip", added=1_000, tsize=1, fsize=50_000
+    )
+    newer = GalleryTorrent(
+        hash="d" * 40, name="d.zip", added=2_000, tsize=1, fsize=50_000
+    )
+    assert select_torrent((older, newer), 50_000) is newer
+
+
+def test_only_resampled_torrents_still_yield_a_choice() -> None:
+    resample = GalleryTorrent(
+        hash="a" * 40, name="x (resample).zip", added=1, tsize=1, fsize=10
+    )
+    assert select_torrent((resample,), 100) is resample
