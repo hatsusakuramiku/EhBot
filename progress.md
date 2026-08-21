@@ -1075,3 +1075,41 @@ Enabling it **requires** `local_save_path` (`TORRENT_LOCAL_PATH_REQUIRED`) and r
 - The two jobs left `FAILED` by the old add-body misjudgement have live torrents in the client; re-pushing is safe now that 409 is absorbed.
 - `select_torrent` still cannot rank by seeders (gdata does not publish them). Stalls remain an operator decision.
 - Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+## Implementation Session: Archive Image Quality Levels (2026-08-22)
+
+### Scope
+- **Status:** complete. Answering "does archiving support an image quality setting?" — it did not: pages were copied byte-for-byte and never decoded. Added four operator-selectable levels with `original` as the default.
+- Requested presets, implemented verbatim: `high` = JPEG 85 no downscale, `medium` = JPEG 60 no downscale, `low` = JPEG 40 capped at 3000px on the longest edge.
+
+### Implementation
+- **`app/archive/quality.py` (new).** `ImageQualityProfile` presets, `normalize_quality`, `reencode_page` and `quality_note`. Pillow is imported lazily inside `reencode_page` so nothing on the import path depends on it.
+- **`ArchiveProcessor`** takes `image_quality` and now refuses the streaming path when a re-encode is requested: `stream_pages` copies members byte-for-byte and never sees pixels, so a quality setting wired only into `pack_cbz` would silently do nothing for the common ZIP case. When re-encoding, the extract path is used and pages are rewritten into `<work>/extract-<stem>/requality/` before packing, which the existing `finally: rmtree` already cleans up.
+- **`ArchiveProcessResult`** gained `image_quality` and `rewritten_pages`; both land in the job's `details_json` so a published book records what was done to it.
+- **`ArchiveSettingsService`** gained `image_quality`, `image_quality_view` and `save_image_quality` behind `SETTING_IMAGE_QUALITY`. An unknown level raises `ARCHIVE_QUALITY_INVALID` rather than falling back, because a silent fallback would publish at a quality nobody chose.
+- **Settings page and `/archive-settings/limits`** carry the level as a `<select>` alongside the safety limits, with the compression estimates shown as a hint. Limits are validated first so a bad number aborts before the level is stored.
+- **`ComicInfo.xml`** appends the policy to the existing source grade: `EH_TORRENT original 121.0MiB requality=medium q60`. Without it, a reading-grade book is indistinguishable from an untouched one without opening every page.
+- **Dependency:** `pillow>=11.0,<13` added (`pillow==12.3.0` in `uv.lock`). It is the only realistic way to decode and requantise JPEG; 7-Zip cannot transcode. This is a real addition to a project that deliberately avoids in-process third-party libraries, and it is accepted only because it is inert unless a non-default level is selected.
+
+### Deliberate Behaviour Choices
+- **`original` is the default and re-encoding is never automatic.** The operation is lossy and irreversible, so it is an explicit operator decision, mirroring the `torrent_auto_pack` reasoning.
+- **PNG pages are never transcoded.** PNG-to-JPEG loses alpha and frequently *inflates* line art. A PNG page is copied through and simply not counted as rewritten.
+- **A re-encoded page is discarded when it is not smaller.** Spending CPU to publish a bigger, lossier file is strictly worse than doing nothing.
+- **An undecodable page does not fail the book.** `reencode_page` catches decode errors (including `DecompressionBombError`) and ships the original, because a slightly larger page is not worth losing an otherwise complete archive over.
+- **Re-encoding runs after `validate_manifest`, never instead of it.** Page order and page names are the ones the safety layer already decided, so a quality change can only ever replace the bytes behind a page.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-22 | `uv add pillow` failed: `failed to open ...\uv\cache\sdists-v9\.git: Access denied` | 1 | Sandbox cannot write the user-level uv cache. Re-ran escalated; resolved in 1.9 s |
+| 2026-08-22 | Synthetic fixtures (`image_bytes`) are undecodable headers, so no existing fixture could test a re-encode | 1 | Added `real_jpeg_bytes` / `write_real_image_zip` producing genuinely decodable gradient-plus-noise JPEGs; flat colour would shrink to nothing at every level and prove nothing |
+
+### Verification
+- Full suite: **422 passed** (409 before; 13 new). No new skips.
+- New coverage: unknown level falls back to `original`; the preset table is pinned; `quality_note` empty for `original`; the default publishes pages byte-identical to the source; the four levels are strictly ordered by output size; `low` downscales 3600px to 3000px and leaves 400px alone; PNG passes through untouched while the JPEG beside it is rewritten; an already-tiny JPEG keeps its original; an undecodable page ships as-is; page order and names survive a re-encode; the level round-trips through the settings page; `ultra` is rejected with 400 and nothing is stored; and an end-to-end conversion at `medium` shrinks the pages, writes `requality=medium q60` into ComicInfo and records `rewritten_pages` in the job details.
+- **Not verified:** no live container run this session; the change is fully covered by tests through `create_app`.
+
+### Open Items For The Next Agent
+- The Telegraph/torrent loose-image packer (`app/telegraph/packer.py`) still packs at source quality. It feeds the same processor, so those books get re-encoded at conversion time anyway; applying the level twice would compound the loss and was deliberately not done.
+- Still open from the previous session: **`local_save_path` is unset in the live deployment** (client saves to `/download/R18lib` on another host), so `torrent_auto_pack` cannot be enabled until that directory is mounted and registered.
+- Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.

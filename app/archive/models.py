@@ -155,6 +155,10 @@ class ArchiveProcessResult:
     snapshot: ArchiveTaskSnapshot
     password_id: int | None
     volume_count: int
+    #: The requested image quality level and how many pages it actually
+    #: rewrote, so a published book records what was done to its pages.
+    image_quality: str = "original"
+    rewritten_pages: int = 0
 
 
 __all__ = [

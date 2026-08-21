@@ -209,6 +209,7 @@ Implementation phase 14 (download source chain: EH torrent original archives wit
 - Operators select registered tool profiles and may only adjust the executable path, timeout, and enabled state; no command line is accepted from the UI.
 - Split naming supports `.partN.rar`, `.rar` + `.rNN`, and `.zip/.7z/.rar` + `.NNN`; incomplete series park in `CONVERSION_WAITING_VOLUMES` and never drive the tool.
 - The selected backend performs both extraction and CBZ packing for a task, and CBZ output uses `ZIP_STORED` so already-compressed images are not recompressed.
+- Page bytes are published unchanged unless the operator selects an image quality level (`original` / `high` / `medium` / `low`); `original` is the default because a lossy re-encode is irreversible. Only JPEG pages are re-encoded, and a result that is not smaller is discarded in favour of the original.
 - Passwords are encrypted at rest with a private-file master key and are never written to logs, task details, or audit payloads.
 - Every published CBZ is written as `<name>.cbz.part` first and atomically renamed; failures delete the partial file and the task's temporary directory.
 

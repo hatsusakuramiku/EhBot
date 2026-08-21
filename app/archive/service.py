@@ -11,6 +11,13 @@ from app.archive.models import (
     ToolProfile,
 )
 from app.archive.backends.seven_zip import resolve_seven_zip_executable
+from app.archive.quality import (
+    IMAGE_QUALITY_LEVELS,
+    IMAGE_QUALITY_PROFILES,
+    QUALITY_LABELS,
+    QUALITY_ORIGINAL,
+    normalize_quality,
+)
 from app.archive.toolchain import (
     SEVEN_ZIP_VERSION,
     ToolchainError,
@@ -34,6 +41,11 @@ MASTER_KEY_NAME = "archive_password_key"
 
 SETTING_KEEP_ORIGINAL = "keep_original"
 SETTING_LIBRARY_TEMPLATE = "library_template"
+
+#: Lossy re-encode level applied while packing the CBZ. Stored as a level name
+#: rather than a JPEG number so the presets can be retuned without rewriting
+#: what operators already saved.
+SETTING_IMAGE_QUALITY = "image_quality"
 
 #: Operator-editable directory overrides. The environment supplies the default,
 #: and a stored value wins so the paths can be changed without a redeploy.
@@ -355,6 +367,45 @@ class ArchiveSettingsService:
             )
         await self._database.save_archive_settings(cleaned)
 
+    async def image_quality(self) -> str:
+        """The stored re-encode level, defaulting to the lossless original."""
+        stored = await self._database.archive_settings()
+        return normalize_quality(stored.get(SETTING_IMAGE_QUALITY))
+
+    async def image_quality_view(self) -> dict[str, object]:
+        selected = await self.image_quality()
+        return {
+            "selected": selected,
+            "levels": [
+                {
+                    "value": level,
+                    "label": QUALITY_LABELS[level],
+                    "selected": level == selected,
+                }
+                for level in IMAGE_QUALITY_LEVELS
+            ],
+        }
+
+    async def save_image_quality(self, level: str) -> str:
+        """Store the re-encode level, refusing anything not a known preset.
+
+        Only the four presets are accepted: an unknown value would silently
+        fall back to ``original`` later and quietly publish books at a quality
+        nobody asked for.
+        """
+        candidate = (level or "").strip().lower() or QUALITY_ORIGINAL
+        if candidate not in IMAGE_QUALITY_PROFILES:
+            raise ArchiveSettingsError(
+                "ARCHIVE_QUALITY_INVALID",
+                "\u56fe\u50cf\u8d28\u91cf\u5fc5\u987b\u662f"
+                "\u539f\u59cb\u6587\u4ef6\u3001\u9ad8\u3001\u4e2d"
+                "\u3001\u4f4e\u4e4b\u4e00",
+            )
+        await self._database.save_archive_settings(
+            {SETTING_IMAGE_QUALITY: candidate}
+        )
+        return candidate
+
     async def keep_original(self) -> bool:
         stored = await self._database.archive_settings()
         return stored.get(SETTING_KEEP_ORIGINAL, "1") not in {"0", "false", "no"}
@@ -527,6 +578,7 @@ __all__ = [
     "LIMIT_KEYS",
     "MASTER_KEY_NAME",
     "PATH_SETTING_KEYS",
+    "SETTING_IMAGE_QUALITY",
     "SETTING_KEEP_ORIGINAL",
     "SETTING_LIBRARY_PATH",
     "SETTING_TORRENT_AUTO_PACK",

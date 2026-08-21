@@ -121,6 +121,13 @@
       <div class="field-group"><label>最大压缩率</label><input name="max_compression_ratio" type="number" step="0.1" min="0.1" value="{{ limits.max_compression_ratio }}"></div>
       <div class="field-group"><label>最大目录层级</label><input name="max_depth" type="number" min="1" value="{{ limits.max_depth }}"></div>
       <label class="toggle-row"><input name="keep_original" type="checkbox" {% if keep_original %}checked{% endif %}><span>CBZ 发布成功后保留原始压缩包</span></label>
+      <div class="field-group">
+        <label for="image-quality">图像质量</label>
+        <select id="image-quality" name="image_quality">
+          {% for level in image_quality.levels %}<option value="{{ level.value }}" {% if level.selected %}selected{% endif %}>{{ level.label }}</option>{% endfor %}
+        </select>
+        <p class="form-hint">重编码不可逆，默认保留原始文件。仅处理 JPEG 页，PNG 与变大的页会自动保留原图；预估体积为原始的 high~60-70%、medium~40-50%、low~20-30%。</p>
+      </div>
       <div class="form-actions"><button class="primary-button" type="submit">保存安全限制</button></div>
     </form>
   </section>

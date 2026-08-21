@@ -1,4 +1,5 @@
 from dataclasses import replace
+import io
 from pathlib import Path
 import zipfile
 
@@ -44,13 +45,26 @@ from app.archive.vault import (
     generate_master_key,
 )
 
+from app.archive.quality import (
+    QUALITY_HIGH,
+    QUALITY_LOW,
+    QUALITY_MEDIUM,
+    QUALITY_ORIGINAL,
+    normalize_quality,
+    quality_note,
+    quality_profile,
+    reencode_page,
+)
+
 from tests.unit.archive_fixtures import (
     ALL_PROFILES,
     JPEG_HEADER,
     SEVEN_ZIP_PROFILE,
     ZIP_ONLY_PROFILES,
     image_bytes,
+    real_jpeg_bytes,
     write_image_zip,
+    write_real_image_zip,
 )
 
 
@@ -508,6 +522,174 @@ def test_processor_tries_vault_passwords_in_order(tmp_path: Path) -> None:
     )
     assert attempted == ["bad", "good"]
     assert result.password_id == 9
+
+
+# --- image quality -------------------------------------------------------
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        return image.size
+
+
+def _cbz_pages(path: Path) -> dict[str, bytes]:
+    with zipfile.ZipFile(path) as archive:
+        return {
+            name: archive.read(name)
+            for name in archive.namelist()
+            if name != "ComicInfo.xml"
+        }
+
+
+def test_unknown_quality_level_falls_back_to_original() -> None:
+    """A stored value that no longer maps to a preset must never re-encode."""
+    assert normalize_quality(None) == QUALITY_ORIGINAL
+    assert normalize_quality("") == QUALITY_ORIGINAL
+    assert normalize_quality("ultra") == QUALITY_ORIGINAL
+    assert normalize_quality(" HIGH ") == QUALITY_HIGH
+    assert not quality_profile("ultra").rewrites
+
+
+def test_quality_presets_match_the_documented_table() -> None:
+    """The presets are a published contract, so they are pinned by a test."""
+    assert quality_profile(QUALITY_HIGH).jpeg_quality == 85
+    assert quality_profile(QUALITY_HIGH).max_edge is None
+    assert quality_profile(QUALITY_MEDIUM).jpeg_quality == 60
+    assert quality_profile(QUALITY_MEDIUM).max_edge is None
+    assert quality_profile(QUALITY_LOW).jpeg_quality == 40
+    assert quality_profile(QUALITY_LOW).max_edge == 3000
+
+
+def test_quality_note_only_describes_a_real_re_encode() -> None:
+    assert quality_note(QUALITY_ORIGINAL) == ""
+    assert quality_note(None) == ""
+    assert quality_note(QUALITY_MEDIUM) == "requality=medium q60"
+    assert quality_note(QUALITY_LOW) == "requality=low q40 max3000px"
+
+
+def test_default_quality_publishes_pages_byte_for_byte(tmp_path: Path) -> None:
+    """`original` is the default and must not touch a single page."""
+    source = tmp_path / "src.zip"
+    write_real_image_zip(source, ("01.jpg", "02.jpg"))
+    destination = tmp_path / "out.cbz"
+    result = _processor().process(
+        source,
+        destination=destination,
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda count: b"<ComicInfo />",
+    )
+    with zipfile.ZipFile(source) as original:
+        expected = original.read("01.jpg")
+    assert result.image_quality == QUALITY_ORIGINAL
+    assert result.rewritten_pages == 0
+    assert _cbz_pages(destination)["0001.jpg"] == expected
+
+
+def test_each_quality_level_shrinks_pages_more_than_the_last(
+    tmp_path: Path,
+) -> None:
+    """The three presets must be ordered by size, not just by JPEG number."""
+    source = tmp_path / "src.zip"
+    write_real_image_zip(source, ("01.jpg",))
+    sizes: dict[str, int] = {}
+    for level in (QUALITY_ORIGINAL, QUALITY_HIGH, QUALITY_MEDIUM, QUALITY_LOW):
+        destination = tmp_path / f"{level}.cbz"
+        result = _processor(image_quality=level).process(
+            source,
+            destination=destination,
+            work_directory=tmp_path / f"work-{level}",
+            comicinfo_builder=lambda count: b"<ComicInfo />",
+        )
+        assert result.image_quality == level
+        assert result.rewritten_pages == (0 if level == QUALITY_ORIGINAL else 1)
+        sizes[level] = len(_cbz_pages(destination)["0001.jpg"])
+    assert (
+        sizes[QUALITY_ORIGINAL]
+        > sizes[QUALITY_HIGH]
+        > sizes[QUALITY_MEDIUM]
+        > sizes[QUALITY_LOW]
+    )
+
+
+def test_low_quality_downscales_only_oversized_pages(tmp_path: Path) -> None:
+    """The 3000px cap must resize a huge page and leave a small one alone."""
+    staging = tmp_path / "staging"
+    profile = quality_profile(QUALITY_LOW)
+
+    small = tmp_path / "small.jpg"
+    small.write_bytes(real_jpeg_bytes(width=400, height=200))
+    outcome = reencode_page("0001.jpg", small, profile, staging / "small")
+    assert outcome.rewritten
+    assert _jpeg_dimensions(outcome.path.read_bytes()) == (400, 200)
+
+    large = tmp_path / "large.jpg"
+    large.write_bytes(real_jpeg_bytes(width=3600, height=1800))
+    outcome = reencode_page("0001.jpg", large, profile, staging / "large")
+    assert outcome.rewritten
+    assert _jpeg_dimensions(outcome.path.read_bytes()) == (3000, 1500)
+
+
+def test_png_pages_are_never_transcoded(tmp_path: Path) -> None:
+    """PNG line art loses alpha and often grows as JPEG, so it is passed through."""
+    source = tmp_path / "src.zip"
+    write_real_image_zip(source, ("01.png", "02.jpg"))
+    destination = tmp_path / "out.cbz"
+    result = _processor(image_quality=QUALITY_LOW).process(
+        source,
+        destination=destination,
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda count: b"<ComicInfo />",
+    )
+    with zipfile.ZipFile(source) as original:
+        expected_png = original.read("01.png")
+    pages = _cbz_pages(destination)
+    assert pages["0001.png"] == expected_png
+    assert result.rewritten_pages == 1
+
+
+def test_re_encode_keeps_the_original_when_it_would_grow(tmp_path: Path) -> None:
+    """Spending CPU to publish a bigger, lossier page is strictly worse."""
+    already_small = tmp_path / "0001.jpg"
+    already_small.write_bytes(real_jpeg_bytes(width=64, height=64, quality=20))
+    outcome = reencode_page(
+        "0001.jpg", already_small, quality_profile(QUALITY_HIGH), tmp_path / "s"
+    )
+    assert not outcome.rewritten
+    assert outcome.path == already_small
+    assert outcome.final_bytes == outcome.original_bytes
+
+
+def test_undecodable_page_is_shipped_as_is(tmp_path: Path) -> None:
+    """A page Pillow cannot read must not fail an otherwise complete book."""
+    broken = tmp_path / "0001.jpg"
+    broken.write_bytes(JPEG_HEADER + b"\x00" * 128)
+    outcome = reencode_page(
+        "0001.jpg", broken, quality_profile(QUALITY_MEDIUM), tmp_path / "s"
+    )
+    assert not outcome.rewritten
+    assert outcome.path == broken
+
+
+def test_re_encode_preserves_page_order_and_names(tmp_path: Path) -> None:
+    """A quality change must never reorder or rename the pages of a book."""
+    source = tmp_path / "src.zip"
+    write_real_image_zip(source, ("2.jpg", "10.jpg", "1.jpg"))
+    destination = tmp_path / "out.cbz"
+    _processor(image_quality=QUALITY_MEDIUM).process(
+        source,
+        destination=destination,
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda count: b"<ComicInfo />",
+    )
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.namelist() == [
+            "ComicInfo.xml",
+            "0001.jpg",
+            "0002.jpg",
+            "0003.jpg",
+        ]
 
 
 # --- password vault ------------------------------------------------------

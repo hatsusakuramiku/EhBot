@@ -24,6 +24,13 @@ from app.archive.models import (
     SafetyLimits,
     ToolProfile,
 )
+from app.archive.quality import (
+    QUALITY_ORIGINAL,
+    ImageQualityProfile,
+    normalize_quality,
+    quality_profile,
+    reencode_page,
+)
 from app.archive.safety import page_file_names, validate_manifest
 
 
@@ -45,12 +52,14 @@ class ArchiveProcessor:
         passwords: tuple[tuple[int, str], ...] = (),
         subprocess_runner=None,
         tools_path: Path | None = None,
+        image_quality: str = QUALITY_ORIGINAL,
     ) -> None:
         self._profiles = profiles
         self._limits = limits or SafetyLimits()
         self._passwords = passwords
         self._subprocess_runner = subprocess_runner
         self._tools_path = tools_path
+        self._image_quality = normalize_quality(image_quality)
 
     def select_profile(self, source_format: str) -> ToolProfile:
         if source_format == FORMAT_UNKNOWN:
@@ -134,12 +143,22 @@ class ArchiveProcessor:
         page_names = page_file_names(pages)
         comicinfo = comicinfo_builder(len(pages))
 
+        quality = quality_profile(self._image_quality)
+        rewritten = 0
+
         partial = destination.with_name(f"{destination.name}.part")
         partial.parent.mkdir(parents=True, exist_ok=True)
         partial.unlink(missing_ok=True)
         task_directory = work_directory / f"extract-{destination.stem}"
         try:
-            if getattr(backend, "streaming", False) and source_format == FORMAT_ZIP:
+            # Streaming copies members byte-for-byte, so it can only be used
+            # when the pages are published unchanged. A re-encode has to see
+            # decoded pixels and therefore goes through the extract path.
+            if (
+                getattr(backend, "streaming", False)
+                and source_format == FORMAT_ZIP
+                and not quality.rewrites
+            ):
                 written = backend.stream_pages(
                     volumes, password, pages, page_names, partial, comicinfo
                 )
@@ -157,6 +176,10 @@ class ArchiveProcessor:
                     raise ArchiveError(
                         "ARCHIVE_MEMBER_MISSING",
                         "\u89e3\u538b\u7ed3\u679c\u7f3a\u5c11\u90e8\u5206\u56fe\u7247\u9875",
+                    )
+                if quality.rewrites:
+                    staged, rewritten = self._reencode_pages(
+                        staged, quality, task_directory / "requality"
                     )
                 written = backend.pack_cbz(staged, partial, comicinfo)
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +201,39 @@ class ArchiveProcessor:
             snapshot=snapshot,
             password_id=password_id,
             volume_count=len(volumes),
+            image_quality=self._image_quality,
+            rewritten_pages=rewritten,
         )
+
+    @staticmethod
+    def _reencode_pages(
+        staged: tuple[tuple[str, Path], ...],
+        profile: ImageQualityProfile,
+        staging: Path,
+    ) -> tuple[tuple[tuple[str, Path], ...], int]:
+        """Re-encode the staged pages, keeping originals wherever it does not help.
+
+        The page order and the page names are the ones already decided by the
+        safety layer, so a re-encode can never reorder or rename a book: it
+        only ever replaces the bytes behind a page.
+        """
+        rewritten = 0
+        result: list[tuple[str, Path]] = []
+        for page_name, path in staged:
+            outcome = reencode_page(page_name, path, profile, staging)
+            if outcome.rewritten:
+                rewritten += 1
+            result.append((page_name, outcome.path))
+        if rewritten:
+            LOGGER.info(
+                "archive_pages_reencoded",
+                extra={
+                    "quality": profile.level,
+                    "rewritten_pages": rewritten,
+                    "page_count": len(staged),
+                },
+            )
+        return tuple(result), rewritten
 
     @staticmethod
     def _probe_inspect(backend):

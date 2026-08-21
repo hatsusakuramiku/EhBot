@@ -18,7 +18,7 @@ from app.db.database import Database
 from app.downloads.models import DOWNLOAD_STATE_COMPLETED
 from app.main import create_app
 
-from tests.unit.archive_fixtures import image_bytes
+from tests.unit.archive_fixtures import image_bytes, write_real_image_zip
 
 
 def make_settings(root: Path) -> Settings:
@@ -157,6 +157,55 @@ def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
     assert "\u4fdd\u7559\u539f\u59cb\u538b\u7f29\u5305" in updated.text
 
 
+def test_image_quality_defaults_to_original_and_round_trips(
+    tmp_path: Path,
+) -> None:
+    """The archive settings page must default to the lossless original."""
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        page = client.get("/archive-settings")
+        assert page.context["image_quality"]["selected"] == "original"
+        saved = client.post(
+            "/archive-settings/limits",
+            data={
+                "max_members": "1200",
+                "max_total_bytes": "2000000",
+                "max_member_bytes": "500000",
+                "max_compression_ratio": "80",
+                "max_depth": "4",
+                "image_quality": "medium",
+                "csrf_token": page.context["csrf_token"],
+            },
+            follow_redirects=False,
+        )
+        updated = client.get("/archive-settings")
+
+    assert saved.status_code == 303
+    assert updated.context["image_quality"]["selected"] == "medium"
+
+
+def test_unknown_image_quality_is_rejected(tmp_path: Path) -> None:
+    """An unrecognised level would silently publish at an unintended quality."""
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        page = client.get("/archive-settings")
+        response = client.post(
+            "/archive-settings/limits",
+            data={
+                "image_quality": "ultra",
+                "csrf_token": page.context["csrf_token"],
+            },
+        )
+        after = client.get("/archive-settings")
+
+    assert response.status_code == 400
+    assert after.context["image_quality"]["selected"] == "original"
+
+
 def test_invalid_limit_is_rejected_without_saving(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
@@ -293,6 +342,44 @@ async def test_conversion_deletes_original_when_keep_original_is_off(
 
     assert (tmp_path / "library" / "Archive Title.cbz").exists()
     assert not archive_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_conversion_reencodes_pages_and_records_the_policy(
+    tmp_path: Path,
+) -> None:
+    """A configured quality level must shrink the pages and say so in ComicInfo."""
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_real_image_zip(archive_path, ("01.jpg", "02.jpg"))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    settings_service = ArchiveSettingsService(database, tmp_path / "data")
+    await settings_service.save_image_quality("medium")
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        settings_service=settings_service,
+    )
+
+    job_id = await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    published = tmp_path / "library" / "Archive Title.cbz"
+    with zipfile.ZipFile(archive_path) as original:
+        source_size = len(original.read("01.jpg"))
+    with zipfile.ZipFile(published) as archive:
+        assert archive.namelist() == ["ComicInfo.xml", "0001.jpg", "0002.jpg"]
+        assert len(archive.read("0001.jpg")) < source_size
+        comicinfo = archive.read("ComicInfo.xml").decode("utf-8")
+    assert "<ScanInformation>requality=medium q60</ScanInformation>" in comicinfo
+
+    with database._connect() as connection:  # noqa: SLF001
+        details = connection.execute(
+            "SELECT details_json FROM download_jobs WHERE id = ?", (job_id,)
+        ).fetchone()[0]
+    assert '"image_quality":"medium"' in details
+    assert '"rewritten_pages":2' in details
 
 
 @pytest.mark.asyncio

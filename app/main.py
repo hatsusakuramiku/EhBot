@@ -1465,6 +1465,7 @@ def create_app(
             "limits": await service.limits(),
             "passwords": await service.passwords(),
             "keep_original": await service.keep_original(),
+            "image_quality": await service.image_quality_view(),
             "toolchain": await service.toolchain_status(),
             "paths": await service.paths(),
             "torrent": await service.torrent_client_view(),
@@ -1577,11 +1578,17 @@ def create_app(
         validate_csrf(request, csrf_token)
         form = await request.form()
         try:
+            # Limits are typed by hand and are the field that realistically
+            # fails validation, so they are stored first: a rejected number
+            # aborts before the quality level is touched.
             await archive_settings_service().save_limits(
                 {key: str(form.get(key) or "") for key in ARCHIVE_LIMIT_KEYS}
             )
             await archive_settings_service().save_keep_original(
                 form.get("keep_original") == "on"
+            )
+            await archive_settings_service().save_image_quality(
+                str(form.get("image_quality") or "")
             )
         except ArchiveSettingsError as exc:
             return await _render_archive_settings(

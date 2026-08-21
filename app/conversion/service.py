@@ -12,6 +12,7 @@ from app.archive.errors import (
 )
 from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
+from app.archive.quality import quality_note
 from app.archive.service import ArchiveSettingsService
 from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
@@ -51,6 +52,21 @@ def _metadata_lookup(metadata, field_name: str) -> str | None:
         if entry.field_name == field_name:
             return entry.field_value
     return None
+
+
+def _scan_information(metadata, image_quality: str | None) -> str | None:
+    """Append the re-encode policy to the source grade already recorded.
+
+    The provider grade (for example `EH_TORRENT original 121.0MiB`) says where
+    the pages came from; the appended note says what EhBot did to them. Keeping
+    both in one field means a re-encoded book can be told apart from an
+    untouched one without opening a single page.
+    """
+    source = _metadata_lookup(metadata, "ScanInformation")
+    note = quality_note(image_quality)
+    if not note:
+        return source
+    return f"{source} {note}" if source else note
 
 
 def _metadata_tags(metadata) -> tuple[str, ...]:
@@ -264,7 +280,8 @@ class ConversionService:
         )
         library_path, work_path = await self._effective_paths()
         library_target = library_path / f"{file_stem}.cbz"
-        processor = await self._build_processor()
+        image_quality = await self._settings.image_quality()
+        processor = await self._build_processor(image_quality)
         try:
             result = await asyncio.to_thread(
                 processor.process,
@@ -272,7 +289,7 @@ class ConversionService:
                 destination=library_target,
                 work_directory=work_path / "conversion",
                 comicinfo_builder=lambda page_count: self._build_comicinfo(
-                    metadata, title, page_count
+                    metadata, title, page_count, image_quality
                 ),
                 library_path=library_path,
             )
@@ -321,24 +338,33 @@ class ConversionService:
                 "volume_count": result.volume_count,
                 "skipped_members": list(result.skipped_members),
                 "password_entry_id": result.password_id,
+                "image_quality": result.image_quality,
+                "rewritten_pages": result.rewritten_pages,
             },
         )
         if not await self._settings.keep_original():
             await asyncio.to_thread(self._remove_original_sync, source_path)
 
-    async def _build_processor(self) -> ArchiveProcessor:
+    async def _build_processor(
+        self, image_quality: str | None = None
+    ) -> ArchiveProcessor:
         profiles = await self._settings.profiles(enabled_only=True)
         limits = await self._settings.limits()
         passwords = await self._settings.password_attempts()
+        if image_quality is None:
+            image_quality = await self._settings.image_quality()
         return ArchiveProcessor(
             profiles=profiles,
             limits=limits,
             passwords=passwords,
             tools_path=self._settings.tools_path,
+            image_quality=image_quality,
         )
 
     @staticmethod
-    def _build_comicinfo(metadata, title: str, page_count: int) -> bytes:
+    def _build_comicinfo(
+        metadata, title: str, page_count: int, image_quality: str | None = None
+    ) -> bytes:
         rating_value = _metadata_lookup(metadata, "Rating")
         try:
             rating = float(rating_value) if rating_value else None
@@ -358,7 +384,7 @@ class ConversionService:
             parody=_metadata_lookup(metadata, "Parody"),
             character=_metadata_lookup(metadata, "Character"),
             web=_metadata_lookup(metadata, "Web"),
-            scan_information=_metadata_lookup(metadata, "ScanInformation"),
+            scan_information=_scan_information(metadata, image_quality),
         )
 
     @staticmethod
