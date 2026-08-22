@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import time
@@ -20,6 +21,7 @@ from pwdlib.exceptions import PwdlibError
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.candidates.ingestor import CandidateIngestor
+from app.candidates.links import find_gallery_ref
 from app.auto_approval.rules import (
     RuleValidationError,
     render_rule_dsl,
@@ -295,6 +297,22 @@ def create_app(
                 torrent_abandon=(
                     lambda job_id: torrent_service().abandon(job_id)
                 ),
+                torrent_verify=(
+                    lambda job_id: torrent_service().complete_if_ready(job_id)
+                ),
+                # Auto-pack a finished download into a CBZ. The idempotent
+                # conversion insert makes the torrent route's own auto-pack a
+                # no-op here, so a single conversion job is created per
+                # candidate no matter how many completions fire.
+                auto_pack=(
+                    lambda candidate_id: (
+                        application.state.conversion_service
+                        .enqueue_for_candidate(candidate_id)
+                    )
+                ),
+                auto_pack_enabled=(
+                    archive_settings_service.auto_pack_after_download
+                ),
                 work_path_provider=archive_settings_service.work_path,
             )
             application.state.download_service = download_service
@@ -516,6 +534,111 @@ def create_app(
         except (ValueError, KeyError):
             return None
 
+    async def _exhentai_configured() -> bool:
+        manager = app.state.connection_manager
+        if manager is None:
+            return False
+        try:
+            return bool(manager.snapshot().exhentai.configured)
+        except Exception:  # noqa: BLE001 - status is a hint, not a gate
+            return False
+
+    async def _torrent_configured() -> bool:
+        service = app.state.archive_settings_service
+        if service is None:
+            return False
+        try:
+            return bool(
+                (await service.torrent_client_view()).get("configured")
+            )
+        except Exception:  # noqa: BLE001 - status is a hint, not a gate
+            return False
+
+    _MAGNET_PATTERN = re.compile(
+        r"magnet:\?.*?xt=urn:btih:([A-Fa-f0-9]{32,40})", re.IGNORECASE
+    )
+
+    async def _ingest_manual_link(raw: str) -> int:
+        """Turn a guitar link or magnet into an approved, queued candidate."""
+        text = raw.strip()
+        if not text:
+            raise ReviewError("INVALID_LINK", "请输入 ExHentai 画廊链接或磁力链接")
+        gallery_ref = find_gallery_ref((text,), text)
+        magnet_match = _MAGNET_PATTERN.search(text)
+        if gallery_ref is None and magnet_match is None:
+            raise ReviewError("INVALID_LINK", "无法识别链接：仅支持 ExHentai 画廊或磁力链接")
+
+        if gallery_ref is not None:
+            return await _ingest_manual_eh(*gallery_ref)
+        return await _ingest_manual_magnet(magnet_match.group(1), text)
+
+    async def _ingest_manual_eh(gid: int, token: str) -> int:
+        candidate_id = await database.create_manual_candidate(
+            filter_reason="手动添加：ExHentai 画廊链接",
+            ex_gid=gid,
+            ex_gallery_token=token,
+            title=f"ExHentai #{gid}",
+        )
+        try:
+            await exhentai_service().fetch_metadata_for_candidate(candidate_id)
+        except ExHentaiDownloadError as exc:
+            # Metadata missing is not fatal: the candidate is already approved
+            # and reviewable, and the operator can re-fetch or edit by hand.
+            logging.getLogger(__name__).warning(
+                "manual_add_metadata_failed candidate=%d error=%s",
+                candidate_id,
+                exc.public_message,
+            )
+        await _enqueue_manual_candidate(candidate_id)
+        return candidate_id
+
+    async def _ingest_manual_magnet(btih: str, raw: str) -> int:
+        torrent_cfg = await archive_settings_service().torrent_client()
+        if not torrent_cfg.is_configured:
+            raise ReviewError(
+                "TORRENT_CLIENT_NOT_CONFIG",
+                "磁力链接需要已配置 qBittorrent（归档设置）",
+            )
+        candidate_id = await database.create_manual_candidate(
+            filter_reason="手动添加：磁力链接",
+            magnet_url=raw,
+            torrent_hash=btih.lower(),
+            title=f"磁力 #{btih[:8]}",
+        )
+        # A magnet has no gallery to fetch metadata from; the torrent's own
+        # DHT metadata arrives as qBittorrent fetches it.
+        await download_service().enqueue_torrent_download(candidate_id)
+        return candidate_id
+
+    async def _enqueue_manual_candidate(candidate_id: int) -> None:
+        """Queue the best available source for a manually-added candidate.
+
+        The candidate already sits in APPROVED, so the normal approval status
+        check is skipped; routing otherwise matches the review pipeline.
+        """
+        candidate = await database.get_candidate(candidate_id)
+        if candidate is None:
+            return
+        provider, attachment = _route_download_source(candidate)
+        if provider is None:
+            logging.getLogger(__name__).info(
+                "manual_add_no_source candidate=%d", candidate_id
+            )
+            return
+        try:
+            if provider == PROVIDER_EH_TORRENT:
+                await download_service().enqueue_torrent_download(candidate_id)
+            elif provider == PROVIDER_TELEGRAPH:
+                await download_service().enqueue_telegraph_download(candidate_id)
+            else:
+                await download_service().enqueue_exhentai_download(candidate_id)
+        except DownloadError as exc:
+            logging.getLogger(__name__).warning(
+                "manual_add_enqueue_failed candidate=%d error=%s",
+                candidate_id,
+                exc.public_message,
+            )
+
     def review_service() -> ReviewService:
         return ReviewService(database)
 
@@ -715,7 +838,15 @@ def create_app(
             if not name:
                 raise RuleValidationError("规则名称不能为空")
             priority = int(str(form.get("priority") or "100"))
-            ast = validate_rule_ast(json.loads(str(form.get("ast_json") or "")))
+            # Rules are expressed as `Regex({Field}, 'pattern')`. The pattern is
+            # validated here (re.compile) so a syntax error can never be saved.
+            ast = validate_rule_ast(
+                {
+                    "kind": "regex",
+                    "field": str(form.get("field") or "").strip(),
+                    "pattern": str(form.get("pattern") or ""),
+                }
+            )
             await database.save_auto_approval_rule(
                 rule_id=None,
                 name=name,
@@ -804,6 +935,51 @@ def create_app(
             empty_title="暂无待审核候选",
             empty_text="白名单来源的新候选会显示在这里",
             batch_enabled=True,
+        )
+
+    @app.get("/manual-add")
+    async def manual_add_page(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="manual_add.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "exhentai_configured": await _exhentai_configured(),
+                "torrent_configured": await _torrent_configured(),
+                "error": None,
+                "success": None,
+            },
+        )
+
+    @app.post("/manual-add")
+    async def manual_add_submit(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        raw = str(form.get("input") or "").strip()
+        try:
+            candidate_id = await _ingest_manual_link(raw)
+        except (ReviewError, ExHentaiDownloadError) as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="manual_add.html",
+                context={
+                    "csrf_token": request.session["csrf_token"],
+                    "exhentai_configured": await _exhentai_configured(),
+                    "torrent_configured": await _torrent_configured(),
+                    "error": str(getattr(exc, "public_message", exc)),
+                    "success": None,
+                },
+                status_code=400,
+            )
+        return RedirectResponse(
+            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            status_code=303,
         )
 
     @app.get("/candidates/needs-info")
@@ -1111,22 +1287,47 @@ def create_app(
         if redirect:
             return redirect
         active = await download_service().list_active_jobs()
+        # Conversion (packaging) jobs live in their own section: they follow a
+        # finished download and never count against the download slots.
+        packing = await download_service().list_active_pack_jobs()
         # Torrent progress is written by a background poller, so the page has to
         # come back for it. The refresh is armed only while something is
         # actually moving, so an idle dashboard does not reload forever.
         live = any(
             job.is_waiting_for_peers or job.is_seeding for job in active
-        )
+        ) or bool(packing)
         return templates.TemplateResponse(
             request=request,
             name="downloads.html",
             context={
                 "csrf_token": request.session["csrf_token"],
                 "active_jobs": active,
+                "pack_jobs": packing,
                 "error": error,
                 "live_refresh_seconds": (
                     app_settings.torrent_poll_seconds if live else 0
                 ),
+            },
+        )
+
+    @app.get("/downloads/history")
+    async def downloads_history(request: Request):
+        """Past download tasks, newest first.
+
+        Completed (and failed / cancelled) jobs are never pruned from
+        ``download_jobs``, so this page is the operator's archive of what the
+        queue has already handled.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        history = await download_service().list_history_jobs()
+        return templates.TemplateResponse(
+            request=request,
+            name="downloads_history.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "history_jobs": history,
             },
         )
 
@@ -1477,6 +1678,7 @@ def create_app(
             "toolchain": await service.toolchain_status(),
             "paths": await service.paths(),
             "torrent": await service.torrent_client_view(),
+            "auto_pack_after_download": await service.auto_pack_after_download(),
             "torrent_enabled": app.state.torrent_service is not None,
             "notice": notice,
             "default_paths": {
@@ -1507,6 +1709,22 @@ def create_app(
         if redirect:
             return redirect
         return await _render_archive_settings(request)
+
+    @app.post("/archive-settings/auto-pack")
+    async def save_auto_pack_after_download(
+        request: Request, csrf_token: str = Form()
+    ):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        await archive_settings_service().save_auto_pack_after_download(
+            form.get("enabled") == "on"
+        )
+        return RedirectResponse(
+            request.url_for("archive_settings_page").path, status_code=303
+        )
 
     @app.post("/archive-settings/paths")
     async def save_archive_paths(request: Request, csrf_token: str = Form()):

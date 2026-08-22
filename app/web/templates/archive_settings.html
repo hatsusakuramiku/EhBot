@@ -50,6 +50,22 @@
     <label class="toggle-row"><input name="auto_pack" type="checkbox" {% if torrent.auto_pack %}checked{% endif %}><span>下载后自动打包漫画（默认关闭；开启后必须填写上方「保存目录（EhBot 视角）」，保存时会验证可读）</span></label>
     <div class="form-actions"><button class="primary-button" type="submit">保存客户端设置</button></div>
   </form>
+</section>
+
+<section class="source-create" aria-label="下载后自动打包">
+  <div class="section-heading">
+    <div>
+      <h2>下载后自动打包</h2>
+      <p>任意来源（Telegram、ExHentai、预览页、种子）下载完成后自动进入 CBZ 转换队列。</p>
+    </div>
+  </div>
+  <form class="settings-form" method="post" action="{{ url_for('save_auto_pack_after_download') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="toggle-row"><input name="enabled" type="checkbox" {% if auto_pack_after_download %}checked{% endif %}><span>下载完成后自动打包（默认开启；转换按候选幂等，重复触发不会产生重复任务）</span></label>
+    <div class="form-actions"><button class="primary-button" type="submit">保存</button></div>
+  </form>
+</section>
+  </form>
   {% if torrent.configured and torrent_enabled %}
   <form method="post" action="{{ url_for('test_torrent_client') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

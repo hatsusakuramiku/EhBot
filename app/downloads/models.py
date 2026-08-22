@@ -66,6 +66,10 @@ NEEDS_INFO_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
 )
 
 #: Error codes that can never succeed on a retry, so the UI hides the button.
+#: `TORRENT_CONTENT_UNREACHABLE` / `TORRENT_CONTENT_UNEXPECTED` are deliberately
+#: absent: a readability failure on the saved path is usually the operator's
+#: misconfigured path being fixed, after which the retry can re-verify the file
+#: and succeed without a fresh push.
 PERMANENT_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
     {
         "TELEGRAM_FILE_TOO_BIG",
@@ -79,8 +83,6 @@ PERMANENT_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
         "TORRENT_CLIENT_AUTH",
         "TORRENT_NOT_AVAILABLE",
         "TORRENT_FILE_INVALID",
-        "TORRENT_CONTENT_UNREACHABLE",
-        "TORRENT_CONTENT_UNEXPECTED",
     }
 )
 
@@ -102,6 +104,9 @@ class DownloadJobSummary:
     #: dashboard reads, and it is a dict rather than columns because the shape
     #: belongs to the provider, not to the queue.
     details: dict = field(default_factory=dict)
+    #: A conversion job's finished CBZ, read from the artifact table so the
+    #: detail page can show the packaging output next to the download source.
+    artifact_cbz_path: str | None = None
 
     @property
     def is_retryable(self) -> bool:

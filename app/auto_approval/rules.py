@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from app.review.models import METADATA_FIELDS, RAW_METADATA_FIELDS
@@ -17,6 +18,14 @@ ALL_OPERATORS = (
 )
 ALLOWED_FIELDS = frozenset(
     (*METADATA_FIELDS, *RAW_METADATA_FIELDS, "FileSize", "Web", "TAG")
+)
+
+#: Fields a `Regex({Field}, 'pattern')` rule may target. Numeric fields and the
+#: TAG collection are excluded: regex-targeting the serialized tags string is
+#: legal but almost never what the operator wants, and it hides the fact that
+#: tags are a set. TEXT_OPERATORS keep covering collections via the legacy DSL.
+REGEX_FIELDS = frozenset(
+    set((*METADATA_FIELDS, *RAW_METADATA_FIELDS)) - {"Rating", "Pages"}
 )
 
 
@@ -35,6 +44,18 @@ def validate_rule_ast(value: object) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuleValidationError("规则必须是对象")
     kind = str(value.get("kind") or "").lower()
+    if kind == "regex":
+        field = str(value.get("field") or "")
+        pattern = str(value.get("pattern") or "")
+        if field not in REGEX_FIELDS:
+            raise RuleValidationError(f"该字段不支持正则匹配 {field}")
+        if not pattern.strip():
+            raise RuleValidationError("正则表达式不能为空")
+        try:
+            _compile_regex(pattern)
+        except re.error as exc:
+            raise RuleValidationError(f"正则语法错误：{exc}") from exc
+        return {"kind": "regex", "field": field, "pattern": pattern}
     if kind == "group":
         operator = str(value.get("operator") or "").upper()
         children = value.get("children")
@@ -95,6 +116,9 @@ def validate_rule_ast(value: object) -> dict[str, Any]:
 
 def render_rule_dsl(ast: dict[str, Any]) -> str:
     """Render a validated AST as readable, non-executable DSL text."""
+    if ast["kind"] == "regex":
+        field = "{TAG}" if ast["field"] == "TAG" else "{" + ast["field"] + "}"
+        return f"Regex({field}, {json.dumps(ast['pattern'], ensure_ascii=False)})"
     if ast["kind"] == "group":
         children = [render_rule_dsl(child) for child in ast["children"]]
         return "(" + f" {ast['operator']} ".join(children) + ")"
@@ -120,6 +144,17 @@ def evaluate_rule(ast: dict[str, Any], metadata: dict[str, str]) -> RuleEvaluati
         if node["kind"] == "group":
             outcomes = [evaluate(child) for child in node["children"]]
             return all(outcomes) if node["operator"] == "AND" else any(outcomes)
+        if node["kind"] == "regex":
+            matched = _evaluate_regex_condition(node, metadata)
+            conditions.append(
+                {
+                    "dsl": render_rule_dsl(node),
+                    "field": node["field"],
+                    "operator": "Regex",
+                    "matched": matched,
+                }
+            )
+            return matched
         matched = _evaluate_condition(node, metadata)
         conditions.append(
             {
@@ -191,6 +226,26 @@ def _evaluate_condition(node: dict[str, Any], metadata: dict[str, str]) -> bool:
     return False
 
 
+def _evaluate_regex_condition(
+    node: dict[str, Any], metadata: dict[str, str]
+) -> bool:
+    actual = metadata.get(node["field"], "").strip()
+    if not actual:
+        return False
+    return _compile_regex(node["pattern"]).search(actual) is not None
+
+
+@lru_cache(maxsize=256)
+def _compile_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a stored rule pattern with a bounded cache.
+
+    Validation guarantees the pattern is syntactically valid before it is
+    persisted, so a `re.error` here would indicate a corrupt row; we prefer to
+    let it surface loudly rather than swallow it like a malformed legacy DSL.
+    """
+    return re.compile(pattern)
+
+
 def _tags(metadata: dict[str, str]) -> set[str]:
     return {
         item.strip().casefold()
@@ -211,7 +266,7 @@ def _like_pattern(value: str) -> re.Pattern[str]:
 
 __all__ = [
     "ALLOWED_FIELDS",
-    "ALL_OPERATORS",
+    "REGEX_FIELDS",
     "RuleEvaluation",
     "RuleValidationError",
     "evaluate_rule",

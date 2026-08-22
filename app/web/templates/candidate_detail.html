@@ -114,7 +114,28 @@
       <p>将压缩附件下载到本地工作目录，再转换为标准 CBZ</p>
     </div>
   </div>
-  {% if archive_ready %}
+  {% set conversion_jobs = download_jobs | selectattr('provider', 'equalto', 'CONVERSION') | list %}
+  {% if conversion_jobs %}
+    {% set latest_conversion = conversion_jobs[0] %}
+    {% if latest_conversion.state == 'CONVERSION_COMPLETED' and latest_conversion.artifact_cbz_path %}
+    <div class="pack-status pack-done">
+      <strong>已打包完成</strong>
+      <p class="notice-text">{{ latest_conversion.artifact_cbz_path }}</p>
+    </div>
+    <form class="download-form" method="post" action="{{ url_for('convert_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="secondary-button">重新打包</button>
+    </form>
+    {% elif latest_conversion.state in ('CONVERSION_PENDING', 'CONVERSION_RUNNING', 'CONVERSION_WAITING_VOLUMES', 'CONVERSION_WAITING_PASSWORD') %}
+    <div class="pack-status"><strong>打包中…</strong><p class="notice-text">{{ status_label(latest_conversion.state) }}</p></div>
+    {% elif latest_conversion.state == 'CONVERSION_FAILED' %}
+    <div class="pack-status pack-failed"><strong>打包失败</strong>{% if latest_conversion.error_message %}<p class="error-text">{{ latest_conversion.error_message }}</p>{% endif %}</div>
+    <form class="download-form" method="post" action="{{ url_for('convert_candidate', candidate_id=candidate.candidate_id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit" class="secondary-button">重试打包</button>
+    </form>
+    {% endif %}
+  {% elif archive_ready %}
   <form class="download-form" method="post" action="{{ url_for('convert_candidate', candidate_id=candidate.candidate_id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <button type="submit" class="primary-button">转换为 CBZ</button>

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}历史任务 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">下载</span>
+    <h1>历史任务</h1>
+    <p>所有已结束的下载任务自动归档在这里：完成、失败与取消</p>
+  </div>
+  <span class="queue-count">{{ history_jobs|length }} 项</span>
+</div>
+
+<p class="queue-hint"><a href="{{ url_for('downloads_dashboard') }}">← 返回当前任务</a></p>
+
+<section class="queue-table download-queue" aria-label="历史下载任务">
+  <div class="queue-header"><span>任务</span><span>候选</span><span>提供方</span><span>状态</span><span>尝试</span><span>产出</span></div>
+  {% for job in history_jobs %}
+  <div class="queue-row">
+    <span>
+      <strong>#{{ job.job_id }}</strong>
+      <small>{{ job.state }}</small>
+      {% if job.error_message %}<small class="error-text">{{ job.error_message }}</small>{% endif %}
+    </span>
+    <span><a href="{{ url_for('candidate_detail', candidate_id=job.candidate_id) }}">候选 #{{ job.candidate_id }}</a></span>
+    <span>{{ job.provider }}</span>
+    <span>{{ job.state }}</span>
+    <span>{{ job.attempt_count }}</span>
+    <span>
+      {% if job.artifact_path %}<small class="notice-text">{{ job.artifact_path }}</small>{% else %}<small>—</small>{% endif %}
+    </span>
+  </div>
+  {% else %}
+  <div class="empty-state"><strong>暂无历史任务</strong><p>完成的下载任务会出现在这里</p></div>
+  {% endfor %}
+</section>
+{% endblock %}

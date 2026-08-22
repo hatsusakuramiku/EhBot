@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}手动添加任务 - EhBot{% endblock %}
+{% block content %}
+<div class="page-heading"><div><span class="eyebrow">下载</span><h1>手动添加任务</h1><p>粘贴 ExHentai 画廊链接或磁力链接，自动解析元数据并加入下载队列；手动添加视为已审批。</p></div></div>
+
+{% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+
+<section class="source-create">
+  <div class="section-heading">
+    <div><h2>添加任务</h2>
+      <p>
+        <strong>ExHentai 链接</strong>：<code>https://exhentai.org/g/123456/abcdef12/</code>，需要已配置 ExHentai 来拉取元数据 ·
+        <strong>磁力链接</strong>：<code>magnet:?xt=urn:btih:...</code>，需要已配置 qBittorrent
+      </p>
+    </div>
+  </div>
+  <form class="settings-form" method="post" action="{{ url_for('manual_add_submit') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-group">
+      <label>链接</label>
+      <textarea name="input" rows="3" required maxlength="1000" placeholder="https://exhentai.org/g/... 或 magnet:?xt=urn:btih:..."></textarea>
+    </div>
+    <ul class="source-summary">
+      <li class="{{ 'ok' if exhentai_configured else 'warn' }}">ExHentai：{{ '已配置' if exhentai_configured else '未配置（仅 gdata 公开画廊可拉取元数据）' }}</li>
+      <li class="{{ 'ok' if torrent_configured else 'warn' }}">qBittorrent：{{ '已配置' if torrent_configured else '未配置（磁力链接无法使用）' }}</li>
+    </ul>
+    <div class="form-actions">
+      <button class="primary-button" type="submit">解析并加入下载队列</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

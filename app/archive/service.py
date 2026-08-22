@@ -68,6 +68,9 @@ SETTING_TORRENT_SAVE_PATH = "torrent_save_path"
 SETTING_TORRENT_LOCAL_SAVE_PATH = "torrent_local_save_path"
 SETTING_TORRENT_KEEP_SEEDING = "torrent_keep_seeding"
 SETTING_TORRENT_AUTO_PACK = "torrent_auto_pack"
+#: Auto-pack on any download completion (Telegram, ExHentai, Telegraph, and
+#: the torrent route), independent of the torrent-specific toggle above.
+SETTING_AUTO_PACK_AFTER_DOWNLOAD = "auto_pack_after_download"
 
 DEFAULT_LIBRARY_TEMPLATE = "{title}"
 
@@ -367,6 +370,25 @@ class ArchiveSettingsService:
             )
         await self._database.save_archive_settings(cleaned)
 
+    async def auto_pack_after_download(self) -> bool:
+        """Whether a finished download is handed straight to the packer.
+
+        Defaults to off, matching the torrent route's existing auto-pack toggle:
+        the pipeline stays quiet until the operator opts in. Conversion itself
+        is idempotent per candidate, so a later enable repacks existing work.
+        """
+        stored = await self._database.archive_settings()
+        return stored.get(SETTING_AUTO_PACK_AFTER_DOWNLOAD, "0") not in {
+            "0",
+            "false",
+            "no",
+        }
+
+    async def save_auto_pack_after_download(self, enabled: bool) -> None:
+        await self._database.save_archive_settings(
+            {SETTING_AUTO_PACK_AFTER_DOWNLOAD: "1" if enabled else "0"}
+        )
+
     async def image_quality(self) -> str:
         """The stored re-encode level, defaulting to the lossless original."""
         stored = await self._database.archive_settings()
@@ -578,6 +600,7 @@ __all__ = [
     "LIMIT_KEYS",
     "MASTER_KEY_NAME",
     "PATH_SETTING_KEYS",
+    "SETTING_AUTO_PACK_AFTER_DOWNLOAD",
     "SETTING_IMAGE_QUALITY",
     "SETTING_KEEP_ORIGINAL",
     "SETTING_LIBRARY_PATH",

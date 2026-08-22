@@ -85,6 +85,46 @@ def test_rule_supports_nested_boolean_numeric_and_like_conditions() -> None:
     assert "{Rating} >= 4.0" in render_rule_dsl(rule)
 
 
+def test_regex_rule_searches_field_and_renders_regex_dsl() -> None:
+    rule = validate_rule_ast(
+        {"kind": "regex", "field": "Title", "pattern": "(futa|chinpo)"}
+    )
+
+    assert render_rule_dsl(rule) == 'Regex({Title}, "(futa|chinpo)")'
+    assert evaluate_rule(rule, {"Title": "futanari story by author"}).matched
+    assert not evaluate_rule(rule, {"Title": "Futanari cased-differently"}).matched
+    assert not evaluate_rule(rule, {"Title": "plain story"}).matched
+    assert not evaluate_rule(rule, {"Title": ""}).matched
+
+
+def test_regex_rule_honours_inline_flags_and_anchoring() -> None:
+    casefold = validate_rule_ast(
+        {"kind": "regex", "field": "Title", "pattern": "(?i)futa"}
+    )
+    assert evaluate_rule(casefold, {"Title": "FUTANARI"}).matched
+
+    anchored = validate_rule_ast(
+        {"kind": "regex", "field": "Artist", "pattern": "^tendou$"}
+    )
+    assert evaluate_rule(anchored, {"Artist": "tendou"}).matched
+    assert not evaluate_rule(anchored, {"Artist": "tendourin"}).matched
+
+
+def test_regex_rule_rejects_bad_pattern_field_or_empty_pattern() -> None:
+    with pytest.raises(RuleValidationError):
+        validate_rule_ast(
+            {"kind": "regex", "field": "Title", "pattern": "(unclosed"}
+        )
+    with pytest.raises(RuleValidationError):
+        validate_rule_ast(
+            {"kind": "regex", "field": "Rating", "pattern": "^5$"}
+        )
+    with pytest.raises(RuleValidationError):
+        validate_rule_ast(
+            {"kind": "regex", "field": "Title", "pattern": "   "}
+        )
+
+
 def test_rule_rejects_unknown_fields_and_invalid_operator_types() -> None:
     with pytest.raises(RuleValidationError):
         validate_rule_ast(

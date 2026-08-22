@@ -1062,6 +1062,105 @@ class Database:
             torrent_hash=str(row[9]) if row[9] is not None else None,
         )
 
+    async def create_manual_candidate(
+        self,
+        *,
+        filter_reason: str,
+        ex_gid: int | None = None,
+        ex_gallery_token: str | None = None,
+        magnet_url: str | None = None,
+        torrent_hash: str | None = None,
+        title: str | None = None,
+    ) -> int:
+        """Create an already-approved candidate from an operator's manual link.
+
+        Manual adds skip the Telegram review funnel: the row lands straight in
+        APPROVED so a download can be enqueued immediately. A `title` supplied
+        here is recorded as an inferred metadata value so the detail page has
+        something to show before a gallery fetch (or, for a magnet, instead of
+        one) completes.
+        """
+        return await asyncio.to_thread(
+            self._create_manual_candidate_sync,
+            filter_reason,
+            ex_gid,
+            ex_gallery_token,
+            magnet_url,
+            torrent_hash,
+            title,
+        )
+
+    def _create_manual_candidate_sync(
+        self,
+        filter_reason: str,
+        ex_gid: int | None,
+        ex_gallery_token: str | None,
+        magnet_url: str | None,
+        torrent_hash: str | None,
+        title: str | None,
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO candidates "
+                "(status, ex_gid, ex_gallery_token, filter_result, "
+                "filter_reason, magnet_url, torrent_hash) "
+                "VALUES ('APPROVED', ?, ?, 'ACCEPT', ?, ?, ?)",
+                (
+                    ex_gid,
+                    ex_gallery_token,
+                    filter_reason,
+                    magnet_url,
+                    torrent_hash,
+                ),
+            )
+            candidate_id = int(cursor.lastrowid)
+            if title:
+                connection.execute(
+                    "INSERT INTO metadata_values "
+                    "(candidate_id, field_name, field_value, value_source, "
+                    "confidence) VALUES (?, 'Title', ?, 'MANUAL_ADD', 0.6) "
+                    "ON CONFLICT(candidate_id, field_name, value_source) "
+                    "DO UPDATE SET field_value = excluded.field_value",
+                    (candidate_id, title),
+                )
+        return candidate_id
+
+    async def set_candidate_metadata_value(
+        self,
+        candidate_id: int,
+        field_name: str,
+        field_value: str,
+        source: str,
+        confidence: float | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_candidate_metadata_value_sync,
+            candidate_id,
+            field_name,
+            field_value,
+            source,
+            confidence,
+        )
+
+    def _set_candidate_metadata_value_sync(
+        self,
+        candidate_id: int,
+        field_name: str,
+        field_value: str,
+        source: str,
+        confidence: float | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, "
+                "confidence) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(candidate_id, field_name, value_source) "
+                "DO UPDATE SET field_value = excluded.field_value, "
+                "confidence = excluded.confidence",
+                (candidate_id, field_name, field_value, source, confidence),
+            )
+
 
     _REVIEWABLE_STATUSES = frozenset(
         {"PENDING_REVIEW", "NEEDS_INFO", "NEEDS_REVISION", "REJECTED"}

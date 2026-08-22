@@ -20,7 +20,8 @@
         <a class="nav-link {% if request.url.path == url_for('auto_approval_rules_page').path %}is-active{% endif %}" href="{{ url_for('auto_approval_rules_page') }}">自动审批</a>
         <a class="nav-link {% if request.url.path.startswith(url_for('archive_settings_page').path) %}is-active{% endif %}" href="{{ url_for('archive_settings_page') }}">归档设置</a>
         <a class="nav-link {% if request.url.path == url_for('connections_page').path %}is-active{% endif %}" href="{{ url_for('connections_page') }}">外部连接</a>
-        <a class="nav-link {% if request.url.path == url_for('downloads_dashboard').path %}is-active{% endif %}" href="{{ url_for('downloads_dashboard') }}">下载任务</a>
+        <a class="nav-link {% if request.url.path == url_for('downloads_dashboard').path or request.url.path.startswith(url_for('downloads_history').path) %}is-active{% endif %}" href="{{ url_for('downloads_dashboard') }}">下载任务</a>
+        <a class="nav-link {% if request.url.path == url_for('manual_add_page').path %}is-active{% endif %}" href="{{ url_for('manual_add_page') }}">手动添加</a>
       </nav>
       <div class="sidebar-footer">
         <a class="nav-link {% if request.url.path == url_for('change_password_page').path %}is-active{% endif %}" href="{{ url_for('change_password_page') }}">修改密码</a>
@@ -44,6 +45,8 @@
           <a href="{{ url_for('archive_settings_page') }}">归档</a>
           <a href="{{ url_for('connections_page') }}">连接</a>
           <a href="{{ url_for('downloads_dashboard') }}">下载</a>
+          <a href="{{ url_for('downloads_history') }}">历史</a>
+          <a href="{{ url_for('manual_add_page') }}">手动</a>
         </nav>
       </header>
       <main class="page-shell">{% block content %}{% endblock %}</main>

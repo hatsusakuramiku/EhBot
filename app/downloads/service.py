@@ -50,6 +50,9 @@ class DownloadService:
         telegraph_download=None,
         torrent_push=None,
         torrent_abandon=None,
+        torrent_verify=None,
+        auto_pack=None,
+        auto_pack_enabled=None,
         work_path_provider=None,
     ) -> None:
         self._database = database
@@ -58,9 +61,15 @@ class DownloadService:
         self._exhentai_download = exhentai_download
         self._telegraph_download = telegraph_download
         # Pushing hands the transfer to qBittorrent; abandoning takes it back
-        # out when the operator cancels or switches sources.
+        # out when the operator cancels or switches sources. Verifying asks the
+        # torrent service whether a finished payload is already readable on
+        # disk so a retry can complete without a fresh push. Auto-pack hands a
+        # finished download to the conversion queue.
         self._torrent_push = torrent_push
         self._torrent_abandon = torrent_abandon
+        self._torrent_verify = torrent_verify
+        self._auto_pack = auto_pack
+        self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
         # restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
@@ -169,10 +178,15 @@ class DownloadService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
-            if str(candidate_row[0]) != "APPROVED":
+            # A candidate may spawn a new download while it is APPROVED and
+            # while it is DOWNLOADED (an operator re-fetching another source or
+            # re-running a finished job). Blocking DOWNLOADED is what produced
+            # the misleading "必须审批后才能进入下载队列" error after a job had
+            # already been approved and completed.
+            if str(candidate_row[0]) not in {"APPROVED", "DOWNLOADED"}:
                 raise DownloadError(
                     "CANDIDATE_NOT_DOWNLOADABLE",
-                    "Only approved candidates can be queued for download",
+                    "该候选尚未通过审批，不能进入下载队列",
                 )
             before = connection.total_changes
             connection.execute(
@@ -215,6 +229,46 @@ class DownloadService:
             (candidate_id,),
         )
 
+    async def list_active_pack_jobs(self) -> tuple[DownloadJobSummary, ...]:
+        """In-flight conversion (packaging) jobs for the downloads dashboard."""
+        return await asyncio.to_thread(self._list_active_pack_jobs_sync)
+
+    def _list_active_pack_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
+        return self._fetch_jobs(
+            "WHERE provider = 'CONVERSION' AND state IN (?, ?, ?, ?) "
+            "ORDER BY id DESC LIMIT 50",
+            (
+                "CONVERSION_PENDING",
+                "CONVERSION_RUNNING",
+                "CONVERSION_WAITING_VOLUMES",
+                "CONVERSION_WAITING_PASSWORD",
+            ),
+        )
+
+    async def list_history_jobs(
+        self, limit: int = 100
+    ) -> tuple[DownloadJobSummary, ...]:
+        """Past, finished download tasks for the history/archive page.
+
+        Terminal rows are never deleted from ``download_jobs``, so the archive
+        is a query here rather than a separate table: every COMPLETED / FAILED
+        / CANCELLED job shows up, newest first.
+        """
+        return await asyncio.to_thread(
+            self._list_history_jobs_sync, int(limit)
+        )
+
+    def _list_history_jobs_sync(self, limit: int) -> tuple[DownloadJobSummary, ...]:
+        return self._fetch_jobs(
+            "WHERE state IN (?, ?, ?) ORDER BY id DESC LIMIT ?",
+            (
+                DOWNLOAD_STATE_COMPLETED,
+                DOWNLOAD_STATE_FAILED,
+                DOWNLOAD_STATE_CANCELLED,
+                limit,
+            ),
+        )
+
     async def list_active_jobs(self) -> tuple[DownloadJobSummary, ...]:
         return await asyncio.to_thread(self._list_active_jobs_sync)
 
@@ -237,9 +291,23 @@ class DownloadService:
     async def retry_job(self, job_id: int) -> str:
         """Requeue a failed or paused job without creating a duplicate.
 
-        The original row is reused so the `idempotency_key` contract holds and
-        the attempt history is preserved.
+        The torrent route tries the cheap outcome first: if the saved payload
+        is already readable on disk (an operator corrected the save path after
+        a content-read failure), the job is completed in place instead of being
+        pushed again. Otherwise the stale client entry is removed and the job
+        re-enters the queue, which re-reads the latest settings on the next
+        push. The original row is reused so the `idempotency_key` contract
+        holds and the attempt history is preserved.
         """
+        provider, state = await asyncio.to_thread(
+            self._job_provider_state_sync, job_id
+        )
+        if (
+            provider == PROVIDER_EH_TORRENT
+            and self._torrent_verify is not None
+        ):
+            if await self._torrent_verify(job_id):
+                return DOWNLOAD_STATE_COMPLETED
         # A retry re-pushes the torrent, and qBittorrent absorbs a duplicate
         # hash, so the stale entry is removed first to keep one job to one
         # client entry rather than relying on that.
@@ -505,6 +573,8 @@ class DownloadService:
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
                 "(SELECT size_bytes FROM artifacts WHERE job_id = download_jobs.id "
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
+                "(SELECT path FROM artifacts WHERE job_id = download_jobs.id "
+                " AND artifact_type = 'CBZ' LIMIT 1), "
                 "created_at, updated_at, details_json FROM download_jobs "
                 + where_sql,
                 params,
@@ -520,9 +590,12 @@ class DownloadService:
                 error_message=str(row[6]) if row[6] is not None else None,
                 artifact_path=str(row[7]) if row[7] is not None else None,
                 artifact_size=int(row[8]) if row[8] is not None else None,
-                created_at=str(row[9]),
-                updated_at=str(row[10]),
-                details=self._safe_details(row[11]),
+                artifact_cbz_path=(
+                    str(row[9]) if row[9] is not None else None
+                ),
+                created_at=str(row[10]),
+                updated_at=str(row[11]),
+                details=self._safe_details(row[12]),
             )
             for row in rows
         )
@@ -680,6 +753,7 @@ class DownloadService:
             await asyncio.to_thread(
                 self._mark_job_completed_sync, job["job_id"]
             )
+            await self._maybe_auto_pack(job["candidate_id"])
         except ProviderConnectionError as exc:
             await asyncio.to_thread(
                 self._mark_job_failed_sync,
@@ -790,6 +864,30 @@ class DownloadService:
         await asyncio.to_thread(
             self._mark_job_completed_sync, job["job_id"]
         )
+        await self._maybe_auto_pack(job["candidate_id"])
+
+    async def _maybe_auto_pack(self, candidate_id: int) -> None:
+        """Hand a finished download to the conversion queue, if one is wired.
+
+        A failure here is logged rather than raised, matching the torrent
+        route's contract: the download itself succeeded and its artifact is
+        registered, so a packing hiccup must not turn into a failed download or
+        hide the archive the operator can still convert by hand.
+        """
+        if self._auto_pack is None:
+            return
+        _enabled = self._auto_pack_enabled
+        if _enabled is not None and not await _enabled():
+            return
+        try:
+            await self._auto_pack(candidate_id)
+        except Exception as exc:  # noqa: BLE001 - queue boundary
+            logging.getLogger(__name__).warning(
+                "download_auto_pack_failed candidate=%d error=%s",
+                candidate_id,
+                exc,
+                extra={"error_code": "DOWNLOAD_AUTO_PACK_FAILED"},
+            )
 
     async def _telegram_api(self) -> TelegramBotApi | None:
         if self._telegram_client_factory is None:

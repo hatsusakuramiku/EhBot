@@ -1154,3 +1154,63 @@ Persisting the key on first start hung the process at **100% CPU, forever**. `wr
 ### Open Items For The Next Agent
 - Still open: **`local_save_path` is unset in the live deployment** (the client saves to `/download/R18lib` on another host). `compose.deploy.yaml` mounts the intended directory at `/work`, but qBittorrent must actually write there before `torrent_auto_pack` can be enabled.
 - Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+
+## Implementation Session: Operator-Facing Bugfix And Workflow Completion (2026-08-22)
+
+### Scope
+- **Status:** complete. The 7-item operator follow-up list from the phase 14/13 sessions, closing the remaining workflow gaps around history, packaging, automatic approval and manual add-task. All code, regression tests and records are done.
+- The list was delivered in one message: a history page, auto-pack after download with packaging status, pack-button feedback, regex-based automatic approval, a manual add-task entry point, a wrong "must approve first" error, and a missing retry button with a torrent retry flow that re-reads settings.
+
+### Item 1 — History Page
+- Completed downloads now auto-archive to a dedicated history page instead of only the active downloads dashboard.
+- `app/downloads/service.py::list_history_jobs` feeds the new page; `base.html` gained `下载任务` (dashboard) and `历史` (history) navigation entries, and the dashboard/history split keeps the active queue and the archive separate.
+
+### Item 2 — Auto-Pack After Download And Packaging Status
+- `app/archive/service.py` gained `auto_pack_after_download()` / `save_auto_pack_after_download(enabled)` behind the new `auto_pack_after_download` setting, default **off** (consistent with the existing `torrent_auto_pack` default).
+- `DownloadService._maybe_auto_pack` hands a finished download to `ConversionService.enqueue_for_candidate` (idempotent per candidate); it fires from the Telegram and the delegated provider branches.
+- Packaging is no longer invisible on the download task page: `DownloadJobSummary` gained `artifact_cbz_path` and the downloads dashboard/queue surfaces the completed CBZ path after conversion.
+
+### Item 3 — Pack Button Feedback
+- The candidate detail page now renders a `pack-status` block showing the conversion outcome and the output CBZ path instead of returning no signal at all.
+- `app/web/static/app.css` gained `.pack-status`, `.pack-done` and `.pack-failed` states so success and failure are visually distinct.
+
+### Item 4 — Regex Automatic Approval
+- The automatic-approval condition builder (the "可选内容" DSL) was replaced with the requested single form: `Regex({Title}, 'regexstring')`.
+- `app/auto_approval/rules.py` accepts a new `kind == "regex"` AST `{"kind": "regex", "field", "pattern"}`. On save the pattern is compiled with `re.compile` and a syntax error raises `RuleValidationError`, so an invalid regex is never persisted. `REGEX_FIELDS` lists the matchable metadata fields (everything except `Rating` / `Pages`, which are numeric).
+- Evaluation uses `re.search` on the stored metadata value for the field; matching is case-sensitive by design, with inline flags (`(?i)`) and `^`/`$` anchoring available, and patterns are cached with `@lru_cache` on `_compile_regex`.
+- `app/web/templates/auto_approval_rules.html` (rewritten) and `app/web/static/auto_approval.js` (rewritten) are a minimal live-preview form: field `<select>`, pattern input, and a `Regex({Field}, "...")` DSL preview. The old `data-condition-template` / `data-ast-json` builder is gone.
+
+### Item 5 — Manual Add-Task
+- New entry point `/manual-add`: paste an ExHentai gallery link (needs EH configured to pull metadata) or a magnet link (needs qBittorrent configured).
+- `app/main.py` gained `GET/POST /manual-add` plus `_ingest_manual_link` / `_ingest_manual_eh` / `_ingest_manual_magnet` / `_enqueue_manual_candidate` and the `_MAGNET_PATTERN` (`magnet:?.*?xt=urn:btih:<hex>`). An unrecognised input returns 400 「无法识别链接」; a magnet with no qBittorrent client returns a clear 400.
+- `app/db/database.py::create_manual_candidate` inserts the candidate immediately as **`APPROVED`** with `filter_result='ACCEPT'` and a `MANUAL_ADD` source title, so a manual task is treated as already approved and skipped straight to the queue. `app/db/migrations/011_manual_add.sql` adds the `magnet_url` column.
+- A manual EH link enqueues through the existing ExHentai path (metadata fetch defeated via `client.app.state.exhentai_service` in tests); a manual magnet enqueues through qBittorrent's `/torrents/add` (`app/torrent/client.py::add_magnet`), branching inside `app/torrent/service.py::push_for_candidate` when a candidate has a magnet.
+- Template `app/web/templates/manual_add.html` shows the EH / qBittorrent configured hints and posts to the submit route with CSRF.
+
+### Item 6 — Wrong "Must Approve First" Error
+- Downloading an **already-approved** candidate no longer errors 「必须要审批后才能进入下载队列」. The enqueue path (`_enqueue_sync`) accepts both `APPROVED` and `DOWNLOADED`, so a real approved candidate that should have downloaded no longer bumps into a spurious approval gate.
+
+### Item 7 — Retry Button And Torrent Retry Flow
+- Failed download jobs now expose a retry action, not only cancel. `retry_job` reuses the same job row, so the idempotency contract and the attempt history survive.
+- The torrent retry flow is: download fails → press retry → first check whether the payload file is readable → if it is, succeed directly → if not, restart the download chain → on exception, stop and surface the reason.
+- `PERMANENT_DOWNLOAD_ERRORS` no longer lists `TORRENT_CONTENT_UNREACHABLE` / `TORRENT_CONTENT_UNEXPECTED`, so a retry after a path fix is a real recovery path instead of a guaranteed repeat. Settings are re-read at every add/retry via the existing per-action provider callables, so a settings change takes effect without a restart.
+
+### Error Log
+| Timestamp | Error | Attempt | Resolution |
+|-----------|-------|---------|------------|
+| 2026-08-22 | `DownloadJobSummary` raised `TypeError: non-default argument follows default argument` | 1 | A new keyword-with-default field was placed before the non-default `created_at`/`updated_at`/`details` fields. Moved `artifact_cbz_path` to the last position, matching the dataclass ordering rule |
+| 2026-08-22 | Auto-pack default ON broke `test_full_download_workflow_writes_artifact` (expected COMPLETED, got CONVERSION_FAILED) | 1 | `auto_pack_after_download` now defaults to off, matching `torrent_auto_pack`; enabling packaging is an explicit operator decision |
+| 2026-08-22 | `REGEX_FIELDS` raised `TypeError: unsupported operand type(s) for -: 'tuple' and 'set'` | 1 | Wrapped the field subtraction in `set(...)`; the tuple operands could not be subtracted |
+| 2026-08-22 | A regex test with `Futanari` searched against a case-sensitive combined pattern and found no match | 1 | The test input was lowercased; matching is intentionally case-sensitive, so a case-difference negative assertion was added on purpose |
+| 2026-08-22 | The magnet guard (`app.state.torrent_service is None`) never triggered, so the no-client case returned 200 | 1 | The service is always constructed. The guard now checks `archive_settings_service().torrent_client().is_configured` |
+| 2026-08-22 | The EH manual-add test expected 303 but got 200 | 1 | TestClient follows redirects by default. The test passes `follow_redirects=False` so the 303 location (the new candidate id) is asserted |
+
+### Verification
+- **Status:** complete. Full suite: **427 passed, 12 skipped** (the skips are the pre-existing real-7-Zip cases).
+- New coverage: 3 regex rule tests (search + render, inline flags/anchoring, reject bad pattern/field/empty); 4 manual-add integration tests (page renders, unrecognised input 400, magnet-without-client 400, EH link creates an `APPROVED` candidate with the right `ex_gid` and token); migration contract updated to 11 migrations with the `magnet_url` column asserted.
+- The candidate-render, downloads-dashboard and candidate-detail templates were exercised through `TestClient`; no browsers were involved.
+
+### Open Items For The Next Agent
+- Still open from earlier phases: **`local_save_path` is unset in the live deployment**, so `torrent_auto_pack` cannot be enabled until the qBittorrent save directory is mounted and registered. The manual magnet path needs the same running client.
+- Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.

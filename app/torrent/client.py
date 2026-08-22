@@ -160,6 +160,37 @@ class QBittorrentClient:
             )
         return self._check_add_body(response)
 
+    async def add_magnet(self, magnet_url: str) -> bool:
+        """Hand a magnet link to the client via the `urls` form field.
+
+        qBittorrent resolves the torrent (name, files) from the hash/DHT
+        itself, so no `.torrent` file is involved. Returns True when the client
+        already held the infohash, mirroring `add_torrent` so the caller can
+        flag a foreign entry. The same `savepath` / `autoTMM=false` posture is
+        kept so the finished payload lands where delivery expects it.
+        """
+        await self.login()
+        data = {
+            "savepath": self._config.save_path,
+            "category": self._config.category,
+            "paused": "false",
+            "autoTMM": "false",
+            "urls": magnet_url,
+        }
+        response = await self._request(
+            "POST",
+            "/torrents/add",
+            data={key: value for key, value in data.items() if value != ""},
+        )
+        if response.status_code == 409:
+            return True
+        if not response.is_success:
+            raise TorrentError(
+                "TORRENT_PUSH_REJECTED",
+                f"qBittorrent 拒绝加种，HTTP {response.status_code}",
+            )
+        return self._check_add_body(response)
+
     @staticmethod
     def _check_add_body(response: httpx.Response) -> bool:
         """Confirm the client really took the torrent, and say whether it is new.

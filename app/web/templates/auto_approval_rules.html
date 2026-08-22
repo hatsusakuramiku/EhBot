@@ -5,19 +5,37 @@
 {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
 <div class="source-layout">
   <section class="source-create">
-    <div class="section-heading"><div><h2>新增规则</h2><p>仅解释下面构造器生成的受限条件。</p></div></div>
+    <div class="section-heading"><div><h2>新增规则</h2><p>用正则匹配候选字段；语法不合法不会被保存。</p></div></div>
     <form class="settings-form" method="post" action="{{ url_for('save_auto_approval_rule') }}" data-rule-builder>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <input type="hidden" name="ast_json" value="" data-ast-json>
       <div class="field-group"><label>名称</label><input name="name" required maxlength="80"></div>
       <div class="field-group"><label>优先级</label><input name="priority" type="number" value="100" required></div>
-      <label class="toggle-row"><input name="enabled" type="checkbox" checked><span>保存后启用</span></label>
-      <fieldset class="rule-fieldset"><legend>条件组</legend>
-        <div class="field-group"><label>组内逻辑</label><select data-group-operator><option>AND</option><option>OR</option></select></div>
-        <div data-condition-list></div>
-        <button class="quiet-button" type="button" data-add-condition>添加条件</button>
-      </fieldset>
+      <div class="field-group"><label>字段</label>
+        <select name="field" data-rule-field>
+          <option value="Title">标题 Title</option>
+          <option value="JapaneseTitle">日文标题</option>
+          <option value="Artist">作者 Artist</option>
+          <option value="Parody">原作 Parody</option>
+          <option value="Character">角色 Character</option>
+          <option value="Group">社团 Group</option>
+          <option value="Language">语言</option>
+          <option value="Category">分类</option>
+          <option value="Uploader">上传者</option>
+          <option value="Description">描述</option>
+          <option value="Tags">标签（含翻译）</option>
+          <option value="TagsRaw">原文标签 TagsRaw</option>
+          <option value="ArtistRaw">原文作者</option>
+          <option value="ParodyRaw">原文原作</option>
+          <option value="CharacterRaw">原文角色</option>
+          <option value="GroupRaw">原文社团</option>
+          <option value="LanguageRaw">原始语言</option>
+          <option value="CategoryRaw">原始分类</option>
+        </select>
+      </div>
+      <div class="field-group"><label>正则表达式</label><input name="pattern" data-rule-pattern placeholder="如 (futa|chinpo)" required value=""></div>
+      <p class="form-hint">语法：<code>Regex({Title}, '(futa|chinpo)')</code>，区分大小写，使用 <code>re.search</code> 判断是否命中。要忽略大小写可写成 <code>(?i)...</code>，要整串匹配写成 <code>^...$</code>。</p>
       <pre class="rule-preview" data-dsl-preview></pre>
+      <label class="toggle-row"><input name="enabled" type="checkbox" checked><span>保存后启用</span></label>
       <div class="form-actions"><button class="primary-button" type="submit">保存自动审批规则</button></div>
     </form>
   </section>
@@ -31,6 +49,5 @@
     {% else %}<div class="empty-state"><strong>暂无自动审批规则</strong><p>新增并启用规则后，会在候选元数据补齐时执行。</p></div>{% endfor %}</div>
   </section>
 </div>
-<template data-condition-template><div class="rule-condition"><select data-field><option value="LanguageRaw">原始语言</option><option value="Language">语言</option><option value="CategoryRaw">原始分类</option><option value="Category">分类</option><option value="Title">标题</option><option value="Artist">作者</option><option value="Rating">评分</option><option value="TAG">Tag</option></select><select data-operator><option value="=">=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option><option value="STARTS_WITH">STARTS_WITH</option><option value="LIKE">LIKE</option><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option><option value="HAS">HAS</option><option value="HAS_ANY">HAS_ANY</option><option value="HAS_ALL">HAS_ALL</option><option value="EXISTS">EXISTS</option><option value="NOT_EXISTS">NOT_EXISTS</option></select><input data-value placeholder="值；多个 Tag 用逗号分隔"><button type="button" class="quiet-button" data-remove-condition>移除</button></div></template>
 <script src="{{ url_for('static', path='/auto_approval.js') }}"></script>
 {% endblock %}

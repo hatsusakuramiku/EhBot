@@ -4,7 +4,7 @@
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
 
 ## Current Phase
-Implementation phase 14 (download source chain: EH torrent original archives with a Telegraph preview fallback) is code complete on all four levels; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials and a real-network pass against a live qBittorrent are still outstanding
+Implementation phase 15 (operator-facing bugfix and workflow completion: history page, auto-pack, pack feedback, regex auto-approval, manual add-task, approve/gate fix, and a read-first torrent retry flow) is complete; phase 14 (download source chain) is code complete on all four levels; phase 6 (low-resource optimization and release) remains deferred; a full `docker compose up` acceptance run with real credentials and a real-network pass against a live qBittorrent are still outstanding
 
 ## Phases
 
@@ -359,3 +359,32 @@ Implementation phase 14 (download source chain: EH torrent original archives wit
 - Image URLs come from untrusted third-party content, so scheme, host, resolved address, redirect depth, byte caps and image magic numbers are all enforced before anything is written. Torrent contents still pass the existing archive safety gates.
 - MTProto (Telethon) remains out of scope; it is the only real route to original files above 20 MB straight from Telegram and is a separate product decision.
 - Channels that post only an archive plus a `t.me/c/...` link gain nothing from this phase.
+
+
+### Implementation Phase 15: Operator-Facing Bugfix And Workflow Completion
+- [x] Add a history page that auto-archives completed download tasks
+- [x] Add auto-pack after download (off by default) and show packaging status/path on the task page
+- [x] Give the pack button real feedback on the candidate detail page
+- [x] Replace the auto-approval condition builder with `Regex({Title}, 'regexstring')` and validate the regex before save
+- [x] Add a manual add-task entry point for ExHentai and magnet links, approved immediately
+- [x] Stop an already-approved candidate from walking into a spurious "must approve first" error
+- [x] Add a retry action with a read-first torrent retry flow that re-reads settings each attempt
+- **Status:** complete; 427 passed, 12 skipped (the skips are the real-7-Zip cases)
+
+## Phase 15 Delivered Behavior
+- Completed downloads auto-archive to `/downloads/history`; the current queue and the archive are separate navigation entries.
+- `auto_pack_after_download` (default off) hands a finished download straight to `ConversionService.enqueue_for_candidate`; the task page surfaces the produced CBZ path and the candidate detail page shows a distinct packed/failed status block.
+- Auto-approval is now pattern-based: the persisted AST is `{"kind":"regex","field","pattern"}`, the pattern is `re.compile`-validated at save time (an invalid regex is refused, never stored), and evaluation is `re.search` over the field's stored value. `REGEX_FIELDS` excludes the numeric `Rating`/`Pages`.
+- `/manual-add` accepts an ExHentai gallery link or a magnet link. A manual candidate is created as `APPROVED` immediately, enqueued through the proper provider (Ex/ qBittorrent), and needs that provider configured; an unrecognised input or an unconfigured client returns a clear 400.
+- Approval-enqueued download no longer rejects an already-approved candidate; the enqueue accepts `APPROVED`/`DOWNLOADED`.
+- A failed job offers retry. Retry reads the payload path first and succeeds if the file is readable, otherwise restarts the download chain and surfaces any exception; `TORRENT_CONTENT_UNREACHABLE`/`TORRENT_CONTENT_UNEXPECTED` were removed from `PERMANENT_DOWNLOAD_ERRORS` so a path fix is a real recovery path. Settings are re-read per add/retry.
+
+## Phase 15 Assumptions And Boundaries
+- Packaging is never automatic implicitly: both `auto_pack_after_download` and `torrent_auto_pack` default to off and remain explicit operator decisions.
+- Regex matching is case-sensitive by design; operators use inline flags (`(?i)`) or explicit character classes for case-insensitive rules. `Rating`/`Pages` are numeric and not regex-matchable.
+- Manual add is treated as already approved by contract: it is an operator action, so it skips review and heads straight to the download queue.
+- Retry reuse of the same job row keeps the `idempotency_key` contract and preserves attempt history; it does not create a second job.
+
+### Deferred After Phase 15
+- Still open: **`local_save_path` is unset in the live deployment**, so `torrent_auto_pack` and the autonomous automatic-pack path cannot run until the qBittorrent save directory is mounted and registered.
+- Outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.

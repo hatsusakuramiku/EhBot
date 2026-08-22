@@ -7,7 +7,7 @@
     <h1>下载任务</h1>
     <p>Telegram 附件、EH 种子、Archive Download 与预览页四条来源共用一个队列</p>
   </div>
-  <span class="queue-count">{{ active_jobs|length }} 项</span>
+  <span class="queue-count">{{ active_jobs|length }} 项 · <a href="{{ url_for('downloads_history') }}">历史任务</a></span>
 </div>
 
 {% if live_refresh_seconds %}
@@ -20,6 +20,20 @@
 
 {% if error %}
 <p class="form-error" role="alert">{{ error }}</p>
+{% endif %}
+
+{% if pack_jobs %}
+<section class="queue-table download-queue" aria-label="打包状态">
+  <div class="queue-header"><span>打包</span><span>候选</span><span>状态</span><span>产出</span></div>
+  {% for job in pack_jobs %}
+  <div class="queue-row">
+    <span><strong>#{{ job.job_id }}</strong><small>{{ status_label(job.state) }}</small></span>
+    <span><a href="{{ url_for('candidate_detail', candidate_id=job.candidate_id) }}">候选 #{{ job.candidate_id }}</a></span>
+    <span>{{ status_label(job.state) }}{% if job.error_message %}<small class="error-text">{{ job.error_message }}</small>{% endif %}</span>
+    <span>{% if job.artifact_cbz_path %}<small class="notice-text">{{ job.artifact_cbz_path }}</small>{% else %}<small>—</small>{% endif %}</span>
+  </div>
+  {% endfor %}
+</section>
 {% endif %}
 
 <section class="queue-table download-queue" aria-label="下载任务">

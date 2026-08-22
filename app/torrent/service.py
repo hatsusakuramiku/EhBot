@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import time
 
@@ -109,6 +110,26 @@ class TorrentService:
         here: the return of this call means the client accepted the torrent,
         not that a payload exists.
         """
+        magnet = await asyncio.to_thread(self._candidate_magnet_sync, candidate_id)
+        if magnet is not None:
+            magnet_url, digest = magnet
+            config = await self._config()
+            already_present = await self._client(config).add_magnet(magnet_url)
+            logging.getLogger(__name__).info(
+                "magnet_pushed candidate=%d hash=%s duplicate=%s",
+                candidate_id,
+                digest[:8],
+                already_present,
+            )
+            details: dict = {
+                "hash": digest,
+                "magnet": True,
+                "pushed_at": time.time(),
+                "save_path": config.save_path,
+            }
+            if already_present:
+                details["was_already_in_client"] = True
+            return details
         gid, token, digest = await asyncio.to_thread(
             self._candidate_torrent_sync, candidate_id
         )
@@ -148,6 +169,71 @@ class TorrentService:
             # ones just requested and delivery may look in the wrong place.
             details["was_already_in_client"] = True
         return details
+
+    async def complete_if_ready(self, job_id: int) -> bool:
+        """Finish a parked torrent whose payload is already readable on disk.
+
+        The retry path tries the cheap outcome first: a job that failed with a
+        content-read error is usually waiting on a path the operator has since
+        fixed. If the client reports the transfer complete and the resolved
+        save path is readable, the job is completed here without a fresh push.
+        Any transient failure falls back to ``False`` so the caller re-pushes.
+        Settings are re-read in this method so a corrected save path takes
+        effect at once, satisfying the "re-read on every retry" contract.
+        """
+        candidate_id, details = await asyncio.to_thread(
+            self._job_candidate_details_sync, job_id
+        )
+        digest = str(details.get("hash") or "")
+        if not digest:
+            return False
+        try:
+            config = await self._config()
+            status = await self._client(config).status(digest)
+            if status is None or not status.is_complete or not status.content_path:
+                return False
+            content_path = resolve_content_path(
+                status.content_path, config.save_path, config.local_save_path
+            )
+            if not os.path.exists(content_path) or not os.access(
+                content_path, os.R_OK
+            ):
+                return False
+            work_path = await self._effective_work_path()
+            delivery = await asyncio.to_thread(
+                self._take_delivery_sync,
+                candidate_id,
+                status,
+                config,
+                work_path,
+            )
+            merged = self._merge_progress(details, status)
+            merged["archive_path"] = delivery.archive_path
+            merged["archive_bytes"] = delivery.size_bytes
+            merged["packed_directory"] = delivery.was_directory
+            merged["completed_at"] = time.time()
+            merged["seeding"] = config.keep_seeding
+            merged["retried_complete"] = True
+            await asyncio.to_thread(
+                self._complete_sync,
+                job_id,
+                candidate_id,
+                delivery,
+                merged,
+            )
+            if not config.keep_seeding:
+                try:
+                    await self._client(config).delete(digest, delete_files=False)
+                except TorrentError:  # noqa: BLE001 - cleanup is best-effort
+                    pass
+            if config.auto_pack:
+                await self._queue_pack(candidate_id)
+            return True
+        except (TorrentError, httpx.HTTPError, OSError):
+            # The client may be down or the payload still not quite readable;
+            # either way the caller falls through to a normal re-push, which
+            # surfaces the reason in the job's error state.
+            return False
 
     async def abandon(self, job_id: int) -> None:
         """Remove a parked torrent from the client, ignoring what is gone.
@@ -369,6 +455,30 @@ class TorrentService:
             content_path, work_path / "torrent", candidate_id
         )
 
+    def _candidate_magnet_sync(
+        self, candidate_id: int
+    ) -> tuple[str, str] | None:
+        """Return (magnet_url, btih) when the candidate was added by magnet."""
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT magnet_url, torrent_hash FROM candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            raise TorrentError(
+                "CANDIDATE_NOT_FOUND", "候选不存在或已被删除"
+            )
+        magnet_url = str(row[0]).strip() if row[0] else ""
+        digest = str(row[1]).strip().lower() if row[1] else ""
+        if not magnet_url:
+            return None
+        if not digest:
+            raise TorrentError(
+                "TORRENT_NOT_AVAILABLE",
+                "磁力链接没有可用的 btih 哈希",
+            )
+        return magnet_url, digest
+
     def _candidate_torrent_sync(
         self, candidate_id: int
     ) -> tuple[int, str, str]:
@@ -397,6 +507,21 @@ class TorrentService:
                 else "\u5c1a\u672a\u62c9\u53d6 gdata\uff0c\u79cd\u5b50\u4fe1\u606f\u672a\u77e5",
             )
         return int(row[0]), str(row[1]), str(row[3])
+
+    def _job_candidate_details_sync(self, job_id: int) -> tuple[int, dict]:
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT candidate_id, details_json FROM download_jobs "
+                "WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return 0, {}
+        try:
+            details = json.loads(str(row[1] or "{}"))
+        except ValueError:
+            details = {}
+        return int(row[0]), details if isinstance(details, dict) else {}
 
     def _job_details_sync(self, job_id: int) -> dict:
         with self._database._connect() as connection:  # noqa: SLF001
