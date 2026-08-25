@@ -1,4 +1,4 @@
-﻿# Progress Log
+# Progress Log
 
 ## Session: 2026-08-19
 
@@ -1214,3 +1214,157 @@ Persisting the key on first start hung the process at **100% CPU, forever**. `wr
 ### Open Items For The Next Agent
 - Still open from earlier phases: **`local_save_path` is unset in the live deployment**, so `torrent_auto_pack` cannot be enabled until the qBittorrent save directory is mounted and registered. The manual magnet path needs the same running client.
 - Still outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+## Release: 2026-08-22 (operator request: rebuild from latest files and publish)
+
+- Rebuilt the application image from the latest source at commit `cd882a7b61c111b3f0c6824e9c3c7e41479cac3b` for `linux/amd64` (296 MB).
+- Built with `org.opencontainers.image.revision=cd882a7b61c111b3f0c6824e9c3c7e41479cac3b` and `org.opencontainers.image.source=https://github.com/hatsusakuramiku/EhBot.git`.
+- Published to Docker Hub as **`hsmk/ehbot:latest`** and **`hsmk/ehbot:0.1.0`**, both `linux/amd64`, digest `sha256:cbf89868ea6f71cf54a568812cf6ca911f74fc2bde977fde731846e730911d33`.
+- **Verified from the registry, not from the local build:** local tags were deleted, `docker pull hsmk/ehbot:latest` returned the same digest, and the pulled image was started (`healthz` -> `{"status":"ok"}`, `readyz` -> `{"status":"ready"}`, `/app/data/private/session_secret_key` created `-rw-------` 64 bytes). Smoke-test container removed afterwards.
+
+## Refactor Session: 2026-08-25
+
+### Phase R0: Baseline And Scaffolding
+- **Status:** complete
+- **Test baseline:** 439 passed / 0 failed (before) -> 481 passed / 0 failed (after; +42 new tests, no regressions)
+
+Actions taken:
+- Measured the real baseline via `--junitxml`. The prior docs claimed "427 passed, 12 skipped"; the suite is actually **439 passed with 0 skipped** (the real-7-Zip cases no longer skip). All refactor docs were corrected to 439.
+- Vendored pinned frontend libraries into `app/web/static/vendor/` with recorded SHA-256 values: HTMX 2.0.4 (51 KB), htmx SSE extension 2.2.2 (9 KB), Alpine.js 3.14.8 (45 KB). Served from the image, never a CDN, so offline deployment works and no browser request reaches a third party.
+- Added `app/api/` with the response contracts: `ApiError` -> `{"error": {code, message, details}}` and `Page` -> `{items, total, page, page_size, pages}`. `PageParams.clamp` is the only constructor path, so a hand-typed query string cannot produce a negative offset or an unbounded scan.
+- Added `app/api/status.py` as the single source of truth for state vocabulary. It replaced the label map that lived inside `create_app`, which the API layer had no way to reach. Templates now also get `status_tone` and `provider_label`, so the download page can stop printing raw `WAITING_TORRENT`.
+- Added `app/api/events.py`: an in-process `EventBus` for SSE. `publish` is synchronous and non-blocking, returns None when nobody is subscribed, and evicts the oldest entry from a full per-subscriber queue.
+- Added `app/api/deps.py`: session, CSRF and service accessors readable from any router, since `create_app`'s getters are closures.
+- Added `app/api/v1.py` with `/api/v1/meta`, `/api/v1/events`, `/api/v1/events/stats`.
+- Added `app/web/routes/` with `shell.py` holding the navigation as a single data list (`NAV_ITEMS`), replacing the nine links `base.html` declares twice.
+- Appended a design-token layer to `app.css`: neutral ramp, semantic surface/ink aliases, six status tone pairs, spacing scale, dark theme (explicit and `prefers-color-scheme`), compact density, `.badge` component, focus-visible rules, skip link, and a reduced-motion block.
+
+Files created:
+- `app/api/__init__.py`, `app/api/contracts.py`, `app/api/status.py`, `app/api/events.py`, `app/api/deps.py`, `app/api/v1.py`
+- `app/web/routes/__init__.py`, `app/web/routes/shell.py`
+- `app/web/static/vendor/{htmx-2.0.4.min.js, htmx-ext-sse-2.2.2.js, alpine-3.14.8.min.js, README.md}`
+- `tests/unit/test_api_contracts.py` (29 tests), `tests/integration/test_api_v1.py` (13 tests)
+- `COMPETITIVE_ANALYSIS.md`
+
+Files modified:
+- `app/main.py`: imports the API layer, installs `app.state.event_bus`, registers the `ApiError` handler and the v1 router, and reads labels from `app.api.status` instead of a local dict.
+- `app/web/static/app.css`: token layer appended (legacy block untouched; it is removed in R9).
+- `EHBot.md`, `DEVELOPMENT_PLAN.md`: rewritten as the refactor baseline (v2).
+
+### R0 Errors Encountered
+| Error | Attempt | Resolution |
+|-------|---------|------------|
+| `include_router` appeared to add nothing: `app.routes` showed one `_IncludedRouter` with `path=None` | 1 | Not a bug. This FastAPI version defers inclusion, so route paths are not visible on `app.routes`. Verified by issuing real requests instead of inspecting the table. |
+| Devanagari digit U+096A pasted inside a hex colour (`#2f7d\u096af`) | 1 | Rewrote the declaration. A generic non-ASCII stripper was tried first and made it worse by also mangling a Chinese comment; both were then repaired explicitly and the file re-verified for malformed hex and balanced braces. |
+| `visually-hidden` missing a semicolon after `height: 1px`, which would swallow the next declaration | 1 | Added the semicolon. |
+| Password-change helper posted `confirm_password` and got 422, so every authenticated API test failed | 1 | The route's field is `confirmation`. Fixed the helper. |
+| Three SSE tests hung indefinitely (killed after 120 s+) | 2 | `TestClient` drains the response body when its context exits, and the stream is endless by design, so it deadlocked. Rewrote those tests to call `api_events` directly and pull frames off `body_iterator`. This still exercises the auth gate, headers and bus wiring, and additionally lets the disconnect-cleanup path be asserted. |
+
+### R0 Decisions
+- **The event bus drops rather than blocks.** A browser that stops reading must never stall the download worker, and an event carries only identifiers, so a dropped one degrades to "the row refreshes a moment later" rather than showing something wrong. The browser always re-reads authoritative state from REST.
+- **`publish` returns None with no subscribers.** That is the normal state with no browser open, and it is what makes the call cheap enough to place directly in the worker loops in R4.
+- **The API returns 401, never a redirect.** A redirect would be followed silently by `fetch` and hand the caller a login page with status 200, which is unreadable as an error.
+- **CSRF via header only for JSON.** HTMX attaches it globally, which removes the per-form hidden input each old template had to remember.
+- **`X-Accel-Buffering: no` on the stream.** Without it nginx buffers frames until its buffer fills, which would defeat the endpoint; this is also why the preamble is emitted before any event.
+- **Status tones are semantic names, not colours.** Python decides `waiting`; CSS decides what `waiting` looks like. A theme change never touches Python.
+- **An unknown state code renders verbatim with a neutral tone.** A newly added backend state must not blank out a page, and the raw value is still a usable clue.
+- **Candidate `FAILED` wins the lookup over download `FAILED`.** Both registries define it; the candidate meaning is the one an operator sees most often. Locked by a test.
+- **Tokens appended, not merged.** The legacy CSS block keeps the current pages pixel-identical while the new shell is built; it is deleted in R9.
+- **Navigation is data, not markup.** `NAV_ITEMS` is rendered by both the desktop and mobile shells, so the two can never drift as they did in `base.html`.
+
+### Deferred From R0
+- Route migration out of `main.py` is R1; the file is still ~2180 lines and all 59 legacy routes remain in place and behaviourally unchanged.
+- The five-domain navigation exists as data but no page consumes it yet; `/library` and `/settings` have no routes until R7/R8.
+- No write endpoints exist yet, so `require_csrf` is covered by a direct unit test rather than through a route. The first R1 write endpoint must wire it in.
+
+### Phase R1: JSON API Layer And Shared Review Orchestration
+- **Status:** complete (route migration out of `main.py` partially deferred; see below)
+- **Test baseline:** 481 passed / 0 failed (before) -> 524 passed / 0 failed (after; +43 new tests, no regressions)
+
+Actions taken:
+- Extended the database read layer with the query the review grid actually needs. `list_candidates` read a fixed 100 rows for a single status with no paging, filtering or sorting, so row 101 was unreachable. Added `list_candidates_page(statuses, search, sort, offset, limit)` returning `(rows, unpaged_total)` in one call, plus a shared `_CANDIDATE_LIST_SELECT` projection and `_candidate_list_item` mapper that the legacy query now also uses, so the two lists cannot drift into different shapes.
+- Made `candidate_counts` report **every** status through a new `CANDIDATE_COUNT_KEYS` map, plus a `total`. It previously returned only four keys, so tabs for `approved` / `rejected` / `downloaded` had no number to show.
+- Extracted `ReviewOrchestrator` (`app/review/orchestration.py`) out of `create_app`. Source routing, approve-then-enqueue, reject and automatic approval were closures, unreachable from anything outside that function. `main.py` now delegates to it and the JSON API calls the same object, which is what makes it impossible for the API to approve a candidate the page would have refused.
+- Added the read endpoints: `GET /api/v1/summary`, `/candidates`, `/works/{id}`, `/queue`, `/history`, each in its own module under `app/api/`.
+- Added the write endpoints: `POST /api/v1/candidates/batch`, `POST /api/v1/jobs/{id}/{action}`, `POST /api/v1/jobs/{id}/switch-source`, `PATCH /api/v1/works/{id}/metadata`. These are the first routes to exercise `require_csrf`, which R0 could only unit-test.
+- Added `app/api/serializers.py` so every state-bearing payload carries the resolved `label`/`tone`/`live` next to the raw `code`. The browser renders vocabulary without a second lookup and cannot show a state translated on one screen and raw on another.
+- Wired SSE into the download worker through a single `notify` hook called from `_process_one`, the one point every delivery passes through. Publishing carries ids only, so the stream never becomes a second, possibly stale, source of job state.
+
+Files created:
+- `app/api/serializers.py`, `app/api/summary.py`, `app/api/candidates.py`, `app/api/works.py`, `app/api/activity.py`, `app/api/actions.py`
+- `app/review/orchestration.py`
+- `tests/unit/test_api_read_layer.py` (22 tests), `tests/integration/test_api_domains.py` (21 tests)
+
+Files modified:
+- `app/db/database.py` — paged/filtered/sorted candidate query, full status counts, shared projection and row mapper, `_escape_like`
+- `app/api/v1.py` — mounts the five domain routers
+- `app/api/deps.py` — added the `review_orchestrator` accessor
+- `app/api/status.py` — see the bug below
+- `app/downloads/service.py` — optional `notify` hook plus `_announce`
+- `app/main.py` — delegates to `ReviewOrchestrator`, publishes it on `app.state`, passes `notify` to `DownloadService`, dropped the imports the extraction orphaned (2180 -> 2062 lines)
+
+### R1 Bug Found And Fixed
+- **`CONNECTION_STATUS` invented a state the domain never emits.** R0 defined `disconnected`, but `ProviderStatus.state` is one of `not_configured` / `connecting` / `connected` / `error`. `connection_view()` therefore fell through to its default for an unconfigured provider by accident, and would have mislabelled any future state the same way. The registry now mirrors the four literals exactly. This was latent in R0 because nothing consumed `connection_view` yet.
+
+### R1 Decisions
+- **`(rows, total)` come back from one call.** Letting the caller count separately allows an ingest landing between the two queries to produce a pager that disagrees with the list it is paging.
+- **Counts ride along with the candidate list response.** Fetching badges separately is exactly how a badge ends up contradicting the grid beneath it.
+- **Sort keys are a whitelist table in the database module.** The value is interpolated into `ORDER BY`, so that table is the boundary keeping a query string out of the SQL text. An unknown key falls back rather than erroring, because a stale bookmark should still render.
+- **`tab=all` maps to no filter, not to the union of the other tabs.** A union would silently hide any candidate in a state that has not been given a tab yet.
+- **The API rejects an unknown `tab`/`sort` but clamps an out-of-range `page_size`.** A bad enum is a caller bug worth reporting; an oversized page is answerable, and refusing it would only push the caller into tighter paging loops.
+- **Search escapes LIKE wildcards.** Without it a `%` in the box matches every row, which reads as a broken filter rather than as the literal search that was typed.
+- **A batch is validated completely before anything is written.** A selection containing one unroutable candidate fails whole, instead of leaving half of it approved.
+- **`MAX_BATCH` refuses rather than truncates.** Silently acting on the first 100 of a larger selection is worse than telling the operator to narrow it.
+- **`_NOT_FOUND` codes map to 404, everything else to 400.** The interface has to tell "your parameters are wrong" from "this row is gone" to choose between showing an error and refreshing the list.
+- **Domain errors are translated, never reworded.** They already carry `code` + `public_message`; anything lacking both is a real bug and is left to surface as a 500 instead of being disguised as a tidy 400.
+- **`notify` is fire-and-forget and wrapped.** The write has already committed when it runs, so a subscriber problem must not turn a successful download into a failure. Verified by a raising callback.
+- **One notify point in `_process_one`, not one per terminal branch.** There are a dozen places that write a terminal state; hooking each is how one gets missed.
+
+### Deferred From R1
+- **`main.py` is 2062 lines, not the planned <500.** The read/write API and the orchestration are extracted, but the 59 legacy HTML routes still live there. Moving them is mechanical and only safe once the pages that replace them exist, so it now happens per-domain in R4-R8 and is finished in R9. Splitting them now would mean migrating each route twice.
+- `GET /api/v1/library` and `/settings/{section}` are not implemented; they need the R2 data model and the R8 settings grouping respectively.
+- `PATCH /works/{id}/metadata` writes overrides but has no field locking; `metadata_values.is_locked` arrives with the R2 migration.
+- Conversion and connection transitions do not publish yet. Only the download worker has a `notify` hook; the packaging queue gets one when R4 renders it.
+
+## Handoff: Next Session (start of R2)
+
+### Where The Refactor Stands
+R0 (scaffolding) and R1 (JSON API + shared review orchestration) are complete and committed. The backend now has a full read/write JSON surface under `/api/v1` and an SSE stream, but **no page consumes any of it yet** — every screen is still the pre-refactor Jinja template. That is expected: R2/R3 build the data and design foundations, and R4 is the first phase where the operator sees a change.
+
+Test baseline to protect: **524 passed / 0 failed / 0 skipped**. Any phase that ends below this number has regressed something.
+
+### The One Thing To Understand First
+`app/api/status.py` is the single source of truth for state vocabulary, and `app/api/serializers.py` is the single place a DTO becomes JSON. Every payload carries the resolved `label`/`tone`/`live` next to the raw `code`, so **the browser never translates an enum itself**. If you find yourself writing a status label in a template or in JavaScript, you are creating the second source of truth this refactor exists to remove.
+
+Similarly, `ReviewOrchestrator` (`app/review/orchestration.py`) is the only path that may approve a candidate. It is reachable from a router via `deps.review_orchestrator(request)`. Do not re-implement "approve then enqueue" anywhere.
+
+### Next Phase: R2 (Thumbnails And Data Model Increment, 2-3 person-days)
+Planned work, in dependency order:
+
+1. **Migration `012_thumbnails_library.sql`** — migrations are append-only and the existing eleven are frozen. Needs:
+   - `thumbnails` table (cache of proxied cover images)
+   - `library_items` table (shelved works, for R7)
+   - `metadata_values.is_locked` — `PATCH /works/{id}/metadata` already writes overrides but has no locking; the API column is the missing half
+   - `download_jobs.priority` — for R4 queue reordering
+2. **Thumbnail service + `GET /api/v1/thumbnails/{hash}`** — gdata already parses a `thumb` URL and the codebase has never used it. Serve it **through a server-side proxy cache**, never as a direct browser request to the third-party host: that would leak operator IPs and break on referer checks. Reuse the existing image safety gates (magic-number check, decompression limits) — do not relax them for thumbnails.
+3. Wire a cover into the candidate list payload (`candidate_summary` in `app/api/serializers.py` is the only place to add the field).
+
+Acceptance: cache hit/miss behaviour covered by tests, cache headers set, a missing or malformed upstream image degrades to a placeholder rather than a broken page, and the full suite is still green.
+
+### Deliberately Deferred (Do Not Treat As Bugs)
+- **`main.py` is 2071 lines, not the planned <500.** The read/write API and orchestration are extracted; the 59 legacy HTML routes remain. They move per-domain in R4-R8, as each one's replacement page lands, and R9 verifies the line count. Splitting them now would migrate every route twice.
+- `GET /api/v1/library` and `GET/PUT /api/v1/settings/{section}` are unimplemented — they need the R2 tables and the R8 settings grouping.
+- Conversion and connection transitions do not publish SSE events. Only the download worker has a `notify` hook; the packaging queue gets one when R4 renders it.
+- `CONVERSION_STATE_{PENDING,RUNNING,COMPLETED,FAILED}` are imported but unused in `app/main.py`. This predates the refactor (verified against `HEAD`), so it was left alone rather than mixed into an unrelated change.
+- Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration.
+
+### Invariants No Phase May Break
+These are business rules, not preferences. Several have tests locking them:
+- Nothing downloads before review; only `APPROVED`/`DOWNLOADED` may enqueue.
+- ExHentai is the sole authority for metadata.
+- ExHentai Archive Download is **never** routed automatically — it spends GP, so it stays an explicit operator action.
+- A stalled torrent is not a failure; `WAITING_TORRENT` shows the stall duration and waits for a decision.
+- Packaging is an explicit decision; `auto_pack_after_download` and `torrent_auto_pack` default to off.
+- Credentials are never stored in plaintext, never echoed back to a page, never logged.
+- Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened.
+- Idempotency: retries reuse the same job row and increment `attempt_count`.

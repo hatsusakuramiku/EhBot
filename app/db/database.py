@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 
 from app.archive.models import ArchivePasswordEntry, ToolProfile
@@ -18,6 +19,91 @@ from app.candidates.models import (
 from app.candidates.rules import evaluate_metadata_rules
 
 from app.review.models import MetadataEntry, ReviewActionEntry
+
+
+#: Status -> counter key. This is the single place a candidate state is mapped
+#: to the name the interface uses for its tab badges, so a new state shows up
+#: in the dashboard by editing one dict instead of three call sites.
+CANDIDATE_COUNT_KEYS: dict[str, str] = {
+    "DISCOVERED": "discovered",
+    "PENDING_REVIEW": "pending_review",
+    "NEEDS_INFO": "needs_info",
+    "NEEDS_REVISION": "needs_revision",
+    "APPROVED": "approved",
+    "PROCESSING": "processing",
+    "DOWNLOADED": "downloaded",
+    "REJECTED": "rejected",
+    "FAILED": "failed",
+}
+
+#: Allowed sort keys mapped to ORDER BY fragments. Values are interpolated into
+#: SQL, so this table is the boundary that keeps a query-string value out of the
+#: statement text -- nothing outside it may reach the ORDER BY clause.
+_CANDIDATE_SORTS: dict[str, str] = {
+    "newest": "c.id DESC",
+    "oldest": "c.id ASC",
+    "updated": "c.updated_at DESC, c.id DESC",
+    "title": "title_value IS NULL, title_value COLLATE NOCASE ASC, c.id DESC",
+}
+
+#: Projection shared by the paged and legacy candidate queries. Both read the
+#: same columns in the same order, which is what lets a single row mapper serve
+#: them and stops the two lists from drifting into different shapes.
+_CANDIDATE_LIST_SELECT = (
+    "SELECT c.id, c.status, c.filter_result, "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) AS title_value, "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Artist' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Tags' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'TagsRaw' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Category' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
+    "c.ex_gallery_token "
+    "FROM candidates c LEFT JOIN candidate_messages cm "
+    "ON cm.candidate_id = c.id"
+)
+
+
+def _escape_like(value: str) -> str:
+    """Neutralise LIKE wildcards in operator-supplied search text.
+
+    Without this a title containing ``%`` would match every row, which reads as
+    a broken filter rather than as the literal search the operator asked for.
+    """
+    return (
+        value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+
+
+def _candidate_list_item(row: Sequence[object]) -> CandidateListItem:
+    """Map a `_CANDIDATE_LIST_SELECT` row onto the list DTO."""
+    return CandidateListItem(
+        candidate_id=int(row[0]),
+        status=str(row[1]),
+        filter_result=str(row[2]),
+        title=str(row[3]) if row[3] is not None else None,
+        message_count=int(row[9]),
+        updated_at=str(row[10]),
+        ex_gid=int(row[11]) if row[11] is not None else None,
+        ex_gallery_token=str(row[12]) if row[12] is not None else None,
+        artist=str(row[4]) if row[4] is not None else None,
+        tags=str(row[5]) if row[5] is not None else None,
+        raw_tags=str(row[6]) if row[6] is not None else None,
+        category=str(row[7]) if row[7] is not None else None,
+        language=str(row[8]) if row[8] is not None else None,
+    )
 
 
 class Database:
@@ -935,78 +1021,109 @@ class Database:
             self._list_candidates_sync, status, limit
         )
 
+    async def list_candidates_page(
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        search: str | None = None,
+        sort: str = "newest",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[CandidateListItem], int]:
+        """One page of candidates plus the unpaged total.
+
+        The total is returned alongside the rows because the interface needs
+        both to render a pager, and computing it in a second round trip from
+        the caller would let the two disagree when an ingest lands between the
+        queries.
+        """
+        return await asyncio.to_thread(
+            self._list_candidates_page_sync,
+            tuple(statuses) if statuses else (),
+            search or "",
+            sort,
+            offset,
+            limit,
+        )
+
+    def _list_candidates_page_sync(
+        self,
+        statuses: tuple[str, ...],
+        search: str,
+        sort: str,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[CandidateListItem], int]:
+        where: list[str] = []
+        params: list[object] = []
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            where.append(f"c.status IN ({placeholders})")
+            params.extend(statuses)
+        needle = search.strip()
+        if needle:
+            # Matching through EXISTS rather than the aliased subqueries keeps
+            # the predicate valid SQL and lets SQLite use the
+            # (candidate_id, field_name) index instead of scanning the
+            # projected columns.
+            where.append(
+                "EXISTS (SELECT 1 FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id "
+                "   AND mv.field_name IN "
+                "       ('Title', 'JapaneseTitle', 'Artist', 'Group', "
+                "        'Tags', 'TagsRaw', 'ArtistRaw', 'GroupRaw') "
+                "   AND mv.field_value LIKE ? ESCAPE '\\')"
+            )
+            params.append(f"%{_escape_like(needle)}%")
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+        # Whitelisted so a hand-typed query string can never reach the SQL
+        # text; an unknown key falls back to the default rather than erroring,
+        # because a bookmarked link with a stale sort should still render.
+        order = _CANDIDATE_SORTS.get(sort, _CANDIDATE_SORTS["newest"])
+
+        with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM candidates c {clause}",
+                    tuple(params),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"{_CANDIDATE_LIST_SELECT} {clause} "
+                f"GROUP BY c.id ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [_candidate_list_item(row) for row in rows], total
+
     def _list_candidates_sync(
         self, status: str, limit: int
     ) -> list[CandidateListItem]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT c.id, c.status, c.filter_result, "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Artist' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Tags' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'TagsRaw' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Category' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
-                "c.ex_gallery_token "
-                "FROM candidates c LEFT JOIN candidate_messages cm "
-                "ON cm.candidate_id = c.id WHERE c.status = ? "
+                f"{_CANDIDATE_LIST_SELECT} WHERE c.status = ? "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT ?",
                 (status, limit),
             ).fetchall()
-        return [
-            CandidateListItem(
-                candidate_id=int(row[0]),
-                status=str(row[1]),
-                filter_result=str(row[2]),
-                title=str(row[3]) if row[3] is not None else None,
-                message_count=int(row[9]),
-                updated_at=str(row[10]),
-                ex_gid=int(row[11]) if row[11] is not None else None,
-                ex_gallery_token=str(row[12]) if row[12] is not None else None,
-                artist=str(row[4]) if row[4] is not None else None,
-                tags=str(row[5]) if row[5] is not None else None,
-                raw_tags=str(row[6]) if row[6] is not None else None,
-                category=str(row[7]) if row[7] is not None else None,
-                language=str(row[8]) if row[8] is not None else None,
-            )
-            for row in rows
-        ]
+        return [_candidate_list_item(row) for row in rows]
 
     async def candidate_counts(self) -> dict[str, int]:
         return await asyncio.to_thread(self._candidate_counts_sync)
 
     def _candidate_counts_sync(self) -> dict[str, int]:
-        counts = {
-            "pending_review": 0,
-            "needs_info": 0,
-            "processing": 0,
-            "failed": 0,
-        }
-        status_keys = {
-            "PENDING_REVIEW": "pending_review",
-            "NEEDS_INFO": "needs_info",
-            "PROCESSING": "processing",
-            "FAILED": "failed",
-        }
+        # Every status gets a key, always, so a tab badge renders銆�0銆峳ather
+        # than disappearing when nothing is in that state. `total` is counted
+        # from the same rows rather than summed by the caller, which keeps it
+        # correct if a future status is added without updating the map.
+        counts = {key: 0 for key in CANDIDATE_COUNT_KEYS.values()}
+        counts["total"] = 0
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) FROM candidates GROUP BY status"
             ).fetchall()
         for status, count in rows:
-            key = status_keys.get(str(status))
+            counts["total"] += int(count)
+            key = CANDIDATE_COUNT_KEYS.get(str(status))
             if key is not None:
                 counts[key] = int(count)
         return counts

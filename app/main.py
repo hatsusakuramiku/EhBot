@@ -43,20 +43,23 @@ from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
 from app.connections.models import ProviderConnectionError
 from app.db.database import Database
+from app.api.contracts import ApiError, api_error_handler
+from app.api.events import EVENT_DOWNLOAD, EventBus
+from app.api.status import provider_label, status_label, status_tone
+from app.api.v1 import router as api_v1_router
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
 
 from app.review.models import (
     METADATA_FIELDS,
-    REVIEWABLE_STATUSES,
     field_label,
     split_metadata_entries,
 )
+from app.review.orchestration import ReviewOrchestrator
 from app.review.service import ReviewError, ReviewService
 from app.downloads.models import (
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
-    PROVIDER_TELEGRAM,
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError, DownloadService
@@ -80,11 +83,6 @@ from app.secrets import SecretStore
 from app.session_secret import resolve_session_secret
 from app.storage.readiness import ensure_writable_directory
 
-
-
-#: Telegram Bot API `getFile` refuses anything larger, permanently. Routing
-#: past an oversized attachment is what makes the rest of the chain useful.
-TELEGRAM_FILE_LIMIT = 20 * 1024 * 1024
 
 
 async def _load_tag_translator(data_path, client):
@@ -314,6 +312,14 @@ def create_app(
                     archive_settings_service.auto_pack_after_download
                 ),
                 work_path_provider=archive_settings_service.work_path,
+                # Publishing carries ids only: the browser answers by calling
+                # the REST endpoint, so the stream never becomes a second,
+                # possibly stale, source of job state.
+                notify=(
+                    lambda **data: app.state.event_bus.publish(
+                        EVENT_DOWNLOAD, **data
+                    )
+                ),
             )
             application.state.download_service = download_service
             application.state.archive_settings_service = archive_settings_service
@@ -402,7 +408,13 @@ def create_app(
     app.state.telegraph_service = None
     app.state.torrent_service = None
     app.state.tag_translator = None
+    # Fan-out for state transitions. Created eagerly so a worker can publish
+    # before any browser has connected (publishing with no subscriber is a
+    # no-op, which is what makes it cheap to call from the download loop).
+    app.state.event_bus = EventBus()
     app.add_exception_handler(AppError, app_error_handler)
+    app.add_exception_handler(ApiError, api_error_handler)
+    app.include_router(api_v1_router)
     login_attempts: dict[str, tuple[int, float]] = {}
     app.add_middleware(
         SessionMiddleware,
@@ -414,27 +426,14 @@ def create_app(
         directory=Path(__file__).parent / "web" / "templates"
     )
 
-    def _status_label(status: str) -> str:
-        labels = {
-            "CONVERSION_PENDING": "待转换",
-            "CONVERSION_RUNNING": "转换中",
-            "CONVERSION_COMPLETED": "已转换",
-            "CONVERSION_FAILED": "转换失败",
-            "CONVERSION_WAITING_VOLUMES": "待补分卷",
-            "CONVERSION_WAITING_PASSWORD": "待补密码",
-            "PENDING_REVIEW": "待审核",
-            "NEEDS_INFO": "待补充",
-            "APPROVED": "已通过",
-            "REJECTED": "已驳回",
-            "NEEDS_REVISION": "需要修订",
-            "PROCESSING": "处理中",
-            "FAILED": "失败",
-            "DOWNLOADED": "已下载",
-        }
-        return labels.get(status, status)
-
-    templates.env.filters["status_label"] = _status_label
-    templates.env.globals["status_label"] = _status_label
+    # Labels, tones and provider names come from `app.api.status`, so a state
+    # reads the same in a template as it does in a JSON response.
+    templates.env.filters["status_label"] = status_label
+    templates.env.globals["status_label"] = status_label
+    templates.env.filters["status_tone"] = status_tone
+    templates.env.globals["status_tone"] = status_tone
+    templates.env.filters["provider_label"] = provider_label
+    templates.env.globals["provider_label"] = provider_label
     app.mount(
         "/static",
         StaticFiles(directory=Path(__file__).parent / "web" / "static"),
@@ -642,138 +641,33 @@ def create_app(
     def review_service() -> ReviewService:
         return ReviewService(database)
 
+    review_orchestrator = ReviewOrchestrator(
+        database,
+        download_service,
+        torrent_available=lambda: app.state.torrent_service is not None,
+        telegraph_available=lambda: app.state.telegraph_service is not None,
+    )
+    # Published so `app/api` reaches the same instance the pages use.
+    app.state.review_orchestrator = review_orchestrator
+
     def _route_download_source(candidate) -> tuple[str | None, dict | None]:
-        """Pick the best available source for a candidate.
-
-        The order is quality first, cost second:
-
-        1. `TELEGRAM` — the uploader's own archive, original quality and free,
-           but Bot API `getFile` caps a single file at 20 MB.
-        2. `EH_TORRENT` — original quality and free, routed whenever gdata
-           reported a torrent and a client is configured. This is the route
-           an oversized book normally takes.
-        3. `TELEGRAPH` — the preview page, complete but re-encoded to 1280 px,
-           so roughly 5–10 % of the original bytes. Last resort.
-
-        ExHentai Archive Download is deliberately absent: it spends GP, and
-        spending a limited resource is an operator decision rather than a
-        routing default. The review page offers it as a button.
-        """
-        attachment = next(
-            (
-                item
-                for message in candidate.messages
-                for item in message.attachments
-                if item.get("type") == "archive"
-                and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
-            ),
-            None,
-        )
-        if attachment is not None:
-            return PROVIDER_TELEGRAM, attachment
-        if (
-            candidate.torrent_hash
-            and app.state.torrent_service is not None
-        ):
-            return PROVIDER_EH_TORRENT, None
-        if (
-            candidate.preview_url
-            and app.state.telegraph_service is not None
-        ):
-            return PROVIDER_TELEGRAPH, None
-        return None, None
+        routed = review_orchestrator.route_source(candidate)
+        return routed.provider, routed.attachment
 
     async def _approve_candidates_and_enqueue(
         candidate_ids: list[int], operator: str
     ) -> tuple[int, ...]:
-        targets: list[tuple[int, str, dict | None]] = []
-        for candidate_id in candidate_ids:
-            candidate = await database.get_candidate(candidate_id)
-            if candidate is None:
-                raise ReviewError(
-                    "CANDIDATE_NOT_FOUND", "候选不存在或已被删除"
-                )
-            if candidate.status not in REVIEWABLE_STATUSES:
-                raise ReviewError(
-                    "REVIEW_INVALID_TRANSITION",
-                    f"候选 #{candidate_id} 当前状态不可审核",
-                )
-            provider, attachment = _route_download_source(candidate)
-            if provider is None:
-                raise ReviewError(
-                    "CANDIDATE_NOT_DOWNLOADABLE",
-                    f"候选 #{candidate_id} 没有可用的下载来源",
-                )
-            targets.append((candidate_id, provider, attachment))
-
-        job_ids: list[int] = []
-        for candidate_id, provider, attachment in targets:
-            await review_service().approve_candidate(candidate_id, operator)
-            try:
-                if provider == PROVIDER_TELEGRAM:
-                    result = await download_service().enqueue_telegram_download(
-                        candidate_id, attachment or {}
-                    )
-                elif provider == PROVIDER_EH_TORRENT:
-                    result = await download_service().enqueue_torrent_download(
-                        candidate_id
-                    )
-                elif provider == PROVIDER_TELEGRAPH:
-                    result = await download_service().enqueue_telegraph_download(
-                        candidate_id
-                    )
-                else:
-                    result = await download_service().enqueue_exhentai_download(
-                        candidate_id
-                    )
-                job_ids.append(result.job_id)
-            except DownloadError as exc:
-                raise ReviewError(exc.code, exc.public_message) from exc
-        return tuple(job_ids)
+        return await review_orchestrator.approve_and_enqueue(
+            candidate_ids, operator
+        )
 
     async def _apply_automatic_approval(candidate_id: int) -> bool:
-        match = await AutomaticApprovalService(database).matching_rule(candidate_id)
-        if match is None:
-            return False
-        try:
-            job_ids = await _approve_candidates_and_enqueue(
-                [candidate_id], "自动审批"
-            )
-        except ReviewError:
-            return False
-        await database.record_review_action(
-            candidate_id,
-            "AUTO_APPROVE",
-            "自动审批",
-            {
-                "rule_id": match.rule.rule_id,
-                "rule_name": match.rule.name,
-                "rule_version": match.rule.version,
-                "dsl_snapshot": match.rule.dsl_snapshot,
-                "condition": match.rule.condition,
-                "conditions": match.conditions,
-                "metadata": match.metadata,
-                "download_job_ids": list(job_ids),
-            },
-        )
-        return True
+        return await review_orchestrator.apply_automatic_approval(candidate_id)
 
     async def _reject_candidates(
         candidate_ids: list[int], operator: str
     ) -> None:
-        for candidate_id in candidate_ids:
-            candidate = await database.get_candidate(candidate_id)
-            if candidate is None:
-                raise ReviewError(
-                    "CANDIDATE_NOT_FOUND", "候选不存在或已被删除"
-                )
-            if candidate.status not in REVIEWABLE_STATUSES:
-                raise ReviewError(
-                    "REVIEW_INVALID_TRANSITION",
-                    f"候选 #{candidate_id} 当前状态不可审核",
-                )
-        for candidate_id in candidate_ids:
-            await review_service().reject_candidate(candidate_id, operator)
+        await review_orchestrator.reject(candidate_ids, operator)
 
     async def _render_candidate_queue(
         request: Request,

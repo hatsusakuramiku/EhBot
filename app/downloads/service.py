@@ -54,6 +54,7 @@ class DownloadService:
         auto_pack=None,
         auto_pack_enabled=None,
         work_path_provider=None,
+        notify=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -73,6 +74,10 @@ class DownloadService:
         # Resolved per job so an operator directory change applies without a
         # restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
+        # Called with a job id after the worker finishes a delivery, so the
+        # interface can refresh without polling. Optional, and deliberately
+        # fire-and-forget: this service must keep working with nothing attached.
+        self._notify = notify
         self._worker_task: asyncio.Task[None] | None = None
 
     async def _effective_work_path(self) -> Path:
@@ -653,7 +658,28 @@ class DownloadService:
                 "DOWNLOAD_WORKER_EXCEPTION",
                 str(exc),
             )
+        # Announced here rather than at each of the dozen places that write a
+        # terminal state: every delivery leaves the worker through this point,
+        # so one call cannot miss a transition the way a per-branch hook would.
+        self._announce(job["job_id"], job["candidate_id"])
         return True
+
+    def _announce(self, job_id: int, candidate_id: int) -> None:
+        """Tell the interface a job moved, if anything is listening.
+
+        Never allowed to disturb the worker: notification is a convenience, and
+        a subscriber problem must not fail or delay a download that already
+        succeeded.
+        """
+        if self._notify is None:
+            return
+        try:
+            self._notify(job_id=job_id, candidate_id=candidate_id)
+        except Exception:  # noqa: BLE001 - notification is best-effort
+            logging.getLogger(__name__).warning(
+                "download_notify_failed",
+                extra={"error_code": "DOWNLOAD_NOTIFY_FAILED"},
+            )
 
     def _claim_pending_job_sync(self) -> dict | None:
         with self._database._connect() as connection:
