@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from app.archive.errors import (
@@ -20,31 +21,22 @@ from app.conversion.convert import ConversionError
 from app.conversion.naming import safe_library_name
 from app.db.database import Database
 from app.downloads.models import (
+    CONVERSION_STATE_COMPLETED,
+    CONVERSION_STATE_FAILED,
+    CONVERSION_STATE_PENDING,
+    CONVERSION_STATE_RUNNING,
+    CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_VOLUMES,
     DOWNLOAD_STATE_COMPLETED,
     DOWNLOAD_STATE_FAILED,
     DOWNLOAD_STATE_PENDING,
+    PROVIDER_CONVERSION,
+    RECOVERABLE_CONVERSION_STATES,
     DownloadState,
 )
 from app.review.models import (
     METADATA_FIELDS,
     STATUS_APPROVED,
-)
-
-
-CONVERSION_STATE_PENDING = "CONVERSION_PENDING"
-CONVERSION_STATE_RUNNING = "CONVERSION_RUNNING"
-CONVERSION_STATE_COMPLETED = "CONVERSION_COMPLETED"
-CONVERSION_STATE_FAILED = "CONVERSION_FAILED"
-# Recoverable states: the operator can supply the missing volume or password
-# and requeue the same task without losing the backend snapshot.
-CONVERSION_STATE_WAITING_VOLUMES = "CONVERSION_WAITING_VOLUMES"
-CONVERSION_STATE_WAITING_PASSWORD = "CONVERSION_WAITING_PASSWORD"
-
-RECOVERABLE_CONVERSION_STATES: frozenset[str] = frozenset(
-    {
-        CONVERSION_STATE_WAITING_VOLUMES,
-        CONVERSION_STATE_WAITING_PASSWORD,
-    }
 )
 
 
@@ -91,6 +83,7 @@ class ConversionService:
         library_path: Path,
         settings_service: ArchiveSettingsService | None = None,
         data_path: Path | None = None,
+        notify: Callable[..., object] | None = None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -102,6 +95,7 @@ class ConversionService:
             default_work_path=work_path,
         )
         self._worker_task: asyncio.Task[None] | None = None
+        self._notify = notify
 
     async def _effective_paths(self) -> tuple[Path, Path]:
         """Read the directories per job so an operator change applies at once.
@@ -152,11 +146,12 @@ class ConversionService:
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
-                "details_json) VALUES (?, ?, 'CONVERSION', ?, '{}') "
+                "details_json) VALUES (?, ?, ?, ?, '{}') "
                 "ON CONFLICT(idempotency_key) DO NOTHING",
                 (
                     candidate_id,
                     f"convert:{candidate_id}",
+                    PROVIDER_CONVERSION,
                     CONVERSION_STATE_PENDING,
                 ),
             )
@@ -224,15 +219,42 @@ class ConversionService:
             await asyncio.to_thread(
                 self._mark_failed_sync, job["job_id"], "WORKER_EXCEPTION", str(exc)
             )
+        # Announced once here rather than at each of the five terminal writes
+        # inside `_handle_job`. Every exit -- packed, failed, waiting for a
+        # volume, waiting for a password, worker crash -- has already committed
+        # its row by the time control reaches this line, so one publish covers
+        # all of them and a future branch cannot forget to notify.
+        self._announce(job["job_id"], job["candidate_id"])
         return True
+
+    def _announce(self, job_id: int, candidate_id: int) -> None:
+        """Tell the interface a packaging job moved, if anything is listening.
+
+        Never allowed to disturb the worker: the activity page falls back to
+        polling, so a subscriber problem must not fail a CBZ that was written
+        successfully.
+        """
+        if self._notify is None:
+            return
+        try:
+            self._notify(job_id=job_id, candidate_id=candidate_id)
+        except Exception:  # noqa: BLE001 - notification is best-effort
+            logging.getLogger(__name__).warning(
+                "conversion_notify_failed",
+                extra={"error_code": "CONVERSION_NOTIFY_FAILED"},
+            )
 
     def _claim_pending_job_sync(self) -> dict | None:
         with self._database._connect() as connection:
             row = connection.execute(
                 "SELECT id, candidate_id FROM download_jobs "
-                "WHERE state = ? AND provider = 'CONVERSION' "
-                "ORDER BY id LIMIT 1",
-                (CONVERSION_STATE_PENDING,),
+                "WHERE state = ? AND provider = ? "
+                # Same ordering as the download claim: a promoted packaging job
+                # runs first, and within one priority the queue stays FIFO. The
+                # two queues are separate but an operator adjusts priority the
+                # same way in both, so they must honour it the same way.
+                "ORDER BY priority, id LIMIT 1",
+                (CONVERSION_STATE_PENDING, PROVIDER_CONVERSION),
             ).fetchone()
             if row is None:
                 return None

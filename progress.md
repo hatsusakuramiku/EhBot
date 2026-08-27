@@ -1476,44 +1476,130 @@ Two fixes, both narrowing rather than special-casing:
 - **No automated contrast assertion.** The pairings were computed by hand and the tokens documented; an axe-core run needs a headless browser, which would be the project's first Node dependency.
 - **The table sorts and pages on the server only.** `sort_button` emits `aria-sort` and a `data-sort-key`; the handler that acts on it belongs to whichever domain page needs it first.
 
-## Handoff: Next Session (start of R4)
+### Phase R4: Activity Domain — Queue / Packaging / History
+
+**Status: complete.** Test baseline moved 592 -> **635 passed / 12 skipped / 0 failed** (+43, zero regressions).
+
+R4 is the first phase an operator sees a difference in. `/downloads` and `/downloads/history` are replaced by `/activity` with three tabs — 队列, 打包, 历史 — and the page no longer reloads itself. The old page carried `<meta http-equiv="refresh">`, which threw away scroll position, an open menu and any checkbox selection every few seconds; progress now arrives through `activity.js`, which patches named fields in place.
+
+Two things that read as view problems turned out to be real defects underneath, and both were fixed at the source rather than in the template: `provider='CONVERSION'` was a bare string literal in three SQL statements while its four sibling providers had constants, and the `badge` macro was putting the raw state enum into `title`, where a screen reader reads it out.
+
+#### Actions Taken
+
+1. **One assembler for the whole domain.** `queue_snapshot()` in `app/api/activity.py` reads both queues in one call and computes grouping, per-section counts, the needs-attention roll-up and `live`. `GET /api/v1/queue` returns it verbatim; the HTML page renders the same dict. A section heading therefore cannot claim a number the rows below it do not add up to, and the dashboard banner cannot disagree with the queue.
+2. **Grouping policy lives on the DTO, not in the page.** `DownloadJobSummary.queue_group` (attention / active / waiting / paused) and `.attention_reason` are properties in `app/downloads/models.py`; `app/api/status.py` holds only the words. Empty sections are dropped rather than rendered as「需干预 0」.
+3. **Split the two queues for real.** Added `PROVIDER_CONVERSION`, deliberately **excluded from `SUPPORTED_PROVIDERS`**: the download worker must never claim a packaging job, and the conversion worker claims nothing else. All three SQL sites now bind the constant. 队列 and 打包 are separate tabs reading `snapshot.downloads` and `snapshot.packing`.
+4. **Replaced the meta refresh with `activity.js`** (303 lines): polls at the interval `/api/v1/meta` advertises while the tab is visible, stops on `visibilitychange`, subscribes to the `download` and `conversion` SSE events for immediate push, and patches `data-field` targets inside `data-job-id` rows. It never constructs a row — row markup exists once, in the `job_row` macro — and a poll that finds an unknown job shows a「队列有变化」notice instead.
+5. **Gave the packaging worker an SSE hook.** `ConversionService` now takes `notify=`; before R4 only the download worker published, so a completed packaging job took a page reload to appear.
+6. **Bulk actions through one shared coroutine.** `apply_job_batch` in `app/api/actions.py` serves both `POST /api/v1/jobs/batch` and the no-JS form at `POST /activity/jobs/batch`, including argument validation, so the two paths cannot diverge. A job that cannot take the action is reported under `skipped` with its reason and the rest of the selection still runs.
+7. **Queue priority adjustment** — the first writer for the `priority` column R2 added. Bounded `1..999` in the API, in the number input, and in `set_job_priority` itself; refused on a terminal job, because reordering something that will never be claimed again would look like it did something.
+8. **Rolled the needs-attention count onto the dashboard**, computed from the same `queue_snapshot` the activity page renders. It is absent, not「0 项」, when there is nothing waiting.
+9. **Wrote 43 tests**: `tests/unit/test_activity_grouping.py` (22, the policy — which section a job lands in, whether a stall is a failure, what the transfer line may say) and `tests/integration/test_activity_web.py` (21, the pages — tabs, redirects, grouping, the roll-up, batch replay, CSRF, route precedence).
+
+#### Files Created
+- `app/web/templates/activity.html` — one template, three tabs, with the `job_row` and `queue_section` macros.
+- `app/web/static/activity.js` — polling, visibility pause, SSE, in-place field patching, bulk selection.
+- `tests/unit/test_activity_grouping.py`, `tests/integration/test_activity_web.py`.
+
+#### Files Modified
+- `app/api/activity.py` — `group_jobs`, `attention_summary`, `queue_snapshot`.
+- `app/api/status.py` — `QUEUE_GROUP_STATUS`, `ATTENTION_STATUS`, and the new row-note vocabulary (`NOTE_SEEDING`, `row_note_view`).
+- `app/api/serializers.py` — `queue_group_payload`, the `attention` and `note` fields on `job_summary`.
+- `app/api/actions.py` — `apply_job_batch` plus `_check_provider` / `_check_priority`.
+- `app/api/events.py` — `EVENT_LIBRARY` removed.
+- `app/downloads/models.py` — `PROVIDER_CONVERSION`, `QUEUE_GROUPS`, `queue_group`, `attention_reason`, `stalled_minutes`, `is_seeding`, the conversion-state constants moved here from `conversion/service.py`.
+- `app/downloads/service.py`, `app/conversion/service.py` — bound `PROVIDER_CONVERSION`; conversion gained `notify`.
+- `app/main.py` — the three `/activity` routes and one `_render_activity`, the two 307 redirects, the batch and row-action form endpoints, the dashboard roll-up.
+- `app/web/routes/shell.py` — the 活动 domain repointed at `/activity` and given a third child.
+- `app/web/templates/components/ui.html` — `badge` writes `data-code`, not `title`.
+- `app/web/templates/dashboard.html` — the roll-up callout; the inline connection-state chain replaced with `ui.badge(... | connection_view)`.
+- `app/web/static/ui.css` — queue-group and callout rules; the legacy light lock widened.
+- `tests/integration/test_torrent_workflow.py`, `tests/integration/test_ui_shell.py`, `tests/unit/test_web_shell.py` — repointed at `/activity`.
+
+#### Pre-Existing Bugs Found And Fixed
+
+1. **The `badge` macro leaked the raw enum into the accessibility tree.** It rendered `title="{{ view.code }}"`, so `WAITING_TORRENT` appeared in the hover tooltip and was read out by a screen reader — the exact leak the state vocabulary exists to close, one layer down from the template. Now `data-code`, which an inspector and a bug report can still read. `activity.js` mirrors the macro attribute for attribute so the JS path cannot reintroduce it.
+2. **A seeding torrent said nothing about seeding, or said it twice.** The old pages wrote「下载完成，正在做种」in `downloads.html` and nothing at all elsewhere. A finished torrent whose payload the client is still sharing is `COMPLETED` as far as the pipeline is concerned, and「已完成」alone tells an operator the job has stopped using their upstream — which is exactly what it has not done. Fixed as a **row note**: `NOTE_SEEDING` in `status.py`, a `note` field in the serializer, a second badge beside the state. The state stays `COMPLETED`, so grouping, history and the JSON contract are unchanged.
+3. **`provider='CONVERSION'` was an unnamed string in three SQL statements.** This is the「混淆」the plan names. It now has a constant, and its exclusion from `SUPPORTED_PROVIDERS` is written down where the next reader will see it.
+4. **`EVENT_LIBRARY` had no publisher.** It survived the deletion of the library phase as a name a client could subscribe to and wait on forever. Removed.
+
+#### Bug Found And Fixed In This Phase's Own New Code
+
+`POST /activity/jobs/batch` — the no-JS path — passed `priority` and `provider` straight through to `apply_job_batch` with no validation. A `priority` batch posted without a number reached `set_job_priority(job_id, None)`, which raised `TypeError`; not being a `DownloadError`, it was not translated, and the operator got a 500.
+
+The fix was not to validate in the route. Both checks moved **into** `apply_job_batch`, ahead of the loop, so neither caller can forget them and the JSON path now hands over raw values too — the same reasoning that made the coroutine shared in the first place. `tests/integration/test_activity_web.py` pins both the missing number and the out-of-range number, and asserts no job moved in either case.
+
+#### Problems Encountered
+
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| `test_every_page_renders_exactly_one_current_page_marker` failed with 3 on `/activity` | A converted page renders its own tab strip, which correctly marks the current tab — on top of the sidebar and drawer | Rewrote the test to assert on the **set of marked hrefs** (`== {path}`), a strictly stronger invariant than a count and immune to how many navigations render the page |
+| `assert "WAITING_TORRENT" not in queue.text` failed | The `badge` macro's `title` attribute | Real defect; see above. The test now checks tag-stripped visible text |
+| `ImportError: cannot import name 'PROVIDER_CONVERSION'` | The constant did not exist | Real defect; see above |
+| The dashboard's new callout would render a dark surface on a hardwired-light page | `.ui-main[data-legacy="true"]` re-pointed the `--t-*` tokens for `.ui-topbar` only | Moved the token block onto the locked column itself; an unconverted page may now host a design-system component |
+| Two seeded jobs collided on `download_jobs.idempotency_key` | `time.monotonic_ns()` has ~16ms granularity on Windows, so back-to-back calls returned the same value | Keys numbered from an `itertools.count` |
+| A batch test expected re-cancel to be reported as skipped | `_cancel_job_sync` only refuses `COMPLETED`, so re-cancelling a cancelled job succeeds and changes nothing | The test now asserts what idempotence actually means here — same result, no error, no second transition — and the skip-reporting path is pinned separately with a terminal job and a nonexistent id |
+| Edits to `test_torrent_workflow.py` turned CJK into `\uXXXX`, comments included | That file is written in escape style and the Edit tool normalizes to it | Reworded those comments in English; did the two renames with a small script |
+
+#### Decisions And Their Reasoning
+
+1. **Grouping, counting and the roll-up are computed on the server.** The alternative is a client that groups what it polled, which puts the section headings one request out of step with the rows under them. Every number on the page comes from one snapshot.
+2. **Three tabs, one template.** They are three views of one table (`download_jobs`) and an operator moves between them constantly — a job leaves 队列, appears in 打包, then in 历史, inside a minute. Three templates would be three copies of `job_row`.
+3. **`live` is read from the states, not from the groups.** A stalled torrent sits under 需干预 but only another request can reveal that a peer appeared, so it still arms the poll. When every visible job is parked, paused or waiting on the operator, the page stops asking entirely — which is what keeps an idle tab from waking the process every two seconds.
+4. **A stall is filed under 需干预 and is never a failure.** `attention_reason` returns `STALLED_TORRENT` with the state left at `WAITING_TORRENT`, the row keeps every action it had, and the badge tone is `waiting`, not `danger` — colouring it as a failure would push an operator into cancelling a transfer that was going to finish. The plan's「停滞种子不被判失败」is a unit test, not a comment.
+5. **Idempotence by construction in the batch, not by loosening the single-job writers.** `apply_job_batch` catches a domain refusal per job and reports it under `skipped`; loosening `resume_job` itself would have cost the single-job path its error message, which is the one place an operator asks about exactly one job.
+6. **A row note is a second badge, never a replacement for the state.** Adding a `SEEDING` state would have changed grouping, history and the JSON contract to say one extra thing about one provider.
+7. **`activity.js` patches fields and refuses to build rows.** Row markup constructed in JavaScript is a second copy of the `job_row` macro, and the two would drift. A job the page has never rendered gets a「队列有变化」notice instead.
+8. **Every row action is a real form; the JS upgrades them.** With JavaScript off the queue stays fully operable, which is also why the batch endpoint has a form path at all.
+9. **307, not 301, on the old paths.** A browser caches a 301 forever, which would make `/downloads` impossible to reclaim. Kept as redirects rather than deleted because an operator's bookmark and every link in an old Telegram notification point there, and a 404 on a page that used to work is worse than one extra hop. R9 owns removing the orphaned templates.
+10. **The tab strip's `aria-current="page"` is correct and stays.** These tabs are three real pages, so the marker belongs on them; the shell test was encoding an implementation detail and was rewritten.
+11. **Priority is accepted on an in-flight job** — the value is what the *next* claim reads, so setting it is harmless and means a retry inherits the operator's intent instead of reverting to the default. It is refused on a terminal job, where it would look like it did something.
+12. **Deterministic tests seed states no worker claims.** `create_app`'s lifespan always starts the download worker and there is no toggle, so a seeded `PENDING` job is claimed and failed mid-test. The fixtures use `PAUSED`, `FAILED`, `WAITING_TORRENT` and `CONVERSION_WAITING_PASSWORD` — which are also exactly the states the queue exists to show.
+
+#### Deferred From R4
+- **The old templates are still on disk.** `app/web/templates/downloads.html` and `downloads_history.html` are unreachable — no route renders them — but **R9 explicitly owns「移除旧模板与旧路由」**, so removing them here would be work done twice. The live pages emit no `<meta http-equiv="refresh">`, and a test asserts it.
+- **History is not paginated in the page.** `GET /api/v1/history` takes `limit`; the HTML tab renders the default 100 newest. The `pagination` macro exists and is wired to nothing until a domain needs it.
+- **`data-queue-changed` announces a membership change but does not act on it.** Deliberate — see decision 7. Reloading the tab is the operator's call.
+- **`switch_source` still only offers TELEGRAPH and EXHENTAI**, which is the whole set of alternatives to a stalled torrent. Nothing in the queue view constrains it further.
+- **No page-visible audit trail for a batch.** The skip reasons reach the operator in the redirect message and in the JSON response; the timeline that records who did what belongs to R6.
+
+## Handoff: Next Session (start of R5)
 
 ### Where The Refactor Stands
-R0 (scaffolding), R1 (JSON API + shared review orchestration), R2 (thumbnails + data model increment) and R3 (design system + shared components) are complete. **All four foundation phases are done.** There is a full read/write JSON surface under `/api/v1`, an SSE stream, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, and one navigation source driving desktop and phone.
+R0-R3 (the foundation phases) and **R4 (the activity domain)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and now one domain actually consuming all of it.
 
-What there is *not* is a single page consuming any of it. The thirteen pre-refactor templates still render their own markup inside the new shell, pinned to the light theme by `data-legacy="true"`. **R4 is the first phase an operator sees a difference in.**
+`/activity` is the reference implementation for every remaining page: server-computed snapshot, one template, macros for the repeated markup, a `data-field` contract with its script, real forms underneath, and no state label written anywhere but `app/api/status.py`. Read it before writing R5.
 
-Test baseline to protect: **592 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
+Eleven pre-refactor templates remain, still pinned to light by `data-legacy="true"`.
+
+Test baseline to protect: **635 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
 
 ### The One Thing To Understand First
-Every phase from here rewrites pages, and the same three mistakes are available in each:
+The same three mistakes are available in every remaining phase:
 
-1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary. A hand-written 「已连接」 is the duplication this refactor exists to delete.
-2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** See decision 2 above — an unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit, and delete its block from `app.css` at the same time.
-3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. If it is an "index" child sharing its parent's path, it needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
+1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out.
+2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** An unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit.
+3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. An "index" child sharing its parent's path needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
 
-Open `/ui-kit` before writing any page CSS — the component you need probably exists, and the gallery shows it in every state including empty and failed.
+A fourth, learned in R4: **when two callers share a coroutine, the validation belongs inside it.** The form path and the JSON path had one copy of the batch logic and two copies of the argument checking, which is how one of them ended up with none.
 
-### Next Phase: R4 (Activity Domain — Queue / Packaging / History, 3-4 person-days)
+### Next Phase: R5 (Candidate Domain And Review Flow, 4-5 person-days)
 See `DEVELOPMENT_PLAN.md` §3. In dependency order:
-1. **`/activity` with three tabs** (queue, packaging, history) replacing `/downloads` and `/downloads/history`. Use the `tabs` macro; add the third `NavItem` child.
-2. **Remove `<meta http-equiv="refresh">`** in favour of 2s polling while visible, paused while hidden, plus SSE push on completion. The refresh tag is why the page currently jumps.
-3. **Group the queue** into in-progress / waiting / needs-intervention / paused, with bulk pause/resume/cancel/retry/switch-source through the existing `/api/v1` write endpoints.
-4. **Separate packaging from download tasks** in both the view and the API — `provider='CONVERSION'` currently shares the queue and confuses both.
-5. **Surface needs-intervention items** (missing volume, missing password, missing preview pages, stalled torrent) at the top of the page and on the dashboard.
-6. **Queue priority adjustment**, which is the first writer for the `priority` column R2 added.
+1. **`/candidates` with six tabs** (全部/待审核/待补充/已通过/驳回/失败) replacing the four separate pages. The `tabs` macro and one `_render_candidates` mirroring `_render_activity`.
+2. **Cover grid / list toggle, sorting, and a multi-condition filter sidebar** (tag / artist / language / category / status). `cover_card`, `filter_group` and `sort_button` all exist; the handler that acts on `data-sort-key` does not.
+3. **Bulk review** (select all / invert / count / floating toolbar), inline quick-approve, and the `j/k/a/x` keyboard shortcuts. The bulk pattern is `apply_job_batch`'s: one shared coroutine, per-item refusals reported rather than fatal.
+4. **In-drawer metadata editing** with field provenance (gdata / translation / manual) and field locking. `metadata_values.is_locked` arrived with the R2 migration and has no writer yet.
 
-Acceptance: progress updates in place without the page jumping; a backend completion is reflected within a second; bulk actions are idempotent; a stalled torrent is not judged a failure.
+Acceptance: bulk review is idempotent and audited; a locked field survives a re-scrape; the whole flow is operable from the keyboard.
 
-Note: the packaging queue has **no SSE `notify` hook** — only the download worker publishes. R4 needs to add one, in `_process_one` style at a single point rather than per terminal branch.
+Note: review orchestration is already shared (`app/review/`), so R5 is a page phase, not a logic phase. Resist adding policy to the template — the R4 shape puts it on the DTO and the words in `status.py`.
 
 ### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is ~2100 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R4-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
+- **`main.py` is ~2280 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R5-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
+- **`app/web/templates/downloads.html` and `downloads_history.html` are orphaned but present.** R9 owns their removal; see "Deferred From R4".
 - **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan — see the R2 scope note. `GET/PUT /api/v1/settings/{section}` is still pending and needs the R8 settings grouping.
-- **`dashboard.html:30` maps connection state to Chinese inline.** Fix it while rewriting the dashboard, not before; see "Deferred From R3".
 - Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".
-- Conversion and connection transitions do not publish SSE events.
-- `CONVERSION_STATE_{PENDING,RUNNING,COMPLETED,FAILED}` are imported but unused in `app/main.py`. This predates the refactor (verified against `HEAD`).
+- Connection transitions do not publish SSE events. Candidate, download and conversion all do.
 - Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration.
 
 ### Invariants No Phase May Break
@@ -1521,10 +1607,11 @@ These are business rules, not preferences. Several have tests locking them:
 - Nothing downloads before review; only `APPROVED`/`DOWNLOADED` may enqueue.
 - ExHentai is the sole authority for metadata.
 - ExHentai Archive Download is **never** routed automatically — it spends GP, so it stays an explicit operator action.
-- A stalled torrent is not a failure; `WAITING_TORRENT` shows the stall duration and waits for a decision.
+- A stalled torrent is not a failure; it is `WAITING_TORRENT` under 需干预, shows its stall duration, keeps every action, and waits for a decision.
 - Packaging is an explicit decision; `auto_pack_after_download` and `torrent_auto_pack` default to off.
+- A packaging job is not a download job: `PROVIDER_CONVERSION` stays out of `SUPPORTED_PROVIDERS`, the download worker never claims one, and the two queues stay separate in the view and in the API.
 - Credentials are never stored in plaintext, never echoed back to a page, never logged.
 - Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened. The thumbnail proxy is inside this rule: it reuses the telegraph SSRF guard and the shared `looks_like_image` gate, and must never accept a caller-supplied URL.
-- Idempotency: retries reuse the same job row and increment `attempt_count`.
+- Idempotency: retries reuse the same job row and increment `attempt_count`; a replayed bulk action changes nothing the first one did.
 - **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it.
 - **One navigation source, one current-page marker, one state vocabulary, one authoritative stylesheet.** R3 established these; each is one careless template away from being two again.

@@ -1,0 +1,240 @@
+{#
+  The activity domain: 队列 / 打包 / 历史 (R4).
+
+  One template for three tabs, selected by `tab`. They are tabs rather than
+  pages because they are three views of one table — `download_jobs` — and
+  because the operator moves between them constantly: a job that leaves 队列
+  appears in 打包 and then in 历史 within a minute.
+
+  It replaces `downloads.html`, whose `<meta http-equiv="refresh">` reloaded the
+  whole document every few seconds and threw away scroll position, an open menu
+  and any checkbox selection with it. Progress now arrives through
+  `activity.js`, which patches the numbers in place.
+
+  Two rules this file follows and the old one broke:
+
+  * No state label is written here. Every one comes from a `StatusView` the API
+    resolved, rendered through `ui.badge`. The old page printed
+    `{{ job.state }}` raw, which is how `WAITING_TORRENT` reached the screen.
+  * Every row action is a real form. `activity.js` upgrades them into batch
+    calls, but with JavaScript off the queue stays fully operable.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}{{ tab_title }} · EhBot{% endblock %}
+
+{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
+{% block main_attrs %}{% endblock %}
+{% block content_class %}ui-content{% endblock %}
+
+{# ------------------------------------------------------------ one queue row #}
+
+{% macro job_row(job, selectable=true) -%}
+  {#- `data-job-id` and `data-field` are the contract with `activity.js`: it
+      finds a row by id and writes into the named fields, and never builds a
+      row itself. Row markup exists once, here. -#}
+  <tr data-job-id="{{ job.job_id }}">
+    {% if selectable %}
+    <td data-label="选择">
+      <input class="ui-checkbox" type="checkbox" name="job_ids" value="{{ job.job_id }}"
+             x-model="selected" aria-label="选择任务 #{{ job.job_id }}">
+    </td>
+    {% endif %}
+    <td data-label="任务">
+      <span class="ui-table-primary">#{{ job.job_id }}</span>
+      <span data-field="state">{{ ui.badge(job.state) }}</span>
+      {% if job.attention %}<span data-field="attention">{{ ui.badge(job.attention) }}</span>{% endif %}
+      {% if job.note %}<span data-field="note">{{ ui.badge(job.note) }}</span>{% endif %}
+      <span class="ui-table-secondary" data-field="detail">{{ job.torrent.detail or "" }}</span>
+      {% if job.torrent.waiting_for_peers %}
+      <progress class="ui-progress" max="100" value="{{ job.progress_percent }}"
+                data-field="progress"></progress>
+      {% endif %}
+      {% if job.torrent.stalled_minutes is not none %}
+      <span class="ui-table-secondary" data-field="stalled">已停滞 {{ job.torrent.stalled_minutes }} 分钟</span>
+      {% endif %}
+      {% if job.torrent.already_in_client %}
+      <span class="ui-table-secondary">该种子已存在于 qBittorrent，未重复加种；保存目录由原有条目决定</span>
+      {% endif %}
+      {% if job.error_message %}
+      <span class="ui-table-secondary" data-field="error">{{ job.error_message }}</span>
+      {% endif %}
+    </td>
+    <td data-label="候选"><a href="{{ job.href }}">候选 #{{ job.candidate_id }}</a></td>
+    <td data-label="来源">{{ job.provider.label }}</td>
+    <td data-label="优先级" data-numeric="true" data-field="priority">{{ job.priority }}</td>
+    <td data-label="尝试" data-numeric="true" data-field="attempt">{{ job.attempt_count }}</td>
+    <td data-label="产出">
+      {% if job.artifact_cbz_path %}<span class="ui-table-secondary">{{ job.artifact_cbz_path }}</span>
+      {% elif job.artifact_path %}<span class="ui-table-secondary">{{ job.artifact_path }}</span>
+      {% else %}<span class="ui-table-secondary">—</span>{% endif %}
+    </td>
+    {% if selectable %}
+    <td data-label="操作">
+      <div class="ui-row-actions">
+        {% if job.actions.retry %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/retry">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ui-btn" data-size="sm" type="submit">重试</button>
+        </form>
+        {% endif %}
+        {% if job.actions.resume %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/resume">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ui-btn" data-size="sm" type="submit">继续</button>
+        </form>
+        {% endif %}
+        {% if job.actions.pause %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/pause">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ui-btn" data-size="sm" type="submit">暂停</button>
+        </form>
+        {% endif %}
+        {% if job.torrent.waiting_for_peers %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/switch-source">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="provider" value="TELEGRAPH">
+          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
+                  title="1280px 重编码，约为原档 5%–10%">改用预览图源</button>
+        </form>
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/switch-source">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="provider" value="EXHENTAI">
+          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
+                  title="消耗 GP">用 Archive Download</button>
+        </form>
+        {% endif %}
+        {% if job.actions.stop_seeding %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/stop-seeding">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
+                  title="从 qBittorrent 移除条目，不删除已归档的文件">停止做种</button>
+        </form>
+        {% endif %}
+        {% if job.actions.cancel %}
+        <form method="post" action="/activity/jobs/{{ job.job_id }}/cancel">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="ui-btn" data-size="sm" data-variant="danger" type="submit">取消</button>
+        </form>
+        {% endif %}
+      </div>
+    </td>
+    {% endif %}
+  </tr>
+{%- endmacro %}
+
+{# ------------------------------------------------------- one queue section #}
+
+{% macro queue_section(section, columns) -%}
+  {#- The heading carries the section's own badge and its own count, both from
+      the same payload as the rows, so it cannot claim a number the rows below
+      do not add up to. -#}
+  <section class="ui-queue-group" data-group="{{ section.group.code }}"
+           aria-label="{{ section.group.label }}">
+    <h2 class="ui-queue-head">
+      {{ ui.badge(section.group) }}
+      <span class="ui-queue-head-count" data-field="group-count">{{ section.count }}</span>
+    </h2>
+    {% call ui.table(columns, caption=section.group.label) %}
+      {% for job in section.jobs %}{{ job_row(job) }}{% endfor %}
+    {% endcall %}
+  </section>
+{%- endmacro %}
+
+{% block content %}
+<header class="ui-page-head">
+  <div>
+    <p class="ui-eyebrow">活动</p>
+    <h1 class="ui-title">{{ tab_title }}</h1>
+    <p class="ui-subtitle">{{ tab_description }}</p>
+  </div>
+</header>
+
+{{ ui.tabs(tabs, tab, "活动分区") }}
+
+{% if error %}
+{{ ui.callout(error, tone="danger", role="alert") }}
+{% endif %}
+
+{#- Everything waiting on the operator, counted across both queues, on every
+    tab: a packaging job stuck on a password is not something they should have
+    to change tab to discover. The banner is server-rendered so it is right on
+    first paint, and `activity.js` keeps its numbers current. -#}
+<div data-attention-banner>
+  {% if snapshot.attention.total %}
+  {% call ui.callout("有 " ~ snapshot.attention.total ~ " 项任务需要处理", tone="danger", role="alert") %}
+    <span class="ui-callout-items">
+      {% for entry in snapshot.attention.reasons %}
+        {{ ui.badge(entry.reason) }}<span class="ui-hint" style="margin: 0">{{ entry.count }}</span>
+      {% endfor %}
+    </span>
+  {% endcall %}
+  {% endif %}
+</div>
+
+{#- The membership notice. `activity.js` fills it in when a poll finds a job the
+    page has never rendered: it patches fields in place and deliberately does not
+    construct rows, because row markup built in JavaScript is a second copy of
+    the macro above and the two would drift. -#}
+<div data-queue-changed hidden></div>
+
+{% if tab == "history" %}
+
+{% if history_jobs %}
+{% call ui.table(history_columns, caption="历史任务") %}
+  {% for job in history_jobs %}{{ job_row(job, selectable=false) }}{% endfor %}
+{% endcall %}
+{% else %}
+{{ ui.empty_state("暂无历史任务", "完成、失败或取消的任务会归档在这里") }}
+{% endif %}
+
+{% else %}
+
+{%- set sections = snapshot.packing if tab == "packing" else snapshot.downloads -%}
+<form data-queue-form
+      x-data="{ selected: [], priority: {{ default_priority }} }"
+      method="post" action="/activity/jobs/batch">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div data-queue-sections>
+    {% for section in sections %}{{ queue_section(section, queue_columns) }}{% endfor %}
+  </div>
+
+  {% if sections %}
+  <div x-show="selected.length" x-cloak>
+    {% call ui.bulk_toolbar(0, noun="项任务", count_binding="selected.length") %}
+      <button class="ui-btn" data-size="sm" type="submit" name="action" value="resume">批量恢复</button>
+      <button class="ui-btn" data-size="sm" type="submit" name="action" value="pause">批量暂停</button>
+      <button class="ui-btn" data-size="sm" type="submit" name="action" value="retry">批量重试</button>
+      {#- Priority is the one batch action that carries an argument. The input is
+          bounded here as well as in the API so the browser refuses an
+          out-of-range value before a request is made. -#}
+      <label class="ui-bulkbar-count" for="bulk-priority">优先级</label>
+      <input class="ui-input" id="bulk-priority" name="priority" type="number"
+             x-model="priority" min="{{ min_priority }}" max="{{ max_priority }}"
+             style="width: 6em" aria-describedby="bulk-priority-hint">
+      <span class="ui-hint" id="bulk-priority-hint" style="margin: 0">数值越小越靠前</span>
+      <button class="ui-btn" data-size="sm" type="submit" name="action" value="priority">调整优先级</button>
+      <button class="ui-btn" data-size="sm" data-variant="danger" type="submit"
+              name="action" value="cancel">批量取消</button>
+    {% endcall %}
+  </div>
+  {% endif %}
+</form>
+
+{% if not sections %}
+{{ ui.empty_state(empty_title, empty_hint) }}
+{% endif %}
+
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{#- `data-live` is the server's answer to「is anything still moving」, computed
+    from the job states in `queue_snapshot`. The script starts polling only when
+    it is true, which is what keeps an idle tab from waking the process. -#}
+<div data-activity-root
+     data-live="{{ 'true' if snapshot.live else 'false' }}"
+     data-tab="{{ tab }}" hidden></div>
+<script defer src="{{ url_for('static', path='/activity.js') }}"></script>
+{% endblock %}

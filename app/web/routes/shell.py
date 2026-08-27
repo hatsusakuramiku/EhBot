@@ -87,8 +87,8 @@ class NavItem:
 
         Only this earns ``aria-current="page"``; ``is_active`` earns a class.
         A parent never claims it, because its prefix is by construction a
-        prefix of its children's paths -- ``/downloads`` also `matches()`
-        ``/downloads/history``, and 活动 plus 历史 both announcing themselves as
+        prefix of its children's paths -- ``/activity`` also `matches()`
+        ``/activity/history``, and 活动 plus 历史 both announcing themselves as
         the current page is a defect a screen reader reads out and a screenshot
         hides. The child is the more specific answer, so the child wins.
         """
@@ -133,17 +133,25 @@ NAV_ITEMS: tuple[NavItem, ...] = (
         "activity",
         "活动",
         "活动",
-        "/downloads",
-        "/downloads",
+        "/activity",
+        "/activity",
         icon="⇄",
         children=(
+            #: 队列 and 打包 are two tabs rather than one list because they are
+            #: two queues: a packaging job carries `provider='CONVERSION'` and
+            #: never competes for a download slot, and mixing them was what made
+            #: the old page's counts unreadable.
             NavItem(
-                "queue", "下载队列", "队列", "/downloads", "/downloads",
+                "queue", "队列", "队列", "/activity", "/activity",
                 exact=True,
             ),
             NavItem(
+                "packing", "打包", "打包",
+                "/activity/packing", "/activity/packing",
+            ),
+            NavItem(
                 "history", "历史", "历史",
-                "/downloads/history", "/downloads/history",
+                "/activity/history", "/activity/history",
             ),
         ),
     ),

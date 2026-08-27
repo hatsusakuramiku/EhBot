@@ -43,8 +43,15 @@ from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
 from app.connections.models import ProviderConnectionError
 from app.db.database import Database
+from app.api.actions import (
+    BATCH_JOB_ACTIONS,
+    JOB_ACTIONS,
+    apply_job_batch,
+)
+from app.api.activity import queue_snapshot
 from app.api.contracts import ApiError, api_error_handler
-from app.api.events import EVENT_DOWNLOAD, EventBus
+from app.api.events import EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
+from app.api.serializers import job_summary
 from app.api.status import (
     connection_view,
     provider_label,
@@ -64,6 +71,9 @@ from app.review.models import (
 from app.review.orchestration import ReviewOrchestrator
 from app.review.service import ReviewError, ReviewService
 from app.downloads.models import (
+    DEFAULT_JOB_PRIORITY,
+    MAX_JOB_PRIORITY,
+    MIN_JOB_PRIORITY,
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAPH,
@@ -345,6 +355,14 @@ def create_app(
                 app_settings.library_path,
                 settings_service=archive_settings_service,
                 data_path=app_settings.data_path,
+                # The packaging queue publishes on its own channel. Downloads
+                # and packaging are two queues in the interface, so a client
+                # watching one must not be woken by the other.
+                notify=(
+                    lambda **data: app.state.event_bus.publish(
+                        EVENT_CONVERSION, **data
+                    )
+                ),
             )
             application.state.conversion_service = conversion_service
             await conversion_service.start()
@@ -855,6 +873,12 @@ def create_app(
         redirect = require_authenticated(request)
         if redirect:
             return redirect
+        #: The needs-attention roll-up is computed from the same snapshot the
+        #: activity page renders, not from a second query: the workbench and the
+        #: queue must never disagree about how many tasks are waiting on the
+        #: operator, and the number on the workbench is the one that decides
+        #: whether they go and look.
+        snapshot = await queue_snapshot(download_service())
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
@@ -862,6 +886,7 @@ def create_app(
                 "csrf_token": request.session["csrf_token"],
                 "connections": connection_manager().snapshot(),
                 "candidate_counts": await database.candidate_counts(),
+                "attention": snapshot["attention"],
             },
         )
 
@@ -1224,118 +1249,263 @@ def create_app(
             status_code=303,
         )
 
-    @app.get("/downloads")
-    async def downloads_dashboard(request: Request, error: str | None = None):
+    #: The three tabs of the activity domain, with the label each one wears as a
+    #: heading and as a tab. Defined once so the tab strip, the `<title>` and the
+    #: page heading cannot disagree, and so adding a tab is one entry.
+    ACTIVITY_TABS: tuple[tuple[str, str, str, str], ...] = (
+        (
+            "queue",
+            "/activity",
+            "队列",
+            "Telegram 附件、EH 种子、Archive Download 与预览页四条来源共用一个下载队列",
+        ),
+        (
+            "packing",
+            "/activity/packing",
+            "打包",
+            "下载完成后的解压与 CBZ 打包任务。它们不占用下载并发，所以单独一个队列",
+        ),
+        (
+            "history",
+            "/activity/history",
+            "历史",
+            "所有已结束的任务：完成、失败与取消。终态记录不会被清理",
+        ),
+    )
+
+    async def _render_activity(
+        request: Request,
+        tab: str,
+        error: str | None = None,
+    ):
+        """Render one activity tab.
+
+        All three tabs read the same snapshot, even 历史: the tab counts and the
+        needs-attention banner are shown on every tab, because a packaging job
+        stuck on a password is not something the operator should have to change
+        tab to discover.
+        """
+        snapshot = await queue_snapshot(download_service())
+        counts = {
+            "queue": snapshot["counts"]["downloads"],
+            "packing": snapshot["counts"]["packing"],
+            "history": None,
+        }
+        current = next(entry for entry in ACTIVITY_TABS if entry[0] == tab)
+        context = {
+            "csrf_token": request.session["csrf_token"],
+            "tab": tab,
+            "tab_title": current[2],
+            "tab_description": current[3],
+            "tabs": [
+                {
+                    "key": key,
+                    "href": href,
+                    "label": label,
+                    "count": counts[key],
+                }
+                for key, href, label, _ in ACTIVITY_TABS
+            ],
+            "snapshot": snapshot,
+            "error": error,
+            "queue_columns": [
+                {"key": "select", "label": "选择"},
+                {"key": "job", "label": "任务"},
+                {"key": "candidate", "label": "候选"},
+                {"key": "provider", "label": "来源"},
+                {"key": "priority", "label": "优先级", "numeric": True},
+                {"key": "attempt", "label": "尝试", "numeric": True},
+                {"key": "artifact", "label": "产出"},
+                {"key": "actions", "label": "操作"},
+            ],
+            # History has neither a checkbox nor an action column: every row is
+            # terminal, so there is nothing to select it for.
+            "history_columns": [
+                {"key": "job", "label": "任务"},
+                {"key": "candidate", "label": "候选"},
+                {"key": "provider", "label": "来源"},
+                {"key": "priority", "label": "优先级", "numeric": True},
+                {"key": "attempt", "label": "尝试", "numeric": True},
+                {"key": "artifact", "label": "产出"},
+            ],
+            "default_priority": DEFAULT_JOB_PRIORITY,
+            "min_priority": MIN_JOB_PRIORITY,
+            "max_priority": MAX_JOB_PRIORITY,
+            "empty_title": (
+                "暂无打包任务" if tab == "packing" else "暂无进行中的下载任务"
+            ),
+            "empty_hint": (
+                "下载完成的任务会自动进入打包队列"
+                if tab == "packing"
+                else "在已审核候选详情页触发下载后会出现在这里"
+            ),
+        }
+        if tab == "history":
+            context["history_jobs"] = [
+                job_summary(job)
+                for job in await download_service().list_history_jobs()
+            ]
+        return templates.TemplateResponse(
+            request=request, name="activity.html", context=context
+        )
+
+    @app.get("/activity")
+    async def activity_queue(request: Request, error: str | None = None):
         redirect = require_authenticated(request)
         if redirect:
             return redirect
-        active = await download_service().list_active_jobs()
-        # Conversion (packaging) jobs live in their own section: they follow a
-        # finished download and never count against the download slots.
-        packing = await download_service().list_active_pack_jobs()
-        # Torrent progress is written by a background poller, so the page has to
-        # come back for it. The refresh is armed only while something is
-        # actually moving, so an idle dashboard does not reload forever.
-        live = any(
-            job.is_waiting_for_peers or job.is_seeding for job in active
-        ) or bool(packing)
-        return templates.TemplateResponse(
-            request=request,
-            name="downloads.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "active_jobs": active,
-                "pack_jobs": packing,
-                "error": error,
-                "live_refresh_seconds": (
-                    app_settings.torrent_poll_seconds if live else 0
-                ),
-            },
-        )
+        return await _render_activity(request, "queue", error)
+
+    @app.get("/activity/packing")
+    async def activity_packing(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_activity(request, "packing", error)
+
+    @app.get("/activity/history")
+    async def activity_history(request: Request):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_activity(request, "history")
+
+    #: The pre-R4 paths. Kept as redirects rather than deleted: an operator's
+    #: bookmark and any link in an old Telegram notification both point here, and
+    #: a 404 on a page that used to work is worse than one extra hop. 307 rather
+    #: than 301 so a browser does not cache the redirect forever, which would
+    #: make the paths impossible to reclaim.
+    @app.get("/downloads")
+    async def downloads_dashboard(request: Request):
+        return RedirectResponse("/activity", status_code=307)
 
     @app.get("/downloads/history")
     async def downloads_history(request: Request):
-        """Past download tasks, newest first.
+        return RedirectResponse("/activity/history", status_code=307)
 
-        Completed (and failed / cancelled) jobs are never pruned from
-        ``download_jobs``, so this page is the operator's archive of what the
-        queue has already handled.
+    async def _activity_redirect(
+        request: Request, error: str | None = None
+    ) -> RedirectResponse:
+        """Back to the tab the operator submitted from, error and all.
+
+        The referer decides, so acting on a packaging job from 打包 does not drop
+        the operator onto 队列. It is only ever used to pick between two known
+        paths -- never followed -- so a forged header buys nothing.
         """
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        history = await download_service().list_history_jobs()
-        return templates.TemplateResponse(
-            request=request,
-            name="downloads_history.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "history_jobs": history,
-            },
+        referer = request.headers.get("referer") or ""
+        target = (
+            "/activity/packing" if "/activity/packing" in referer else "/activity"
         )
+        if error:
+            target = f"{target}?error={quote_plus(error)}"
+        return RedirectResponse(target, status_code=303)
 
-    async def _download_action(
-        request: Request, csrf_token: str, action, job_id: int
+    @app.post("/activity/jobs/batch")
+    async def activity_batch(
+        request: Request,
+        csrf_token: str = Form(),
+        action: str = Form(),
+        job_ids: list[int] = Form(default=[]),
+        priority: int | None = Form(default=None),
+        provider: str | None = Form(default=None),
     ):
-        """Run one queue action and return to the dashboard either way."""
+        """The bulk toolbar, without JavaScript.
+
+        Runs through `apply_job_batch`, the same coroutine
+        `POST /api/v1/jobs/batch` uses, so the form and the API cannot disagree
+        about what a batch does or about which jobs it skips. Skips are folded
+        into the redirect's error text: a form post has nowhere else to report
+        that three of eight jobs were already cancelled.
+        """
         redirect = require_authenticated(request)
         if redirect:
             return redirect
         validate_csrf(request, csrf_token)
-        target_url = request.url_for("downloads_dashboard").path
+        if action not in BATCH_JOB_ACTIONS:
+            return await _activity_redirect(request, f"未知的任务动作：{action}")
+        if not job_ids:
+            return await _activity_redirect(request, "请至少选择一个任务")
+        try:
+            result = await apply_job_batch(
+                download_service(),
+                action,
+                list(dict.fromkeys(job_ids)),
+                provider=provider,
+                priority=priority,
+                announce=lambda job_id: app.state.event_bus.publish(
+                    EVENT_DOWNLOAD, job_id=job_id
+                ),
+            )
+        except ApiError as exc:
+            return await _activity_redirect(request, exc.message)
+        skipped = result["skipped"]
+        if not skipped:
+            return await _activity_redirect(request)
+        return await _activity_redirect(
+            request,
+            f"{len(result['applied'])} 个任务已执行，{len(skipped)} 个跳过："
+            f"{skipped[0]['message']}",
+        )
+
+    async def _job_action(
+        request: Request, csrf_token: str, action, job_id: int
+    ):
+        """Run one queue action and return to the activity page either way."""
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
         try:
             await action(job_id)
         except DownloadError as exc:
-            return RedirectResponse(
-                f"{target_url}?error={quote_plus(exc.public_message)}",
-                status_code=303,
-            )
-        return RedirectResponse(target_url, status_code=303)
+            return await _activity_redirect(request, exc.public_message)
+        app.state.event_bus.publish(EVENT_DOWNLOAD, job_id=job_id)
+        return await _activity_redirect(request)
 
-    @app.post("/downloads/{job_id}/retry")
-    async def retry_download(
-        request: Request, job_id: int, csrf_token: str = Form()
+    @app.post("/activity/jobs/{job_id}/switch-source")
+    async def switch_download_source(
+        request: Request,
+        job_id: int,
+        csrf_token: str = Form(),
+        provider: str = Form(),
     ):
-        return await _download_action(
-            request, csrf_token, download_service().retry_job, job_id
-        )
+        """Move a stalled torrent to another source at the operator's request.
 
-    @app.post("/downloads/{job_id}/pause")
-    async def pause_download(
-        request: Request, job_id: int, csrf_token: str = Form()
-    ):
-        return await _download_action(
-            request, csrf_token, download_service().pause_job, job_id
-        )
+        A stall is never resolved automatically: dropping to preview grade or
+        spending GP are both choices the service refuses to make for someone.
 
-    @app.post("/downloads/{job_id}/resume")
-    async def resume_download(
-        request: Request, job_id: int, csrf_token: str = Form()
-    ):
-        return await _download_action(
-            request, csrf_token, download_service().resume_job, job_id
-        )
-
-    @app.post("/downloads/{job_id}/cancel")
-    async def cancel_download(
-        request: Request, job_id: int, csrf_token: str = Form()
-    ):
-        return await _download_action(
-            request, csrf_token, download_service().cancel_job, job_id
-        )
-
-    @app.post("/downloads/{job_id}/stop-seeding")
-    async def stop_seeding(
-        request: Request, job_id: int, csrf_token: str = Form()
-    ):
-        """Stop sharing a finished torrent, at the operator's choice.
-
-        Seeding continues by default because the payload came from the swarm,
-        so ending it is an explicit action rather than a side effect of the
-        download finishing.
+        Declared above the catch-all below, for the same reason the API's copy is:
+        Starlette matches routes in declaration order, so `/jobs/5/switch-source`
+        would otherwise be answered by `activity_job_action` and refused as an
+        unknown action.
         """
-        return await _download_action(
-            request, csrf_token, download_service().stop_seeding, job_id
+        return await _job_action(
+            request,
+            csrf_token,
+            lambda target: download_service().switch_source(target, provider),
+            job_id,
+        )
+
+    @app.post("/activity/jobs/{job_id}/{action}")
+    async def activity_job_action(
+        request: Request,
+        job_id: int,
+        action: str,
+        csrf_token: str = Form(),
+    ):
+        """One row's action button, without JavaScript.
+
+        The action table is `app.api.actions.JOB_ACTIONS`, shared with the JSON
+        API, so the form fallback can never offer a verb the API does not have.
+        """
+        method_name = JOB_ACTIONS.get(action)
+        if method_name is None:
+            return await _activity_redirect(request, f"未知的任务动作：{action}")
+        return await _job_action(
+            request,
+            csrf_token,
+            getattr(download_service(), method_name),
+            job_id,
         )
 
     @app.post("/candidates/{candidate_id}/exhentai-metadata")
@@ -1433,27 +1603,6 @@ def create_app(
         return RedirectResponse(
             request.url_for("candidate_detail", candidate_id=candidate_id).path,
             status_code=303,
-        )
-
-    @app.post("/downloads/{job_id}/switch-source")
-    async def switch_download_source(
-        request: Request,
-        job_id: int,
-        csrf_token: str = Form(),
-        provider: str = Form(),
-    ):
-        """Move a stalled torrent to another source at the operator's request.
-
-        A stall is never resolved automatically: dropping to preview grade or
-        spending GP are both choices the service refuses to make for someone.
-        """
-        return await _download_action(
-            request,
-            csrf_token,
-            lambda target: download_service().switch_source(
-                target, provider
-            ),
-            job_id,
         )
 
     @app.post("/candidates/{candidate_id}/convert")

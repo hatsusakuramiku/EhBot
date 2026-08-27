@@ -12,8 +12,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.api.status import (
+    NOTE_SEEDING,
+    attention_view,
     connection_view,
     provider_label,
+    queue_group_view,
+    row_note_view,
     status_view,
 )
 from app.review.models import field_label
@@ -23,6 +27,26 @@ from app.thumbnails import THUMBNAIL_VARIANT_CARD, identity_hash
 def status_payload(code: str | None) -> dict[str, Any]:
     """Full status descriptor for a state code."""
     return status_view(code).to_payload()
+
+
+def _attention_payload(reason: str | None) -> dict[str, Any] | None:
+    """What the operator has to do about a job, or null if nothing."""
+    view = attention_view(reason)
+    return view.to_payload() if view is not None else None
+
+
+def queue_group_payload(group: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    """One queue section with its heading and its own rows.
+
+    The count comes from the section's own list rather than being passed in, so
+    a heading cannot claim a number the rows below it do not add up to.
+    """
+    view = queue_group_view(group)
+    return {
+        "group": view.to_payload(),
+        "count": len(jobs),
+        "jobs": jobs,
+    }
 
 
 def candidate_summary(item: Any) -> dict[str, Any]:
@@ -116,6 +140,49 @@ def review_action(entry: Any) -> dict[str, Any]:
     }
 
 
+def _kib(value: int) -> str:
+    """A byte rate as whole KiB/s. Fractions of a KiB are noise at this size."""
+    return f"{int(value) // 1024} KiB/s"
+
+
+def _torrent_detail(job: Any) -> str | None:
+    """The one-line transfer summary, or ``None`` when there is nothing to say.
+
+    Composed here rather than in the template because the activity page patches
+    this text in place on every poll: built in Jinja *and* in JavaScript it would
+    be two formats that drift, which is the duplication this refactor removes.
+    It carries no state label -- those come from ``status_view`` -- only numbers
+    and their units.
+    """
+    parts: list[str] = []
+    if job.is_waiting_for_peers:
+        parts.append(f"{job.progress_percent}%")
+        parts.append(f"做种者 {job.num_seeds}")
+        if job.download_speed:
+            parts.append(f"↓{_kib(job.download_speed)}")
+        if job.eta_seconds is not None:
+            parts.append(f"剩 {job.eta_seconds // 60} 分")
+    elif job.is_seeding:
+        parts.append(f"↑{_kib(job.upload_speed)}")
+    if not parts:
+        return None
+    return " · ".join(parts)
+
+
+def _note_payload(job: Any) -> dict[str, Any] | None:
+    """The row's extra badge, or ``None`` when its state says everything.
+
+    Only seeding qualifies today. It is resolved here rather than in the
+    template because a template that writes「正在做种」itself is a state label
+    outside `app.api.status`, which is how the old page ended up saying
+    「下载完成，正在做种」in one place and nothing at all in another.
+    """
+    if not job.is_seeding:
+        return None
+    view = row_note_view(NOTE_SEEDING)
+    return view.to_payload() if view is not None else None
+
+
 def job_summary(job: Any) -> dict[str, Any]:
     """A download or packaging task as the activity view needs it.
 
@@ -135,6 +202,16 @@ def job_summary(job: Any) -> dict[str, Any]:
         "attempt_count": job.attempt_count,
         "error_code": job.error_code,
         "error_message": job.error_message,
+        # Which of the four queue sections the row belongs in, and why the
+        # operator is needed if they are. Decided in Python because「停滞的种子
+        # 不是失败」is policy, and a client that regrouped rows itself would be
+        # free to disagree with the count in the group heading.
+        "group": job.queue_group,
+        "attention": _attention_payload(job.attention_reason),
+        # What the row is doing beyond its lifecycle state -- today only「正在
+        # 做种」, which `COMPLETED` alone would hide.
+        "note": _note_payload(job),
+        "priority": job.priority,
         "artifact_path": job.artifact_path,
         "artifact_size": job.artifact_size,
         "artifact_cbz_path": job.artifact_cbz_path,
@@ -153,10 +230,16 @@ def job_summary(job: Any) -> dict[str, Any]:
             "seeding": job.is_seeding,
             "already_in_client": job.was_already_in_client,
             "upload_speed": job.upload_speed,
+            "download_speed": job.download_speed,
+            "num_seeds": job.num_seeds,
+            "eta_seconds": job.eta_seconds,
             "state": job.torrent_state,
             # Minutes without progress. `None` means「not stalled」rather than
             # zero, so the interface can stay silent instead of showing「0 分钟」.
             "stalled_minutes": job.stalled_minutes,
+            # The rendered line the queue shows under the job id. `None` when
+            # the job is not a live transfer, so the row has nothing to print.
+            "detail": _torrent_detail(job),
         },
         "href": f"/works/{job.candidate_id}",
     }
@@ -186,6 +269,7 @@ __all__ = [
     "job_summary",
     "metadata_entry",
     "provider_connection",
+    "queue_group_payload",
     "review_action",
     "status_payload",
 ]

@@ -12,6 +12,8 @@ from app.connections.telegram import TelegramBotApi
 from app.db.database import Database
 from app.downloads.models import (
     ACTIVE_DOWNLOAD_STATES,
+    CONVERSION_STATE_COMPLETED,
+    CONVERSION_STATE_FAILED,
     DOWNLOAD_STATE_CANCELLED,
     DOWNLOAD_STATE_COMPLETED,
     DOWNLOAD_STATE_DOWNLOADING,
@@ -19,14 +21,18 @@ from app.downloads.models import (
     DOWNLOAD_STATE_PAUSED,
     DOWNLOAD_STATE_PENDING,
     DOWNLOAD_STATE_WAITING_TORRENT,
+    MAX_JOB_PRIORITY,
+    MIN_JOB_PRIORITY,
     NEEDS_INFO_DOWNLOAD_ERRORS,
     OPEN_DOWNLOAD_STATES,
     PERMANENT_DOWNLOAD_ERRORS,
+    PROVIDER_CONVERSION,
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
     PROVIDER_TELEGRAPH,
     SUPPORTED_PROVIDERS,
+    TERMINAL_DOWNLOAD_STATES,
     DownloadEnqueueResult,
     DownloadJobSummary,
     DownloadState,
@@ -240,9 +246,10 @@ class DownloadService:
 
     def _list_active_pack_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
         return self._fetch_jobs(
-            "WHERE provider = 'CONVERSION' AND state IN (?, ?, ?, ?) "
+            "WHERE provider = ? AND state IN (?, ?, ?, ?) "
             "ORDER BY id DESC LIMIT 50",
             (
+                PROVIDER_CONVERSION,
                 "CONVERSION_PENDING",
                 "CONVERSION_RUNNING",
                 "CONVERSION_WAITING_VOLUMES",
@@ -418,6 +425,50 @@ class DownloadService:
         await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._cancel_job_sync, job_id)
 
+    async def set_job_priority(self, job_id: int, priority: int) -> int:
+        """Move a job up or down the queue.
+
+        Applies to both queues, since both claims order by `priority, id`. It is
+        accepted on a job that is already running rather than refused: the value
+        is what the *next* claim reads, so setting it on an in-flight job is
+        harmless and means a retry of that job inherits the operator's intent
+        instead of silently reverting to the default.
+        """
+        return await asyncio.to_thread(
+            self._set_job_priority_sync, job_id, priority
+        )
+
+    def _set_job_priority_sync(self, job_id: int, priority: int) -> int:
+        if priority < MIN_JOB_PRIORITY or priority > MAX_JOB_PRIORITY:
+            raise DownloadError(
+                "PRIORITY_OUT_OF_RANGE",
+                f"优先级需在 {MIN_JOB_PRIORITY} 到 {MAX_JOB_PRIORITY} 之间"
+                "，数值越小越靠前",
+            )
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            if str(row[0]) in TERMINAL_DOWNLOAD_STATES or str(row[0]) in {
+                CONVERSION_STATE_COMPLETED,
+                CONVERSION_STATE_FAILED,
+            }:
+                # Reordering something that will never be claimed again would
+                # look like it did something. Retry first, then reprioritise.
+                raise DownloadError(
+                    "JOB_NOT_QUEUED",
+                    "已结束的任务没有队列位置；请先重试再调整优先级",
+                )
+            connection.execute(
+                "UPDATE download_jobs SET priority = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (int(priority), job_id),
+            )
+        return int(priority)
+
     async def stop_seeding(self, job_id: int) -> str:
         """Stop sharing a finished torrent, keeping the archived file.
 
@@ -580,7 +631,8 @@ class DownloadService:
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
                 "(SELECT path FROM artifacts WHERE job_id = download_jobs.id "
                 " AND artifact_type = 'CBZ' LIMIT 1), "
-                "created_at, updated_at, details_json FROM download_jobs "
+                "created_at, updated_at, details_json, priority "
+                "FROM download_jobs "
                 + where_sql,
                 params,
             ).fetchall()
@@ -601,6 +653,7 @@ class DownloadService:
                 created_at=str(row[10]),
                 updated_at=str(row[11]),
                 details=self._safe_details(row[12]),
+                priority=int(row[13]),
             )
             for row in rows
         )

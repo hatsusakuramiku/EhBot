@@ -38,11 +38,12 @@ QUEUE_MAXSIZE = 64
 KEEPALIVE_INTERVAL_SECONDS = 15.0
 
 #: Event names. The interface subscribes by name, so these are part of the
-#: contract with `base.html`.
+#: contract with `base.html`. Every name here has a publisher; `EVENT_LIBRARY`
+#: was removed with the library-shelf phase rather than left as a name a client
+#: could subscribe to and wait on forever.
 EVENT_CANDIDATE = "candidate"
 EVENT_DOWNLOAD = "download"
 EVENT_CONVERSION = "conversion"
-EVENT_LIBRARY = "library"
 EVENT_CONNECTION = "connection"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
@@ -50,7 +51,6 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_CANDIDATE,
         EVENT_DOWNLOAD,
         EVENT_CONVERSION,
-        EVENT_LIBRARY,
         EVENT_CONNECTION,
     }
 )
@@ -180,7 +180,6 @@ __all__ = [
     "EVENT_CONNECTION",
     "EVENT_CONVERSION",
     "EVENT_DOWNLOAD",
-    "EVENT_LIBRARY",
     "KEEPALIVE_INTERVAL_SECONDS",
     "KNOWN_EVENTS",
     "QUEUE_MAXSIZE",

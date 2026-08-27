@@ -12,6 +12,7 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from urllib.parse import parse_qsl
 import zipfile
@@ -818,7 +819,7 @@ def test_the_review_page_offers_the_torrent_and_queues_it_once(
     assert [job.provider for job in jobs] == [PROVIDER_EH_TORRENT]
 
 
-def test_the_dashboard_shows_progress_and_offers_the_manual_actions(
+def test_the_queue_shows_progress_and_offers_the_manual_actions(
     tmp_path: Path,
 ) -> None:
     settings = replace(make_settings(tmp_path), torrent_poll_seconds=1)
@@ -858,24 +859,40 @@ def test_the_dashboard_shows_progress_and_offers_the_manual_actions(
         # rather than driving them from a second event loop.
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
-            dashboard = client.get("/downloads")
-            if "42%" in dashboard.text:
+            queue = client.get("/activity")
+            if "42%" in queue.text:
                 break
             time.sleep(0.2)
 
-    assert dashboard.status_code == 200
-    assert "WAITING_TORRENT" in dashboard.text
-    assert "42%" in dashboard.text
-    assert "\u65e0\u505a\u79cd\u8005" in dashboard.text
+    assert queue.status_code == 200
+    # The state reaches the operator as vocabulary, never as the enum. The old
+    # page printed `job.state` raw, which is how `WAITING_TORRENT` got on screen.
+    # The code is still in the markup as `data-code` for an inspector, so the
+    # check is against the text with tags removed -- what a person actually sees,
+    # and what a screen reader actually reads.
+    visible = re.sub(r"<[^>]+>", " ", queue.text)
+    assert "WAITING_TORRENT" not in visible
+    assert "\u7b49\u5f85\u505a\u79cd" in visible
+    # 42% and the seeder count arrive as one composed line, so the transfer
+    # reads as a sentence rather than four unlabelled numbers.
+    assert "42%" in queue.text
+    assert "\u505a\u79cd\u8005 0" in queue.text
+    # A stall is not a failure, so the row is filed under the needs-attention
+    # section with its reason spelled out, and keeps every action it had.
+    assert "\u79cd\u5b50\u65e0\u505a\u79cd\u8005" in queue.text
+    assert "\u9700\u5e72\u9884" in queue.text
     # The three manual actions a stalled torrent needs, and no auto-degrade.
-    assert "\u6539\u7528\u9884\u89c8\u56fe\u6e90" in dashboard.text
-    assert "\u7528 Archive Download" in dashboard.text
-    assert "\u53d6\u6d88" in dashboard.text
-    # Progress is written by the poller, so the page has to come back for it.
-    assert 'http-equiv="refresh"' in dashboard.text
+    assert "\u6539\u7528\u9884\u89c8\u56fe\u6e90" in queue.text
+    assert "\u7528 Archive Download" in queue.text
+    assert "\u53d6\u6d88" in queue.text
+    # Progress used to arrive by reloading the whole document, which threw away
+    # scroll position and any open menu with it. It now arrives through
+    # `activity.js`, armed by `data-live` -- and the meta refresh is gone.
+    assert 'http-equiv="refresh"' not in queue.text
+    assert 'data-live="true"' in queue.text
 
 
-def test_the_dashboard_keeps_showing_a_torrent_that_is_still_seeding(
+def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
     tmp_path: Path,
 ) -> None:
     """A completed job is normally gone, but a seed is still using resources."""
@@ -914,13 +931,16 @@ def test_the_dashboard_keeps_showing_a_torrent_that_is_still_seeding(
         )
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
-            dashboard = client.get("/downloads")
-            if "\u6b63\u5728\u505a\u79cd" in dashboard.text:
+            queue = client.get("/activity")
+            if "\u6b63\u5728\u505a\u79cd" in queue.text:
                 break
             time.sleep(0.2)
 
-        assert "\u6b63\u5728\u505a\u79cd" in dashboard.text
-        assert "\u505c\u6b62\u505a\u79cd" in dashboard.text
+        # The lifecycle state is COMPLETED, and\u300c\u5df2\u5b8c\u6210\u300don its own would tell the
+        # operator this job has stopped using their upstream -- which is exactly
+        # what it has not done. The seeding note is a second badge beside it.
+        assert "\u6b63\u5728\u505a\u79cd" in queue.text
+        assert "\u505c\u6b62\u505a\u79cd" in queue.text
         job_id = int(
             asyncio.run(
                 DownloadService(
@@ -929,10 +949,10 @@ def test_the_dashboard_keeps_showing_a_torrent_that_is_still_seeding(
             )[0].job_id
         )
         stopped = client.post(
-            f"/downloads/{job_id}/stop-seeding", data={"csrf_token": csrf}
+            f"/activity/jobs/{job_id}/stop-seeding", data={"csrf_token": csrf}
         )
         assert stopped.status_code == 303
-        after = client.get("/downloads")
+        after = client.get("/activity")
         assert "\u6b63\u5728\u505a\u79cd" not in after.text
 
     # Stopping the seed removed the client entry without deleting files.

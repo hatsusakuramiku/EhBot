@@ -23,7 +23,7 @@ def test_dashboard_prefix_does_not_swallow_every_path() -> None:
     dashboard = NAV_ITEMS[0]
     assert dashboard.matches("/")
     assert not dashboard.matches("/candidates")
-    assert not dashboard.matches("/downloads/history")
+    assert not dashboard.matches("/activity/history")
 
 
 def test_prefix_matches_on_segment_boundaries_only() -> None:
@@ -36,11 +36,11 @@ def test_prefix_matches_on_segment_boundaries_only() -> None:
 
 def test_parent_is_active_but_only_the_child_is_current() -> None:
     activity = NAV_ITEMS[2]
-    history = "/downloads/history"
+    history = "/activity/history"
     # The parent is highlighted...
     assert activity.is_active(history)
-    # ...but does not claim `aria-current`. `/downloads` is a prefix of
-    # `/downloads/history`, so the parent does `matches()` it -- which is why
+    # ...but does not claim `aria-current`. `/activity` is a prefix of
+    # `/activity/history`, so the parent does `matches()` it -- which is why
     # the template must ask `is_current()` instead. Two current pages in one
     # document is a defect a screen reader reads out loud.
     assert activity.matches(history)
@@ -60,8 +60,9 @@ def test_exactly_one_item_in_the_whole_tree_is_ever_current() -> None:
         "/candidates/processing",
         "/candidates/failed",
         "/manual-add",
-        "/downloads",
-        "/downloads/history",
+        "/activity",
+        "/activity/packing",
+        "/activity/history",
         "/connections",
         "/sources",
         "/auto-approval-rules",
@@ -91,8 +92,9 @@ def test_every_live_page_resolves_to_exactly_one_domain() -> None:
         "/candidates/processing",
         "/candidates/failed",
         "/manual-add",
-        "/downloads",
-        "/downloads/history",
+        "/activity",
+        "/activity/packing",
+        "/activity/history",
         "/connections",
         "/sources",
         "/auto-approval-rules",

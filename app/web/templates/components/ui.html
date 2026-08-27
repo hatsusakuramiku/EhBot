@@ -17,8 +17,13 @@
 {% macro badge(view) -%}
   {#- `view` is a StatusView (or its `to_payload()` dict). Jinja's dot access
       tries the attribute then the subscript, so either side of the API
-      boundary can pass what it already has without reshaping it. -#}
-  <span class="badge" data-tone="{{ view.tone }}" data-live="{{ 'true' if view.live else 'false' }}" title="{{ view.code }}">{{ view.label }}</span>
+      boundary can pass what it already has without reshaping it.
+
+      The raw code rides along in `data-code` rather than `title`: it is there
+      for an inspector and a bug report, and `title` would put `WAITING_TORRENT`
+      in a hover tooltip and in the accessibility tree, where a screen reader
+      reads it out. That is the same leak the label exists to close. -#}
+  <span class="badge" data-tone="{{ view.tone }}" data-live="{{ 'true' if view.live else 'false' }}" data-code="{{ view.code }}">{{ view.label }}</span>
 {%- endmacro %}
 
 {% macro badge_for(code) -%}
@@ -117,13 +122,17 @@
 
 {# --------------------------------------------------------- bulk toolbar #}
 
-{% macro bulk_toolbar(count, total=None, noun="项") -%}
+{% macro bulk_toolbar(count, total=None, noun="项", count_binding=None) -%}
   {#- Sticky rather than fixed: a selection made at the bottom of a long list
       stays actionable without scrolling back up, but the bar still scrolls out
       of the way when the list ends. Rendered only when something is selected,
-      which the caller decides. -#}
+      which the caller decides.
+
+      `count_binding` is an Alpine expression for pages where the selection is
+      client-side, so the number tracks the checkboxes instead of a server
+      render. `count` stays the fallback for the frame before Alpine runs. -#}
   <div class="ui-bulkbar" role="group" aria-label="批量操作">
-    <span class="ui-bulkbar-count">已选 {{ count }} {{ noun }}{% if total %} / {{ total }}{% endif %}</span>
+    <span class="ui-bulkbar-count">已选 <span {% if count_binding %}x-text="{{ count_binding }}"{% endif %}>{{ count }}</span> {{ noun }}{% if total %} / {{ total }}{% endif %}</span>
     <div class="ui-bulkbar-actions">{{ caller() }}</div>
   </div>
 {%- endmacro %}
@@ -251,6 +260,20 @@
     <strong>{{ title }}</strong>
     {% if hint %}<span>{{ hint }}</span>{% endif %}
     {% if caller %}{{ caller() }}{% endif %}
+  </div>
+{%- endmacro %}
+
+{% macro callout(title, tone="neutral", detail=None, role="status") -%}
+  {#- A page-level notice. `tone` is one of the semantic tones, never a colour;
+      `role="alert"` is for something the operator has to act on now and
+      `role="status"` for something that merely changed. The caller supplies any
+      badges, links or buttons. -#}
+  <div class="ui-callout" data-tone="{{ tone }}" role="{{ role }}">
+    <div class="ui-callout-body">
+      <span class="ui-callout-title">{{ title }}</span>
+      {% if detail %}<span class="ui-hint" style="margin: 0">{{ detail }}</span>{% endif %}
+      {% if caller %}{{ caller() }}{% endif %}
+    </div>
   </div>
 {%- endmacro %}
 

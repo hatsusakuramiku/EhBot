@@ -417,10 +417,12 @@
   color-scheme: light;
   background: #f3f5f6;
   color: #20272d;
-}
-/* The topbar sits inside the locked column, so its tokens are re-pointed at
-   light values rather than being excluded from the lock. */
-.ui-main[data-legacy="true"] .ui-topbar {
+  /* The tokens are re-pointed at light values for the whole locked column, not
+     just the topbar: an unconverted page can host a design-system component
+     (the dashboard's needs-attention callout is the first), and a component
+     reading the dark surface token inside a hardwired-light page renders as a
+     dark box floating on a light one. Converted pages drop the attribute and
+     get the real theme back. */
   --t-surface: #ffffff;
   --t-surface-sunken: #eef1f2;
   --t-line: #dce2e5;
@@ -540,6 +542,42 @@
   text-align: center;
 }
 .ui-empty strong { color: var(--t-ink); font-size: 15px; }
+
+/* A page-level notice: what needs the operator, or what changed underneath
+   them. Toned by the same `--tone-*` pairs the badges use, so「需干预」reads as
+   the same colour whether it is a row badge or the banner counting those rows.
+   The left border rather than a filled background: a banner that fills with
+   red every time a torrent stalls trains an operator to ignore it. */
+.ui-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-top: var(--s-5);
+  padding: var(--s-4);
+  border: 1px solid var(--t-line);
+  border-left: 3px solid var(--tone-neutral-fg);
+  border-radius: var(--r-md);
+  background: var(--t-surface);
+  color: var(--t-ink);
+  font-size: var(--font-body);
+}
+.ui-callout[data-tone="active"] { border-left-color: var(--tone-active-fg); }
+.ui-callout[data-tone="waiting"] { border-left-color: var(--tone-waiting-fg); }
+.ui-callout[data-tone="success"] { border-left-color: var(--tone-success-fg); }
+.ui-callout[data-tone="danger"] { border-left-color: var(--tone-danger-fg); }
+.ui-callout-body { display: grid; gap: var(--s-2); min-width: 0; }
+.ui-callout-title { color: var(--t-ink); font-weight: 650; }
+.ui-callout-items { display: flex; gap: var(--s-2); flex-wrap: wrap; align-items: center; }
+.ui-callout-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-left: auto; }
+
+/* One queue section — 需干预 / 进行中 / 等待中 / 已暂停. The heading carries the
+   section's badge and its own row count, both resolved server-side, so a
+   heading can never claim a number the rows below it do not add up to. */
+.ui-queue-group { margin-top: var(--s-5); }
+.ui-queue-head { display: flex; align-items: center; gap: var(--s-2); margin: 0 0 var(--s-2); font-size: var(--font-body); font-weight: 650; }
+.ui-queue-head-count { color: var(--t-ink-muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ui-row-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
 
 /* Tabs: the six candidate states and the seven settings sections both use
    these, which is what makes them one domain instead of eleven pages. */

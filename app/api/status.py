@@ -118,6 +118,42 @@ CONNECTION_STATUS: dict[str, StatusView] = {
     "not_configured": _view("not_configured", "尚未配置", TONE_MUTED),
 }
 
+#: The four queue sections. Keyed by `DownloadJobSummary.queue_group`; the
+#: policy deciding which one a job is in lives on the DTO, and only the words
+#: live here. `live` is what arms the activity page's poll: the interface keeps
+#: asking while an「进行中」or「等待中」row exists, and stops once every visible
+#: job is parked, paused or waiting on the operator.
+QUEUE_GROUP_STATUS: dict[str, StatusView] = {
+    "attention": _view("attention", "需干预", TONE_DANGER),
+    "active": _view("active", "进行中", TONE_ACTIVE, live=True),
+    "waiting": _view("waiting", "等待中", TONE_WAITING, live=True),
+    "paused": _view("paused", "已暂停", TONE_MUTED),
+}
+
+#: Why a job needs the operator, from `DownloadJobSummary.attention_reason`.
+#: A stalled torrent is `waiting`, not `danger`: the swarm may still deliver it,
+#: and colouring it as a failure would push an operator into cancelling a
+#: transfer that was going to finish.
+ATTENTION_STATUS: dict[str, StatusView] = {
+    "MISSING_VOLUMES": _view("MISSING_VOLUMES", "缺少分卷", TONE_WAITING),
+    "MISSING_PASSWORD": _view("MISSING_PASSWORD", "缺少解压密码", TONE_WAITING),
+    "MISSING_PAGES": _view("MISSING_PAGES", "预览页缺页", TONE_WAITING),
+    "STALLED_TORRENT": _view("STALLED_TORRENT", "种子无做种者", TONE_WAITING),
+    "FAILED": _view("FAILED", "任务失败", TONE_DANGER),
+}
+
+#: What a row is doing that its lifecycle state does not name. A torrent whose
+#: payload the client is still sharing is `COMPLETED` as far as the pipeline is
+#: concerned, and「已完成」on its own tells an operator the job has stopped using
+#: their upstream -- which is exactly what it has not done. A note is a second
+#: badge beside the state, never a replacement for it: the state stays
+#: `COMPLETED`, so grouping, history and the JSON contract are unchanged.
+NOTE_SEEDING = "SEEDING"
+
+ROW_NOTE_STATUS: dict[str, StatusView] = {
+    NOTE_SEEDING: _view(NOTE_SEEDING, "正在做种", TONE_ACTIVE),
+}
+
 #: Lookup order for the generic helpers. Candidate statuses come first because
 #: `FAILED` means「候选失败」in the review context, which is the one an
 #: operator sees most often.
@@ -170,17 +206,52 @@ def connection_view(state: str | None) -> StatusView:
     )
 
 
+def queue_group_view(group: str | None) -> StatusView:
+    """Resolve a queue section name into its heading vocabulary."""
+    return QUEUE_GROUP_STATUS.get(
+        group or "", _view(group or "", group or "—", TONE_NEUTRAL)
+    )
+
+
+def attention_view(reason: str | None) -> StatusView | None:
+    """Resolve an attention reason, or None when the job needs nothing.
+
+    Returning None rather than a placeholder keeps the caller honest: a page
+    asks「这条要我做什么」and gets either an answer or silence, never an empty
+    badge that looks like a state.
+    """
+    if not reason:
+        return None
+    return ATTENTION_STATUS.get(reason, _view(reason, reason, TONE_DANGER))
+
+
 def is_live(code: str | None) -> bool:
     """Whether a state advances on its own and therefore needs polling."""
     return status_view(code).live
 
 
+def row_note_view(code: str | None) -> StatusView | None:
+    """Resolve a row note, or None when the row has nothing extra to say.
+
+    Unknown notes return None rather than a fallback badge: unlike a state, a
+    note is optional by design, so an unrecognised one is better left unsaid
+    than rendered as a raw code beside a perfectly good state.
+    """
+    if not code:
+        return None
+    return ROW_NOTE_STATUS.get(code)
+
+
 __all__ = [
+    "ATTENTION_STATUS",
     "CANDIDATE_STATUS",
     "CONNECTION_STATUS",
     "CONVERSION_STATUS",
     "DOWNLOAD_STATUS",
+    "NOTE_SEEDING",
     "PROVIDER_STATUS",
+    "QUEUE_GROUP_STATUS",
+    "ROW_NOTE_STATUS",
     "StatusView",
     "TONE_ACTIVE",
     "TONE_DANGER",
@@ -188,9 +259,12 @@ __all__ = [
     "TONE_NEUTRAL",
     "TONE_SUCCESS",
     "TONE_WAITING",
+    "attention_view",
     "connection_view",
     "is_live",
     "provider_label",
+    "queue_group_view",
+    "row_note_view",
     "status_label",
     "status_tone",
     "status_view",

@@ -65,11 +65,17 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 592 passed / 12 skipped / 0 failed.** Ending below this is a
+**Baseline: 635 passed / 12 skipped / 0 failed.** Ending below this is a
 regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
 need a toolchain this dev machine cannot host. (Baseline moves per phase:
-R0 439 -> R1 524 -> R2 569 -> R3 592. An older note claiming "0 skipped" was
-wrong.)
+R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635. An older note claiming
+"0 skipped" was wrong.)
+
+**Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
+lifespan always starts the download worker and there is no toggle, so the worker
+claims the row and fails it mid-test. Seed `PAUSED`, `FAILED`, `WAITING_TORRENT`
+or `CONVERSION_WAITING_PASSWORD` — which are also the states the queue exists to
+show. `tests/integration/test_activity_web.py` has the fixture.
 
 **Do not stream an SSE endpoint through `TestClient`.** It drains the response
 body when the context exits and the stream is endless, so it deadlocks. Call the
@@ -153,14 +159,39 @@ operator navigation).
   paths, so `matches()` is true for both and two elements would announce
   themselves as the current page. A section whose child is open gets the
   `is-active` class instead. An "index" child whose path equals its parent's
-  (`/candidates`, `/downloads`, `/connections`) must be declared `exact=True`,
-  or it prefix-matches its own siblings.
+  (`/candidates`, `/activity`, `/connections`) must be declared `exact=True`,
+  or it prefix-matches its own siblings. A converted page's own tab strip marks
+  the current tab as well, so a page may legitimately render the marker several
+  times — the invariant is one *destination*, not one occurrence.
 - **A state's Chinese label is never written in a template or in JS.** The badge
   macro takes the whole `StatusView` from `app/api/status.py`, so a page and a
   JSON response cannot disagree, and a template can never pair one state's label
-  with another state's colour. `data-theme="auto"` likewise never reaches the
-  DOM: neither theme selector matches it, so `applyTheme("auto")` *removes* the
-  attribute.
+  with another state's colour. This covers attributes nobody sees on screen: the
+  raw code rides in `data-code`, never in `title`, because `title` reaches the
+  hover tooltip and the accessibility tree. `data-theme="auto"` likewise never
+  reaches the DOM: neither theme selector matches it, so `applyTheme("auto")`
+  *removes* the attribute.
+- **`/activity` is the reference implementation for a domain page.** One
+  server-computed snapshot (`queue_snapshot` in `app/api/activity.py`) feeding
+  both the JSON endpoint and the template, one template for its tabs, macros for
+  repeated markup, a `data-field` contract with its script, and real forms
+  underneath so the page works with JavaScript off. Read it before writing the
+  next domain.
+- **`activity.js` patches fields; it never builds a row.** Row markup
+  constructed in JS is a second copy of the `job_row` macro and the two drift. A
+  poll that finds an unknown job shows a change notice instead.
+- **A row note is a second badge, not a state.** `NOTE_SEEDING` says「正在做种」
+  beside a `COMPLETED` torrent whose payload the client is still sharing.
+  Inventing a `SEEDING` state would have changed grouping, history and the JSON
+  contract to say one extra thing about one provider.
+- **When two callers share a coroutine, the argument checking goes inside it.**
+  `apply_job_batch` serves the JSON endpoint and the no-JS form; while the checks
+  lived in the callers, one of them had none and a `priority` batch with no
+  number returned a 500.
+- **`PROVIDER_CONVERSION` is deliberately absent from `SUPPORTED_PROVIDERS`.** A
+  packaging job shares the `download_jobs` table but the download worker must
+  never claim one, and the conversion worker claims nothing else. The two queues
+  stay separate in the view and in the API.
 - **The theme/density script in `<head>` is inline and blocking on purpose.**
   Deferring it flashes the light theme for one frame on every navigation.
 
@@ -171,8 +202,9 @@ Several are locked by tests. Do not "simplify" them:
 - Nothing downloads before review; only `APPROVED`/`DOWNLOADED` may enqueue.
 - ExHentai is the only metadata authority.
 - ExHentai Archive Download is never routed automatically (it spends GP).
-- A stalled torrent is not a failure — `WAITING_TORRENT` reports the stall and
-  waits for an operator decision.
+- A stalled torrent is not a failure — `WAITING_TORRENT` reports the stall,
+  files the row under 需干预, keeps every action it had, and waits for an
+  operator decision.
 - Packaging is explicit; `auto_pack_after_download` and `torrent_auto_pack`
   default off.
 - Credentials: never plaintext, never echoed to a page, never logged.
@@ -181,4 +213,8 @@ Several are locked by tests. Do not "simplify" them:
   reuses the telegraph SSRF guard, gates on `looks_like_image`, bounds decoded
   pixel count, and re-encodes everything it serves to WebP so the outbound bytes
   are ours.
-- Retries reuse the same job row and increment `attempt_count`.
+- Retries reuse the same job row and increment `attempt_count`. A replayed bulk
+  action changes nothing the first one did: `apply_job_batch` reports a job that
+  cannot take the action under `skipped`, with its reason, and runs the rest.
+- A packaging job is not a download job: `PROVIDER_CONVERSION` stays out of
+  `SUPPORTED_PROVIDERS`, and the two queues stay separate in view and API.

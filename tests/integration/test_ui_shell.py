@@ -60,7 +60,12 @@ def _client(tmp_path: Path) -> tuple[TestClient, Settings]:
     return client, settings
 
 
-def test_every_page_renders_exactly_one_current_page_marker(
+#: Every `<a>` carrying the current-page marker, captured with its own href.
+#: `re.S` because the attribute sits on the line after `href` in `base.html`.
+_CURRENT_LINK = re.compile(r'<a\b[^>]*?href="([^"]+)"[^>]*?aria-current="page"', re.S)
+
+
+def test_every_page_marks_exactly_one_destination_as_current(
     tmp_path: Path,
 ) -> None:
     client, _ = _client(tmp_path)
@@ -72,19 +77,23 @@ def test_every_page_renders_exactly_one_current_page_marker(
             "/candidates/processing",
             "/candidates/failed",
             "/manual-add",
-            "/downloads",
-            "/downloads/history",
+            "/activity",
+            "/activity/packing",
+            "/activity/history",
             "/connections",
             "/sources",
             "/auto-approval-rules",
             "/archive-settings",
         ):
             body = client.get(path).text
-            # The sidebar and the tab bar each render the marker, so two is the
-            # correct count for one logical current page. Three means a prefix
-            # is matching a sibling; zero means the page fell out of the tree.
-            count = body.count('aria-current="page"')
-            assert count == 2, f"{path} rendered {count} current markers"
+            marked = _CURRENT_LINK.findall(body)
+            # The invariant is about destinations, not occurrences: several
+            # navigations render the marker for the same page (the sidebar, the
+            # mobile drawer, and on a converted page its own tab strip), and
+            # that is not a defect. Two *different* hrefs claiming to be the
+            # current page is -- a screen reader reads out both. An empty set
+            # means the page fell out of the navigation tree.
+            assert set(marked) == {path}, f"{path} marked {sorted(set(marked))}"
     finally:
         client.__exit__(None, None, None)
 
