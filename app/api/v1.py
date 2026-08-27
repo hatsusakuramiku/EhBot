@@ -18,6 +18,7 @@ from app.api.activity import router as activity_router
 from app.api.candidates import router as candidates_router
 from app.api.events import EventBus
 from app.api.summary import router as summary_router
+from app.api.thumbnails import router as thumbnails_router
 from app.api.works import router as works_router
 from app.api.status import (
     CANDIDATE_STATUS,
@@ -37,6 +38,7 @@ router.include_router(summary_router)
 router.include_router(candidates_router)
 router.include_router(works_router)
 router.include_router(activity_router)
+router.include_router(thumbnails_router)
 router.include_router(actions_router)
 
 

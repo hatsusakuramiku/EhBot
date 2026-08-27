@@ -1,0 +1,271 @@
+{#
+  Shared UI components (R3).
+
+  Every component is a macro here rather than a partial template per component,
+  so a page imports one file and the set stays discoverable. Interactive state
+  lives in Alpine on the element that owns it — there is no build step and no
+  component framework, which is a deliberate constraint from R0.
+
+  The rule these macros exist to enforce: a status label is never written in a
+  template. `badge()` takes the StatusView that `app/api/status.py` resolved, so
+  a state reads identically in a page and in a JSON payload. A macro that
+  hardcodes 「已连接」 has recreated the duplication this refactor removes.
+#}
+
+{# ---------------------------------------------------------------- badge #}
+
+{% macro badge(view) -%}
+  {#- `view` is a StatusView (or its `to_payload()` dict). Jinja's dot access
+      tries the attribute then the subscript, so either side of the API
+      boundary can pass what it already has without reshaping it. -#}
+  <span class="badge" data-tone="{{ view.tone }}" data-live="{{ 'true' if view.live else 'false' }}" title="{{ view.code }}">{{ view.label }}</span>
+{%- endmacro %}
+
+{% macro badge_for(code) -%}
+  {#- Convenience for the common case where a template holds only the raw
+      state string. Resolution still happens in Python. -#}
+  {{ badge(status_view(code)) }}
+{%- endmacro %}
+
+{# ------------------------------------------------------------ cover card #}
+
+{% macro cover_card(title, href=None, cover=None, meta=None, tags=None, status=None, selectable=false, value=None, selected=false) -%}
+  {#- `cover` is the `cover` object from a candidate payload:
+      {"url": "/api/v1/thumbnails/<hash>", "hash": "..."} or None. The URL is
+      used verbatim — never rebuilt here, and never pointed at an upstream
+      image host. -#}
+  <article class="ui-card" {% if selected %}data-selected="true"{% endif %}>
+    <div class="ui-card-cover">
+      {% if cover and cover.url %}
+        {#- Lazy + async: a grid of 50 covers must not block first paint, and
+            each request is a proxy fetch that may be a cache miss. -#}
+        <img src="{{ cover.url }}" alt="" loading="lazy" decoding="async">
+      {% else %}
+        <div class="ui-card-cover-empty">无封面</div>
+      {% endif %}
+      {% if status %}<div class="ui-card-badge">{{ badge(status) }}</div>{% endif %}
+      {% if selectable %}
+        <div class="ui-card-select">
+          <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ value }}"
+                 aria-label="选择「{{ title }}」" {% if selected %}checked{% endif %}>
+        </div>
+      {% endif %}
+    </div>
+    <div class="ui-card-body">
+      <h3 class="ui-card-title">
+        {% if href %}<a href="{{ href }}">{{ title }}</a>{% else %}{{ title }}{% endif %}
+      </h3>
+      {% if meta %}<span class="ui-card-meta">{{ meta }}</span>{% endif %}
+      {% if tags %}
+        <div class="ui-card-tags">
+          {% for tag in tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </article>
+{%- endmacro %}
+
+{# ------------------------------------------------------------ data table #}
+
+{% macro sort_button(label, key, sort=None, direction="asc", numeric=false) -%}
+  {#- The control is a button inside the header cell, not a handler on the cell
+      itself: a keyboard user needs a real focusable target, and `aria-sort`
+      has to sit on something that announces its state. -#}
+  {%- set is_sorted = (sort == key) -%}
+  {%- set state = ("ascending" if direction == "asc" else "descending") if is_sorted else "none" -%}
+  <button class="ui-sort" type="button" aria-sort="{{ state }}" data-sort-key="{{ key }}">
+    <span>{{ label }}</span>
+    <span class="ui-sort-arrow" aria-hidden="true">{% if is_sorted %}{{ "▲" if direction == "asc" else "▼" }}{% else %}⇅{% endif %}</span>
+  </button>
+{%- endmacro %}
+
+{% macro table(columns, caption=None, sort=None, direction="asc") -%}
+  {#- `columns` is a list of {key, label, numeric?, sortable?} dicts. The body
+      comes from the caller so a page keeps full control of its cells; only the
+      chrome is shared. Each cell should carry `data-label` so the phone layout
+      can drop the header row without the values becoming anonymous. -#}
+  <div class="ui-table-wrap">
+    <table class="ui-table">
+      {% if caption %}<caption class="visually-hidden">{{ caption }}</caption>{% endif %}
+      <thead>
+        <tr>
+          {% for column in columns %}
+            <th scope="col" {% if column.numeric %}data-numeric="true"{% endif %}>
+              {% if column.sortable %}{{ sort_button(column.label, column.key, sort, direction, column.numeric) }}
+              {% else %}{{ column.label }}{% endif %}
+            </th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>{{ caller() }}</tbody>
+    </table>
+  </div>
+{%- endmacro %}
+
+{% macro pagination(page, page_size, total) -%}
+  {%- set last = ((total - 1) // page_size + 1) if total > 0 else 1 -%}
+  <nav class="ui-pagination" aria-label="分页">
+    <span>共 {{ total }} 条，第 {{ page }} / {{ last }} 页</span>
+    <span class="ui-pagination-pages">
+      <button class="ui-btn" data-size="sm" type="button" data-page="{{ page - 1 }}"
+              {% if page <= 1 %}disabled{% endif %}>上一页</button>
+      <button class="ui-btn" data-size="sm" type="button" data-page="{{ page + 1 }}"
+              {% if page >= last %}disabled{% endif %}>下一页</button>
+    </span>
+  </nav>
+{%- endmacro %}
+
+{# --------------------------------------------------------- bulk toolbar #}
+
+{% macro bulk_toolbar(count, total=None, noun="项") -%}
+  {#- Sticky rather than fixed: a selection made at the bottom of a long list
+      stays actionable without scrolling back up, but the bar still scrolls out
+      of the way when the list ends. Rendered only when something is selected,
+      which the caller decides. -#}
+  <div class="ui-bulkbar" role="group" aria-label="批量操作">
+    <span class="ui-bulkbar-count">已选 {{ count }} {{ noun }}{% if total %} / {{ total }}{% endif %}</span>
+    <div class="ui-bulkbar-actions">{{ caller() }}</div>
+  </div>
+{%- endmacro %}
+
+{# --------------------------------------------------------------- drawer #}
+
+{% macro drawer(id, title, side="right") -%}
+  {#- Alpine owns the open state. `x-trap` is not vendored, so focus is moved
+      manually on open and `@keydown.escape.window` closes it: an overlay a
+      keyboard user cannot dismiss is worse than no overlay. -#}
+  <div x-data="{ open: false }" x-id="['{{ id }}']">
+    <button class="ui-btn" type="button" @click="open = true"
+            :aria-expanded="open" aria-haspopup="dialog">{{ title }}</button>
+    <template x-teleport="body">
+      <div x-show="open" x-cloak @keydown.escape.window="open = false">
+        <div class="ui-scrim" @click="open = false"></div>
+        <aside class="ui-drawer" data-side="{{ side }}" role="dialog" aria-modal="true"
+               aria-label="{{ title }}" x-init="$watch('open', v => v && $nextTick(() => $el.querySelector('[autofocus], button, a, input')?.focus()))">
+          <header class="ui-drawer-head">
+            <h2 class="ui-drawer-title">{{ title }}</h2>
+            <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
+                    @click="open = false" aria-label="关闭">✕</button>
+          </header>
+          <div class="ui-drawer-body">{{ caller() }}</div>
+        </aside>
+      </div>
+    </template>
+  </div>
+{%- endmacro %}
+
+{# ------------------------------------------------------- confirm dialog #}
+
+{% macro confirm(label, title, body, confirm_label="确认", action=None, method="post", variant="danger", csrf_token=None) -%}
+  {#- Destructive actions get a second step. The confirm button submits a real
+      form, so the action still works with JavaScript disabled once the dialog
+      is bypassed — the guard is UX, not the authorisation. -#}
+  <div x-data="{ open: false }">
+    <button class="ui-btn" data-variant="{{ variant }}" type="button" @click="open = true">{{ label }}</button>
+    <template x-teleport="body">
+      <div x-show="open" x-cloak @keydown.escape.window="open = false">
+        <div class="ui-scrim" @click="open = false"></div>
+        <div class="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-{{ label | replace(' ', '') }}">
+          <div class="ui-dialog-panel" @click.outside="open = false">
+            <h2 class="ui-dialog-title" id="dlg-{{ label | replace(' ', '') }}">{{ title }}</h2>
+            <p class="ui-dialog-body">{{ body }}</p>
+            <div class="ui-dialog-foot">
+              <button class="ui-btn" type="button" @click="open = false">取消</button>
+              {% if action %}
+                <form method="{{ method }}" action="{{ action }}">
+                  {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+                  <button class="ui-btn" data-variant="{{ variant }}" type="submit" x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
+                </form>
+              {% else %}
+                <button class="ui-btn" data-variant="{{ variant }}" type="button" @click="open = false">{{ confirm_label }}</button>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+{%- endmacro %}
+
+{# ----------------------------------------------------------- filter side #}
+
+{% macro filter_group(title, options, name) -%}
+  {#- `options` is a list of {value, label, count?}. Counts come from the same
+      payload as the list, so the sidebar can never disagree with the results. -#}
+  <div class="ui-filter-group">
+    <h3>{{ title }}</h3>
+    {% for option in options %}
+      <label class="ui-filter-option">
+        <input class="ui-checkbox" type="checkbox" name="{{ name }}" value="{{ option.value }}"
+               {% if option.get('checked') %}checked{% endif %}>
+        <span>{{ option.label }}</span>
+        {% if option.get('count') is not none %}<span>{{ option.count }}</span>{% endif %}
+      </label>
+    {% endfor %}
+  </div>
+{%- endmacro %}
+
+{# -------------------------------------------------------------- skeleton #}
+
+{% macro skeleton(shape="text", count=1, width=None) -%}
+  {#- Placeholders carry `aria-hidden`: a screen reader should hear the live
+      region announce「加载中」once, not read six empty boxes. -#}
+  {% for _ in range(count) %}
+    <div class="ui-skeleton" data-shape="{{ shape }}" aria-hidden="true"
+         {% if width %}style="width: {{ width }}"{% endif %}></div>
+  {% endfor %}
+{%- endmacro %}
+
+{% macro skeleton_cards(count=6) -%}
+  <div class="ui-cover-grid" aria-busy="true" aria-label="加载中">
+    {% for _ in range(count) %}
+      <div class="ui-card">
+        {{ skeleton("cover") }}
+        <div class="ui-card-body">{{ skeleton("title") }}{{ skeleton("text", 1, "60%") }}</div>
+      </div>
+    {% endfor %}
+  </div>
+{%- endmacro %}
+
+{# -------------------------------------------------------------- progress #}
+
+{% macro progress(value=None, total=100, label=None, detail=None) -%}
+  {#- Native <progress> is styled rather than replaced, so an indeterminate
+      task (value omitted) and assistive technology both work for free. -#}
+  <div class="ui-progress-row">
+    {% if label or detail %}
+      <span class="ui-progress-label"><span>{{ label or "" }}</span><span>{{ detail or "" }}</span></span>
+    {% endif %}
+    {% if value is none %}
+      <progress class="ui-progress"></progress>
+    {% else %}
+      <progress class="ui-progress" value="{{ value }}" max="{{ total }}"></progress>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
+{# ----------------------------------------------------------------- misc #}
+
+{% macro empty_state(title, hint=None) -%}
+  <div class="ui-empty">
+    <strong>{{ title }}</strong>
+    {% if hint %}<span>{{ hint }}</span>{% endif %}
+    {% if caller %}{{ caller() }}{% endif %}
+  </div>
+{%- endmacro %}
+
+{% macro tabs(items, current=None, label="分区") -%}
+  {#- `items` is a list of {key, label, href, count?}. Six candidate states and
+      seven settings sections both render through this, which is what makes
+      each a single domain rather than eleven pages. -#}
+  <nav class="ui-tabs" aria-label="{{ label }}">
+    {% for item in items %}
+      <a class="ui-tabs-item" href="{{ item.href }}"
+         aria-selected="{{ 'true' if item.key == current else 'false' }}"
+         {% if item.key == current %}aria-current="page"{% endif %}>
+        <span>{{ item.label }}</span>
+        {% if item.get('count') is not none %}<span class="ui-tabs-count">{{ item.count }}</span>{% endif %}
+      </a>
+    {% endfor %}
+  </nav>
+{%- endmacro %}

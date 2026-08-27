@@ -682,13 +682,20 @@ class DownloadService:
             )
 
     def _claim_pending_job_sync(self) -> dict | None:
+        """Take the next queued job, lowest `priority` value first.
+
+        `priority` before `id` rather than instead of it: within one priority
+        the queue stays FIFO, so raising one job's priority reorders that job
+        and nothing else. The default is 100, which leaves room to promote
+        (lower) and demote (higher) without renumbering the queue.
+        """
         with self._database._connect() as connection:
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
                 "WHERE state = ? AND provider IN ("
                 + ",".join("?" for _ in SUPPORTED_PROVIDERS)
-                + ") ORDER BY id LIMIT 1",
+                + ") ORDER BY priority, id LIMIT 1",
                 (DOWNLOAD_STATE_PENDING, *SUPPORTED_PROVIDERS),
             ).fetchone()
             if row is None:

@@ -8,6 +8,7 @@ REVIEW_REJECT = "REJECT"
 REVIEW_NEEDS_REVISION = "NEEDS_REVISION"
 REVIEW_REQUEUE = "REQUEUE"
 REVIEW_EDIT_METADATA = "EDIT_METADATA"
+REVIEW_LOCK_METADATA = "LOCK_METADATA"
 
 REVIEW_ACTIONS: tuple[str, ...] = (
     REVIEW_APPROVE,
@@ -15,6 +16,7 @@ REVIEW_ACTIONS: tuple[str, ...] = (
     REVIEW_NEEDS_REVISION,
     REVIEW_REQUEUE,
     REVIEW_EDIT_METADATA,
+    REVIEW_LOCK_METADATA,
 )
 
 STATUS_PENDING_REVIEW = "PENDING_REVIEW"
@@ -131,6 +133,10 @@ class MetadataEntry:
     confidence: float | None
     is_manual: bool
     created_at: str
+    #: Pinned by the operator against re-scraping. Distinct from `is_manual`:
+    #: a locked value can still be one ExHentai supplied, which is exactly the
+    #: case `is_manual` cannot express.
+    is_locked: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 import zipfile
 
@@ -318,6 +319,46 @@ async def test_conversion_publishes_cbz_and_records_snapshot(
     assert '"tool_profile":"zipfile-default"' in details
     # The original archive is kept by default.
     assert archive_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_packed_cbz_artifact_records_its_real_size_and_digest(
+    tmp_path: Path,
+) -> None:
+    """`size_bytes` used to receive `page_count`.
+
+    Every packed CBZ therefore reported a size of a few dozen bytes and the
+    row could not be compared against the archive it came from, so this
+    asserts the three columns independently rather than just "a row exists".
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg", "02.jpg", "03.jpg"))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    job_id = await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    published = tmp_path / "library" / "Archive Title.cbz"
+    with database._connect() as connection:  # noqa: SLF001
+        row = connection.execute(
+            "SELECT path, sha256, size_bytes, page_count FROM artifacts "
+            "WHERE job_id = ? AND artifact_type = 'CBZ'",
+            (job_id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == str(published)
+    assert row[1] == hashlib.sha256(published.read_bytes()).hexdigest()
+    assert row[2] == published.stat().st_size
+    assert row[2] > 100, "a size that small is the old page-count bug"
+    assert row[3] == 3
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,10 @@ def connection_manager(request: Request) -> Any:
     return _service(request, "connection_manager", "外部连接")
 
 
+def thumbnail_service(request: Request) -> Any:
+    return _service(request, "thumbnail_service", "缩略图服务")
+
+
 def review_orchestrator(request: Request) -> Any:
     """The shared approve/reject/route coordinator.
 
@@ -136,5 +140,6 @@ __all__ = [
     "require_session",
     "review_orchestrator",
     "telegraph_service",
+    "thumbnail_service",
     "torrent_service",
 ]

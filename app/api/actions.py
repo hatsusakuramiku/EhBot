@@ -181,18 +181,33 @@ async def switch_source(request: Request, job_id: int) -> dict:
 
 @router.patch("/works/{candidate_id}/metadata")
 async def patch_metadata(request: Request, candidate_id: int) -> dict:
-    """Apply operator overrides to one or more metadata fields.
+    """Apply operator overrides and field locks to one or more metadata fields.
 
     Writes go through `ReviewService`, which re-evaluates the source rules after
     each change: editing a field can move a candidate out of NEEDS_INFO, and
     that has to happen here rather than on the next ingest.
+
+    `fields` and `locks` are independent, and either alone is a valid request:
+    an operator can retype a value, pin one ExHentai already supplied, or do
+    both. Locks are applied after the edits so `{"fields": {"Title": "x"},
+    "locks": {"Title": true}}` pins the value it just wrote rather than the one
+    it replaced.
     """
     operator = _guard(request)
     payload = await _body(request)
     fields = payload.get("fields")
-    if not isinstance(fields, dict) or not fields:
-        raise ApiError("FIELDS_REQUIRED", "\u8bf7\u63d0\u4f9b\u8981\u4fee\u6539\u7684\u5b57\u6bb5")
-    unknown = sorted(set(fields) - set(METADATA_FIELDS))
+    locks = payload.get("locks")
+    if fields is not None and not isinstance(fields, dict):
+        raise ApiError("FIELDS_INVALID", "fields \u5fc5\u987b\u662f\u5b57\u6bb5\u5230\u503c\u7684\u6620\u5c04")
+    if locks is not None and not isinstance(locks, dict):
+        raise ApiError("LOCKS_INVALID", "locks \u5fc5\u987b\u662f\u5b57\u6bb5\u5230\u5e03\u5c14\u503c\u7684\u6620\u5c04")
+    fields = fields or {}
+    locks = locks or {}
+    if not fields and not locks:
+        raise ApiError(
+            "FIELDS_REQUIRED", "\u8bf7\u63d0\u4f9b\u8981\u4fee\u6539\u7684\u5b57\u6bb5"
+        )
+    unknown = sorted((set(fields) | set(locks)) - set(METADATA_FIELDS))
     if unknown:
         raise ApiError(
             "METADATA_FIELD_INVALID",
@@ -214,6 +229,10 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
             await service.set_manual_metadata(
                 candidate_id, operator, field_name, str(value)
             )
+        for field_name, locked in locks.items():
+            await service.set_metadata_lock(
+                candidate_id, operator, field_name, bool(locked)
+            )
     except ReviewError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
 
@@ -221,6 +240,8 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     return {
         "candidate_id": candidate_id,
         "updated": sorted(fields),
+        "locked": sorted(name for name, on in locks.items() if on),
+        "unlocked": sorted(name for name, on in locks.items() if not on),
         "metadata": await database.effective_metadata(candidate_id),
     }
 

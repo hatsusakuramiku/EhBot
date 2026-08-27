@@ -1,26 +1,43 @@
 """Context every page shell needs.
 
-The navigation is defined once here, as data. `base.html` currently hardcodes
-the same nine links twice -- once for the sidebar and once for the mobile
-header -- which is why the two drifted apart. A single list rendered by both
-means adding a section is one edit, and the mobile view can never disagree with
-the desktop one.
+The navigation is defined once here, as data. `base.html` used to hardcode the
+same links twice -- once for the sidebar and once for the mobile header -- which
+is why the two drifted apart: the mobile bar had a 历史 entry the sidebar never
+gained. One list rendered by both means adding a section is one edit, and the
+mobile view can never disagree with the desktop one.
+
+Why the tree has two levels
+---------------------------
+The target information architecture is four flat domains. But 设置 does not
+exist yet -- it arrives in R8 -- and 来源规则 / 自动审批 / 归档设置 / 外部连接
+are live pages an operator uses today. A flat four-item nav would make them
+unreachable, trading a real regression for a cosmetic match with the plan. So a
+domain carries the pages it will eventually absorb as ``children``, and when R8
+lands `/settings` those children become tabs inside it and this file shrinks by
+one edit. The nav never points at a route that does not exist.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Request
+
+#: Themes the shell will apply. `auto` follows the operating system.
+THEMES: tuple[str, ...] = ("auto", "light", "dark")
+
+#: Row density. `comfortable` is the default; `compact` is for scanning a long
+#: queue. Only shared measurements change, so no component has its own variant.
+DENSITIES: tuple[str, ...] = ("comfortable", "compact")
 
 
 @dataclass(frozen=True, slots=True)
 class NavItem:
-    """One top-level destination.
+    """One destination in the navigation tree.
 
     ``prefix`` is what marks the item active, so a detail page under a section
-    keeps its parent highlighted. ``short`` is the compact label for the
-    mobile bar, where the full name does not fit.
+    keeps its parent highlighted. ``short`` is the compact label for the mobile
+    bar, where the full name does not fit.
     """
 
     key: str
@@ -28,26 +45,144 @@ class NavItem:
     short: str
     path: str
     prefix: str
+    #: A single glyph for the collapsed rail and the mobile tab bar. It is
+    #: decorative -- the label stays in the DOM and is only visually hidden --
+    #: so it is never the sole cue for a destination.
+    icon: str = "•"
+    #: Match the path exactly instead of by prefix. Needed by the "index" child
+    #: of a section, whose path is its parent's: `/candidates` is a prefix of
+    #: `/candidates/needs-info`, so a prefix test would make 全部候选 and 待补充
+    #: both the current page. The index child is the narrower claim, so it gives
+    #: up prefix matching and the parent keeps it.
+    exact: bool = False
+    children: tuple[NavItem, ...] = field(default=())
 
-    def is_active(self, current_path: str) -> bool:
+    def matches(self, current_path: str) -> bool:
+        """Whether this item's own route is the current one.
+
+        The dashboard is special-cased: its prefix is ``/``, which every path
+        starts with, so a prefix test would light it up on every page.
+        """
         if self.prefix == "/":
             return current_path == "/"
+        if self.exact:
+            return current_path == self.prefix
         return current_path == self.prefix or current_path.startswith(
             self.prefix + "/"
         )
 
+    def is_active(self, current_path: str) -> bool:
+        """Whether this item or any of its children is the current route.
 
-#: The five domains from the refactor spec. The legacy pages remain reachable
-#: at their existing URLs during the transition; this list is what the new
-#: shell renders, and each entry is pointed at its rebuilt page as that page
-#: lands.
+        A parent whose child is open must read as active, otherwise the mobile
+        bar shows nothing selected while the operator is plainly inside a
+        section.
+        """
+        if self.matches(current_path):
+            return True
+        return any(child.matches(current_path) for child in self.children)
+
+    def is_current(self, current_path: str) -> bool:
+        """Whether this item is the page the document is showing.
+
+        Only this earns ``aria-current="page"``; ``is_active`` earns a class.
+        A parent never claims it, because its prefix is by construction a
+        prefix of its children's paths -- ``/downloads`` also `matches()`
+        ``/downloads/history``, and 活动 plus 历史 both announcing themselves as
+        the current page is a defect a screen reader reads out and a screenshot
+        hides. The child is the more specific answer, so the child wins.
+        """
+        return not self.children and self.matches(current_path)
+
+
+#: The four domains from the refactor spec, each carrying the legacy pages it
+#: will absorb. The 书库 domain that once sat between 活动 and 设置 was deleted
+#: on 2026-08-26: this project's scope ends at the archive.
 NAV_ITEMS: tuple[NavItem, ...] = (
-    NavItem("dashboard", "工作台", "工作台", "/", "/"),
-    NavItem("candidates", "候选", "候选", "/candidates", "/candidates"),
-    NavItem("activity", "活动", "活动", "/downloads", "/downloads"),
-    NavItem("library", "书库", "书库", "/library", "/library"),
-    NavItem("settings", "设置", "设置", "/settings", "/settings"),
+    NavItem("dashboard", "工作台", "工作台", "/", "/", icon="◉"),
+    NavItem(
+        "candidates",
+        "候选",
+        "候选",
+        "/candidates",
+        "/candidates",
+        icon="▤",
+        children=(
+            NavItem(
+                "candidates_all", "全部候选", "全部", "/candidates",
+                "/candidates", exact=True,
+            ),
+            NavItem(
+                "candidates_needs_info", "待补充", "待补充",
+                "/candidates/needs-info", "/candidates/needs-info",
+            ),
+            NavItem(
+                "candidates_processing", "处理中", "处理中",
+                "/candidates/processing", "/candidates/processing",
+            ),
+            NavItem(
+                "candidates_failed", "失败", "失败",
+                "/candidates/failed", "/candidates/failed",
+            ),
+            NavItem(
+                "manual_add", "手动添加", "手动", "/manual-add", "/manual-add",
+            ),
+        ),
+    ),
+    NavItem(
+        "activity",
+        "活动",
+        "活动",
+        "/downloads",
+        "/downloads",
+        icon="⇄",
+        children=(
+            NavItem(
+                "queue", "下载队列", "队列", "/downloads", "/downloads",
+                exact=True,
+            ),
+            NavItem(
+                "history", "历史", "历史",
+                "/downloads/history", "/downloads/history",
+            ),
+        ),
+    ),
+    NavItem(
+        "settings",
+        "设置",
+        "设置",
+        "/connections",
+        "/connections",
+        icon="⚙",
+        children=(
+            NavItem(
+                "connections", "外部连接", "连接", "/connections",
+                "/connections", exact=True,
+            ),
+            NavItem("sources", "来源规则", "来源", "/sources", "/sources"),
+            NavItem(
+                "auto_approval", "自动审批", "审批",
+                "/auto-approval-rules", "/auto-approval-rules",
+            ),
+            NavItem(
+                "archive", "归档设置", "归档",
+                "/archive-settings", "/archive-settings",
+            ),
+            NavItem(
+                "change_password", "修改密码", "密码",
+                "/change-password", "/change-password",
+            ),
+        ),
+    ),
 )
+
+
+def active_domain(current_path: str) -> NavItem | None:
+    """The top-level item the current path belongs to, if any."""
+    for item in NAV_ITEMS:
+        if item.is_active(current_path):
+            return item
+    return None
 
 
 def shell_context(request: Request) -> dict:
@@ -58,11 +193,21 @@ def shell_context(request: Request) -> dict:
     hidden input the old templates each had to remember.
     """
     current_path = request.url.path
+    domain = active_domain(current_path)
     return {
         "nav_items": NAV_ITEMS,
         "current_path": current_path,
+        "active_domain": domain,
+        "active_children": domain.children if domain is not None else (),
         "csrf_token": request.session.get("csrf_token", ""),
     }
 
 
-__all__ = ["NAV_ITEMS", "NavItem", "shell_context"]
+__all__ = [
+    "DENSITIES",
+    "NAV_ITEMS",
+    "THEMES",
+    "NavItem",
+    "active_domain",
+    "shell_context",
+]

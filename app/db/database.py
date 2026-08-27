@@ -70,7 +70,7 @@ _CANDIDATE_LIST_SELECT = (
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
-    "c.ex_gallery_token "
+    "c.ex_gallery_token, c.thumb_url "
     "FROM candidates c LEFT JOIN candidate_messages cm "
     "ON cm.candidate_id = c.id"
 )
@@ -103,6 +103,7 @@ def _candidate_list_item(row: Sequence[object]) -> CandidateListItem:
         raw_tags=str(row[6]) if row[6] is not None else None,
         category=str(row[7]) if row[7] is not None else None,
         language=str(row[8]) if row[8] is not None else None,
+        thumb_url=str(row[13]) if row[13] is not None else None,
     )
 
 
@@ -1394,8 +1395,70 @@ class Database:
                 ),
             )
 
+    async def set_metadata_lock(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        field_name: str,
+        locked: bool,
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_metadata_lock_sync,
+            candidate_id,
+            operator_name,
+            field_name,
+            locked,
+        )
+
+    def _set_metadata_lock_sync(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        field_name: str,
+        locked: bool,
+    ) -> None:
+        """Pin or release every stored value for one field.
+
+        The lock is set on all rows for the field, not just the winning one,
+        because the operator is expressing a decision about the field rather
+        than about the row that happens to be selected today: a later scrape
+        adding a higher-confidence value must not slip past the lock by
+        landing on a row that was never locked.
+        """
+        with self._connect() as connection:
+            candidate_row = connection.execute(
+                "SELECT 1 FROM candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if candidate_row is None:
+                raise LookupError(f"Candidate {candidate_id} does not exist")
+            cursor = connection.execute(
+                "UPDATE metadata_values SET is_locked = ? "
+                "WHERE candidate_id = ? AND field_name = ?",
+                (1 if locked else 0, candidate_id, field_name),
+            )
+            if cursor.rowcount == 0:
+                raise LookupError(
+                    f"Candidate {candidate_id} has no {field_name} value"
+                )
+            connection.execute(
+                "INSERT INTO review_actions "
+                "(candidate_id, action, operator_name, details_json) "
+                "VALUES (?, 'LOCK_METADATA', ?, ?)",
+                (
+                    candidate_id,
+                    operator_name,
+                    json.dumps(
+                        {"field": field_name, "locked": bool(locked)},
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+
     async def effective_metadata(self, candidate_id: int) -> dict[str, str]:
-        return await asyncio.to_thread(self._effective_metadata_sync, candidate_id)
+        return await asyncio.to_thread(
+            self._effective_metadata_sync, candidate_id
+        )
 
     def _effective_metadata_sync(self, candidate_id: int) -> dict[str, str]:
         with self._connect() as connection:
@@ -1697,7 +1760,7 @@ class Database:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT field_name, field_value, value_source, confidence, "
-                "is_manual, created_at FROM metadata_values "
+                "is_manual, created_at, is_locked FROM metadata_values "
                 "WHERE candidate_id = ? ORDER BY is_manual DESC, field_name",
                 (candidate_id,),
             ).fetchall()
@@ -1709,6 +1772,7 @@ class Database:
                 confidence=float(row[3]) if row[3] is not None else None,
                 is_manual=bool(row[4]),
                 created_at=str(row[5]),
+                is_locked=bool(row[6]),
             )
             for row in rows
         )

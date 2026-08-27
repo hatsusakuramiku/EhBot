@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 420" role="img" aria-labelledby="title">
+  <title id="title">封面不可用</title>
+  <rect width="300" height="420" fill="#e8eceb"/>
+  <rect x="0.5" y="0.5" width="299" height="419" fill="none" stroke="#c9d2d0"/>
+  <g fill="#a8b4b1">
+    <rect x="90" y="150" width="120" height="90" rx="6"/>
+    <circle cx="120" cy="176" r="10" fill="#e8eceb"/>
+    <path d="M100 232l30-34 22 26 16-18 24 26z" fill="#e8eceb"/>
+  </g>
+  <text x="150" y="278" text-anchor="middle" font-family="system-ui, sans-serif"
+        font-size="15" fill="#7d8a87">封面不可用</text>
+</svg>

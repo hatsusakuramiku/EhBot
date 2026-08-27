@@ -117,6 +117,34 @@ class ReviewService:
             candidate_id
         )
 
+    async def set_metadata_lock(
+        self,
+        candidate_id: int,
+        operator_name: str,
+        field_name: str,
+        locked: bool,
+    ) -> None:
+        """Pin a field's value against the next re-scrape, or release it.
+
+        Unlike `set_manual_metadata` this stores no value of its own: locking
+        is how an operator says「ExHentai 这个值是对的，别再改」without having
+        to retype it as a manual override and lose the provenance.
+        """
+        if field_name not in METADATA_FIELDS:
+            raise ReviewError(
+                "METADATA_FIELD_INVALID",
+                f"Unsupported metadata field: {field_name}",
+            )
+        try:
+            await self._database.set_metadata_lock(
+                candidate_id, operator_name, field_name, locked
+            )
+        except LookupError as exc:
+            raise ReviewError(
+                "METADATA_VALUE_NOT_FOUND",
+                f"Candidate has no {field_name} value to lock",
+            ) from exc
+
     async def get_candidate_review_summary(
         self, candidate_id: int
     ) -> CandidateReviewSummary | None:

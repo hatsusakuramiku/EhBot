@@ -1,56 +1,177 @@
+{#
+  The application shell.
+
+  The navigation used to be written twice in this file — once for the sidebar
+  and once for the mobile header — and the two had already drifted: the mobile
+  bar carried a 历史 link the sidebar never gained. Both now loop over
+  `nav_items` from `app/web/routes/shell.py`. Adding a section is one edit
+  there, and the phone view cannot disagree with the desktop one.
+
+  Three renderings of ONE list is not three sources of truth: the sidebar shows
+  domains with their sub-pages, the tab bar shows the four domains, and the
+  drawer shows the sub-pages. Change the list and all three change together.
+
+  `main_attrs` carries `data-legacy="true"` by default, which locks the content
+  column to the light palette. `app.css` hardcodes light surfaces and a light
+  ink ramp, so a pre-refactor page shown on the dark ground would put ~3.2:1
+  muted grey on near-black. A page rewritten in R4–R8 overrides the block to
+  drop the lock, and the lock disappears entirely with `app.css` in R9.
+#}
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}EhBot{% endblock %}</title>
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  {#- Theme and density are applied before the first paint. A deferred script
+      runs after it, which flashes the light theme on every navigation. This is
+      the only inline script in the app, and it is why `ui.js` does not do it. -#}
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("ehbot.theme");
+        if (t && t !== "auto") document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.setAttribute(
+          "data-density", localStorage.getItem("ehbot.density") || "comfortable"
+        );
+      } catch (e) {
+        document.documentElement.setAttribute("data-density", "comfortable");
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/ui.css') }}">
+  <script defer src="{{ url_for('static', path='/vendor/htmx-2.0.4.min.js') }}"></script>
+  <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>
+  <script defer src="{{ url_for('static', path='/ui.js') }}"></script>
+  {% block head %}{% endblock %}
 </head>
-<body>
-  <div class="app-layout">
-    <aside class="sidebar">
-      <a class="brand" href="{{ url_for('dashboard') }}">
+<body class="ui-page">
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="ui-shell" data-collapsed="false">
+
+    {# -------- desktop: domains, with the active domain's sub-pages -------- #}
+    <aside class="ui-sidebar">
+      <a class="ui-brand" href="/">
         <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
         <span>EhBot</span>
       </a>
-      <nav class="primary-nav" aria-label="主导航">
-        <a class="nav-link {% if request.url.path == url_for('dashboard').path %}is-active{% endif %}" href="{{ url_for('dashboard') }}">工作台</a>
-        <a class="nav-link {% if request.url.path.startswith(url_for('candidate_queue').path) %}is-active{% endif %}" href="{{ url_for('candidate_queue') }}">候选队列</a>
-        <a class="nav-link {% if request.url.path == url_for('sources_page').path %}is-active{% endif %}" href="{{ url_for('sources_page') }}">来源规则</a>
-        <a class="nav-link {% if request.url.path == url_for('auto_approval_rules_page').path %}is-active{% endif %}" href="{{ url_for('auto_approval_rules_page') }}">自动审批</a>
-        <a class="nav-link {% if request.url.path.startswith(url_for('archive_settings_page').path) %}is-active{% endif %}" href="{{ url_for('archive_settings_page') }}">归档设置</a>
-        <a class="nav-link {% if request.url.path == url_for('connections_page').path %}is-active{% endif %}" href="{{ url_for('connections_page') }}">外部连接</a>
-        <a class="nav-link {% if request.url.path == url_for('downloads_dashboard').path or request.url.path.startswith(url_for('downloads_history').path) %}is-active{% endif %}" href="{{ url_for('downloads_dashboard') }}">下载任务</a>
-        <a class="nav-link {% if request.url.path == url_for('manual_add_page').path %}is-active{% endif %}" href="{{ url_for('manual_add_page') }}">手动添加</a>
+      <nav class="ui-nav" aria-label="主导航">
+        {% for item in nav_items %}
+          <div class="ui-nav-group">
+            {#- `aria-current` marks the exact route; `is-active` marks a parent
+                whose child is open. A parent must not claim to be the current
+                page, or a screen reader reports two. -#}
+            <a class="ui-nav-link{% if item.is_active(current_path) and not item.is_current(current_path) %} is-active{% endif %}"
+               href="{{ item.path }}"
+               {% if item.is_current(current_path) %}aria-current="page"{% endif %}>
+              <span class="ui-nav-icon" aria-hidden="true">{{ item.icon }}</span>
+              <span class="ui-nav-label">{{ item.label }}</span>
+            </a>
+            {% if item.children and item.is_active(current_path) %}
+              <div class="ui-nav-sub">
+                {% for child in item.children %}
+                  <a class="ui-nav-link" href="{{ child.path }}"
+                     {% if child.is_current(current_path) %}aria-current="page"{% endif %}>
+                    <span class="ui-nav-label">{{ child.label }}</span>
+                  </a>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        {% endfor %}
       </nav>
-      <div class="sidebar-footer">
-        <a class="nav-link {% if request.url.path == url_for('change_password_page').path %}is-active{% endif %}" href="{{ url_for('change_password_page') }}">修改密码</a>
-        <form method="post" action="{{ url_for('logout') }}">
+      <div class="ui-sidebar-footer">
+        <button class="ui-nav-link ui-collapse-toggle" type="button" aria-expanded="true">
+          <span class="ui-nav-icon" aria-hidden="true">‹›</span>
+          <span class="ui-nav-label">折叠侧栏</span>
+        </button>
+        <form method="post" action="/logout">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="nav-button" type="submit">退出登录</button>
+          <button class="ui-nav-link" type="submit">
+            <span class="ui-nav-icon" aria-hidden="true">⏻</span>
+            <span class="ui-nav-label">退出登录</span>
+          </button>
         </form>
       </div>
     </aside>
-    <div class="workspace">
-      <header class="mobile-header">
-        <a class="brand" href="{{ url_for('dashboard') }}">
-          <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
-          <span>EhBot</span>
+
+    <div class="ui-main" {% block main_attrs %}data-legacy="true"{% endblock %}>
+      <header class="ui-topbar">
+        <a class="ui-brand ui-topbar-mobile-brand" href="/">
+          <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="EhBot">
         </a>
-        <nav aria-label="移动端导航">
-          <a href="{{ url_for('dashboard') }}">工作台</a>
-          <a href="{{ url_for('candidate_queue') }}">候选</a>
-          <a href="{{ url_for('sources_page') }}">来源</a>
-          <a href="{{ url_for('auto_approval_rules_page') }}">审批</a>
-          <a href="{{ url_for('archive_settings_page') }}">归档</a>
-          <a href="{{ url_for('connections_page') }}">连接</a>
-          <a href="{{ url_for('downloads_dashboard') }}">下载</a>
-          <a href="{{ url_for('downloads_history') }}">历史</a>
-          <a href="{{ url_for('manual_add_page') }}">手动</a>
-        </nav>
+        {% block topbar %}{% endblock %}
+        <div class="ui-topbar-spacer"></div>
+
+        <div class="ui-segmented" role="group" aria-label="外观">
+          <button type="button" data-theme-option="auto" aria-pressed="true">跟随系统</button>
+          <button type="button" data-theme-option="light" aria-pressed="false">浅色</button>
+          <button type="button" data-theme-option="dark" aria-pressed="false">深色</button>
+        </div>
+        <div class="ui-segmented" role="group" aria-label="密度">
+          <button type="button" data-density-option="comfortable" aria-pressed="true">舒适</button>
+          <button type="button" data-density-option="compact" aria-pressed="false">紧凑</button>
+        </div>
       </header>
-      <main class="page-shell">{% block content %}{% endblock %}</main>
+
+      <main class="{% block content_class %}page-shell{% endblock %}" id="main">{% block content %}{% endblock %}</main>
+
+      {# -------- phone: the same list as a tab bar. Sub-pages move into a
+                 drawer rather than a second set of links. -------- #}
+      <nav class="ui-tabbar" aria-label="主导航" x-data="{ drawer: false }">
+        {% for item in nav_items %}
+          {% if item.children %}
+            <button class="ui-tab{% if item.is_active(current_path) %} is-active{% endif %}"
+                    type="button" @click="drawer = true" :aria-expanded="drawer"
+                    aria-haspopup="dialog">
+              <span class="ui-tab-icon" aria-hidden="true">{{ item.icon }}</span>
+              <span>{{ item.short }}</span>
+            </button>
+          {% else %}
+            <a class="ui-tab" href="{{ item.path }}"
+               {% if item.is_current(current_path) %}aria-current="page"{% endif %}>
+              <span class="ui-tab-icon" aria-hidden="true">{{ item.icon }}</span>
+              <span>{{ item.short }}</span>
+            </a>
+          {% endif %}
+        {% endfor %}
+
+        <template x-teleport="body">
+          <div x-show="drawer" x-cloak @keydown.escape.window="drawer = false">
+            <div class="ui-scrim" @click="drawer = false"></div>
+            <aside class="ui-drawer" data-side="bottom" role="dialog" aria-modal="true"
+                   aria-label="分区导航">
+              <header class="ui-drawer-head">
+                <h2 class="ui-drawer-title">分区</h2>
+                <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
+                        @click="drawer = false" aria-label="关闭">✕</button>
+              </header>
+              <div class="ui-drawer-body">
+                <nav class="ui-nav" aria-label="分区">
+                  {% for item in nav_items %}{% for child in item.children %}
+                    <a class="ui-nav-link ui-nav-link-plain" href="{{ child.path }}"
+                       {% if child.is_current(current_path) %}aria-current="page"{% endif %}>
+                      <span class="ui-nav-label">{{ item.label }} · {{ child.label }}</span>
+                    </a>
+                  {% endfor %}{% endfor %}
+                </nav>
+              </div>
+            </aside>
+          </div>
+        </template>
+      </nav>
     </div>
   </div>
+
+  {# One live region, present from load: creating it and writing to it in the
+     same tick is the classic way to get an announcement that never fires. #}
+  <div class="ui-toasts" aria-live="polite" aria-atomic="false"></div>
+
+  {# Page scripts go last, after the live region exists and after `ui.js` has
+     defined `window.EhBotUI`. A page needing more than a listener or two
+     belongs in a static file, not here. #}
+  {% block scripts %}{% endblock %}
 </body>
 </html>

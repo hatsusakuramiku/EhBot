@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -430,17 +431,38 @@ class ConversionService:
         destination: Path,
         page_count: int,
     ) -> None:
+        """Record the packed CBZ the way the download path records an archive.
+
+        `size_bytes` used to receive `page_count`, so every packed CBZ reported
+        a size of a few dozen bytes and the column could not be compared
+        against the archive row it was produced from. It now carries the real
+        file size, and the digest is computed the same way — streamed in
+        chunks, because a CBZ is arbitrarily large and must not be read into
+        memory to be hashed.
+        """
+        sha256 = hashlib.sha256()
+        with destination.open("rb") as handle:
+            while True:
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                sha256.update(chunk)
         with self._database._connect() as connection:
             connection.execute(
                 "INSERT INTO artifacts "
-                "(job_id, artifact_type, path, size_bytes) "
-                "VALUES (?, 'CBZ', ?, ?) "
+                "(job_id, artifact_type, path, sha256, size_bytes, "
+                "page_count) "
+                "VALUES (?, 'CBZ', ?, ?, ?, ?) "
                 "ON CONFLICT(job_id, artifact_type) DO UPDATE SET "
-                "path = excluded.path, size_bytes = excluded.size_bytes",
+                "path = excluded.path, sha256 = excluded.sha256, "
+                "size_bytes = excluded.size_bytes, "
+                "page_count = excluded.page_count",
                 (
                     job_id,
                     str(destination),
-                    page_count,
+                    sha256.hexdigest(),
+                    destination.stat().st_size,
+                    int(page_count),
                 ),
             )
 

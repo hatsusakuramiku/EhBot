@@ -28,6 +28,36 @@ _IMAGE_SIGNATURES: tuple[tuple[bytes, frozenset[str]], ...] = (
 
 _DIGITS = re.compile(r"(\d+)")
 
+#: First bytes of every image container this application is willing to open.
+#: ``RIFF`` covers WebP and the ``\x00\x00\x00`` prefix covers the ISO-BMFF box
+#: length that AVIF and HEIF start with. An SVG or an HTML error page fails
+#: here, which is the point.
+_CONTAINER_PREFIXES: tuple[bytes, ...] = (
+    b"\xff\xd8\xff",
+    b"\x89PNG\r\n\x1a\n",
+    b"GIF87a",
+    b"GIF89a",
+    b"BM",
+    b"RIFF",
+    b"\x00\x00\x00",
+)
+
+
+def looks_like_image(data: bytes) -> bool:
+    """Accept only payloads whose first bytes match a known image container.
+
+    This is the "is this an image at all" gate, distinct from
+    ``header_matches_extension``, which cross-checks a *claimed* extension and
+    is deliberately permissive. Callers that pull bytes off the network — the
+    Telegraph fetcher, the thumbnail proxy — use this one before handing the
+    payload to a decoder.
+    """
+    if len(data) < 12:
+        return False
+    if data.lstrip()[:1] == b"<":
+        return False
+    return data.startswith(_CONTAINER_PREFIXES)
+
 
 def natural_sort_key(name: str) -> tuple:
     """Sort `2.jpg` before `10.jpg` while keeping the order deterministic."""
@@ -184,6 +214,7 @@ __all__ = [
     "NESTED_ARCHIVE_EXTENSIONS",
     "header_matches_extension",
     "is_image_member",
+    "looks_like_image",
     "member_depth",
     "natural_sort_key",
     "normalize_member_name",

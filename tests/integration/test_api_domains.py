@@ -391,3 +391,156 @@ class TestMetadataPatch:
 
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "BODY_INVALID"
+
+
+class TestMetadataLocks:
+    def test_a_lock_alone_is_a_valid_request(self, tmp_path: Path) -> None:
+        """Pinning is not an edit.
+
+        The value the operator wants held is one ExHentai already supplied, so
+        requiring `fields` alongside `locks` would force the interface to
+        re-send text it is not changing.
+        """
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": {"Title": True}},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+            entry = next(
+                item
+                for item in client.get("/api/v1/works/1").json()["metadata"]
+                if item["field_name"] == "Title"
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["locked"] == ["Title"]
+        assert payload["unlocked"] == []
+        assert payload["updated"] == []
+        # The flag has to reach the read layer, or the interface cannot render
+        # a pinned field as pinned.
+        assert entry["is_locked"] is True
+
+    def test_a_lock_is_released_by_the_same_endpoint(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            token = csrf_token(client)
+            client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": {"Title": True}},
+                headers={CSRF_HEADER: token},
+            )
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": {"Title": False}},
+                headers={CSRF_HEADER: token},
+            )
+
+        assert response.json()["unlocked"] == ["Title"]
+        assert response.json()["locked"] == []
+
+    def test_an_edit_and_a_lock_pin_the_value_just_written(
+        self, tmp_path: Path
+    ) -> None:
+        """Order matters: the lock must land on the new value, not the old one."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={
+                    "fields": {"Artist": "Sensei"},
+                    "locks": {"Artist": True},
+                },
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["updated"] == ["Artist"]
+        assert payload["locked"] == ["Artist"]
+        assert payload["metadata"]["Artist"] == "Sensei"
+
+    def test_an_unknown_field_in_locks_is_refused(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": {"NotAField": True}},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "METADATA_FIELD_INVALID"
+        assert error["details"]["unknown"] == ["NotAField"]
+
+    def test_locks_must_be_a_mapping(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": ["Title"]},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "LOCKS_INVALID"
+
+    def test_an_empty_body_still_asks_for_something_to_do(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "FIELDS_REQUIRED"
+
+    def test_locking_a_field_with_no_value_is_a_404(self, tmp_path: Path) -> None:
+        """`Artist` has no row in the fixture, so there is nothing to pin."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.patch(
+                "/api/v1/works/1/metadata",
+                json={"locks": {"Artist": True}},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "METADATA_VALUE_NOT_FOUND"

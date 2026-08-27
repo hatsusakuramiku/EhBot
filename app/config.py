@@ -62,6 +62,7 @@ class Settings:
     torrent_poll_seconds: int = 15
     torrent_category: str = "ehbot"
     torrent_keep_seeding: bool = True
+    thumbnails_enabled: bool = True
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -105,6 +106,7 @@ class Settings:
                 os.getenv("TORRENT_CATEGORY", "").strip() or "ehbot"
             ),
             torrent_keep_seeding=_read_bool("TORRENT_KEEP_SEEDING", True),
+            thumbnails_enabled=_read_bool("THUMBNAILS_ENABLED", True),
         )
 
     def readiness_errors(self) -> list[str]:

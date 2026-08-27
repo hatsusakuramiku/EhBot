@@ -17,6 +17,7 @@ from app.api.status import (
     status_view,
 )
 from app.review.models import field_label
+from app.thumbnails import THUMBNAIL_VARIANT_CARD, identity_hash
 
 
 def status_payload(code: str | None) -> dict[str, Any]:
@@ -45,10 +46,30 @@ def candidate_summary(item: Any) -> dict[str, Any]:
         "updated_at": item.updated_at,
         "ex_gid": item.ex_gid,
         "ex_gallery_token": item.ex_gallery_token,
+        "cover": _cover(getattr(item, "thumb_url", None)),
         # The detail page is the one destination for a candidate at any stage,
         # so the list hands the client the link instead of each caller
         # rebuilding it.
         "href": f"/works/{item.candidate_id}",
+    }
+
+
+def _cover(thumb_url: str | None) -> dict[str, Any] | None:
+    """The proxied cover URL for a candidate, or ``None`` when there is none.
+
+    The upstream URL is *not* returned. Pointing an ``<img>`` at ExHentai's CDN
+    would tell that host every cover this deployment renders and would break
+    the moment they refuse the hotlink; the digest is derived here so the
+    client only ever talks to us. It is derivable without a fetch because the
+    hash covers the source identity, not the rendered bytes.
+    """
+    cleaned = (thumb_url or "").strip()
+    if not cleaned:
+        return None
+    digest = identity_hash(cleaned, THUMBNAIL_VARIANT_CARD)
+    return {
+        "url": f"/api/v1/thumbnails/{digest}",
+        "hash": digest,
     }
 
 
@@ -69,7 +90,9 @@ def metadata_entry(entry: Any) -> dict[str, Any]:
 
     ``value_source`` and ``is_manual`` are exposed because the review UI has to
     show where a value came from -- an operator override must be visually
-    distinct from a value ExHentai supplied.
+    distinct from a value ExHentai supplied. ``is_locked`` is the third state:
+    a value that came from ExHentai but which the operator has pinned, so a
+    re-scrape leaves it alone.
     """
     return {
         "field_name": entry.field_name,
@@ -78,6 +101,7 @@ def metadata_entry(entry: Any) -> dict[str, Any]:
         "value_source": entry.value_source,
         "confidence": entry.confidence,
         "is_manual": entry.is_manual,
+        "is_locked": bool(getattr(entry, "is_locked", False)),
         "created_at": entry.created_at,
     }
 

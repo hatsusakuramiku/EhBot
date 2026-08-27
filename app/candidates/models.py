@@ -41,6 +41,10 @@ class CandidateListItem:
     raw_tags: str | None = None
     category: str | None = None
     language: str | None = None
+    #: Upstream cover URL from gdata. Kept on the candidate rather than in
+    #: `metadata_values` because it is routing state for the thumbnail proxy,
+    #: not a metadata field an operator reviews or edits.
+    thumb_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

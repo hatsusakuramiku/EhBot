@@ -45,7 +45,13 @@ from app.connections.models import ProviderConnectionError
 from app.db.database import Database
 from app.api.contracts import ApiError, api_error_handler
 from app.api.events import EVENT_DOWNLOAD, EventBus
-from app.api.status import provider_label, status_label, status_tone
+from app.api.status import (
+    connection_view,
+    provider_label,
+    status_label,
+    status_tone,
+    status_view,
+)
 from app.api.v1 import router as api_v1_router
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
@@ -74,10 +80,13 @@ from app.conversion.service import (
 from app.exhentai.service import ExHentaiDownloadError, ExHentaiService
 from app.exhentai.tagdb import TagTranslator
 from app.telegraph.fetcher import FetchLimits
+from app.telegraph.guard import check_image_url
 from app.telegraph.models import TelegraphError
 from app.telegraph.service import TelegraphService
+from app.thumbnails.service import ThumbnailService
 from app.torrent.models import TorrentError
 from app.torrent.service import TorrentService
+from app.web.routes import shell_context, ui_kit_context
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.secrets import SecretStore
 from app.session_secret import resolve_session_secret
@@ -122,6 +131,8 @@ def create_app(
     telegraph_transport: httpx.AsyncBaseTransport | None = None,
     telegraph_resolver=None,
     torrent_client_transport: httpx.AsyncBaseTransport | None = None,
+    thumbnail_transport: httpx.AsyncBaseTransport | None = None,
+    thumbnail_resolver=None,
 ) -> FastAPI:
     configure_logging()
     app_settings = settings or Settings.from_env()
@@ -144,6 +155,7 @@ def create_app(
         tagdb_client: httpx.AsyncClient | None = None
         telegraph_client: httpx.AsyncClient | None = None
         torrent_client: httpx.AsyncClient | None = None
+        thumbnail_client: httpx.AsyncClient | None = None
         try:
             for path in (
                 app_settings.data_path,
@@ -359,6 +371,27 @@ def create_app(
                 work_path_provider=archive_settings_service.work_path,
             )
             application.state.exhentai_service = exhentai_service
+            if app_settings.thumbnails_enabled:
+                # Covers come from the same image hosts the preview fetcher
+                # talks to, so this client carries no cookie either: a cover is
+                # public art, and sending the gallery Cookie to a CDN would
+                # leak the credential for nothing.
+                thumbnail_client = httpx.AsyncClient(
+                    timeout=30,
+                    follow_redirects=True,
+                    transport=thumbnail_transport,
+                )
+                checker = (
+                    (lambda url: check_image_url(url, resolver=thumbnail_resolver))
+                    if thumbnail_resolver is not None
+                    else check_image_url
+                )
+                application.state.thumbnail_service = ThumbnailService(
+                    database,
+                    app_settings.data_path / "thumbnails",
+                    thumbnail_client,
+                    image_url_checker=checker,
+                )
             await download_service.start()
             if application.state.torrent_service is not None:
                 # Parked jobs are read from the database each pass, so this
@@ -394,6 +427,8 @@ def create_app(
                 await telegraph_client.aclose()
             if torrent_client is not None:
                 await torrent_client.aclose()
+            if thumbnail_client is not None:
+                await thumbnail_client.aclose()
 
     app = FastAPI(
         title="EhBot", lifespan=lifespan, root_path=app_settings.app_root_path
@@ -407,6 +442,7 @@ def create_app(
     app.state.exhentai_service = None
     app.state.telegraph_service = None
     app.state.torrent_service = None
+    app.state.thumbnail_service = None
     app.state.tag_translator = None
     # Fan-out for state transitions. Created eagerly so a worker can publish
     # before any browser has connected (publishing with no subscriber is a
@@ -422,8 +458,14 @@ def create_app(
         https_only=app_settings.session_cookie_secure,
         same_site="lax",
     )
+    # `shell_context` supplies `nav_items`, `current_path` and `active_domain`
+    # to every rendered page. A context processor rather than 25 edited
+    # `TemplateResponse` calls: the shell is a property of the response, not of
+    # each handler, and a handler that forgets to pass it would render a page
+    # with no navigation at all.
     templates = Jinja2Templates(
-        directory=Path(__file__).parent / "web" / "templates"
+        directory=Path(__file__).parent / "web" / "templates",
+        context_processors=[shell_context],
     )
 
     # Labels, tones and provider names come from `app.api.status`, so a state
@@ -434,6 +476,13 @@ def create_app(
     templates.env.globals["status_tone"] = status_tone
     templates.env.filters["provider_label"] = provider_label
     templates.env.globals["provider_label"] = provider_label
+    # The badge macro takes a whole `StatusView`, not a label and a tone
+    # separately, so that a template can never pair one state's label with
+    # another's colour.
+    templates.env.filters["status_view"] = status_view
+    templates.env.globals["status_view"] = status_view
+    templates.env.filters["connection_view"] = connection_view
+    templates.env.globals["connection_view"] = connection_view
     app.mount(
         "/static",
         StaticFiles(directory=Path(__file__).parent / "web" / "static"),
@@ -1470,6 +1519,20 @@ def create_app(
                 "csrf_token": request.session["csrf_token"],
                 "sources": await database.list_telegram_sources(),
             },
+        )
+
+    @app.get("/ui-kit")
+    async def ui_kit_page(request: Request):
+        # Behind the session like every other page: it is a developer tool, not
+        # public documentation, and an unauthenticated route here would be one
+        # more surface to keep honest for no benefit.
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return templates.TemplateResponse(
+            request=request,
+            name="ui_kit.html",
+            context={"demo": ui_kit_context()},
         )
 
     @app.post("/sources")

@@ -19,6 +19,11 @@ from app.exhentai.enrich import enrich_metadata
 from app.exhentai.gdata import GalleryData
 from app.exhentai.gdata_client import GdataClient, GdataError
 from app.exhentai.tagdb import TagTranslator
+from app.thumbnails import (
+    THUMBNAIL_KIND_CANDIDATE_COVER,
+    THUMBNAIL_VARIANT_CARD,
+)
+from app.thumbnails.identity import identity_hash
 
 
 PROVIDER_NAME = "EXHENTAI"
@@ -60,6 +65,9 @@ class ExHentaiService:
         if gallery is not None:
             await asyncio.to_thread(
                 self._persist_torrents_sync, candidate_id, gallery
+            )
+            await asyncio.to_thread(
+                self._persist_cover_sync, candidate_id, gallery
             )
         await self._database.re_evaluate_candidate_metadata_rules(
             candidate_id
@@ -105,6 +113,9 @@ class ExHentaiService:
             if gallery is not None:
                 await asyncio.to_thread(
                     self._persist_torrents_sync, candidate_id, gallery
+                )
+                await asyncio.to_thread(
+                    self._persist_cover_sync, candidate_id, gallery
                 )
             await self._database.re_evaluate_candidate_metadata_rules(
                 candidate_id
@@ -244,6 +255,14 @@ class ExHentaiService:
     def _persist_metadata_sync(
         self, candidate_id: int, metadata: dict
     ) -> None:
+        """Write scraped values, leaving anything the operator pinned alone.
+
+        Two guards, not one. `is_manual = 0` skips rows the operator typed —
+        a re-scrape must not overwrite hand-entered text. `is_locked = 0`
+        additionally skips rows the operator *pinned* without retyping: an
+        ExHentai value they judged correct and want held against the next
+        scrape, which would otherwise be free to replace it.
+        """
         with self._database._connect() as connection:
             for field_name, value in metadata.items():
                 if value is None or value == "":
@@ -258,7 +277,8 @@ class ExHentaiService:
                     "DO UPDATE SET field_value = excluded.field_value, "
                     "confidence = excluded.confidence, "
                     "is_manual = 0, created_at = CURRENT_TIMESTAMP "
-                    "WHERE metadata_values.is_manual = 0",
+                    "WHERE metadata_values.is_manual = 0 "
+                    "AND metadata_values.is_locked = 0",
                     (candidate_id, field_name, str(value), confidence),
                 )
 
@@ -281,6 +301,44 @@ class ExHentaiService:
                     gallery.torrent_count,
                     best.hash if best is not None else None,
                     candidate_id,
+                ),
+            )
+
+    def _persist_cover_sync(
+        self, candidate_id: int, gallery: GalleryData
+    ) -> None:
+        """Record the cover URL and open a cache slot for it.
+
+        Two writes, one transaction, because they are one fact: the candidate
+        learns where its cover lives, and the proxy learns that this digest is
+        a cover it is allowed to fetch. Creating the `thumbnails` row here is
+        what keeps the endpoint from accepting a caller-supplied URL — it
+        serves only digests something upstream already vouched for.
+
+        The row is left `PENDING`: nothing is fetched on the scrape path, so a
+        gallery with an unreachable cover never slows down enrichment. The
+        first request for the digest does the work.
+        """
+        thumb_url = (gallery.thumb or "").strip()
+        if not thumb_url:
+            return
+        digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
+        with self._database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE candidates SET thumb_url = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (thumb_url, candidate_id),
+            )
+            connection.execute(
+                "INSERT INTO thumbnails "
+                "(hash, kind, variant, source_url, state) "
+                "VALUES (?, ?, ?, ?, 'PENDING') "
+                "ON CONFLICT(hash) DO NOTHING",
+                (
+                    digest,
+                    THUMBNAIL_KIND_CANDIDATE_COVER,
+                    THUMBNAIL_VARIANT_CARD,
+                    thumb_url,
                 ),
             )
 

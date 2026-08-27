@@ -2,7 +2,12 @@
 
 Telegram-sourced manga review and CBZ archiving service. Single container,
 SQLite in WAL mode, one administrator, FastAPI + Jinja2. Pipeline:
-message -> candidate -> review -> download -> pack -> library.
+message -> candidate -> review -> download -> pack.
+
+**Scope ends at the archive.** Download, convert to the target archive format,
+plus a few operator-convenience management items. Detailed book/library
+management belongs to downstream tools — the library domain was deleted from the
+plan on 2026-08-26 by operator instruction. Do not reintroduce it.
 
 Read `progress.md` bottom-up for current state; it ends with a handoff section
 naming the next phase. `EHBot.md` is the requirements spec, `DEVELOPMENT_PLAN.md`
@@ -48,11 +53,11 @@ repo root fails partway. Scope recursive listings to `app`, `tests`, etc.
 
 ## Tests
 
-Full suite is ~110-150 s. There is **no `pytest-timeout` plugin**, and a PTY
+Full suite is ~150-320 s. There is **no `pytest-timeout` plugin**, and a PTY
 swallows pytest's summary line, so run it as a job and read the JUnit XML:
 
 ```powershell
-$job = Start-Job -ScriptBlock { Set-Location 'E:\Github\EhBot'
+$job = Start-Job -ScriptBlock { Set-Location 'E:\Workshop\VSCode\EhBot'
   & .\.venv\Scripts\python.exe -m pytest --no-header -q --junitxml="$env:TEMP\pt.xml" 2>&1 | Select-Object -Last 20 }
 if (Wait-Job $job -Timeout 500) { Receive-Job $job } else { "TIMEOUT"; Stop-Job $job }
 Remove-Job $job -Force
@@ -60,8 +65,11 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 524 passed / 0 failed / 0 skipped.** Ending below this is a
-regression. (An older doc claimed "427 passed / 12 skipped" — that was wrong.)
+**Baseline: 592 passed / 12 skipped / 0 failed.** Ending below this is a
+regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
+need a toolchain this dev machine cannot host. (Baseline moves per phase:
+R0 439 -> R1 524 -> R2 569 -> R3 592. An older note claiming "0 skipped" was
+wrong.)
 
 **Do not stream an SSE endpoint through `TestClient`.** It drains the response
 body when the context exits and the stream is endless, so it deadlocks. Call the
@@ -73,6 +81,13 @@ endpoint function directly and pull frames off `response.body_iterator` with
 request instead.
 
 ## Architecture rules
+
+`/ui-kit` renders every shared component in its real states from fixtures in
+`app/web/routes/ui_kit.py` — no database access, so it works on a fresh install.
+Open it after touching `ui.css` or `components/ui.html`; it is where a theme,
+density or contrast regression shows up first. It is behind the session and is
+deliberately absent from `NAV_ITEMS` (a developer tool does not belong in
+operator navigation).
 
 - **State vocabulary lives only in `app/api/status.py`**; DTO-to-JSON conversion
   only in `app/api/serializers.py`. Payloads carry resolved `label`/`tone`/`live`
@@ -89,8 +104,65 @@ request instead.
 - **The event bus drops rather than blocks**, and events carry ids only. A
   browser that stops reading must never stall the download worker; the client
   re-reads authoritative state over REST.
-- **Migrations are append-only.** The existing eleven are frozen; add `012_*`
+- **Migrations are append-only.** The existing twelve are frozen; add `013_*`
   onward.
+- **`GET /api/v1/thumbnails/{hash}` accepts a hash and nothing else.** A URL
+  parameter would make it an open proxy for anyone holding a session. The only
+  admission point is the scrape path, which writes `candidates.thumb_url` and a
+  `PENDING` `thumbnails` row in one transaction — so the service can only fetch
+  a URL something upstream already vouched for. Never add a URL parameter.
+- **The thumbnail hash names the source, not the bytes**:
+  `sha256(f"{variant}\0{source_url}")`, in `app/thumbnails/identity.py`. Because
+  it is derivable before any fetch, a serializer can emit a cover URL
+  synchronously; because the variant is inside it, `Cache-Control: immutable` is
+  honest. A second variant sharing a URL would permanently serve the wrong size
+  out of the browser cache.
+- **Import `app/thumbnails/identity.py`, not `service.py`, when you only need to
+  name a thumbnail.** The split exists so the scrape and serialization paths do
+  not drag httpx and Pillow in.
+- **A failed thumbnail is a 200 placeholder, not a 404.** An `<img>` whose `src`
+  404s renders as a broken-image icon with no way to style around it; the state
+  travels in the `X-Thumbnail-State` / `X-Thumbnail-Error` headers instead.
+- **`looks_like_image` lives in `app/archive/safety.py`** and is shared by the
+  telegraph fetcher, the conversion path and the thumbnail renderer. Do not add
+  a fourth magic-number table.
+- **`is_locked` is not a duplicate of `is_manual`.** `is_manual` protects text
+  the operator typed; `is_locked` pins a value ExHentai supplied that the
+  operator judged correct. Both guards are needed in the metadata upsert, and a
+  lock covers **every** row for the field, not just the winning one.
+- **Job claim is `ORDER BY priority, id`, never `ORDER BY priority` alone.**
+  Every pre-column job is priority 100, so within one priority the queue must
+  stay FIFO — promoting one job reorders that job and nothing else.
+- **`app/web/static/ui.css` is the authoritative stylesheet; `app.css` is
+  frozen.** New rules go in `ui.css`. `app.css` holds only pre-refactor page CSS
+  and is deleted outright in R9 — the split is a file boundary rather than two
+  halves of one file precisely so that deletion is `rm` and not a careful cut.
+- **Every rule in `ui.css` is class-scoped, deliberately.** `app.css` still
+  hardcodes a light `body` background and a light `--ink`, so a bare `body` or
+  `p` rule in `ui.css` would put muted grey on near-black across the pages not
+  yet rewritten — about 3.2:1, under the 4.5:1 the project is held to. Pages
+  awaiting rewrite carry `data-legacy="true"` on `.ui-main`, which pins them to
+  light with `color-scheme` included; drop that attribute in the same commit
+  that rewrites the page, never before.
+- **`NAV_ITEMS` in `app/web/routes/shell.py` is the only navigation source.**
+  The sidebar, the phone tab bar and its drawer all render from it. Three
+  renderings of one list is not three lists — the previous hand-written pair had
+  already drifted by one link. A test compares the rendered destination sets.
+- **Only a leaf claims `aria-current="page"` — ask `is_current()`, not
+  `matches()`.** A parent's prefix is by construction a prefix of its children's
+  paths, so `matches()` is true for both and two elements would announce
+  themselves as the current page. A section whose child is open gets the
+  `is-active` class instead. An "index" child whose path equals its parent's
+  (`/candidates`, `/downloads`, `/connections`) must be declared `exact=True`,
+  or it prefix-matches its own siblings.
+- **A state's Chinese label is never written in a template or in JS.** The badge
+  macro takes the whole `StatusView` from `app/api/status.py`, so a page and a
+  JSON response cannot disagree, and a template can never pair one state's label
+  with another state's colour. `data-theme="auto"` likewise never reaches the
+  DOM: neither theme selector matches it, so `applyTheme("auto")` *removes* the
+  attribute.
+- **The theme/density script in `<head>` is inline and blocking on purpose.**
+  Deferring it flashes the light theme for one frame on every navigation.
 
 ## Business invariants
 
@@ -105,5 +177,8 @@ Several are locked by tests. Do not "simplify" them:
   default off.
 - Credentials: never plaintext, never echoed to a page, never logged.
 - Security gates (path traversal, decompression bombs, SSRF, image magic
-  numbers) must never be loosened.
+  numbers) must never be loosened. The thumbnail proxy is inside this rule: it
+  reuses the telegraph SSRF guard, gates on `looks_like_image`, bounds decoded
+  pixel count, and re-encodes everything it serves to WebP so the outbound bytes
+  are ours.
 - Retries reuse the same job row and increment `attempt_count`.

@@ -13,7 +13,11 @@ from pathlib import PurePosixPath
 
 import httpx
 
-from app.archive.safety import IMAGE_EXTENSIONS, header_matches_extension
+from app.archive.safety import (
+    IMAGE_EXTENSIONS,
+    header_matches_extension,
+    looks_like_image,
+)
 from app.telegraph.client import PAGE_BASE, USER_AGENT
 from app.telegraph.guard import MAX_REDIRECTS, check_image_url
 from app.telegraph.models import FetchedImage, TelegraphError
@@ -41,31 +45,6 @@ _EXTENSION_BY_CONTENT_TYPE: dict[str, str] = {
     "image/avif": ".avif",
     "image/jxl": ".jxl",
 }
-
-_MAGIC_PREFIXES: tuple[bytes, ...] = (
-    b"\xff\xd8\xff",
-    b"\x89PNG\r\n\x1a\n",
-    b"GIF87a",
-    b"GIF89a",
-    b"BM",
-    b"RIFF",
-    b"\x00\x00\x00",
-)
-
-
-def _looks_like_image(data: bytes) -> bool:
-    """Accept only payloads whose first bytes match a known image container.
-
-    ``RIFF`` covers WebP and the ``\\x00\\x00\\x00`` prefix covers the ISO-BMFF
-    box length that AVIF and HEIF start with. An SVG or an HTML error page
-    fails here, which is the point.
-    """
-    if len(data) < 12:
-        return False
-    if data.lstrip()[:1] == b"<":
-        return False
-    return data.startswith(_MAGIC_PREFIXES)
-
 
 def image_extension(url: str, content_type: str | None) -> str:
     """Pick a page suffix, preferring the served type over the URL.
@@ -192,7 +171,7 @@ class TelegraphFetcher:
                     f"第 {index + 1} 张图片是空文件",
                 )
                 continue
-            if not _looks_like_image(data):
+            if not looks_like_image(data):
                 # A wrong body is a decision, not a transient fault: retrying
                 # a host that serves HTML will only serve HTML again.
                 raise TelegraphError(

@@ -1,0 +1,213 @@
+{#
+  Component gallery (R3).
+
+  This page exists to make the acceptance criteria checkable by hand: every
+  component R3 delivers is rendered here in its real states, so「组件在演示页可
+  交互」is something an operator verifies rather than something a changelog
+  claims. It is also the only page in the tree that opts out of the legacy
+  light lock, which makes it the place a theme or density regression shows up
+  first.
+
+  It renders no live data on purpose. A gallery that queried the database would
+  be empty on a fresh install — exactly when someone is most likely to open it —
+  and every status shown here is resolved by `status_view()` in Python, so the
+  labels are the same strings the API returns.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}组件库 · EhBot{% endblock %}
+
+{#- Not a legacy page: dropping `data-legacy` lets the design tokens paint the
+    content column, which is what makes the theme and density toggles visible
+    here at all. -#}
+{% block main_attrs %}{% endblock %}
+{% block content_class %}ui-content{% endblock %}
+
+{% block content %}
+<header class="ui-page-head">
+  <div>
+    <p class="ui-eyebrow">R3</p>
+    <h1 class="ui-title">组件库</h1>
+    <p class="ui-subtitle">设计令牌与通用组件的演示页。右上角切换深浅主题与舒适/紧凑密度，本页所有组件应同时随之变化。</p>
+  </div>
+  <div class="ui-demo-row">
+    <button class="ui-btn" type="button" data-demo-toast="success">成功提示</button>
+    <button class="ui-btn" data-variant="danger" type="button" data-demo-toast="danger">错误提示</button>
+  </div>
+</header>
+
+<section class="ui-section" aria-labelledby="s-tabs">
+  <h2 class="ui-section-title" id="s-tabs">分区标签</h2>
+  {{ ui.tabs(demo.tabs, "all", "演示分区") }}
+  <p class="ui-hint">候选队列的六个状态与设置的多个分节共用这一组件，因此它们是一个域而不是十几个页面。</p>
+</section>
+
+<section class="ui-section" aria-labelledby="s-badge">
+  <h2 class="ui-section-title" id="s-badge">状态徽章</h2>
+  <div class="ui-panel">
+    <p class="ui-hint" style="margin-top: 0">枚举 → 中文标签与语义色由 <code>app/api/status.py</code> 决定；模板不做映射。带脉冲点的是进行中的状态（<code>live</code>）。</p>
+    <div class="ui-demo-row" style="margin-top: var(--s-3)">
+      {% for code in demo.candidate_states %}{{ ui.badge_for(code) }}{% endfor %}
+    </div>
+    <div class="ui-demo-row" style="margin-top: var(--s-3)">
+      {% for code in demo.job_states %}{{ ui.badge_for(code) }}{% endfor %}
+    </div>
+    <div class="ui-demo-row" style="margin-top: var(--s-3)">
+      {% for state in demo.connection_states %}{{ ui.badge(state | connection_view) }}{% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="ui-section" aria-labelledby="s-btn">
+  <h2 class="ui-section-title" id="s-btn">按钮与表单控件</h2>
+  <div class="ui-demo-grid">
+    <div class="ui-panel">
+      <div class="ui-demo-row">
+        <button class="ui-btn" data-variant="primary" type="button">主操作</button>
+        <button class="ui-btn" type="button">次操作</button>
+        <button class="ui-btn" data-variant="ghost" type="button">幽灵</button>
+        <button class="ui-btn" data-variant="danger" type="button">危险</button>
+      </div>
+      <div class="ui-demo-row" style="margin-top: var(--s-3)">
+        <button class="ui-btn" data-size="sm" type="button">小号</button>
+        <button class="ui-btn" data-size="icon" type="button" aria-label="更多">⋯</button>
+        <button class="ui-btn" type="button" disabled>禁用</button>
+      </div>
+    </div>
+    <div class="ui-panel">
+      <div class="ui-field">
+        <label for="demo-input">标题关键字</label>
+        <input class="ui-input" id="demo-input" type="search" placeholder="输入后按回车">
+        <small>聚焦时应有可见的 2px 焦点环。</small>
+      </div>
+      <div class="ui-field" style="margin-top: var(--s-4)">
+        <label for="demo-select">来源</label>
+        <select class="ui-select" id="demo-select">
+          {% for state in demo.providers %}<option>{{ state | provider_label }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="ui-section" aria-labelledby="s-cards">
+  <h2 class="ui-section-title" id="s-cards">封面卡片</h2>
+  <div class="ui-cover-grid">
+    {% for item in demo.cards %}
+      {{ ui.cover_card(
+           title=item.title,
+           href="#",
+           cover=item.cover,
+           meta=item.meta,
+           tags=item.tags,
+           status=status_view(item.status),
+           selectable=true,
+           value=loop.index,
+           selected=item.selected) }}
+    {% endfor %}
+  </div>
+  <p class="ui-hint">封面地址直接取自候选 payload 的 <code>cover.url</code>（本地缩略图代理），不在模板里拼接上游图床地址。上面第一张没有封面，走占位分支。</p>
+</section>
+
+<section class="ui-section" aria-labelledby="s-table">
+  <h2 class="ui-section-title" id="s-table">数据表格</h2>
+  <div class="ui-filter-layout">
+    <aside class="ui-filters" aria-label="筛选">
+      {{ ui.filter_group("状态", demo.filters.status, "status") }}
+      {{ ui.filter_group("来源", demo.filters.provider, "provider") }}
+      <button class="ui-btn" data-size="sm" data-variant="ghost" type="button">清除筛选</button>
+    </aside>
+    <div>
+      {% call ui.table(demo.columns, caption="演示数据表", sort="updated", direction="desc") %}
+        {% for row in demo.rows %}
+          <tr {% if row.selected %}data-selected="true"{% endif %}>
+            <td data-label="选择"><input class="ui-checkbox" type="checkbox" aria-label="选择「{{ row.title }}」" {% if row.selected %}checked{% endif %}></td>
+            <td data-label="标题">{{ row.title }}</td>
+            <td data-label="状态">{{ ui.badge_for(row.status) }}</td>
+            <td data-label="来源">{{ row.provider | provider_label }}</td>
+            <td data-label="页数" data-numeric="true">{{ row.pages }}</td>
+            <td data-label="更新时间">{{ row.updated }}</td>
+          </tr>
+        {% endfor %}
+      {% endcall %}
+      {{ ui.pagination(2, 20, 137) }}
+      {% call ui.bulk_toolbar(2, 6, "个候选") %}
+        <button class="ui-btn" data-size="sm" data-variant="primary" type="button">批量通过</button>
+        <button class="ui-btn" data-size="sm" type="button">批量重试</button>
+        {{ ui.confirm(
+             label="批量驳回",
+             title="驳回 2 个候选？",
+             body="被驳回的候选不会进入下载队列，可在「全部候选」中重新处理。",
+             confirm_label="驳回",
+             csrf_token=csrf_token) }}
+      {% endcall %}
+    </div>
+  </div>
+</section>
+
+<section class="ui-section" aria-labelledby="s-overlay">
+  <h2 class="ui-section-title" id="s-overlay">抽屉与对话框</h2>
+  <div class="ui-panel ui-demo-row">
+    {% call ui.drawer("demo-drawer", "打开详情抽屉") %}
+      <p class="ui-subtitle" style="margin-top: 0">抽屉里放候选详情、日志或表单。Esc 关闭，打开时焦点移入，遮罩可点。</p>
+      <div class="ui-field" style="margin-top: var(--s-4)">
+        <label for="demo-drawer-note">备注</label>
+        <textarea class="ui-textarea" id="demo-drawer-note" rows="3"></textarea>
+      </div>
+      <div class="ui-demo-row" style="margin-top: var(--s-4)">
+        <button class="ui-btn" data-variant="primary" type="button">保存</button>
+      </div>
+    {% endcall %}
+    {{ ui.confirm(
+         label="删除归档",
+         title="删除这个归档文件？",
+         body="磁盘上的 CBZ 会被移除，数据库记录保留为失败状态。此操作不可撤销。",
+         confirm_label="删除",
+         csrf_token=csrf_token) }}
+  </div>
+</section>
+
+<section class="ui-section" aria-labelledby="s-loading">
+  <h2 class="ui-section-title" id="s-loading">加载态与进度</h2>
+  <div class="ui-demo-grid">
+    <div class="ui-panel">
+      {{ ui.progress(38, 100, "下载中", "38 / 100 页") }}
+      {{ ui.progress(100, 100, "打包完成", "12.4 MB") }}
+      {{ ui.progress(none, 100, "连接中", "等待上游响应") }}
+      <p class="ui-hint">最后一条是不确定进度：<code>value</code> 省略时用原生 <code>&lt;progress&gt;</code> 的不确定态。</p>
+    </div>
+    <div class="ui-panel">
+      {{ ui.skeleton("title") }}
+      {{ ui.skeleton("text", 3) }}
+      {{ ui.skeleton("text", 1, "45%") }}
+    </div>
+  </div>
+  <div style="margin-top: var(--s-4)">{{ ui.skeleton_cards(4) }}</div>
+</section>
+
+<section class="ui-section" aria-labelledby="s-empty">
+  <h2 class="ui-section-title" id="s-empty">空状态</h2>
+  {% call ui.empty_state("暂无待审核候选", "新抓取到的漫画会出现在这里") %}
+    <button class="ui-btn" data-size="sm" type="button" style="margin-top: var(--s-2)">立即抓取</button>
+  {% endcall %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Wired here rather than in `ui.js`: the toast buttons are demo affordances,
+  // and a selector for them in the shared script would be dead code on every
+  // real page.
+  document.addEventListener("click", function (event) {
+    var trigger = event.target.closest("[data-demo-toast]");
+    if (!trigger || !window.EhBotUI) return;
+    var tone = trigger.getAttribute("data-demo-toast");
+    if (tone === "danger") {
+      window.EhBotUI.toast("打包失败：分卷 2 缺失，已保留任务待补充", "danger");
+    } else {
+      window.EhBotUI.toast("已通过 2 个候选，已加入下载队列", "success");
+    }
+  });
+</script>
+{% endblock %}

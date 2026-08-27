@@ -1,0 +1,1044 @@
+/* ==========================================================================
+   EhBot UI layer — design tokens + components (R3)
+   --------------------------------------------------------------------------
+   This file is the authoritative stylesheet. `app.css` holds the pre-refactor
+   page rules and is deleted in R9; keeping them in two files rather than two
+   commented halves of one file means that deletion is `rm`, not a careful cut.
+
+   Every rule here is CLASS-SCOPED ON PURPOSE. `app.css` still hardcodes
+   `body { background: #f3f5f6 }` and a light `--ink`, so a bare `body` or `p`
+   rule here would put muted grey text on a dark page background on the 13
+   legacy pages — about 3.5:1, below the 4.5:1 this phase is required to meet.
+   Legacy pages therefore stay exactly as they are; the token values flip with
+   the theme but only components in this file read them. When R9 removes
+   `app.css`, `.ui-page` on `<body>` takes over globally.
+
+   Tone names are semantic (`success`, `waiting`), never colour names, so the
+   status registry in `app/api/status.py` never has to know what a tone looks
+   like and a theme change never touches Python.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Tokens
+   -------------------------------------------------------------------------- */
+
+:root {
+  /* Neutral ramp. Referenced only through the semantic aliases below, so a
+     palette change is one edit here rather than a search across components. */
+  --c-gray-50: #f7f8f9;
+  --c-gray-100: #eef1f2;
+  --c-gray-200: #dce2e5;
+  --c-gray-300: #c3cbcf;
+  --c-gray-400: #97a2a8;
+  --c-gray-500: #68747c;
+  --c-gray-600: #4a555c;
+  --c-gray-700: #333d43;
+  --c-gray-800: #232c31;
+  --c-gray-900: #171d21;
+
+  --c-teal-400: #42b3a4;
+  --c-teal-500: #16756b;
+  --c-teal-600: #0e5b53;
+  --c-amber-500: #8a6100;
+  --c-amber-100: #fdf3e0;
+  --c-red-500: #a43c3c;
+  --c-red-100: #fbeaea;
+  --c-green-500: #226b41;
+  --c-green-100: #e8f5ee;
+  --c-blue-500: #2a5f91;
+  --c-blue-100: #e9f1f8;
+
+  /* Semantic surface + text. Overridden wholesale by the dark theme. */
+  --t-bg: var(--c-gray-50);
+  --t-surface: #ffffff;
+  --t-surface-raised: #ffffff;
+  --t-surface-sunken: var(--c-gray-100);
+  --t-line: var(--c-gray-200);
+  --t-line-strong: var(--c-gray-300);
+  --t-ink: #20272d;
+  --t-ink-muted: var(--c-gray-600);
+  --t-ink-inverted: #ffffff;
+  --t-accent: var(--c-teal-500);
+  --t-accent-hover: var(--c-teal-600);
+  --t-accent-ring: rgba(22, 117, 107, 0.35);
+  --t-focus: var(--c-teal-500);
+  --t-scrim: rgba(23, 29, 33, 0.5);
+
+  /* Chrome is its own pair: the sidebar is dark in both themes, so it cannot
+     read --t-surface without inverting in light mode. */
+  --t-chrome: #202a2d;
+  --t-chrome-ink: #c5d0d2;
+  --t-chrome-ink-strong: #ffffff;
+  --t-chrome-hover: #2d393c;
+  --t-chrome-active: #344346;
+  --t-chrome-line: #394448;
+
+  /* Status tones: each is a background/foreground pair, so a badge needs one
+     class plus a tone attribute. Foregrounds are chosen to clear 4.5:1 against
+     their own background, not against the page. */
+  --tone-neutral-bg: var(--c-gray-100);
+  --tone-neutral-fg: var(--c-gray-700);
+  --tone-active-bg: var(--c-blue-100);
+  --tone-active-fg: var(--c-blue-500);
+  --tone-waiting-bg: var(--c-amber-100);
+  --tone-waiting-fg: var(--c-amber-500);
+  --tone-success-bg: var(--c-green-100);
+  --tone-success-fg: var(--c-green-500);
+  --tone-danger-bg: var(--c-red-100);
+  --tone-danger-fg: var(--c-red-500);
+  --tone-muted-bg: var(--c-gray-100);
+  --tone-muted-fg: var(--c-gray-600);
+
+  /* Spacing scale. A 4px base keeps the two density modes on the same grid. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  --s-12: 48px;
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-full: 999px;
+
+  --z-sticky: 10;
+  --z-tabbar: 30;
+  --z-drawer: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  --shadow-sm: 0 1px 2px rgba(23, 29, 33, 0.06);
+  --shadow-md: 0 4px 12px rgba(23, 29, 33, 0.10);
+  --shadow-lg: 0 12px 32px rgba(23, 29, 33, 0.16);
+
+  --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
+
+  /* Density-driven measurements. Tables, cards and the cover grid all read
+     these, so the toggle affects the whole interface consistently and no
+     component needs a `--compact` variant of its own. */
+  --row-height: 56px;
+  --cell-pad-y: var(--s-3);
+  --cover-width: 150px;
+  --card-gap: var(--s-4);
+  --font-body: 14px;
+  --font-small: 12px;
+
+  --nav-width: 224px;
+  --nav-width-collapsed: 64px;
+  --tabbar-height: 56px;
+}
+
+/* Dark theme. Applied when the operator has chosen it explicitly... */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --t-bg: var(--c-gray-900);
+  --t-surface: var(--c-gray-800);
+  --t-surface-raised: var(--c-gray-700);
+  --t-surface-sunken: #12171a;
+  --t-line: #2f3a40;
+  --t-line-strong: #3d4a51;
+  --t-ink: #e6ecee;
+  --t-ink-muted: #a9b4b9;
+  --t-accent: var(--c-teal-400);
+  --t-accent-hover: #5cc7b8;
+  --t-accent-ring: rgba(66, 179, 164, 0.4);
+  --t-focus: var(--c-teal-400);
+  --t-scrim: rgba(0, 0, 0, 0.62);
+
+  --t-chrome: #12171a;
+  --t-chrome-hover: #1e262a;
+  --t-chrome-active: #263135;
+  --t-chrome-line: #2b353a;
+
+  --tone-neutral-bg: #2b353a;
+  --tone-neutral-fg: #cdd6d9;
+  --tone-active-bg: #1d3245;
+  --tone-active-fg: #8dc0ea;
+  --tone-waiting-bg: #3a2f1a;
+  --tone-waiting-fg: #e5bd6d;
+  --tone-success-bg: #1c3527;
+  --tone-success-fg: #7cce9f;
+  --tone-danger-bg: #3b2124;
+  --tone-danger-fg: #e89393;
+  --tone-muted-bg: #2b353a;
+  --tone-muted-fg: #a9b4b9;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+/* ...and when the operator has expressed no preference and the system asks for
+   dark. `:not([data-theme="light"])` is what lets an explicit light choice win
+   over a dark system setting; `data-theme="auto"` deliberately does not appear
+   in the selector, because absent-attribute and auto must behave alike. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --t-bg: var(--c-gray-900);
+    --t-surface: var(--c-gray-800);
+    --t-surface-raised: var(--c-gray-700);
+    --t-surface-sunken: #12171a;
+    --t-line: #2f3a40;
+    --t-line-strong: #3d4a51;
+    --t-ink: #e6ecee;
+    --t-ink-muted: #a9b4b9;
+    --t-accent: var(--c-teal-400);
+    --t-accent-hover: #5cc7b8;
+    --t-accent-ring: rgba(66, 179, 164, 0.4);
+    --t-focus: var(--c-teal-400);
+    --t-scrim: rgba(0, 0, 0, 0.62);
+
+    --t-chrome: #12171a;
+    --t-chrome-hover: #1e262a;
+    --t-chrome-active: #263135;
+    --t-chrome-line: #2b353a;
+
+    --tone-neutral-bg: #2b353a;
+    --tone-neutral-fg: #cdd6d9;
+    --tone-active-bg: #1d3245;
+    --tone-active-fg: #8dc0ea;
+    --tone-waiting-bg: #3a2f1a;
+    --tone-waiting-fg: #e5bd6d;
+    --tone-success-bg: #1c3527;
+    --tone-success-fg: #7cce9f;
+    --tone-danger-bg: #3b2124;
+    --tone-danger-fg: #e89393;
+    --tone-muted-bg: #2b353a;
+    --tone-muted-fg: #a9b4b9;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* Compact density: tighter rows and smaller covers for scanning long queues. */
+:root[data-density="compact"] {
+  --row-height: 40px;
+  --cell-pad-y: var(--s-1);
+  --cover-width: 112px;
+  --card-gap: var(--s-2);
+  --font-body: 13px;
+  --font-small: 11px;
+}
+
+/* --------------------------------------------------------------------------
+   2. Accessibility primitives
+   -------------------------------------------------------------------------- */
+
+/* Visible focus everywhere. The legacy rules never styled `:focus-visible`,
+   which made keyboard navigation impossible to follow. */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--t-focus);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip link: first tab stop, so a keyboard user is not forced through the
+   whole navigation on every page. */
+.skip-link {
+  position: absolute;
+  left: var(--s-2);
+  top: -48px;
+  z-index: var(--z-modal);
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--t-accent);
+  color: var(--t-ink-inverted);
+  font-family: var(--font-ui);
+  text-decoration: none;
+  transition: top 120ms ease-in;
+}
+.skip-link:focus { top: var(--s-2); }
+
+/* Honour a reduced-motion preference: animations become instant rather than
+   removed, so a state change is still perceivable. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* HTMX marks in-flight elements; a subtle fade communicates the wait without
+   the layout shift a spinner swap would cause. */
+.htmx-request,
+.htmx-request .htmx-indicator-target {
+  opacity: 0.6;
+  transition: opacity 120ms ease-in;
+}
+
+/* Alpine sets x-cloak until it has booted. Without this the drawer and dialog
+   markup flashes on screen during the first paint. */
+[x-cloak] { display: none !important; }
+
+/* --------------------------------------------------------------------------
+   3. Application shell
+   Breakpoints are 640 / 1024 / 1440 per the spec. Desktop-first here because
+   the sidebar is the default and the tab bar is the exception.
+   -------------------------------------------------------------------------- */
+
+.ui-page {
+  margin: 0;
+  min-width: 320px;
+  font-family: var(--font-ui);
+  font-size: var(--font-body);
+  color: var(--t-ink);
+  background: var(--t-bg);
+}
+
+.ui-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--nav-width) minmax(0, 1fr);
+}
+.ui-shell[data-collapsed="true"] {
+  grid-template-columns: var(--nav-width-collapsed) minmax(0, 1fr);
+}
+
+.ui-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-5) var(--s-3) var(--s-4);
+  overflow-y: auto;
+  color: var(--t-chrome-ink);
+  background: var(--t-chrome);
+}
+
+.ui-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
+  padding: 0 var(--s-2);
+  color: var(--t-chrome-ink-strong);
+  font-size: 18px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.ui-brand img { width: 32px; height: 32px; flex: 0 0 auto; }
+
+.ui-nav { display: grid; gap: var(--s-1); margin-top: var(--s-6); }
+.ui-nav-group { display: grid; gap: var(--s-1); }
+
+.ui-nav-link {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: 0 var(--s-3);
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--t-chrome-ink);
+  background: transparent;
+  font: inherit;
+  font-size: var(--font-body);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ui-nav-link:hover { color: var(--t-chrome-ink-strong); background: var(--t-chrome-hover); }
+.ui-nav-link[aria-current="page"],
+.ui-nav-link.is-active {
+  color: var(--t-chrome-ink-strong);
+  background: var(--t-chrome-active);
+  box-shadow: inset 3px 0 var(--c-teal-400);
+}
+
+/* Sub-items are indented rather than boxed: they are the same kind of thing as
+   their parent, just narrower in scope. */
+.ui-nav-sub { display: grid; gap: 2px; margin: 2px 0 var(--s-2) var(--s-4); }
+.ui-nav-sub .ui-nav-link {
+  min-height: 32px;
+  font-size: var(--font-small);
+  color: var(--c-gray-400);
+}
+.ui-nav-sub .ui-nav-link:hover { color: var(--t-chrome-ink-strong); }
+.ui-nav-sub .ui-nav-link[aria-current="page"] {
+  color: var(--t-chrome-ink-strong);
+  box-shadow: inset 2px 0 var(--c-teal-400);
+}
+
+.ui-sidebar-footer {
+  display: grid;
+  gap: var(--s-1);
+  margin-top: auto;
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--t-chrome-line);
+}
+.ui-sidebar-footer form { margin: 0; }
+.ui-sidebar-footer .ui-nav-link { width: 100%; }
+
+/* Collapsed rail: labels are hidden but stay in the DOM, so a screen reader
+   still announces the destination and the icon is not the only cue. */
+.ui-shell[data-collapsed="true"] .ui-nav-label,
+.ui-shell[data-collapsed="true"] .ui-brand span,
+.ui-shell[data-collapsed="true"] .ui-nav-sub { display: none; }
+.ui-shell[data-collapsed="true"] .ui-nav-link { justify-content: center; padding: 0; }
+.ui-shell[data-collapsed="true"] .ui-brand { justify-content: center; padding: 0; }
+
+.ui-nav-icon { flex: 0 0 auto; width: 18px; text-align: center; font-size: 15px; }
+
+.ui-main { min-width: 0; display: flex; flex-direction: column; }
+
+/* Legacy content lock.
+   `app.css` hardcodes light surfaces (`--surface: #ffffff`) and a light ink
+   ramp (`--muted: #68747c`), so a pre-refactor page rendered on the dark ground
+   would put roughly 3.2:1 grey on near-black — below the 4.5:1 this phase must
+   meet. The whole content column, gutters included, is therefore pinned light
+   until its page is rewritten. `color-scheme` is pinned too, or the browser
+   paints dark scrollbars and form controls into a light page.
+
+   A page rewritten in R4–R8 overrides `{% block main_attrs %}` to drop the
+   attribute; the rule dies with `app.css` in R9. */
+.ui-main[data-legacy="true"] {
+  color-scheme: light;
+  background: #f3f5f6;
+  color: #20272d;
+}
+/* The topbar sits inside the locked column, so its tokens are re-pointed at
+   light values rather than being excluded from the lock. */
+.ui-main[data-legacy="true"] .ui-topbar {
+  --t-surface: #ffffff;
+  --t-surface-sunken: #eef1f2;
+  --t-line: #dce2e5;
+  --t-line-strong: #c3cbcf;
+  --t-ink: #20272d;
+  --t-ink-muted: #4a555c;
+  --t-accent: #16756b;
+}
+
+/* Nav links reused outside the dark chrome (the mobile drawer) need the page
+   ink, not the chrome ink, or they are grey-on-white. */
+.ui-nav-link-plain { color: var(--t-ink); }
+.ui-nav-link-plain:hover { color: var(--t-ink); background: var(--t-surface-sunken); }
+.ui-nav-link-plain[aria-current="page"] { color: var(--t-accent); background: var(--t-surface-sunken); }
+
+.ui-topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-5);
+  border-bottom: 1px solid var(--t-line);
+  background: var(--t-surface);
+}
+.ui-topbar-mobile-brand { display: none; }
+.ui-topbar-spacer { margin-left: auto; }
+
+.ui-tabbar { display: none; }
+
+/* Tablet: the sidebar becomes a rail, because 224px of navigation on a 900px
+   viewport costs more than it returns. */
+@media (max-width: 1024px) {
+  .ui-shell,
+  .ui-shell[data-collapsed="false"] { grid-template-columns: var(--nav-width-collapsed) minmax(0, 1fr); }
+  .ui-shell .ui-nav-label,
+  .ui-shell .ui-brand span,
+  .ui-shell .ui-nav-sub { display: none; }
+  .ui-shell .ui-nav-link { justify-content: center; padding: 0; }
+  .ui-shell .ui-brand { justify-content: center; padding: 0; }
+  .ui-collapse-toggle { display: none; }
+}
+
+/* Phone: one navigation structure, presented as a bottom tab bar plus a drawer
+   for the sub-items. The sidebar is removed from the layout entirely -- it is
+   not a second copy of the links, it is the same list rendered differently. */
+@media (max-width: 640px) {
+  .ui-shell { display: block; }
+  .ui-sidebar { display: none; }
+  .ui-topbar-mobile-brand { display: flex; }
+  .ui-main { padding-bottom: var(--tabbar-height); }
+
+  .ui-tabbar {
+    position: fixed;
+    inset: auto 0 0 0;
+    z-index: var(--z-tabbar);
+    height: var(--tabbar-height);
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+    border-top: 1px solid var(--t-line);
+    background: var(--t-surface);
+  }
+  .ui-tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    border: 0;
+    color: var(--t-ink-muted);
+    background: transparent;
+    font: inherit;
+    font-size: 11px;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .ui-tab[aria-current="page"], .ui-tab.is-active { color: var(--t-accent); font-weight: 700; }
+  .ui-tab-icon { font-size: 17px; line-height: 1; }
+}
+
+/* --------------------------------------------------------------------------
+   4. Page furniture
+   -------------------------------------------------------------------------- */
+
+.ui-content { width: min(1440px, 100%); margin: 0 auto; padding: var(--s-8) var(--s-6) var(--s-12); }
+
+@media (max-width: 640px) {
+  .ui-content { padding: var(--s-5) var(--s-4) var(--s-8); }
+}
+
+.ui-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-5); flex-wrap: wrap; }
+.ui-eyebrow { color: var(--t-accent); font-size: var(--font-small); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.ui-title { margin: var(--s-1) 0 0; color: var(--t-ink); font-size: 26px; font-weight: 650; line-height: 1.25; }
+.ui-subtitle { margin: var(--s-1) 0 0; color: var(--t-ink-muted); font-size: var(--font-body); }
+.ui-section { margin-top: var(--s-8); }
+.ui-section-title { margin: 0 0 var(--s-3); color: var(--t-ink); font-size: 16px; font-weight: 650; }
+.ui-hint { margin: var(--s-2) 0 0; color: var(--t-ink-muted); font-size: var(--font-small); }
+
+.ui-panel {
+  padding: var(--s-5);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+}
+
+.ui-empty {
+  display: grid;
+  place-items: center;
+  gap: var(--s-2);
+  padding: var(--s-12) var(--s-5);
+  border: 1px dashed var(--t-line-strong);
+  border-radius: var(--r-lg);
+  color: var(--t-ink-muted);
+  text-align: center;
+}
+.ui-empty strong { color: var(--t-ink); font-size: 15px; }
+
+/* Tabs: the six candidate states and the seven settings sections both use
+   these, which is what makes them one domain instead of eleven pages. */
+.ui-tabs {
+  display: flex;
+  gap: var(--s-1);
+  border-bottom: 1px solid var(--t-line);
+  overflow-x: auto;
+}
+.ui-tabs-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--t-ink-muted);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ui-tabs-item:hover { color: var(--t-ink); }
+.ui-tabs-item[aria-selected="true"], .ui-tabs-item.is-active {
+  color: var(--t-accent);
+  border-bottom-color: var(--t-accent);
+}
+.ui-tabs-count {
+  min-width: 20px;
+  padding: 0 5px;
+  border-radius: var(--r-full);
+  background: var(--t-surface-sunken);
+  color: var(--t-ink-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   5. Buttons and form controls
+   -------------------------------------------------------------------------- */
+
+.ui-btn {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  padding: 0 var(--s-4);
+  border: 1px solid var(--t-line-strong);
+  border-radius: var(--r-md);
+  color: var(--t-ink);
+  background: var(--t-surface);
+  font: inherit;
+  font-size: var(--font-body);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ui-btn:hover { background: var(--t-surface-sunken); }
+.ui-btn[disabled], .ui-btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+
+.ui-btn[data-variant="primary"] {
+  border-color: var(--t-accent);
+  color: var(--t-ink-inverted);
+  background: var(--t-accent);
+}
+.ui-btn[data-variant="primary"]:hover { border-color: var(--t-accent-hover); background: var(--t-accent-hover); }
+/* Dark theme accent is the light teal, so inverted white text on it would drop
+   to ~2:1. Ink-on-accent is the readable pairing there. */
+:root[data-theme="dark"] .ui-btn[data-variant="primary"] { color: var(--c-gray-900); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .ui-btn[data-variant="primary"] { color: var(--c-gray-900); }
+}
+
+.ui-btn[data-variant="danger"] { border-color: var(--tone-danger-fg); color: var(--tone-danger-fg); background: var(--t-surface); }
+.ui-btn[data-variant="danger"]:hover { background: var(--tone-danger-bg); }
+.ui-btn[data-variant="ghost"] { border-color: transparent; background: transparent; }
+.ui-btn[data-variant="ghost"]:hover { background: var(--t-surface-sunken); }
+.ui-btn[data-size="sm"] { min-height: 28px; padding: 0 var(--s-3); font-size: var(--font-small); }
+.ui-btn[data-size="icon"] { min-height: 32px; width: 32px; padding: 0; }
+
+.ui-field { display: grid; gap: var(--s-2); }
+.ui-field > label { color: var(--t-ink); font-size: var(--font-small); font-weight: 600; }
+.ui-field small { color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-input, .ui-select, .ui-textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--t-line-strong);
+  border-radius: var(--r-md);
+  color: var(--t-ink);
+  background: var(--t-surface);
+  font: inherit;
+  font-size: var(--font-body);
+}
+.ui-input::placeholder { color: var(--t-ink-muted); }
+.ui-input:focus, .ui-select:focus, .ui-textarea:focus {
+  border-color: var(--t-accent);
+  outline: 2px solid var(--t-accent-ring);
+  outline-offset: 0;
+}
+.ui-checkbox { width: 16px; height: 16px; accent-color: var(--t-accent); }
+
+/* Segmented control, used for the theme and density toggles. */
+.ui-segmented { display: inline-flex; padding: 2px; border: 1px solid var(--t-line); border-radius: var(--r-md); background: var(--t-surface-sunken); }
+.ui-segmented button {
+  min-height: 26px;
+  padding: 0 var(--s-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--t-ink-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--font-small);
+  font-weight: 600;
+  cursor: pointer;
+}
+.ui-segmented button[aria-pressed="true"] { color: var(--t-ink); background: var(--t-surface); box-shadow: var(--shadow-sm); }
+
+/* --------------------------------------------------------------------------
+   6. Status badge
+   Consumes the tone chosen by `status_view()` in Python, so a state's colour is
+   decided in one place for both templates and JSON consumers.
+   -------------------------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-full);
+  font-size: var(--font-small);
+  font-weight: 600;
+  line-height: 20px;
+  white-space: nowrap;
+  background: var(--tone-neutral-bg);
+  color: var(--tone-neutral-fg);
+}
+.badge[data-tone="active"] { background: var(--tone-active-bg); color: var(--tone-active-fg); }
+.badge[data-tone="waiting"] { background: var(--tone-waiting-bg); color: var(--tone-waiting-fg); }
+.badge[data-tone="success"] { background: var(--tone-success-bg); color: var(--tone-success-fg); }
+.badge[data-tone="danger"] { background: var(--tone-danger-bg); color: var(--tone-danger-fg); }
+.badge[data-tone="muted"] { background: var(--tone-muted-bg); color: var(--tone-muted-fg); }
+
+/* A live state gets a pulsing dot: the operator can tell「还在动」from
+   「停住了」without reading the label. */
+.badge[data-live="true"]::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+  animation: badge-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* --------------------------------------------------------------------------
+   7. Cover card and grid
+   -------------------------------------------------------------------------- */
+
+.ui-cover-grid {
+  display: grid;
+  gap: var(--card-gap);
+  grid-template-columns: repeat(auto-fill, minmax(var(--cover-width), 1fr));
+  margin-top: var(--s-5);
+}
+
+.ui-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+  overflow: hidden;
+}
+.ui-card:hover { border-color: var(--t-line-strong); box-shadow: var(--shadow-md); }
+.ui-card[data-selected="true"] { border-color: var(--t-accent); box-shadow: 0 0 0 2px var(--t-accent-ring); }
+
+/* 2:3 is the manga cover ratio. Reserving it stops the grid reflowing as
+   thumbnails arrive, which is the whole point of having a fixed aspect. */
+.ui-card-cover {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  display: block;
+  background: var(--t-surface-sunken);
+}
+.ui-card-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ui-card-cover-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+}
+.ui-card-badge { position: absolute; left: var(--s-2); bottom: var(--s-2); }
+.ui-card-select { position: absolute; right: var(--s-2); top: var(--s-2); }
+
+.ui-card-body { display: grid; gap: var(--s-1); padding: var(--s-3); min-width: 0; }
+.ui-card-title {
+  margin: 0;
+  color: var(--t-ink);
+  font-size: var(--font-body);
+  font-weight: 600;
+  line-height: 1.35;
+  /* Two lines then ellipsis: one line truncates too many real titles, three
+     makes the cards uneven. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ui-card-title a { color: inherit; text-decoration: none; }
+.ui-card-title a:hover { text-decoration: underline; }
+.ui-card-meta { color: var(--t-ink-muted); font-size: var(--font-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-card-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+
+.ui-tag {
+  display: inline-block;
+  padding: 1px var(--s-2);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-sm);
+  color: var(--t-ink-muted);
+  background: var(--t-surface-sunken);
+  font-size: 11px;
+}
+
+/* --------------------------------------------------------------------------
+   8. Data table
+   -------------------------------------------------------------------------- */
+
+.ui-table-wrap {
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+  /* Own scroll container: a wide table must not make the page scroll
+     sideways. */
+  overflow-x: auto;
+}
+.ui-table { width: 100%; border-collapse: collapse; font-size: var(--font-body); }
+.ui-table th, .ui-table td {
+  padding: var(--cell-pad-y) var(--s-4);
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--t-line);
+}
+.ui-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: var(--t-ink-muted);
+  background: var(--t-surface-sunken);
+  font-size: var(--font-small);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ui-table tbody tr { height: var(--row-height); }
+.ui-table tbody tr:hover { background: var(--t-surface-sunken); }
+.ui-table tbody tr[data-selected="true"] { background: var(--tone-active-bg); }
+.ui-table tbody tr:last-child td { border-bottom: 0; }
+.ui-table td[data-numeric], .ui-table th[data-numeric] { text-align: right; font-variant-numeric: tabular-nums; }
+.ui-table-primary { color: var(--t-ink); font-weight: 600; }
+.ui-table-secondary { display: block; margin-top: 2px; color: var(--t-ink-muted); font-size: var(--font-small); }
+
+/* The sort control is a button inside the header cell, not a click handler on
+   the cell: a keyboard user needs a real focusable target. */
+.ui-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ui-sort:hover { color: var(--t-ink); }
+.ui-sort-arrow { font-size: 10px; opacity: .45; }
+.ui-sort[aria-sort="ascending"] .ui-sort-arrow,
+.ui-sort[aria-sort="descending"] .ui-sort-arrow { opacity: 1; color: var(--t-accent); }
+
+.ui-table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--t-line);
+  background: var(--t-surface);
+}
+.ui-table-toolbar .ui-input { width: auto; min-width: 200px; flex: 1 1 200px; }
+
+.ui-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  padding: var(--s-3) var(--s-4);
+  border-top: 1px solid var(--t-line);
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+}
+.ui-pagination-pages { display: flex; align-items: center; gap: var(--s-1); }
+
+/* Phone: the table collapses to stacked cards. Each cell carries its column
+   name in `data-label` so the header row can be dropped without the values
+   becoming anonymous. */
+@media (max-width: 640px) {
+  .ui-table thead { display: none; }
+  .ui-table, .ui-table tbody, .ui-table tr, .ui-table td { display: block; width: 100%; }
+  .ui-table tbody tr {
+    height: auto;
+    padding: var(--s-3) var(--s-4);
+    border-bottom: 1px solid var(--t-line);
+  }
+  .ui-table td { padding: 2px 0; border: 0; }
+  .ui-table td[data-label]::before {
+    content: attr(data-label) "：";
+    color: var(--t-ink-muted);
+    font-size: var(--font-small);
+  }
+  .ui-table td[data-numeric] { text-align: left; }
+}
+
+/* --------------------------------------------------------------------------
+   9. Bulk toolbar
+   Floats above the content so a selection made at the bottom of a long list
+   does not require scrolling back up to act on it.
+   -------------------------------------------------------------------------- */
+
+.ui-bulkbar {
+  position: sticky;
+  bottom: var(--s-4);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-top: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--t-line-strong);
+  border-radius: var(--r-lg);
+  background: var(--t-surface-raised);
+  box-shadow: var(--shadow-lg);
+}
+.ui-bulkbar-count { color: var(--t-ink); font-weight: 700; }
+.ui-bulkbar-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-left: auto; }
+
+@media (max-width: 640px) {
+  .ui-bulkbar { bottom: calc(var(--tabbar-height) + var(--s-2)); }
+  .ui-bulkbar-actions { margin-left: 0; width: 100%; }
+}
+
+/* --------------------------------------------------------------------------
+   10. Filter sidebar
+   -------------------------------------------------------------------------- */
+
+.ui-filter-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: var(--s-6); align-items: start; margin-top: var(--s-5); }
+.ui-filters { display: grid; gap: var(--s-5); padding: var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-lg); background: var(--t-surface); }
+.ui-filter-group { display: grid; gap: var(--s-2); }
+.ui-filter-group > h3 { margin: 0; color: var(--t-ink-muted); font-size: var(--font-small); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.ui-filter-option { display: flex; align-items: center; gap: var(--s-2); min-height: 28px; color: var(--t-ink); font-size: var(--font-body); cursor: pointer; }
+.ui-filter-option span:last-child { margin-left: auto; color: var(--t-ink-muted); font-size: var(--font-small); }
+
+@media (max-width: 1024px) {
+  .ui-filter-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* --------------------------------------------------------------------------
+   11. Skeleton and progress
+   -------------------------------------------------------------------------- */
+
+.ui-skeleton {
+  border-radius: var(--r-sm);
+  background: linear-gradient(90deg, var(--t-surface-sunken) 25%, var(--t-line) 37%, var(--t-surface-sunken) 63%);
+  background-size: 400% 100%;
+  animation: ui-shimmer 1.4s ease-in-out infinite;
+}
+.ui-skeleton[data-shape="text"] { height: 12px; }
+.ui-skeleton[data-shape="title"] { height: 18px; }
+.ui-skeleton[data-shape="cover"] { aspect-ratio: 2 / 3; border-radius: var(--r-lg); }
+.ui-skeleton[data-shape="row"] { height: var(--row-height); }
+
+@keyframes ui-shimmer {
+  from { background-position: 100% 50%; }
+  to { background-position: 0 50%; }
+}
+
+/* Native <progress> is styled rather than replaced, so an indeterminate task
+   and assistive technology both keep working for free. */
+.ui-progress { width: 100%; height: 6px; appearance: none; border: 0; border-radius: var(--r-full); background: var(--t-surface-sunken); overflow: hidden; }
+.ui-progress::-webkit-progress-bar { background: var(--t-surface-sunken); border-radius: var(--r-full); }
+.ui-progress::-webkit-progress-value { background: var(--t-accent); border-radius: var(--r-full); }
+.ui-progress::-moz-progress-bar { background: var(--t-accent); border-radius: var(--r-full); }
+.ui-progress-row { display: grid; gap: var(--s-1); min-width: 140px; }
+.ui-progress-label { display: flex; justify-content: space-between; gap: var(--s-2); color: var(--t-ink-muted); font-size: var(--font-small); font-variant-numeric: tabular-nums; }
+
+/* --------------------------------------------------------------------------
+   12. Overlays: drawer, dialog, toast
+   -------------------------------------------------------------------------- */
+
+.ui-scrim { position: fixed; inset: 0; z-index: var(--z-drawer); background: var(--t-scrim); }
+
+.ui-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: var(--z-drawer);
+  width: min(480px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--t-surface);
+  border-left: 1px solid var(--t-line);
+  box-shadow: var(--shadow-lg);
+}
+.ui-drawer[data-side="left"] { inset: 0 auto 0 0; border-left: 0; border-right: 1px solid var(--t-line); width: min(320px, 88%); }
+.ui-drawer[data-side="bottom"] {
+  inset: auto 0 0 0;
+  width: 100%;
+  max-height: 80vh;
+  border: 0;
+  border-top: 1px solid var(--t-line);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+}
+.ui-drawer-head { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--t-line); }
+.ui-drawer-title { margin: 0; font-size: 16px; font-weight: 650; }
+.ui-drawer-head .ui-btn { margin-left: auto; }
+.ui-drawer-body { flex: 1; padding: var(--s-5); overflow-y: auto; }
+.ui-drawer-foot { display: flex; justify-content: flex-end; gap: var(--s-2); padding: var(--s-4) var(--s-5); border-top: 1px solid var(--t-line); }
+
+.ui-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  padding: var(--s-4);
+}
+.ui-dialog-panel {
+  position: relative;
+  width: min(440px, 100%);
+  padding: var(--s-5);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+  box-shadow: var(--shadow-lg);
+}
+.ui-dialog-title { margin: 0 0 var(--s-2); font-size: 17px; font-weight: 650; }
+.ui-dialog-body { color: var(--t-ink-muted); font-size: var(--font-body); line-height: 1.55; }
+.ui-dialog-foot { display: flex; justify-content: flex-end; gap: var(--s-2); margin-top: var(--s-5); }
+
+/* Toast region. `aria-live="polite"` is on the container, not each toast, so
+   the region exists before the first message and is therefore announced. */
+.ui-toasts {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  z-index: var(--z-toast);
+  display: grid;
+  gap: var(--s-2);
+  width: min(360px, calc(100vw - var(--s-8)));
+  pointer-events: none;
+}
+.ui-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--t-line-strong);
+  border-left: 3px solid var(--tone-neutral-fg);
+  border-radius: var(--r-md);
+  background: var(--t-surface-raised);
+  box-shadow: var(--shadow-lg);
+  pointer-events: auto;
+}
+.ui-toast[data-tone="success"] { border-left-color: var(--tone-success-fg); }
+.ui-toast[data-tone="danger"] { border-left-color: var(--tone-danger-fg); }
+.ui-toast[data-tone="waiting"] { border-left-color: var(--tone-waiting-fg); }
+.ui-toast-text { flex: 1; min-width: 0; font-size: var(--font-body); overflow-wrap: anywhere; }
+.ui-toast-text strong { display: block; }
+.ui-toast-text span { color: var(--t-ink-muted); font-size: var(--font-small); }
+
+@media (max-width: 640px) {
+  .ui-toasts { right: var(--s-3); left: var(--s-3); bottom: calc(var(--tabbar-height) + var(--s-3)); width: auto; }
+}
+
+/* --------------------------------------------------------------------------
+   13. Demo page only
+   -------------------------------------------------------------------------- */
+
+.ui-demo-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.ui-demo-grid { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }

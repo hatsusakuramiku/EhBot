@@ -1326,36 +1326,194 @@ Files modified:
 - `PATCH /works/{id}/metadata` writes overrides but has no field locking; `metadata_values.is_locked` arrives with the R2 migration.
 - Conversion and connection transitions do not publish yet. Only the download worker has a `notify` hook; the packaging queue gets one when R4 renders it.
 
-## Handoff: Next Session (start of R2)
+### Phase R2: Thumbnail Service And Data Model Increment
+- **Status:** complete
+- **Test baseline:** 524 passed / 12 skipped (before) -> **569 passed / 12 skipped / 0 failed** (after; +45 new tests, no regressions)
+- **Scope narrowed mid-phase by the operator.** The phase as planned included a `library_items` table and CBZ-first-image thumbnails for a library domain. The operator's instruction: 「这个项目不需要实现对书籍管理的详细功能，只需要管理下载到转化成成目标归档格式即可，附带部分便于用户操作的简要管理项。后续图书管理应当使用其他的工具。」 Both were dropped, **phase R7 (library domain) was deleted from `DEVELOPMENT_PLAN.md` entirely**, and the one item inside it still worth having — the `{category}/{artist}/{title}` archive path template — moved to R8. This reversed an answer the operator had given earlier in the same session; the later instruction wins.
+
+Actions taken:
+- **Migration `012_thumbnails_locking_priority.sql`** (renamed from `012_thumbnails_library.sql` when the scope narrowed): `candidates.thumb_url`, `metadata_values.is_locked`, `download_jobs.priority`, `artifacts.page_count`, and the `thumbnails` cache table. No `library_items`.
+- **`app/thumbnails/` package**: `identity.py` (hash + disk layout), `render.py` (decode + WebP re-encode), `service.py` (cache lookup, fetch, dedup), `models.py`, `errors.py`, and constants in `__init__.py`.
+- **`GET /api/v1/thumbnails/{hash}`** (`app/api/thumbnails.py`): session-gated, `ETag` + `Cache-Control: private, max-age=31536000, immutable`, `304` on `If-None-Match`, and a placeholder SVG on failure.
+- **Admission on the scrape path**: `_persist_cover_sync` in `app/exhentai/service.py` writes `candidates.thumb_url` and a `PENDING` `thumbnails` row in one transaction, called from both `fetch_metadata_for_candidate` and `enrich_candidates_for_review`.
+- **Promoted the image-container check** out of `app/telegraph/fetcher.py` into `app/archive/safety.py` as public `looks_like_image`, rather than writing a third copy of an image magic-number table. That module already owns this knowledge and is imported by both the telegraph and conversion paths. Verified by Grep that no test referenced the private names before moving them.
+- **Both remaining new columns got real readers this phase**, so nothing shipped dead: `is_locked` gained a second guard in `_persist_metadata_sync`'s upsert and a `locks` payload on `PATCH /api/v1/works/{id}/metadata`; `priority` became the leading `ORDER BY` term in `_claim_pending_job_sync`.
+- **`cover` in `candidate_summary`, `is_locked` in `metadata_entry`** — both added in `app/api/serializers.py`, which stays the only place a DTO becomes JSON.
+- `THUMBNAILS_ENABLED` added to `Settings`, `.env.example` and `README.md`; the service is constructed only when it is on, and `create_app` gained `thumbnail_transport` / `thumbnail_resolver` so tests can drive it.
+
+Files created:
+- `app/db/migrations/012_thumbnails_locking_priority.sql`
+- `app/thumbnails/__init__.py`, `errors.py`, `models.py`, `identity.py`, `render.py`, `service.py`
+- `app/api/thumbnails.py`, `app/web/static/thumb-placeholder.svg`
+- `tests/unit/test_thumbnails.py` (26 tests), `tests/integration/test_thumbnails_workflow.py` (14 tests)
+
+Files modified:
+- `app/archive/safety.py` — `looks_like_image` promoted to public API
+- `app/telegraph/fetcher.py` — private magic-number table deleted, imports the shared gate
+- `app/config.py`, `app/main.py`, `app/api/deps.py`, `app/api/v1.py` — wiring
+- `app/db/database.py` — `thumb_url` in the shared candidate projection, `is_locked` in the metadata listing, new `set_metadata_lock`
+- `app/exhentai/service.py` — cover admission, second guard in the metadata upsert
+- `app/downloads/service.py` — `ORDER BY priority, id`
+- `app/conversion/service.py` — CBZ artifact bug fix (below)
+- `app/api/serializers.py`, `app/api/actions.py`, `app/review/models.py`, `app/review/service.py`, `app/candidates/models.py`
+- `tests/integration/test_database.py`, `test_api_domains.py`, `test_archive_workflow.py`, `test_downloads.py`, `test_exhentai_torrents.py`
+
+### R2 Pre-Existing Bug Found And Fixed
+- **Every packed CBZ reported a size of a few dozen bytes.** `_record_cbz_artifact_sync` passed `page_count` into the `size_bytes` column and wrote no `sha256` at all, so the artifact row could not be compared against the archive it was produced from. The three values now go to three columns: real `st_size`, a streamed SHA-256 (64 KB chunks — a CBZ is arbitrarily large and must not be read into memory to hash), and `page_count` in the column migration 012 adds. The column was added rather than the value dropped, because the buggy code at least stored the page count *somewhere* and losing it would be a second regression. Flagged to the operator and approved before the fix landed.
+
+### R2 Errors Encountered
+| Error | Cause | Resolution |
+|---|---|---|
+| Duplicated `_MAGIC_PREFIXES` block in `app/telegraph/fetcher.py` | An Edit whose `new_string` re-included the text being replaced | Caught by re-reading the region; replaced the whole duplicated span |
+| Two signatures joined to their bodies (`app/db/database.py`, `app/review/service.py`) | Edits that tried to remove a blank line after a `def` | Caught by re-reading; repaired inside the same Edit that inserted the new method |
+| `no such column: artifacts.page_count` | The CBZ fix referenced a column that did not exist | Confirmed absent in `001_initial.sql`, added to migration 012 |
+| `git mv` -> `fatal: not under version control` | The migration file was new and unstaged | Fell through to plain `mv` |
+| `pytest tests/unit/test_telegraph_fetcher.py` -> exit 4 | No such file; telegraph tests live in `test_telegraph.py` | Re-ran with `-k "telegraph or safety or archive"` |
+| `assert 12 == 11` in `test_initial_migration_is_idempotent...` | The new migration changed the count — the expected failure | Updated the assertion and the expected table set |
+| `UNIQUE constraint failed: metadata_values(candidate_id, field_name, value_source)` | A test scenario inserted two rows differing only in `is_locked` | Rewrote as insert-then-UPDATE, which is also the real locking flow |
+| `asyncio.run() cannot be called from a running event loop` | A sync seeding helper reused inside an async test | Split the helper into `admit_cover` (initialises) and `admit_cover_into` (takes an initialised database) |
+| A lock test passed for the wrong reason | It asserted on `effective_metadata`, where `TELEGRAM` outranks `EXHENTAI` — so the value was right whether or not the guard worked | Rewrote to read the `EXHENTAI`-sourced row the scrape owns |
+
+### R2 Decisions
+- **The hash covers the source identity, not the rendered bytes.** That is what lets a serializer emit a cover URL synchronously, without having fetched anything, and it is why `immutable` is honest: a different source produces a different URL.
+- **The variant is inside the hash, not a query parameter.** A second variant sharing a URL would permanently serve the wrong size out of the browser cache once `immutable` is set. Only one variant (`card`) exists today; the CHECK constraint says so, and gdata thumbs are already small enough that a second one would be upscaling.
+- **The endpoint accepts a hash and nothing else.** A URL parameter would make this an open proxy for anyone with a session. The scrape path's two-writes-one-transaction is the sole admission point, so the service only ever fetches a URL something upstream already vouched for.
+- **Failure is a 200 placeholder, not a 404.** An `<img>` whose `src` 404s renders as a broken-image icon and there is no way to style around it. The state travels in `X-Thumbnail-State` instead, with a 60-second cache so a transient failure is retried but a grid of 50 failures does not re-ask on every scroll.
+- **Everything served is re-encoded.** WebP out, whatever came in, so the bytes leaving this server are ours and the magic-number gate has something definite to check on the way in.
+- **Per-hash dedup plus a global semaphore of 4.** A 50-cover first paint would otherwise stampede one host; dedup handles the shared-cover case and the semaphore bounds the rest.
+- **`identity.py` is separate from `service.py`.** `app/exhentai/service.py` and `app/api/serializers.py` only need to *name* a thumbnail; importing the service would drag httpx and Pillow onto the scrape and serialization paths.
+- **A lock covers every row for the field, not the winning one.** The operator is expressing a decision about the field. Locking only the resolved row would let a later scrape land on an unlocked row of another source and change what the field resolves to.
+- **`is_locked` is not a duplicate of `is_manual`.** `is_manual` already protects text the operator typed. `is_locked`'s distinct job is pinning a value ExHentai supplied that the operator judged correct — nothing marks it as theirs, so without a second guard the next scrape overwrites it.
+- **`ORDER BY priority, id`, not `ORDER BY priority`.** Every job that predates the column is now priority 100; sorting on priority alone would make the queue order arbitrary. Within one priority the queue stays FIFO, so promoting one job reorders that job and nothing else.
+- **Locks are applied after edits** in `patch_metadata`, so `{"fields": {"Title": "x"}, "locks": {"Title": true}}` pins the value it just wrote rather than the one it replaced.
+- **`self._database._connect()` inside a service is the established pattern here** (`app/downloads/service.py:685`), and it carries no `# noqa`, so the speculative ones were removed.
+
+### Deferred From R2
+- **No thumbnail eviction.** `data/thumbnails/` grows without bound. A card WebP is a few KB and covers are one-per-candidate, so this is not urgent, but the LRU sweep named in the plan's risk table does not exist yet.
+- **No background warmer.** The first request for a cover pays the fetch. Acceptable because the scrape path deliberately does not fetch (an unreachable cover must not slow enrichment), but a first paint over cold covers is as slow as the slowest upstream.
+- **`FAILED` is terminal until the row is touched.** There is no retry schedule: a cover that failed once keeps serving the placeholder. `attempt_count` and `updated_at` are recorded so a sweeper can be written, but nothing reads them.
+- **`thumbnails.source_path` is unused.** It was kept for a local-file source (a CBZ first page) that the narrowed scope removed. The column is nullable and commented as unused; it is left rather than dropped because migrations here are append-only.
+- **No page renders a cover yet.** `candidate_summary` emits `cover`, but every screen is still the pre-refactor Jinja template. R5 is where the grid consumes it.
+- **`priority` has no writer.** The claim honours it; nothing sets it but the default. R4 adds the queue-reordering UI.
+### Phase R3: Design System And Shared Components
+
+**Status: complete.** Test baseline moved 569 -> **592 passed / 12 skipped / 0 failed** (+23, zero regressions).
+
+R3 was the last foundation phase. It delivers the design tokens, the shared component set and one navigation source — but it deliberately changes **no existing page**. The thirteen pre-refactor templates render exactly as they did before, now inside the new shell. R4 is the first phase an operator sees a difference in content.
+
+#### Actions Taken
+
+1. **Split the stylesheet rather than rewriting one file.** `app/web/static/ui.css` is new and authoritative (~1050 lines, 13 numbered sections); `app.css` shrank 562 -> 297 lines and is frozen, holding only pre-refactor page rules. Both load on every page, `app.css` first.
+2. **Built the component set as Jinja macros** in `app/web/templates/components/ui.html`: `badge`/`badge_for`, `cover_card`, `table`/`sort_button`/`pagination`, `bulk_toolbar`, `drawer`, `confirm`, `filter_group`, `skeleton`/`skeleton_cards`, `progress`, `empty_state`, `tabs`.
+3. **Made the navigation a Python data structure.** `app/web/routes/shell.py` holds `NAV_ITEMS` (4 domains, 12 children) plus `NavItem.matches` / `is_active` / `is_current`. `shell_context` is registered as a Starlette **context processor**, so all ~25 existing `TemplateResponse` calls receive `nav_items` without being edited.
+4. **Rewrote `base.html` as one shell**: pre-paint theme script, skip link, collapsible sidebar, top bar with theme + density segmented controls, phone tab bar with a section drawer, and one `aria-live` toast region present from load. Sidebar, tab bar and drawer all iterate the same `NAV_ITEMS`.
+5. **Added `/ui-kit`**, a gallery rendering every component in its real states from fixtures in `app/web/routes/ui_kit.py`. It is the only page that opts out of the legacy light lock, which makes it where a theme regression surfaces first.
+6. **Wrote 23 tests** across `tests/unit/test_web_shell.py` (navigation model) and `tests/integration/test_ui_shell.py` (the rendered HTML).
+
+#### Files Created
+- `app/web/static/ui.css` — tokens + component layer.
+- `app/web/static/ui.js` — theme/density persistence, toasts, sidebar collapse.
+- `app/web/templates/components/ui.html` — the component macros.
+- `app/web/templates/ui_kit.html` — the gallery page.
+- `app/web/routes/shell.py` — `NAV_ITEMS`, `NavItem`, `shell_context`.
+- `app/web/routes/ui_kit.py` — gallery fixtures.
+- `tests/unit/test_web_shell.py`, `tests/integration/test_ui_shell.py`.
+
+#### Files Modified
+- `app/web/templates/base.html` — rewritten as the unified shell; gained a `scripts` block.
+- `app/web/static/app.css` — R0 token block moved out; remainder frozen with a note.
+- `app/main.py` — `context_processors=[shell_context]`, `status_view`/`connection_view` registered as Jinja globals and filters, `/ui-kit` route.
+- `app/web/routes/__init__.py` — re-exports.
+- `AGENTS.md`, `DEVELOPMENT_PLAN.md`, `progress.md`.
+
+#### Bug Found And Fixed In This Phase's Own New Code
+
+`test_parent_is_active_but_only_the_child_is_current` failed on first run, and it was right to. `/downloads` is a prefix of `/downloads/history`, so the 活动 parent and the 历史 child both satisfied `matches()` and the template emitted **two** `aria-current="page"` attributes. A screenshot cannot show this; a screen reader announces two current pages.
+
+The same trap existed one level down between siblings: `candidates_all` has prefix `/candidates`, which prefix-matches `/candidates/needs-info`, so 全部候选 and 待补充 would both have been current.
+
+Two fixes, both narrowing rather than special-casing:
+- `NavItem.is_current()` returns true only for a **leaf** — a parent, whose prefix is by construction a prefix of its children's paths, never claims the marker. `is_active()` still grants it the `is-active` class.
+- An "index" child whose path equals its parent's carries `exact=True`, giving up prefix matching so it cannot match its own siblings. Three items need it: `/candidates`, `/downloads`, `/connections`.
+
+`test_exactly_one_item_in_the_whole_tree_is_ever_current` now walks all 13 live paths and asserts a count of exactly one; the integration test asserts exactly two markers per rendered page (sidebar + tab bar).
+
+#### Problems Encountered
+
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| Two `aria-current="page"` per page | Parent prefix contains child path | `is_current()` = leaf only; see above |
+| Two sibling children both current | `/candidates` prefix-matches `/candidates/needs-info` | `exact=True` on the three index children |
+| `base.html` v1 referenced an undefined `nav_icons` global | Icons held in a template dict instead of on the model | Moved the glyph onto `NavItem.icon` |
+| `base.html` v1 emitted a duplicate `class` attribute | A conditional adding `class=` inside an element that already had one | Computed the class inline in the existing attribute |
+| Cover-URL test failed on the shell logo | The assertion covered every `<img>`, not just covers | Split into "no `<img>` is off-origin" plus "every cover is the proxy path" |
+| Bash tool mangled `.\.venv\Scripts\python.exe` | Backslash paths under the POSIX shell | Ran through the PowerShell tool, per `AGENTS.md` |
+| `badge` macro had four `is defined` fallbacks | Guarding against attribute-vs-subscript access | Removed: Jinja's dot access already falls back to subscript |
+
+#### Decisions And Their Reasoning
+
+1. **Two CSS files, not two halves of one.** R9 deletes the pre-refactor rules. A file boundary makes that `rm app.css`; a comment boundary makes it a careful cut through 300 lines, and a careful cut can be got wrong.
+2. **Every `ui.css` rule is class-scoped.** This is the load-bearing decision of the phase. `app.css` still hardcodes `body { background: #f3f5f6 }` and a light `--ink`. A bare `body { background: var(--t-bg) }` in `ui.css` would, in dark mode, render `app.css`'s `--muted: #68747c` on `#171d21` — about 3.2:1, across all 13 not-yet-rewritten pages, violating R3's own ≥ 4.5:1 acceptance criterion. Verified by grep first that no legacy template consumes the R0 tokens or `.badge`, so moving them was provably safe rather than hopefully safe.
+3. **`.ui-main[data-legacy="true"]` pins unrewritten pages to light**, including `color-scheme: light` so the browser does not paint dark scrollbars and form controls into a light page. Each page drops the attribute in the commit that rewrites it.
+4. **A two-level navigation tree, against the plan's flat four items.** 设置 does not exist as a page until R8, and 来源规则/自动审批/归档设置/外部连接 are live now. A flat four-item nav would make six reachable pages unreachable — trading a real regression for a cosmetic match with the plan. R8 collapses the children into in-page tabs by editing one place.
+5. **A Starlette context processor, not 25 edited call sites.** The shell is a property of the response, not of each handler, and a handler that forgot to pass `nav_items` would render a page with no navigation at all. `Jinja2Templates(directory=..., context_processors=[...])` is supported on Starlette 1.6.0.
+6. **`status_view` and `connection_view` registered as Jinja globals**, so `badge()` takes a whole `StatusView`. Passing a label and a tone separately would let a template pair one state's label with another state's colour.
+7. **The theme script is inline and blocking in `<head>`.** Deferred, it flashes the light theme for one frame on every navigation.
+8. **`data-theme="auto"` never reaches the DOM.** Neither theme selector matches it, so `applyTheme("auto")` *removes* the attribute — absent and auto must behave identically, and a test asserts the string is absent from the rendered page.
+9. **Density is measurement-only** (`--row-height`, `--cell-pad-y`, `--cover-width`, `--card-gap`, `--font-body`, `--font-small`), so no component needs a compact variant.
+10. **A separate `--t-chrome*` token family** for the sidebar, which is dark in both themes and therefore cannot read `--t-surface`.
+11. **Native `<progress>` is styled, not replaced.** Indeterminate state and assistive technology then work without any code.
+12. **Every `localStorage` access is wrapped in try/catch.** It throws in a private window with site data blocked, and the shell must still render.
+13. **Danger toasts do not auto-dismiss** and carry `role="alert"`. Five seconds is not long enough to read a path out of an error.
+14. **Overlays close on Escape and have an explicit close button, with focus moved manually.** Alpine's `x-trap` is not vendored and no build step may be introduced, so this is the whole story; an overlay a keyboard user cannot leave is worse than no overlay.
+15. **`/ui-kit` is authenticated and absent from `NAV_ITEMS`.** A developer tool does not belong in operator navigation, and an unauthenticated route would be one more surface to keep honest for no benefit.
+16. **Gallery fixtures live in Python, not in the template.** The gallery shows real enum codes; a template holding its own list of them would drift from `app/api/status.py` silently, which is the one thing this phase exists to stop. A test asserts every label in all four status registries appears on the page.
+
+#### Deferred From R3
+- **`dashboard.html:30` still maps connection state to Chinese inline** (`{{ "已连接" if ... == "connected" else ... }}`). It now has a correct replacement — `{{ ui.badge(state | connection_view) }}` — but the dashboard is rewritten in R4, and changing it here would mean touching that page twice and re-baselining its tests for no operator-visible gain.
+- **No page consumes the components yet.** That is R4-R8, one domain at a time.
+- **The sidebar collapse state is per-browser, not per-account.** It lives in `localStorage`; a server-side preference needs a settings table that R8 introduces.
+- **No automated contrast assertion.** The pairings were computed by hand and the tokens documented; an axe-core run needs a headless browser, which would be the project's first Node dependency.
+- **The table sorts and pages on the server only.** `sort_button` emits `aria-sort` and a `data-sort-key`; the handler that acts on it belongs to whichever domain page needs it first.
+
+## Handoff: Next Session (start of R4)
 
 ### Where The Refactor Stands
-R0 (scaffolding) and R1 (JSON API + shared review orchestration) are complete and committed. The backend now has a full read/write JSON surface under `/api/v1` and an SSE stream, but **no page consumes any of it yet** — every screen is still the pre-refactor Jinja template. That is expected: R2/R3 build the data and design foundations, and R4 is the first phase where the operator sees a change.
+R0 (scaffolding), R1 (JSON API + shared review orchestration), R2 (thumbnails + data model increment) and R3 (design system + shared components) are complete. **All four foundation phases are done.** There is a full read/write JSON surface under `/api/v1`, an SSE stream, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, and one navigation source driving desktop and phone.
 
-Test baseline to protect: **524 passed / 0 failed / 0 skipped**. Any phase that ends below this number has regressed something.
+What there is *not* is a single page consuming any of it. The thirteen pre-refactor templates still render their own markup inside the new shell, pinned to the light theme by `data-legacy="true"`. **R4 is the first phase an operator sees a difference in.**
+
+Test baseline to protect: **592 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
 
 ### The One Thing To Understand First
-`app/api/status.py` is the single source of truth for state vocabulary, and `app/api/serializers.py` is the single place a DTO becomes JSON. Every payload carries the resolved `label`/`tone`/`live` next to the raw `code`, so **the browser never translates an enum itself**. If you find yourself writing a status label in a template or in JavaScript, you are creating the second source of truth this refactor exists to remove.
+Every phase from here rewrites pages, and the same three mistakes are available in each:
 
-Similarly, `ReviewOrchestrator` (`app/review/orchestration.py`) is the only path that may approve a candidate. It is reachable from a router via `deps.review_orchestrator(request)`. Do not re-implement "approve then enqueue" anywhere.
+1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary. A hand-written 「已连接」 is the duplication this refactor exists to delete.
+2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** See decision 2 above — an unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit, and delete its block from `app.css` at the same time.
+3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. If it is an "index" child sharing its parent's path, it needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
 
-### Next Phase: R2 (Thumbnails And Data Model Increment, 2-3 person-days)
-Planned work, in dependency order:
+Open `/ui-kit` before writing any page CSS — the component you need probably exists, and the gallery shows it in every state including empty and failed.
 
-1. **Migration `012_thumbnails_library.sql`** — migrations are append-only and the existing eleven are frozen. Needs:
-   - `thumbnails` table (cache of proxied cover images)
-   - `library_items` table (shelved works, for R7)
-   - `metadata_values.is_locked` — `PATCH /works/{id}/metadata` already writes overrides but has no locking; the API column is the missing half
-   - `download_jobs.priority` — for R4 queue reordering
-2. **Thumbnail service + `GET /api/v1/thumbnails/{hash}`** — gdata already parses a `thumb` URL and the codebase has never used it. Serve it **through a server-side proxy cache**, never as a direct browser request to the third-party host: that would leak operator IPs and break on referer checks. Reuse the existing image safety gates (magic-number check, decompression limits) — do not relax them for thumbnails.
-3. Wire a cover into the candidate list payload (`candidate_summary` in `app/api/serializers.py` is the only place to add the field).
+### Next Phase: R4 (Activity Domain — Queue / Packaging / History, 3-4 person-days)
+See `DEVELOPMENT_PLAN.md` §3. In dependency order:
+1. **`/activity` with three tabs** (queue, packaging, history) replacing `/downloads` and `/downloads/history`. Use the `tabs` macro; add the third `NavItem` child.
+2. **Remove `<meta http-equiv="refresh">`** in favour of 2s polling while visible, paused while hidden, plus SSE push on completion. The refresh tag is why the page currently jumps.
+3. **Group the queue** into in-progress / waiting / needs-intervention / paused, with bulk pause/resume/cancel/retry/switch-source through the existing `/api/v1` write endpoints.
+4. **Separate packaging from download tasks** in both the view and the API — `provider='CONVERSION'` currently shares the queue and confuses both.
+5. **Surface needs-intervention items** (missing volume, missing password, missing preview pages, stalled torrent) at the top of the page and on the dashboard.
+6. **Queue priority adjustment**, which is the first writer for the `priority` column R2 added.
 
-Acceptance: cache hit/miss behaviour covered by tests, cache headers set, a missing or malformed upstream image degrades to a placeholder rather than a broken page, and the full suite is still green.
+Acceptance: progress updates in place without the page jumping; a backend completion is reflected within a second; bulk actions are idempotent; a stalled torrent is not judged a failure.
+
+Note: the packaging queue has **no SSE `notify` hook** — only the download worker publishes. R4 needs to add one, in `_process_one` style at a single point rather than per terminal branch.
 
 ### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is 2071 lines, not the planned <500.** The read/write API and orchestration are extracted; the 59 legacy HTML routes remain. They move per-domain in R4-R8, as each one's replacement page lands, and R9 verifies the line count. Splitting them now would migrate every route twice.
-- `GET /api/v1/library` and `GET/PUT /api/v1/settings/{section}` are unimplemented — they need the R2 tables and the R8 settings grouping.
-- Conversion and connection transitions do not publish SSE events. Only the download worker has a `notify` hook; the packaging queue gets one when R4 renders it.
-- `CONVERSION_STATE_{PENDING,RUNNING,COMPLETED,FAILED}` are imported but unused in `app/main.py`. This predates the refactor (verified against `HEAD`), so it was left alone rather than mixed into an unrelated change.
+- **`main.py` is ~2100 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R4-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
+- **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan — see the R2 scope note. `GET/PUT /api/v1/settings/{section}` is still pending and needs the R8 settings grouping.
+- **`dashboard.html:30` maps connection state to Chinese inline.** Fix it while rewriting the dashboard, not before; see "Deferred From R3".
+- Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".
+- Conversion and connection transitions do not publish SSE events.
+- `CONVERSION_STATE_{PENDING,RUNNING,COMPLETED,FAILED}` are imported but unused in `app/main.py`. This predates the refactor (verified against `HEAD`).
 - Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration.
 
 ### Invariants No Phase May Break
@@ -1366,5 +1524,7 @@ These are business rules, not preferences. Several have tests locking them:
 - A stalled torrent is not a failure; `WAITING_TORRENT` shows the stall duration and waits for a decision.
 - Packaging is an explicit decision; `auto_pack_after_download` and `torrent_auto_pack` default to off.
 - Credentials are never stored in plaintext, never echoed back to a page, never logged.
-- Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened.
+- Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened. The thumbnail proxy is inside this rule: it reuses the telegraph SSRF guard and the shared `looks_like_image` gate, and must never accept a caller-supplied URL.
 - Idempotency: retries reuse the same job row and increment `attempt_count`.
+- **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it.
+- **One navigation source, one current-page marker, one state vocabulary, one authoritative stylesheet.** R3 established these; each is one careless template away from being two again.

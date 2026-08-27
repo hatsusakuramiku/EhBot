@@ -442,3 +442,62 @@ async def test_failed_job_stays_visible_on_the_dashboard(tmp_path: Path) -> None
     assert listed[0].is_retryable is True
     assert listed[0].is_cancellable is True
     assert listed[0].is_pausable is False
+
+
+def enqueue_raw(
+    database: Database, candidate_id: int, key: str, priority: int
+) -> int:
+    """Insert a queued Telegram job directly, so only the ordering is tested."""
+    with database._connect() as connection:  # noqa: SLF001
+        cursor = connection.execute(
+            "INSERT INTO download_jobs (candidate_id, idempotency_key, "
+            "provider, state, priority, details_json) "
+            "VALUES (?, ?, 'TELEGRAM', ?, ?, '{}')",
+            (candidate_id, key, DOWNLOAD_STATE_PENDING, priority),
+        )
+    return int(cursor.lastrowid)
+
+
+@pytest.mark.asyncio
+async def test_the_queue_is_fifo_within_one_priority(tmp_path: Path) -> None:
+    """Default priority must leave the existing behaviour untouched.
+
+    Every job before this column existed is now priority 100, so if the sort
+    were on `priority` alone the queue order would become arbitrary.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    service = DownloadService(database, tmp_path / "work")
+    first = enqueue_raw(database, candidate_id, "a", 100)
+    second = enqueue_raw(database, candidate_id, "b", 100)
+
+    claimed = [
+        service._claim_pending_job_sync()["job_id"]  # noqa: SLF001
+        for _ in range(2)
+    ]
+
+    assert claimed == [first, second]
+
+
+@pytest.mark.asyncio
+async def test_a_lower_priority_value_is_claimed_first(tmp_path: Path) -> None:
+    """Promotion reorders one job and nothing else.
+
+    The urgent job was enqueued last, so an `id`-only sort would have run it
+    third; the two default-priority jobs must still come out in FIFO order
+    behind it.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    service = DownloadService(database, tmp_path / "work")
+    normal = enqueue_raw(database, candidate_id, "a", 100)
+    later = enqueue_raw(database, candidate_id, "b", 100)
+    urgent = enqueue_raw(database, candidate_id, "c", 10)
+
+    claimed = [
+        service._claim_pending_job_sync()["job_id"]  # noqa: SLF001
+        for _ in range(3)
+    ]
+
+    assert claimed == [urgent, normal, later]
+    assert service._claim_pending_job_sync() is None  # noqa: SLF001
