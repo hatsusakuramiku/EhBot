@@ -126,6 +126,18 @@ def conversion_service(request: Request) -> Any:
     return _service(request, "conversion_service", "Conversion is unavailable")
 
 
+def archived_work_service(request: Request) -> Any:
+    """The 已下载内容 service: remove, rename and re-download.
+
+    Separate from `download_service` because it is a separate object:
+    the queue service owns tasks in flight, this one owns works that
+    have finished, and only this one deletes files.
+    """
+    return _service(
+        request, "archived_work_service", "Downloaded content is unavailable"
+    )
+
+
 def archive_settings_service(request: Request) -> Any:
     return _service(
         request, "archive_settings_service", "Archive settings are unavailable"

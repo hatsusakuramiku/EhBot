@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from app.api.status import DOWNLOADED_PACK_STATUS, DOWNLOADED_TAB_STATUS
 from app.web import deps
 
 #: Every candidate state, in lifecycle order rather than dict order, so the
@@ -61,6 +62,14 @@ CONNECTION_STATES: tuple[str, ...] = (
     "awaiting_code",
     "awaiting_password",
 )
+
+#: The 已下载内容 packaging badges. Passed as resolved views rather than as codes
+#: because they are *derived* vocabulary -- `downloaded_pack_view` maps facts
+#: onto them and `status_view` cannot resolve them, so `badge_for` would render
+#: 「packing」 verbatim. Present here for the reason every other registry is: a
+#: test asserts each label in `status.py` reaches this page, which is what stops
+#: a card template from writing its own.
+DOWNLOADED_PACK_VIEWS = tuple(DOWNLOADED_PACK_STATUS.values())
 
 PROVIDERS: tuple[str, ...] = (
     "TELEGRAM",
@@ -186,10 +195,25 @@ def ui_kit_context() -> dict[str, Any]:
             {"key": "processing", "label": "处理中", "href": "#", "count": 5},
             {"key": "failed", "label": "失败", "href": "#", "count": 1},
         ],
+        # The 已下载内容 tabs, in the order the page declares them. Rendered
+        # through the same `ui.tabs` component as the candidate tabs, from the
+        # same registry the sidebar and the page title read.
+        "downloaded_tabs": [
+            {
+                "key": code,
+                "label": view.label,
+                "href": "#",
+                "count": count,
+            }
+            for (code, view), count in zip(
+                DOWNLOADED_TAB_STATUS.items(), (137, 9, 126, 1, 1)
+            )
+        ],
         "candidate_states": CANDIDATE_STATES,
         "job_states": JOB_STATES,
         "connection_states": CONNECTION_STATES,
         "providers": PROVIDERS,
+        "downloaded_pack_views": DOWNLOADED_PACK_VIEWS,
         "columns": TABLE_COLUMNS,
         "rows": _rows(),
         "cards": _cards(),

@@ -45,6 +45,7 @@ from app.candidates.ingestor import CandidateIngestor
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
 from app.conversion.service import ConversionService
+from app.downloads.archived import ArchivedWorkService
 from app.downloads.service import DownloadService
 from app.exhentai.service import ExHentaiService
 from app.exhentai.tagdb import TagTranslator
@@ -164,6 +165,7 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.connection_manager = None
     app.state.download_service = None
     app.state.conversion_service = None
+    app.state.archived_work_service = None
     app.state.archive_settings_service = None
     app.state.exhentai_service = None
     app.state.telegraph_service = None
@@ -459,6 +461,29 @@ def build_lifespan(
             )
             application.state.conversion_service = conversion_service
             await conversion_service.start()
+            # Built after the conversion service because re-download can chain
+            # into packaging, and it takes that entry point rather than
+            # importing it: the two services are constructed here in dependency
+            # order and nowhere else. It reads its roots through the archive
+            # settings service for the reason the packer does -- an operator who
+            # corrects a directory expects the next removal to validate against
+            # the new tree, not the one that was configured at startup.
+            application.state.archived_work_service = ArchivedWorkService(
+                database,
+                app_settings.library_path,
+                app_settings.work_path,
+                settings_service=archive_settings_service,
+                conversion_enqueue=conversion_service.enqueue_for_candidate,
+                # A removal, rename or re-download changes the download queue,
+                # so it announces on the download channel. Packaging chained off
+                # a re-download announces itself on the packaging channel from
+                # inside the conversion service.
+                notify=(
+                    lambda candidate_id: application.state.event_bus.publish(
+                        EVENT_DOWNLOAD, candidate_id=candidate_id
+                    )
+                ),
+            )
             tag_translator = None
             if app_settings.tag_translation_enabled:
                 tagdb_client = httpx.AsyncClient(

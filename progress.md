@@ -1887,7 +1887,7 @@ Both are locked by `tests/integration/markup.py`, and both fail *silently* -- th
 Everything else on the `EHBot.md` §8 list is satisfied and has a test naming it.
 
 ### Deliberately Not Built (Do Not Treat As Bugs)
-- **`GET /api/v1/library` will never exist.** The library domain (old R7) was deleted with the scope narrowing: this project ends at the archive.
+- **`GET /api/v1/library` will never exist under that name.** The library domain (old R7) was deleted with the scope narrowing on 2026-08-26 and partly restored on 2026-08-28 as the narrower 已下载内容 domain (R10): the endpoint is `GET /api/v1/downloaded`, there is still no `library_items` table, and there is still no reader, shelf grouping, import scan or CBZ-first-page cover.
 - **`PUT /api/v1/settings/{section}` was considered and refused.** Every settings write is a form POST with its own validation and refusal message; a JSON writer would be a second gate per section.
 - **Condition groups do not nest in the rule editor**, though `validate_rule_ast` accepts nested groups. A hand-written nested rule still evaluates and still renders its DSL.
 - **Theme and density are not stored server-side.** They describe one screen, not the deployment.
@@ -1907,7 +1907,7 @@ These are business rules, not preferences. Several have tests locking them:
 - Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened. The thumbnail proxy is inside this rule: it reuses the telegraph SSRF guard and the shared `looks_like_image` gate, and must never accept a caller-supplied URL.
 - Idempotency: retries reuse the same job row and increment `attempt_count`; a replayed bulk action changes nothing the first one did.
 - A destructive or GP-spending action takes two steps; a cheap one takes one. Adding a confirmation to every button is how the gate stops being read.
-- **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it.
+- **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it. R10 (2026-08-28) added exactly the operator-convenience items `EHBot.md` §1.3.1 names -- list, batch repack/remove/redownload, per-work rename -- and nothing past them.
 - **One navigation source, one current-page marker, one state vocabulary, one authoritative stylesheet.** R3 established these; each is one careless template away from being two again.
 
 
@@ -1962,3 +1962,116 @@ Bot API 的 20 MB `getFile` 上限挡住了上传者原档。上限在**协议**
 ### Open Items For The Next Agent
 - 用户账户没有做上传者删帖之外的进度上报：`download_media` 的 `progress_callback` 已接上但没写进 `details_json`，所以大文件在队列里只显示「进行中」而没有百分比。种子有百分比，这里是不一致的。
 - MTProto 也可以摄取消息（不只是下载），那会让 Bot 完全可选。刻意没做：Bot 的长轮询、`getUpdates` 去重与整条摄取链路都已在生产用了几个月。
+
+## Feature Session: 已下载内容 Domain (R10, 2026-08-28)
+
+### Scope
+「已完成的作品无法勾选、无法批量重新打包」。The operator asked for selection plus
+batch actions, then chose to restore the whole page from `EHBot.md` §1.3.1 rather
+than bolt checkboxes onto `/activity`'s history tab.
+
+This **overrides the 2026-08-26 scope narrowing** that deleted the library domain,
+so all three documents were changed rather than only the code: `EHBot.md` §4.5 is
+rewritten as a delivered section, `DEVELOPMENT_PLAN.md` gains an R10 phase and a
+「部分恢复」note under R2, and `AGENTS.md` no longer says the domain must not come
+back.
+
+What was restored is narrower than the old R7. Restored: the list (grid/list),
+five pack-state tabs, batch repack / remove / redownload, per-work rename and
+relocate. **Not** restored: `library_items` (the domain reads `download_jobs` +
+`artifacts`; a second table would be a second truth), CBZ-first-page covers (the
+candidate cover is reused -- extracting one means unpacking every book), reader,
+shelves, import scan. A work's detail page is still only `/works/{id}`.
+
+### Implementation
+- `app/db/migrations/014_downloaded_works.sql` — `artifacts.library_relative_path`
+  (nullable: NULL means「render from the template」, which is what every existing
+  row needs to keep doing) and `removed_works` (removal audit, including whether
+  the files went too).
+- `app/downloads/models.py` — `DownloadedWork` DTO. A *work*, not a job: it spans
+  the download that produced the archive and the packaging task that produced the
+  CBZ. `is_packaged` reads `cbz_path`, never a status column.
+- `app/db/database.py` — `DOWNLOADED_PACK_FILTERS` (whitelist), `_DOWNLOADED_SORTS`,
+  `_DOWNLOADED_SELECT` (one join, found by `idempotency_key = 'convert:{id}'`),
+  `list_downloaded_works`, `downloaded_work_counts`, `downloaded_work`.
+- `app/downloads/archived.py` (new) — `ArchivedWorkService`: `remove_work`,
+  `redownload_work`, `rename_work`, plus `_resolve_inside` and
+  `_prune_empty_parents`.
+- `app/conversion/service.py` — two changes, both fixing real bugs (below).
+- `app/api/status.py` — `DOWNLOADED_TAB_STATUS`, `DOWNLOADED_PACK_STATUS`,
+  `downloaded_tab_view` (raises), `downloaded_pack_view` (derives).
+- `app/api/serializers.py` — `downloaded_work`, including the `actions` policy.
+- `app/api/downloaded.py` (new) — `downloaded_snapshot`, `apply_downloaded_batch`,
+  `GET /downloaded`, `POST /downloaded/batch`.
+- `app/web/routes/downloaded.py` + `downloaded.html` + `downloaded.js` (new) — five
+  tab routes above the typed ones, a per-work repack and rename route, the batch
+  form, the rename drawer.
+- `app/wiring.py` / `app/main.py` / `app/api/v1.py` — construction after the
+  conversion service (re-download chains into packaging) and the two routers.
+- `app/web/routes/shell.py` — `NAV_ITEMS` gains the domain; five children, the
+  index one `exact=True`.
+- `app/web/routes/ui_kit.py` + `ui_kit.html` — both new registries render there.
+
+### Decisions And Their Reasoning
+1. **「删记录」与「删文件」是两个按钮、两个对话框。** `ui.confirm` is teleported out
+   of its form, so it can carry exactly one name/value pair; a checkbox would have
+   to be reconnected by hand and could be left in either state. Deleting files is
+   therefore its own *action name* (`remove-files`), which makes it impossible to
+   trigger by omission — and「默认不移除文件」is only true if the operator can see
+   which button they pressed.
+2. **A removal leaves an audit row.** `list_history_jobs` has always treated a
+   terminal job row as permanent, so deleting one silently would make the history
+   lie about its own completeness. The row cannot be a column on `download_jobs`:
+   that row is the thing being deleted.
+3. **The candidate survives a removal.** It is the work's identity, it carries the
+   metadata, and every `review_actions` row points at it. Removing downloaded
+   content means the download is gone, not that the book was never seen.
+4. **`downloaded_work` (single) deliberately does not filter `state = COMPLETED`,
+   while the list does.** A work being re-downloaded has last run's archive and a
+   PENDING job row. Filtering here would make the caller's「已有任务在进行」guard
+   unreachable and report `WORK_NOT_DOWNLOADED` — wrong and unactionable.
+5. **`live` is read off the resolved `pack` payload, never through `is_live()`.**
+   The pack codes are derived vocabulary and deliberately absent from
+   `_REGISTRIES`, so `is_live("packing")` is False and the page would never poll.
+6. **Every path is validated against the root it belongs to, resolved.** The CBZ
+   against the library, the archive against the work directory. The stored path is
+   not trusted even though this service wrote it: an old layout template, a
+   re-pointed library directory or an ExHentai artist name can all put a value
+   there that is outside the tree. A refused file is reported in `failed_files`
+   and the records still go — and the audit row's `deleted_files` stays 0, because
+   not everything the operator asked to delete was deleted.
+7. **`retry_job` could not serve re-download.** It refuses a COMPLETED job on
+   purpose: inside the queue, a completed download is done. Re-download resets the
+   same row (the key is UNIQUE per source, so a second row would split one book's
+   history) and increments `attempt_count`.
+8. **Rename is per-work, not batch.** A filename belongs to one book; a batch
+   rename would need a template, and the archive layout setting already is one.
+9. **The page adds no second approve/pack path.** Repack posts to
+   `enqueue_for_candidate`, the same entry point `/works/{id}` uses.
+
+### Bugs Found And Fixed In Existing Code
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| 对已打包作品点「重新打包」毫无反应，页面却报成功 | `_enqueue_sync` 的 UPDATE 只允许 `WAITING_VOLUMES`/`WAITING_PASSWORD` 重置为 PENDING；`ON CONFLICT DO NOTHING` 之后行仍是 COMPLETED，而 worker 只认领 PENDING | 允许 FAILED 与 COMPLETED 也重排，RUNNING 除外（worker 持有该行）。落回同一文件本已由 `_existing_cbz_paths_sync` 处理 |
+| 改名后重新打包会把书搬回模板位置，并在旁边生出 ` (2)` | `_library_target` 从不读 `artifacts.library_relative_path`，每次都重新渲染模板；`unique_library_target` 于是把操作员那份当成别人的书 | `_pinned_library_path_sync` 先读钉住的相对路径（绝对路径与 `..` 一律忽略并回落模板），读到就直接用 |
+
+### Error Log
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| 页面显示「打包中」但永不刷新 | 用 `is_live(pack_code)` 判断是否轮询，而派生词表不在 `_REGISTRIES` 里，恒为 False | 快照读 `item["pack"]["live"]`，徽章与轮询决定同源 |
+| `AttributeError: deps.page_params` | 该访问器不存在，凭印象写的 | 改用 `app.api.contracts.PageParams.clamp` |
+| 一个作品在 `remove_work` 里报 `WORK_NOT_DOWNLOADED` 而不是「仍在下载」 | `downloaded_work` 当时也过滤了 `state = COMPLETED`，守卫不可达 | 单件查询去掉状态过滤，状态随 DTO 传给调用方判断 |
+| `sqlite3.OperationalError: no column named source` | 测试里凭印象写 `metadata_values.source` | 真实列名是 `value_source`；补 `is_manual` 才能让标题被 `_DOWNLOADED_SELECT` 的 `ORDER BY is_manual DESC` 选中 |
+| 「文件已被手工删掉」的测试断言少了一个路径 | 服务把 `FileNotFoundError` 视为已达目标并计入 `deleted_files`，测试却以为它会被跳过 | 断言改为两个文件都在 `deleted_files` 里，并额外断言审计行仍为 1 —— 那才是它要表达的语义 |
+| `test_database.py` 断言迁移数为 13 | 新增 014 | 改为 14，并把两处新结构（列与表）也断言进去 |
+
+### Verification
+✅ **939 passed / 0 failed**（+73；无真实 7-Zip 工具链的主机为 927 passed / 12 skipped）。
+新增 `tests/unit/test_archived_works.py` 22、`tests/unit/test_downloaded_api.py` 29、
+`tests/integration/test_downloaded_web.py` 20，`test_archive_workflow.py` +2（钉住路径与越界回落），
+`test_database.py` 迁移断言更新。
+
+### Open Items For The Next Agent
+- **重新下载不会自动重新打包**，即使勾了「下载后重新打包」：`redownload_work` 只是把打包任务一并排进队列，真正的先后由 worker 决定——打包任务读 ARCHIVE 产物，而下载完成时会重写那一行。若要严格保证顺序，得让下载完成回调去触发打包，而不是提前排队。
+- **`downloaded.js` 只 patch 打包徽章与错误行**，不建行；发现未知作品时显示变更通知。作品**消失**（被别处移除）时同样只提示，不删行。
+- **`app/db/database.py:1348` 用 `str(row[3])` 无条件转换**，`filter_result`/`filter_reason` 为 NULL 时 `/works/{id}` 会显示字面 `None`。与本次改动无关，已向操作者提过，未获指示，未动。

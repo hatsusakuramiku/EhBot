@@ -56,7 +56,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(thumbnails)")
         }
 
-    assert migration_count == 13
+    assert migration_count == 14
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -89,6 +89,13 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     assert "is_locked" in metadata_columns
     assert "priority" in download_job_columns
     assert "page_count" in artifact_columns
+    # Migration 014: the 已下载内容 domain. `library_relative_path` is where a
+    # repack has to land once the operator has renamed or moved the book, and
+    # `removed_works` is why a removal is recorded rather than only performed --
+    # deleting a terminal job row would otherwise make the history lie about its
+    # own completeness.
+    assert "library_relative_path" in artifact_columns
+    assert "removed_works" in tables
     assert {
         "hash",
         "kind",

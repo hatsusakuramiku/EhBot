@@ -18,6 +18,14 @@ from app.candidates.models import (
     TelegramSourceConfig,
 )
 from app.candidates.rules import evaluate_metadata_rules
+from app.downloads.models import (
+    CONVERSION_STATE_FAILED,
+    CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_VOLUMES,
+    DOWNLOAD_STATE_COMPLETED,
+    PROVIDER_CONVERSION,
+    DownloadedWork,
+)
 
 from app.review.models import MetadataEntry, ReviewActionEntry
 
@@ -75,6 +83,111 @@ _CANDIDATE_LIST_SELECT = (
     "FROM candidates c LEFT JOIN candidate_messages cm "
     "ON cm.candidate_id = c.id"
 )
+
+
+#: Which packaging outcome the 已下载内容 page is showing. Also the whitelist:
+#: `list_downloaded_works` refuses a name that is not here rather than letting a
+#: query-string value decide a WHERE clause.
+DOWNLOADED_PACK_FILTERS: tuple[str, ...] = (
+    "all",
+    "unpacked",
+    "packed",
+    "attention",
+    "failed",
+)
+
+#: Packing states that are waiting on the operator rather than failing. They get
+#: their own filter because the remedy differs -- supply a password or the
+#: missing volume, then requeue the same task.
+_DOWNLOADED_ATTENTION_STATES: tuple[str, ...] = (
+    CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_VOLUMES,
+)
+
+#: Whitelisted sorts, for the reason `_CANDIDATE_SORTS` is: nothing outside this
+#: table may reach the ORDER BY text.
+_DOWNLOADED_SORTS: dict[str, str] = {
+    "newest": "job_id DESC",
+    "oldest": "job_id ASC",
+    "title": "title_value IS NULL, title_value COLLATE NOCASE ASC, job_id DESC",
+    "largest": "archive_size IS NULL, archive_size DESC, job_id DESC",
+}
+
+#: The download-plus-packaging join every downloaded-works query reads.
+#:
+#: The packaging task is found by `idempotency_key = 'convert:{candidate_id}'`
+#: rather than by provider-and-candidate, because that key is what
+#: `ConversionService` guarantees is unique per work -- matching on the provider
+#: would need an aggregate to pick one of several rows and could pair a book with
+#: a different attempt's error.
+#:
+#: `LEFT JOIN` on both artifacts: a work with no CBZ yet is precisely what the
+#: 待打包 filter is for, so an inner join would hide the rows the page exists to
+#: show.
+_DOWNLOADED_SELECT = (
+    "SELECT c.id, dj.id AS job_id, dj.provider, dj.state, "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) AS title_value, "
+    "arch.path, arch.size_bytes AS archive_size, "
+    "pack.id AS pack_job_id, pack.state AS pack_state, "
+    "pack.error_code, pack.error_message, "
+    "cbz.path AS cbz_path, cbz.size_bytes, cbz.page_count, "
+    "cbz.library_relative_path, "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Artist' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Category' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "c.thumb_url, dj.updated_at "
+    "FROM download_jobs dj "
+    "JOIN candidates c ON c.id = dj.candidate_id "
+    "LEFT JOIN artifacts arch "
+    "  ON arch.job_id = dj.id AND arch.artifact_type = 'ARCHIVE' "
+    "LEFT JOIN download_jobs pack "
+    "  ON pack.idempotency_key = 'convert:' || c.id "
+    "LEFT JOIN artifacts cbz "
+    "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ'"
+)
+
+
+def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
+    """Map a `_DOWNLOADED_SELECT` row onto the list DTO."""
+
+    def text(index: int) -> str | None:
+        value = row[index]
+        return str(value) if value is not None else None
+
+    def number(index: int) -> int | None:
+        value = row[index]
+        return int(value) if value is not None else None
+
+    return DownloadedWork(
+        candidate_id=int(row[0]),
+        job_id=int(row[1]),
+        provider=str(row[2]),
+        state=str(row[3]),
+        title=text(4),
+        archive_path=text(5),
+        archive_size=number(6),
+        pack_job_id=number(7),
+        pack_state=text(8),
+        pack_error_code=text(9),
+        pack_error_message=text(10),
+        cbz_path=text(11),
+        cbz_size=number(12),
+        page_count=number(13),
+        library_relative_path=text(14),
+        artist=text(15),
+        category=text(16),
+        language=text(17),
+        thumb_url=text(18),
+        updated_at=str(row[19]) if row[19] is not None else "",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1238,6 +1351,160 @@ class Database:
             if key is not None:
                 counts[key] = int(count)
         return counts
+
+    async def list_downloaded_works(
+        self,
+        *,
+        search: str | None = None,
+        pack_filter: str = "all",
+        sort: str = "newest",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[DownloadedWork], int]:
+        """One page of downloaded works plus the unpaged total.
+
+        A work here is a candidate with a COMPLETED download that produced an
+        ARCHIVE artifact -- that is what「已下载」means, and it is also exactly
+        what packaging can act on. The packaging task is joined in rather than
+        fetched per row, so a page of fifty is two queries instead of fifty-one.
+
+        `pack_filter` groups by packaging outcome because that is the axis this
+        page exists for: an operator comes here to find what still needs packing
+        or what failed, not to browse. An unknown value raises for the same
+        reason an unknown facet does -- a silently ignored filter shows more rows
+        than were asked for and looks like the filter working.
+        """
+        if pack_filter not in DOWNLOADED_PACK_FILTERS:
+            raise ValueError(f"unknown pack filter: {pack_filter}")
+        return await asyncio.to_thread(
+            self._list_downloaded_works_sync,
+            (search or "").strip(),
+            pack_filter,
+            sort,
+            offset,
+            limit,
+        )
+
+    def _list_downloaded_works_sync(
+        self,
+        search: str,
+        pack_filter: str,
+        sort: str,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[DownloadedWork], int]:
+        where = [
+            "dj.state = ?",
+            "dj.provider <> ?",
+            "arch.path IS NOT NULL",
+        ]
+        params: list[object] = [
+            DOWNLOAD_STATE_COMPLETED,
+            PROVIDER_CONVERSION,
+        ]
+        if search:
+            where.append(
+                "EXISTS (SELECT 1 FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id "
+                "   AND mv.field_name IN "
+                "       ('Title', 'JapaneseTitle', 'Artist', 'Group', "
+                "        'Tags', 'TagsRaw') "
+                "   AND mv.field_value LIKE ? ESCAPE '\\')"
+            )
+            params.append(f"%{_escape_like(search)}%")
+        # Each filter is expressed against the CBZ artifact or the packing job's
+        # state, never against the candidate's status: packaging leaves the
+        # status alone, so the status cannot answer「打好包了吗」.
+        if pack_filter == "packed":
+            where.append("cbz.path IS NOT NULL")
+        elif pack_filter == "unpacked":
+            where.append("cbz.path IS NULL AND pack.state IS NULL")
+        elif pack_filter == "failed":
+            where.append("pack.state = ?")
+            params.append(CONVERSION_STATE_FAILED)
+        elif pack_filter == "attention":
+            placeholders = ", ".join("?" for _ in _DOWNLOADED_ATTENTION_STATES)
+            where.append(f"pack.state IN ({placeholders})")
+            params.extend(_DOWNLOADED_ATTENTION_STATES)
+
+        clause = " AND ".join(where)
+        order = _DOWNLOADED_SORTS.get(sort, _DOWNLOADED_SORTS["newest"])
+        with self._connect() as connection:
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM ({_DOWNLOADED_SELECT} WHERE {clause})",
+                    tuple(params),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"{_DOWNLOADED_SELECT} WHERE {clause} "
+                f"ORDER BY {order} LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [_downloaded_work(row) for row in rows], total
+
+    async def downloaded_work_counts(self) -> dict[str, int]:
+        """One count per pack filter, for the tab strip.
+
+        Every filter is counted in one pass over the same join the list uses, so
+        a badge cannot claim a number the list will not produce.
+        """
+        return await asyncio.to_thread(self._downloaded_work_counts_sync)
+
+    def _downloaded_work_counts_sync(self) -> dict[str, int]:
+        attention = ", ".join("?" for _ in _DOWNLOADED_ATTENTION_STATES)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN cbz_path IS NOT NULL THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN cbz_path IS NULL AND pack_state IS NULL "
+                "         THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN pack_state = ? THEN 1 ELSE 0 END), "
+                f"SUM(CASE WHEN pack_state IN ({attention}) THEN 1 ELSE 0 END) "
+                f"FROM ({_DOWNLOADED_SELECT} WHERE dj.state = ? "
+                "       AND dj.provider <> ? AND arch.path IS NOT NULL)",
+                (
+                    CONVERSION_STATE_FAILED,
+                    *_DOWNLOADED_ATTENTION_STATES,
+                    DOWNLOAD_STATE_COMPLETED,
+                    PROVIDER_CONVERSION,
+                ),
+            ).fetchone()
+        return {
+            "all": int(row[0] or 0),
+            "packed": int(row[1] or 0),
+            "unpacked": int(row[2] or 0),
+            "failed": int(row[3] or 0),
+            "attention": int(row[4] or 0),
+        }
+
+    async def downloaded_work(self, candidate_id: int) -> DownloadedWork | None:
+        """One work that has produced an archive, or None.
+
+        Used by the action paths, which need the current paths and the packing
+        state before they delete, rename or requeue anything.
+
+        Deliberately *not* filtered on `state = COMPLETED`, unlike the list: a
+        work being re-downloaded has an archive from its previous run and a job
+        row that is PENDING again, and it must still be found. Filtering here
+        would make it invisible, and the caller's「已有任务在进行」guard would be
+        unreachable -- the operator would be told the work has no archive, which
+        is both wrong and unactionable. The state travels on the DTO so the
+        caller decides what to do about it.
+        """
+        return await asyncio.to_thread(
+            self._downloaded_work_sync, int(candidate_id)
+        )
+
+    def _downloaded_work_sync(self, candidate_id: int) -> DownloadedWork | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"{_DOWNLOADED_SELECT} WHERE dj.provider <> ? "
+                "  AND arch.path IS NOT NULL "
+                "  AND c.id = ? ORDER BY dj.id DESC LIMIT 1",
+                (PROVIDER_CONVERSION, candidate_id),
+            ).fetchone()
+        return _downloaded_work(row) if row is not None else None
 
     async def candidate_facets(
         self, *, statuses: Sequence[str] | None = None

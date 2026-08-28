@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.downloads.models import (
+    CONVERSION_STATE_RUNNING,
+    OPEN_DOWNLOAD_STATES,
+)
 from app.api.status import (
+    downloaded_pack_view,
     NOTE_SEEDING,
     actor_view,
     attention_view,
@@ -314,6 +319,67 @@ def job_summary(job: Any) -> dict[str, Any]:
     }
 
 
+def downloaded_work(work: Any) -> dict[str, Any]:
+    """One downloaded work as the 已下载内容 page and its endpoint show it.
+
+    `pack` is resolved here rather than in the template for the reason every
+    other badge is: the grid, the list and a JSON client must describe a book
+    identically, and a page that decided「已打包」for itself could pair one
+    state's word with another's colour.
+
+    `actions` is policy, and it belongs beside the state it is derived from. The
+    rules, each earned:
+
+    * **repack** needs an archive to unpack, which every row here has by
+      construction -- so it is offered on an unpacked book (as 打包) and on a
+      packaged one (as 重新打包). It is withheld only while the packer holds the
+      row.
+    * **remove** and **redownload** are withheld while anything is in flight,
+      because both would race the worker that owns the job.
+    * **rename** needs a CBZ to move; an unpacked work has no published file
+      whose name could be changed.
+    """
+    in_flight = work.state in OPEN_DOWNLOAD_STATES
+    packing = work.pack_state == CONVERSION_STATE_RUNNING
+    return {
+        "candidate_id": work.candidate_id,
+        "job_id": work.job_id,
+        "provider": {
+            "code": work.provider,
+            "label": provider_label(work.provider),
+        },
+        "state": status_payload(work.state),
+        "pack": downloaded_pack_view(
+            has_cbz=work.is_packaged, pack_state=work.pack_state
+        ).to_payload(),
+        "pack_job_id": work.pack_job_id,
+        "pack_error_message": work.pack_error_message,
+        "title": work.title,
+        "artist": work.artist,
+        "category": work.category,
+        "language": work.language,
+        "archive_path": work.archive_path,
+        "archive_size": work.archive_size,
+        "cbz_path": work.cbz_path,
+        "cbz_size": work.cbz_size,
+        "page_count": work.page_count,
+        # Present only once the operator has moved the book, and the reason a
+        # later repack lands on their path rather than a re-derived one.
+        "library_relative_path": work.library_relative_path,
+        "cover": _cover(getattr(work, "thumb_url", None)),
+        "updated_at": work.updated_at,
+        "actions": {
+            "repack": not packing,
+            "remove": not in_flight and not packing,
+            "redownload": not in_flight and not packing,
+            "rename": work.is_packaged and not packing,
+        },
+        # The one detail page for a work at any stage, handed over rather than
+        # rebuilt by each caller.
+        "href": f"/works/{work.candidate_id}",
+    }
+
+
 def provider_connection(status: Any) -> dict[str, Any]:
     """One external connection's health."""
     view = connection_view(status.state)
@@ -480,6 +546,7 @@ __all__ = [
     "connection_snapshot",
     "job_summary",
     "metadata_entry",
+    "downloaded_work",
     "provider_connection",
     "queue_group_payload",
     "review_action",

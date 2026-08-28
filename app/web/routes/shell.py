@@ -36,6 +36,7 @@ from app.api.status import (
     SETTINGS_SOURCES,
     SETTINGS_SYSTEM,
     candidate_tab_view,
+    downloaded_tab_view,
     settings_section_view,
 )
 
@@ -117,9 +118,13 @@ class NavItem:
         return not self.children and self.matches(current_path)
 
 
-#: The four domains from the refactor spec, each carrying the legacy pages it
-#: will absorb. The 书库 domain that once sat between 活动 and 设置 was deleted
-#: on 2026-08-26: this project's scope ends at the archive.
+#: The five domains, each carrying the pages it absorbed. 已下载 sits between
+#: 活动 and 设置: it was cut on 2026-08-26 as「书库纳管」and reinstated on
+#: 2026-08-28 by operator instruction, scoped to what §1.3.1 of the requirements
+#: document actually asks for -- listing what has been downloaded and acting on
+#: it (pack, re-pack, rename, relocate, remove, re-download). It is deliberately
+#: *not* a reader or a catalogue: no shelves, no reading progress, no import
+#: scan. Those remain out of scope.
 NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("dashboard", "工作台", "工作台", "/", "/", icon="◉"),
     NavItem(
@@ -210,6 +215,60 @@ NAV_ITEMS: tuple[NavItem, ...] = (
             NavItem(
                 "history", "历史", "历史",
                 "/activity/history", "/activity/history",
+            ),
+        ),
+    ),
+    NavItem(
+        "downloaded",
+        "已下载",
+        "已下载",
+        "/downloaded",
+        "/downloaded",
+        icon="▣",
+        children=(
+            #: The five tabs, named by `downloaded_tab_view` rather than by a
+            #: string typed here, for the reason the candidate tabs are: the
+            #: sidebar entry, the tab strip and the JSON payload must be one
+            #: vocabulary.
+            #:
+            #: 全部 is the index child because `/downloaded` renders it, so it is
+            #: the one that gives up prefix matching -- otherwise it would
+            #: prefix-match every sibling.
+            NavItem(
+                "downloaded_all",
+                downloaded_tab_view("all").label,
+                downloaded_tab_view("all").label,
+                "/downloaded",
+                "/downloaded",
+                exact=True,
+            ),
+            NavItem(
+                "downloaded_unpacked",
+                downloaded_tab_view("unpacked").label,
+                downloaded_tab_view("unpacked").label,
+                "/downloaded/unpacked",
+                "/downloaded/unpacked",
+            ),
+            NavItem(
+                "downloaded_packed",
+                downloaded_tab_view("packed").label,
+                downloaded_tab_view("packed").label,
+                "/downloaded/packed",
+                "/downloaded/packed",
+            ),
+            NavItem(
+                "downloaded_attention",
+                downloaded_tab_view("attention").label,
+                downloaded_tab_view("attention").label,
+                "/downloaded/attention",
+                "/downloaded/attention",
+            ),
+            NavItem(
+                "downloaded_failed",
+                downloaded_tab_view("failed").label,
+                downloaded_tab_view("failed").label,
+                "/downloaded/failed",
+                "/downloaded/failed",
             ),
         ),
     ),

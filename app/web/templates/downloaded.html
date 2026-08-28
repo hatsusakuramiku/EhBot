@@ -1,0 +1,295 @@
+{#
+  The 已下载内容 domain (§1.3.1): what has finished downloading, and what the
+  operator can still do with it.
+
+  Restores the page cut on 2026-08-26 and reinstated on 2026-08-28 by operator
+  instruction. Built against `/candidates` rather than freehand, so the two
+  grids behave identically: whole state in the query string, grid and list as
+  two renderings of one selection form, real forms underneath.
+
+  Three rules this file follows:
+
+  * No state word is written here. 「已打包」/「待打包」/「需干预」 all arrive as
+    resolved `StatusView` payloads through `ui.badge`, so this page and
+    `GET /api/v1/downloaded` cannot disagree, and a template can never pair one
+    state's label with another's colour.
+  * Every row action is a `<button formaction="...">`, never a nested form. Each
+    row lives inside the batch form and HTML does not nest forms -- a `<form>`
+    start tag inside another is *ignored*, which would leave every one of these
+    buttons submitting the batch with no action. That shipped broken once on
+    `/activity`; `tests/integration/markup.py` now parses for it.
+  * 移除 asks first, and asks twice over: the records-only variant and the
+    delete-the-files variant are two separate confirmations with two different
+    bodies, because 「默认不移除文件」 is only true if the operator can see which
+    one they picked.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}{{ tab_title }} · 已下载 · EhBot{% endblock %}
+
+{% block content_class %}ui-content{% endblock %}
+
+{%- macro work_meta(item) -%}
+  {{- [item.artist, item.category, item.language] | select | join(" · ") -}}
+{%- endmacro %}
+
+{%- macro size_text(value) -%}
+  {#- Rendered here rather than in Python because it is presentation, and the
+      payload carries the exact byte count for anything that needs it. -#}
+  {%- if value is none -%}—
+  {%- elif value >= 1073741824 -%}{{ (value / 1073741824) | round(1) }} GB
+  {%- elif value >= 1048576 -%}{{ (value / 1048576) | round(1) }} MB
+  {%- elif value >= 1024 -%}{{ (value / 1024) | round(0) | int }} KB
+  {%- else -%}{{ value }} B
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro work_actions(item) -%}
+  {%- set base = "/downloaded/" ~ item.candidate_id -%}
+  <div class="ui-row-actions">
+    {% if item.actions.repack %}
+    {#- One button, two labels: an unpacked work is being packed for the first
+        time, a packaged one is being re-packed over its own file. Same endpoint
+        either way -- `enqueue_for_candidate` is idempotent per work. Not gated
+        behind a dialog: it costs CPU and replaces a file the operator asked to
+        replace, and a confirmation on every button is how they learn to dismiss
+        them unread. -#}
+    <button class="ui-btn" data-size="sm" type="submit"
+            formaction="{{ base }}/repack">{{ "重新打包" if item.pack.code == "packed" else "打包" }}</button>
+    {% endif %}
+    {% if item.actions.rename %}
+    {#- Hidden until `downloaded.js` runs: the rename drawer is the one control
+        here that cannot work without it, and a dead button is worse than none. -#}
+    <button class="ui-btn" data-size="sm" data-variant="ghost" type="button"
+            data-rename-open="{{ item.candidate_id }}"
+            data-rename-name="{{ item.cbz_path or '' }}"
+            data-rename-relative="{{ item.library_relative_path or '' }}"
+            data-rename-title="{{ item.title or '' }}" hidden>改名/移动</button>
+    {% endif %}
+    <a class="ui-btn" data-size="sm" data-variant="ghost" href="{{ item.href }}">详情</a>
+  </div>
+{%- endmacro %}
+
+{% macro work_row(item) -%}
+  <tr data-work-id="{{ item.candidate_id }}">
+    <td data-label="选择">
+      <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ item.candidate_id }}"
+             aria-label="选择「{{ item.title or '未命名作品' }}」">
+    </td>
+    <td data-label="作品">
+      <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名作品" }}</a></span>
+      {%- set meta = work_meta(item) -%}
+      {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
+      {% if item.pack_error_message %}
+      <span class="ui-table-secondary" data-field="pack-error">{{ item.pack_error_message }}</span>
+      {% endif %}
+    </td>
+    <td data-label="打包"><span data-field="pack">{{ ui.badge(item.pack) }}</span></td>
+    <td data-label="来源">{{ item.provider.label }}</td>
+    <td data-label="页数" data-numeric="true">{{ item.page_count if item.page_count is not none else "—" }}</td>
+    <td data-label="大小" data-numeric="true">{{ size_text(item.cbz_size or item.archive_size) }}</td>
+    <td data-label="归档路径">
+      {% if item.library_relative_path %}
+      {#- Shown in preference to the absolute path: it is what the operator set,
+          and it is what a later repack will land on. -#}
+      <span class="ui-table-secondary">{{ item.library_relative_path }}</span>
+      {% elif item.cbz_path %}
+      <span class="ui-table-secondary">{{ item.cbz_path }}</span>
+      {% else %}<span class="ui-table-secondary">尚未打包</span>{% endif %}
+    </td>
+    <td data-label="操作">{{ work_actions(item) }}</td>
+  </tr>
+{%- endmacro %}
+
+{% block content %}
+<header class="ui-page-head">
+  <div>
+    <p class="ui-eyebrow">已下载</p>
+    <h1 class="ui-title">{{ tab_title }}</h1>
+    <p class="ui-subtitle">{{ tab_description }}</p>
+  </div>
+</header>
+
+{{ ui.tabs(tabs, tab, "已下载分区") }}
+
+{% if error %}
+{{ ui.callout(error, tone="danger", role="alert") }}
+{% endif %}
+{% if notice %}
+{{ ui.callout(notice, tone="success") }}
+{% endif %}
+
+<div class="ui-filter-layout">
+  <form class="ui-filters" id="downloaded-filters" method="get" action="{{ tab_href }}">
+    <input type="hidden" name="view" value="{{ view }}">
+    <div class="ui-field">
+      <label for="downloaded-search">搜索</label>
+      <input class="ui-input" id="downloaded-search" name="search" type="search"
+             value="{{ search }}" placeholder="标题、作者或标签">
+    </div>
+    <div class="ui-field">
+      <label for="downloaded-sort">排序</label>
+      <select class="ui-select" id="downloaded-sort" name="sort" data-autosubmit>
+        {% for option in sorts %}
+        <option value="{{ option.key }}" {% if option.key == sort %}selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="ui-row-actions">
+      <button class="ui-btn" data-variant="primary" data-size="sm" type="submit">应用</button>
+      {% if search or sort != "newest" %}
+      <a class="ui-btn" data-size="sm" href="{{ tab_href }}">清除</a>
+      {% endif %}
+    </div>
+  </form>
+
+  <div>
+    <div class="ui-table-toolbar">
+      <span class="ui-hint" style="margin: 0">共 {{ total }} 件作品</span>
+      <div class="ui-segmented" role="group" aria-label="视图">
+        <a href="{{ grid_href }}" aria-pressed="{{ 'true' if view == 'grid' else 'false' }}">封面</a>
+        <a href="{{ list_href }}" aria-pressed="{{ 'true' if view == 'list' else 'false' }}">列表</a>
+      </div>
+      {% if works %}
+      <div class="ui-row-actions" data-select-tools hidden>
+        <button class="ui-btn" data-size="sm" type="button" data-select="all">全选</button>
+        <button class="ui-btn" data-size="sm" type="button" data-select="invert">反选</button>
+        <button class="ui-btn" data-size="sm" type="button" data-select="none">清空</button>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if works %}
+    <form data-downloaded-form id="downloaded-batch" method="post" action="/downloaded/batch"
+          x-data="{ selected: 0 }"
+          @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="tab" value="{{ tab }}">
+
+      {% if view == "list" %}
+      {% call ui.table(columns, caption=tab_title) %}
+        {% for item in works %}{{ work_row(item) }}{% endfor %}
+      {% endcall %}
+      {% else %}
+      <div class="ui-cover-grid">
+        {% for item in works %}
+        <div data-work-id="{{ item.candidate_id }}">
+          {% call ui.cover_card(
+                item.title or "未命名作品",
+                href=item.href,
+                cover=item.cover,
+                meta=work_meta(item),
+                status=item.pack,
+                selectable=true,
+                value=item.candidate_id) %}
+            {{ work_actions(item) }}
+          {% endcall %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <div x-show="selected > 0" x-cloak>
+        {% call ui.bulk_toolbar(0, total=total, noun="件作品", count_binding="selected") %}
+          <button class="ui-btn" data-variant="primary" data-size="sm" type="submit"
+                  name="action" value="repack">批量打包</button>
+          {#- Re-download replaces the file on disk, which is destructive to
+              whatever is there now, so it asks. It does not spend GP by itself:
+              the source is whichever one produced the archive. -#}
+          {{ ui.confirm("批量重新下载", "重新下载选中的作品",
+                        "会按原来源重新抓取一遍，下载完成后覆盖现有文件；原任务记录会复用并累加尝试次数。打包不会自动重跑，需要时可在下载完成后手动打包。",
+                        confirm_label="确认重新下载", form="downloaded-batch",
+                        field="action", value="redownload", variant=None, size="sm") }}
+          {#- The two removals. Split into two dialogs rather than one dialog
+              with a checkbox, because a checkbox inside a teleported dialog
+              would have to be reconnected to this form by hand and could be
+              left in either state -- while the whole point of
+              「默认不移除文件」 is that the safe one is what happens unless the
+              operator deliberately says otherwise. Two buttons make the choice
+              legible in the button they pressed. -#}
+          {{ ui.confirm("移除记录", "移除选中作品的记录",
+                        "只删除下载与打包记录，磁盘上已归档的 CBZ 与原始压缩包都会保留；候选与元数据不受影响，需要时可重新下载。",
+                        confirm_label="确认移除记录", form="downloaded-batch",
+                        field="action", value="remove", size="sm") }}
+          {{ ui.confirm("移除并删除文件", "移除记录并删除文件",
+                        "除记录外，还会删除已归档的 CBZ 与原始压缩包，此操作不可恢复。候选与元数据会保留，但需要重新下载才能再次打包。",
+                        confirm_label="确认删除文件", form="downloaded-batch",
+                        field="action", value="remove-files", size="sm") }}
+        {% endcall %}
+      </div>
+    </form>
+
+    {{ ui.pagination(page, page_size, total, prev_href=prev_href, next_href=next_href) }}
+    {% else %}
+    {% if search %}
+    {{ ui.empty_state("没有符合条件的作品", "换个关键词，或清除搜索条件后重试") }}
+    {% else %}
+    {{ ui.empty_state(empty_title, empty_hint) }}
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#- The rename drawer. Its form is inside a `<template>`, which is what makes it
+    legal: a template's contents are a separate fragment, so this is not a form
+    nested in the batch form. -#}
+{#- One drawer for the whole page, opened against whichever work was clicked.
+    `ui.drawer` is not used because it owns both its trigger and its open state:
+    this one has fifty triggers and its form's `action` is rewritten per work.
+    The markup, the classes and the escape-to-close behaviour still match it.
+
+    The form lives here rather than in a row for the reason the row actions are
+    buttons: this would otherwise be a form nested inside the batch form, which
+    the HTML parser discards. Out here it is a sibling, so it is a real form. -#}
+<div data-rename-drawer hidden>
+  <div class="ui-scrim" data-rename-close></div>
+  <aside class="ui-drawer" data-side="right" role="dialog" aria-modal="true"
+         aria-labelledby="rename-drawer-title">
+    <header class="ui-drawer-head">
+      <h2 class="ui-drawer-title" id="rename-drawer-title">修改文件名与归档路径</h2>
+      <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
+              data-rename-close aria-label="关闭">✕</button>
+    </header>
+    <form method="post" data-rename-form>
+      <div class="ui-drawer-body">
+        <p class="ui-hint" data-rename-current role="status" aria-live="polite"></p>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="tab" value="{{ tab }}">
+        <div class="ui-field">
+          <label for="rename-filename">文件名</label>
+          <input class="ui-input" id="rename-filename" name="filename" type="text"
+                 aria-describedby="rename-filename-hint">
+          <span class="ui-hint" id="rename-filename-hint">不含 .cbz 后缀；非法字符会被自动清理。留空则保留现有文件名</span>
+        </div>
+        <div class="ui-field">
+          <label for="rename-directory">归档子目录</label>
+          <input class="ui-input" id="rename-directory" name="directory" type="text"
+                 placeholder="例如 分类/作者" aria-describedby="rename-directory-hint">
+          <span class="ui-hint" id="rename-directory-hint">相对于书库根目录，留空则直接放在根目录下</span>
+        </div>
+        <label class="ui-filter-option">
+          <input class="ui-checkbox" type="checkbox" name="repack">
+          <span>移动后重新打包一次</span>
+        </label>
+      </div>
+      <div class="ui-drawer-foot">
+        <button class="ui-btn" data-variant="primary" data-size="sm" type="submit">保存</button>
+      </div>
+    </form>
+  </aside>
+</div>
+
+{#- The membership notice. `downloaded.js` fills it in when a poll finds a work
+    the page has never rendered: it patches fields in place and deliberately does
+    not construct rows, because row markup built in JavaScript is a second copy
+    of the `work_row` macro and the two would drift. -#}
+<div data-queue-changed hidden></div>
+
+<div data-downloaded-root
+     data-live="{{ 'true' if live else 'false' }}"
+     data-tab="{{ tab }}" hidden></div>
+<script defer src="{{ url_for('static', path='/downloaded.js') }}"></script>
+{% endblock %}

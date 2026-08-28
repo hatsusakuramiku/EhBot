@@ -6,8 +6,16 @@ message -> candidate -> review -> download -> pack.
 
 **Scope ends at the archive.** Download, convert to the target archive format,
 plus a few operator-convenience management items. Detailed book/library
-management belongs to downstream tools — the library domain was deleted from the
-plan on 2026-08-26 by operator instruction. Do not reintroduce it.
+management belongs to downstream tools.
+
+Where that line now sits: the library domain was deleted on 2026-08-26 and partly
+restored on 2026-08-28 as `/downloaded`, which is `EHBot.md` §1.3.1 and nothing
+more — list what has been downloaded, batch repack / remove / redownload, rename
+or relocate one book. It is an operator console, not a library: there is no
+`library_items` table (the domain reads `download_jobs` + `artifacts`), no reader,
+no shelves or collections, no import scan of files this service did not download,
+and no cover extracted from a CBZ's first page. A work's detail page is still only
+`/works/{id}`. Do not grow it past that list.
 
 Read `progress.md` bottom-up for current state; it ends with a handoff section
 naming the next phase. `EHBot.md` is the requirements spec, `DEVELOPMENT_PLAN.md`
@@ -65,12 +73,13 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 866 passed / 0 failed.** Ending below this is a
+**Baseline: 939 passed / 0 failed.** Ending below this is a
 regression. The twelve `test_seven_zip_real.py` skips are gone because this
 machine now has a real toolchain in `data/tools/7zip/`; on a host without one
-they skip again and the count is 854 passed / 12 skipped. (Baseline moves per phase:
+they skip again and the count is 927 passed / 12 skipped. (Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820 -> Telegram user account 866. There is no R7 — the library domain was deleted from the plan. An older
+R9 820 -> Telegram user account 866 -> R10 939. There is no R7 — that number was
+the library domain, deleted on 2026-08-26; its narrow replacement is R10. An older
 note claiming "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
@@ -391,6 +400,78 @@ operator navigation).
   screen where it is wrong. The 系统 tab points at the topbar controls rather
   than rendering a second pair that could disagree.
 
+- **`/downloaded` is `EHBot.md` §1.3.1 and stops there.** It reads
+  `download_jobs` joined to `artifacts` — there is no registry table, because a
+  second table describing the same book is a second truth. The five tabs filter on
+  the CBZ artifact and the packaging job's state, **never on the candidate's
+  status**: packaging does not touch that column, so it cannot answer
+  「打好包了吗」. Same rule `work_stage` follows.
+- **`/activity` history and `/downloaded` read the same rows and ask different
+  questions.** History is ordered by *task* and answers「这次跑得怎么样」; the
+  downloaded page is ordered by *work* and answers「这本书现在在哪、要不要再动
+  它」. That is why one groups by job state and the other by pack state, and why
+  neither is a filter of the other.
+- **Deleting the records and deleting the files are two decisions, and the safe one
+  is what happens by omission.** `remove_work(delete_files=False)` is the default
+  because `EHBot.md` §1.2.3 says so. The page offers two buttons with two dialogs
+  rather than one dialog with a checkbox: `ui.confirm` is teleported out of its
+  form and can carry exactly one name/value pair, so a checkbox would have to be
+  reconnected by hand and could be left in either state. The file-deleting variant
+  is therefore its own action name (`remove-files`), which makes it impossible to
+  reach by omission. Do not "simplify" it into a flag on one button.
+- **A removal writes `removed_works`.** `list_history_jobs` has always treated a
+  terminal job row as permanent, so deleting one silently would make the history
+  lie about its own completeness. The audit row cannot be a column on
+  `download_jobs` — that row is the thing being deleted — and it records *whether
+  the files went too*, which is the question an operator asks later.
+- **A removal keeps the candidate.** It is the work's identity, it holds the
+  metadata, and every `review_actions` row points at it. Removing downloaded
+  content means the download is gone, not that the book was never seen.
+- **Every path the archived-work service touches is resolved and proved to be
+  inside the root it belongs to** — the CBZ under the library, the source archive
+  under the work directory, each against its own root and against the *currently
+  configured* one. The stored path is not trusted even though this service wrote
+  it: an old layout template, a re-pointed library directory or an ExHentai artist
+  name can all leave a value outside the tree. A refused file lands in
+  `failed_files`, the records still go, and the audit row's `deleted_files` stays 0
+  — claiming 1 there would be the trail lying about bytes still on disk.
+- **`Database.downloaded_work` (single) deliberately does not filter on
+  `state = COMPLETED`; `list_downloaded_works` does.** A work being re-downloaded
+  has last run's archive and a job row that is PENDING again. Filtering the single
+  read too would make every caller's「已有任务在进行」guard unreachable and report
+  `WORK_NOT_DOWNLOADED` — both wrong and unactionable. The state travels on the DTO
+  so the caller decides.
+- **Re-download resets the original job row; `retry_job` cannot serve it.**
+  `retry_job` refuses a COMPLETED job on purpose — inside the queue, a finished
+  download is finished. Here the operator is explicitly asking to fetch it again,
+  so the same row goes back to PENDING with `attempt_count + 1`. A second row is
+  not an option: `idempotency_key` is UNIQUE per source, so a different key would
+  split one book's attempt history in two.
+- **Re-packing must land on the file it replaces, and on the operator's path if
+  they set one.** `_library_target` reads `artifacts.library_relative_path` before
+  it renders the layout template, and `_existing_cbz_paths_sync` reserves this
+  book's own path. Without the first, a renamed book is moved back to the
+  template's location *and* `unique_library_target` grows a ` (2)` beside the
+  operator's copy — one action reading as both undone and duplicated. The stored
+  relative path is re-validated on the way out (absolute, or containing `..`, is
+  ignored and the template renders instead): it was sanitised on the way in, but a
+  path read back out of the database and joined onto a root is exactly the shape
+  that must not be trusted twice.
+- **`downloaded_pack_view` is derived vocabulary, so `is_live` cannot see it.** The
+  pack codes are deliberately absent from `_REGISTRIES`, which means
+  `is_live("packing")` is False. Anything deciding whether to poll must read
+  `pack["live"]` off the resolved payload — `downloaded_snapshot` does — or the page
+  freezes on 打包中 and never refreshes. The badge and the polling decision come
+  from one object for that reason.
+- **`downloaded_tab_view` raises on an unknown name**, like `settings_section_view`
+  and unlike `candidate_tab_view`. The difference is where the value comes from: a
+  candidate tab is validated by its route before it arrives, while this one reaches
+  the page from a query string an operator can type, so `?tab=nonsense` must 404
+  rather than render a page titled with the typo.
+- **Rename is per-work and there is no batch version.** A filename belongs to one
+  book. A batch rename would need a template, and the archive layout setting
+  already is that template.
+
 ## Business invariants
 
 Several are locked by tests. Do not "simplify" them:
@@ -402,7 +483,12 @@ Several are locked by tests. Do not "simplify" them:
   files the row under 需干预, keeps every action it had, and waits for an
   operator decision.
 - Packaging is explicit; `auto_pack_after_download` and `torrent_auto_pack`
-  default off.
+  default off. Re-packaging an already packaged work is allowed and requeues the
+  same task row: every state but RUNNING is requeueable, and 重新打包 is why
+  COMPLETED is on that list.
+- Removing downloaded content never deletes a file unless the request named the
+  file-deleting action, and never touches a work whose download or packaging task
+  is still in flight.
 - Credentials: never plaintext, never echoed to a page, never logged.
 - Security gates (path traversal, decompression bombs, SSRF, image magic
   numbers) must never be loosened. The thumbnail proxy is inside this rule: it

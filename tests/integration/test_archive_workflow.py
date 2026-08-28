@@ -659,6 +659,92 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_repack_lands_on_the_path_the_operator_pinned(
+    tmp_path: Path,
+) -> None:
+    """A renamed book stays renamed across 重新打包 (R10).
+
+    `ArchivedWorkService.rename_work` records `artifacts.library_relative_path`,
+    and this is the half that makes recording it worth anything. Without it the
+    repack re-renders the path from the layout template and the metadata, so the
+    file goes back to where the template says -- and `unique_library_target`
+    then sees the operator's copy as somebody else's book and grows a ` (2)`
+    beside it. The rename would read as undone *and* duplicated.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+    default_target = tmp_path / "library" / "Archive Title.cbz"
+    assert default_target.exists()
+
+    # The operator moves and renames it, exactly as the rename action does.
+    pinned = tmp_path / "library" / "分类" / "作者" / "整理后的书名.cbz"
+    pinned.parent.mkdir(parents=True)
+    default_target.replace(pinned)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE artifacts SET path = ?, library_relative_path = ? "
+            "WHERE artifact_type = 'CBZ'",
+            (str(pinned), "分类/作者/整理后的书名.cbz"),
+        )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    assert pinned.exists()
+    # Neither the template's path nor a suffixed sibling comes back.
+    assert not default_target.exists()
+    assert not (pinned.parent / "整理后的书名 (2).cbz").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_path_that_escapes_the_library_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """A path read back out of the database is not trusted twice.
+
+    `rename_work` sanitises every segment before writing the column, so a value
+    like this cannot arrive through the interface -- but a path joined onto a
+    root is the exact shape that must be re-validated, and falling back to the
+    template publishes the book instead of refusing it.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE artifacts SET library_relative_path = ? "
+            "WHERE artifact_type = 'CBZ'",
+            ("../escaped/book.cbz",),
+        )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    assert not (tmp_path / "escaped").exists()
+    assert (tmp_path / "library" / "Archive Title.cbz").exists()
+
+
+@pytest.mark.asyncio
 async def test_conversion_publishes_into_the_overridden_library(
     tmp_path: Path,
 ) -> None:

@@ -14,7 +14,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.downloads.models import (
+    CONVERSION_STATE_FAILED,
+    CONVERSION_STATE_PENDING,
+    CONVERSION_STATE_RUNNING,
+    CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_VOLUMES,
+)
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
+
+#: Packing states that are waiting on the operator rather than broken.
+_PACK_ATTENTION_STATES: frozenset[str] = frozenset(
+    {CONVERSION_STATE_WAITING_PASSWORD, CONVERSION_STATE_WAITING_VOLUMES}
+)
 
 
 #: Semantic tones. The stylesheet maps each to a colour pair; nothing here
@@ -335,6 +347,38 @@ ACTOR_STATUS: dict[str, StatusView] = {
     ACTOR_SYSTEM: _view(ACTOR_SYSTEM, "系统", TONE_MUTED),
 }
 
+#: The 已下载内容 tabs, keyed by the `pack_filter` name the query uses. The words
+#: live here for the reason every other tab's do: the sidebar entry, the tab
+#: strip, the page title and the JSON payload must be one vocabulary, and a
+#: literal in the template would be the copy that drifts.
+#:
+#: Tones describe what the operator should feel about the group, not what colour
+#: it is: 待打包 is work queued behind them (`waiting`), 需干预 is blocked on them
+#: specifically (`danger` would overstate it -- nothing failed), 打包失败 did fail.
+DOWNLOADED_TAB_STATUS: dict[str, StatusView] = {
+    "all": _view("all", "全部", TONE_NEUTRAL),
+    "unpacked": _view("unpacked", "待打包", TONE_WAITING),
+    "packed": _view("packed", "已打包", TONE_SUCCESS),
+    "attention": _view("attention", "需干预", TONE_WAITING),
+    "failed": _view("failed", "打包失败", TONE_DANGER),
+}
+
+#: A downloaded work's packaging state, as one badge on a card.
+#:
+#: This is *derived* vocabulary, not a column: `downloaded_pack_view` maps the
+#: facts (is there a CBZ, is there a packing job, what state is it in) onto one
+#: of these. It is separate from `CONVERSION_STATUS` because the question differs
+#: -- that registry describes a task in the packing queue, this one describes a
+#: book. 「未打包」 has no task at all, so `CONVERSION_STATUS` has no word for it.
+DOWNLOADED_PACK_STATUS: dict[str, StatusView] = {
+    "unpacked": _view("unpacked", "未打包", TONE_MUTED),
+    "packed": _view("packed", "已打包", TONE_SUCCESS),
+    "packing": _view("packing", "打包中", TONE_ACTIVE, live=True),
+    "queued": _view("queued", "待打包", TONE_WAITING, live=True),
+    "attention": _view("attention", "需干预", TONE_WAITING),
+    "failed": _view("failed", "打包失败", TONE_DANGER),
+}
+
 #: Lookup order for the generic helpers. Candidate statuses come first because
 #: `FAILED` means「候选失败」in the review context, which is the one an
 #: operator sees most often.
@@ -405,6 +449,49 @@ def candidate_tab_view(tab: str | None) -> StatusView:
     return CANDIDATE_TAB_STATUS.get(
         tab or "", _view(tab or "", tab or "—", TONE_NEUTRAL)
     )
+
+
+def downloaded_tab_view(tab: str | None) -> StatusView:
+    """Resolve a 已下载内容 tab name into its label and tone.
+
+    Raises on an unknown name rather than falling back, unlike
+    `candidate_tab_view`. The difference is where the value comes from: a
+    candidate tab name is validated by its route before arriving, while this one
+    reaches the page from a query string an operator can type, so
+    `?tab=nonsense` must 404 rather than render a page titled with the typo --
+    the same rule `settings_section_view` follows.
+    """
+    view = DOWNLOADED_TAB_STATUS.get(tab or "")
+    if view is None:
+        raise KeyError(f"unknown downloaded tab: {tab}")
+    return view
+
+
+def downloaded_pack_view(
+    *,
+    has_cbz: bool,
+    pack_state: str | None,
+) -> StatusView:
+    """One badge for a downloaded work's packaging, derived from facts.
+
+    Order matters and encodes policy. A task in flight wins over an existing
+    CBZ, because「打包中」is what the operator needs to know about a book being
+    re-packed right now -- reporting 「已打包」 while the packer is rewriting the
+    file would be describing the previous run. Below that, the artifact wins over
+    a finished task's state, for the reason `work_stage` reads the artifact: it
+    is the only honest evidence that a book exists on disk.
+    """
+    if pack_state == CONVERSION_STATE_RUNNING:
+        return DOWNLOADED_PACK_STATUS["packing"]
+    if pack_state == CONVERSION_STATE_PENDING:
+        return DOWNLOADED_PACK_STATUS["queued"]
+    if pack_state in _PACK_ATTENTION_STATES:
+        return DOWNLOADED_PACK_STATUS["attention"]
+    if has_cbz:
+        return DOWNLOADED_PACK_STATUS["packed"]
+    if pack_state == CONVERSION_STATE_FAILED:
+        return DOWNLOADED_PACK_STATUS["failed"]
+    return DOWNLOADED_PACK_STATUS["unpacked"]
 
 
 def metadata_source_view(source: str | None) -> StatusView:

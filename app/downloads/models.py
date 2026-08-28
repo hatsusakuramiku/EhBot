@@ -167,6 +167,58 @@ PERMANENT_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class DownloadedWork:
+    """One downloaded work as the 已下载内容 page lists it.
+
+    A work rather than a job: the page answers「这本书现在是什么状态」, and that
+    spans two rows -- the download that produced the archive and the packaging
+    task that produced the CBZ. Joining them here rather than in the view is
+    what lets one row carry both `archive_path` and `cbz_path`, and what keeps
+    the page from having to pair jobs by candidate itself.
+
+    `pack_state` is `None` when nothing has ever been packed, which is a
+    different thing from a packaging task that failed: the first offers 打包,
+    the second offers 重新打包 with an error to read.
+    """
+
+    candidate_id: int
+    #: The download job. Always present -- a work with no completed download is
+    #: not downloaded content and the query excludes it.
+    job_id: int
+    provider: str
+    state: str
+    title: str | None
+    archive_path: str | None
+    archive_size: int | None
+    #: The packaging task, when there has been one.
+    pack_job_id: int | None = None
+    pack_state: str | None = None
+    pack_error_code: str | None = None
+    pack_error_message: str | None = None
+    cbz_path: str | None = None
+    cbz_size: int | None = None
+    page_count: int | None = None
+    #: Set once the operator has renamed or relocated the book, and the reason a
+    #: later repack lands on their path instead of re-deriving it.
+    library_relative_path: str | None = None
+    artist: str | None = None
+    category: str | None = None
+    language: str | None = None
+    thumb_url: str | None = None
+    updated_at: str = ""
+
+    @property
+    def is_packaged(self) -> bool:
+        """Whether a CBZ exists. The artifact, never the job state.
+
+        Packaging does not change the candidate's status and a re-download can
+        put a new task in flight beside a finished book, so the artifact is the
+        only honest evidence -- the same rule `work_stage` follows.
+        """
+        return bool(self.cbz_path)
+
+
+@dataclass(frozen=True, slots=True)
 class DownloadJobSummary:
     job_id: int
     candidate_id: int

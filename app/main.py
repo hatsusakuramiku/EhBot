@@ -31,6 +31,7 @@ from app.web.routes.auto_approval import router as auto_approval_router
 from app.web.routes.candidates import router as candidates_router
 from app.web.routes.connections import router as connections_router
 from app.web.routes.dashboard import router as dashboard_router
+from app.web.routes.downloaded import router as downloaded_router
 from app.web.routes.health import router as health_router
 from app.web.routes.manual_add import router as manual_add_router
 from app.web.routes.settings_pages import router as settings_router
@@ -111,6 +112,10 @@ def create_app(
     app.include_router(works_router)
     app.include_router(manual_add_router)
     app.include_router(activity_router)
+    # Its five literal tabs are declared above `/downloaded/{candidate_id}/...`
+    # inside the module, which is the order that matters; the position here only
+    # keeps it beside the other domain pages.
+    app.include_router(downloaded_router)
     app.include_router(settings_router)
     app.include_router(ui_kit_router)
     app.include_router(connections_router)

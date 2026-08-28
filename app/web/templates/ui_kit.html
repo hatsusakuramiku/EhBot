@@ -36,7 +36,8 @@
 <section class="ui-section" aria-labelledby="s-tabs">
   <h2 class="ui-section-title" id="s-tabs">分区标签</h2>
   {{ ui.tabs(demo.tabs, "all", "演示分区") }}
-  <p class="ui-hint">候选队列的六个状态与设置的多个分节共用这一组件，因此它们是一个域而不是十几个页面。</p>
+  {{ ui.tabs(demo.downloaded_tabs, "all", "已下载分区演示") }}
+  <p class="ui-hint">候选队列的六个状态、已下载内容的五个分区与设置的多个分节共用这一组件，因此它们是一个域而不是十几个页面。</p>
 </section>
 
 <section class="ui-section" aria-labelledby="s-badge">
@@ -51,6 +52,11 @@
     </div>
     <div class="ui-demo-row" style="margin-top: var(--s-3)">
       {% for state in demo.connection_states %}{{ ui.badge(state | connection_view) }}{% endfor %}
+    </div>
+    <div class="ui-demo-row" style="margin-top: var(--s-3)">
+      {#- 已下载内容 的打包徽章是派生词表：由「有没有 CBZ、有没有打包任务」推出来，
+          `status_view` 认不出这些码，因此这里传入解析好的视图而不是字符串。 -#}
+      {% for view in demo.downloaded_pack_views %}{{ ui.badge(view) }}{% endfor %}
     </div>
   </div>
 </section>

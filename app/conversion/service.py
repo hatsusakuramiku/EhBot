@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from app.archive.errors import (
     ArchiveError,
@@ -131,6 +131,23 @@ class ConversionService:
         page is where an invalid template is caught, and it cannot be saved.
         """
         fallback = f"candidate-{candidate_id}"
+        reserved = frozenset(
+            await asyncio.to_thread(self._existing_cbz_paths_sync, candidate_id)
+        )
+        # An operator who renamed or moved this book has pinned where it lives,
+        # and a repack must land there. Re-rendering the template would move the
+        # file back and `unique_library_target` would then see the operator's
+        # copy as somebody else's book and grow a ` (2)` beside it -- so the
+        # rename would read as undone *and* duplicated. The pin wins over the
+        # template for the same reason `is_locked` wins over a scrape: it is a
+        # judgement the operator already made about this one book.
+        pinned = await asyncio.to_thread(
+            self._pinned_library_path_sync, candidate_id
+        )
+        if pinned is not None:
+            return await asyncio.to_thread(
+                unique_library_target, library_path / pinned, reserved=reserved
+            )
         template = await self._settings.library_template()
         values = {
             "category": _metadata_lookup(metadata, "Category"),
@@ -152,12 +169,42 @@ class ConversionService:
         # Appended rather than `with_suffix`, which would read 「Vol. 1」 as a
         # name with a `. 1` extension and publish the book as `Vol.cbz`.
         target = library_path / relative.parent / f"{relative.name}.cbz"
-        reserved = frozenset(
-            await asyncio.to_thread(self._existing_cbz_paths_sync, candidate_id)
-        )
         return await asyncio.to_thread(
             unique_library_target, target, reserved=reserved
         )
+
+    def _pinned_library_path_sync(self, candidate_id: int) -> PurePosixPath | None:
+        """The library-relative path the operator set, if they set one.
+
+        Read as a relative path and re-joined onto the *current* library root
+        rather than stored absolute, so moving the library directory carries a
+        renamed book with it. Validated before use: the column was written by
+        `ArchivedWorkService.rename_work`, which sanitises every segment, but a
+        path read back out of the database and joined onto a root is exactly the
+        shape that must not be trusted twice -- an absolute value or a `..`
+        would escape the library, so it is ignored and the template renders the
+        path instead.
+        """
+        with self._database._connect() as connection:  # noqa: SLF001
+            row = connection.execute(
+                "SELECT artifacts.library_relative_path FROM artifacts "
+                "JOIN download_jobs ON download_jobs.id = artifacts.job_id "
+                "WHERE download_jobs.candidate_id = ? "
+                "AND artifacts.artifact_type = 'CBZ' "
+                "AND artifacts.library_relative_path IS NOT NULL "
+                "ORDER BY artifacts.id DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+        if row is None or not row[0]:
+            return None
+        relative = PurePosixPath(str(row[0]).replace("\\", "/"))
+        if relative.is_absolute() or ".." in relative.parts:
+            logging.getLogger(__name__).warning(
+                "library_relative_path_refused",
+                extra={"error_code": "PATH_OUTSIDE_ROOT"},
+            )
+            return None
+        return relative
 
     def _existing_cbz_paths_sync(self, candidate_id: int) -> tuple[str, ...]:
         """Paths already recorded as this book's own CBZ.
@@ -225,17 +272,36 @@ class ConversionService:
             )
             created = connection.total_changes > before
             if not created:
-                # A task parked for missing volumes or an unknown password can
-                # be requeued once the operator supplies what was missing.
+                # The task already exists, so requeueing it is an UPDATE. Every
+                # state except RUNNING is requeueable, and each for its own
+                # reason:
+                #
+                # * WAITING_VOLUMES / WAITING_PASSWORD -- the operator has
+                #   supplied what was missing.
+                # * FAILED -- a retry after fixing the cause.
+                # * COMPLETED -- 重新打包. This one is the whole point of the
+                #   action and was missing until 2026-08-28: `DO NOTHING` above
+                #   left the row COMPLETED, the worker claims only PENDING, so
+                #   the request 303'd back to a page reporting success while
+                #   nothing had been re-packed and the CBZ on disk was
+                #   untouched. Landing on the file it replaces is already
+                #   handled -- `_existing_cbz_paths_sync` reserves this book's
+                #   own path so the conflict suffix does not invent
+                #   `book (2).cbz`.
+                #
+                # RUNNING is excluded because the worker holds that row; the
+                # requeue would be overwritten by whatever it writes next.
                 connection.execute(
                     "UPDATE download_jobs SET state = ?, error_code = NULL, "
                     "error_message = NULL, updated_at = CURRENT_TIMESTAMP "
-                    "WHERE idempotency_key = ? AND state IN (?, ?)",
+                    "WHERE idempotency_key = ? AND state IN (?, ?, ?, ?)",
                     (
                         CONVERSION_STATE_PENDING,
                         f"convert:{candidate_id}",
                         CONVERSION_STATE_WAITING_VOLUMES,
                         CONVERSION_STATE_WAITING_PASSWORD,
+                        CONVERSION_STATE_FAILED,
+                        CONVERSION_STATE_COMPLETED,
                     ),
                 )
             row = connection.execute(
