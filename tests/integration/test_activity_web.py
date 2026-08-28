@@ -27,7 +27,15 @@ from app.downloads.models import (
     PROVIDER_EH_TORRENT,
 )
 from app.main import create_app
+from tests.integration.markup import (
+    gated_targets,
+    nested_form_lines,
+    ungated_targets,
+)
 
+
+#: The three tabs, which is every page that renders a job row.
+ACTIVITY_TABS = ("/activity", "/activity/packing", "/activity/history")
 
 #: Distinct idempotency keys across the whole module.
 _KEYS = itertools.count(1)
@@ -602,3 +610,91 @@ def test_switch_source_is_reachable_and_not_shadowed(tmp_path: Path) -> None:
         assert job_row(fixture.database, fixture.stalled)[0] == "WAITING_TORRENT"
     finally:
         fixture.close()
+
+
+# ------------------------------------------------ the markup a click needs
+
+
+def test_no_row_action_is_swallowed_by_the_batch_form(tmp_path: Path) -> None:
+    """The bug this file did not catch until R9.
+
+    Every row sits inside the batch form, and HTML does not nest forms: a
+    `<form>` start tag inside another one is *ignored*, so each row's own form
+    was discarded and its buttons submitted the batch endpoint with no action.
+    The page rendered, returned 200, and did nothing anyone asked for. Only the
+    parser sees it, which is why this asserts on the parse and not on a string.
+    """
+    fixture = Fixture(tmp_path)
+    try:
+        pages = [fixture.client.get(path).text for path in ACTIVITY_TABS]
+    finally:
+        fixture.close()
+
+    for path, page in zip(ACTIVITY_TABS, pages):
+        assert nested_form_lines(page) == [], path
+
+
+def test_a_row_action_posts_to_its_own_job(tmp_path: Path) -> None:
+    # `formaction` is what replaced the nested forms, so every row control has
+    # to carry its own job id rather than inherit the batch form's action.
+    fixture = Fixture(tmp_path)
+    try:
+        body = fixture.client.get("/activity").text
+    finally:
+        fixture.close()
+
+    reachable = gated_targets(body) | ungated_targets(body)
+    assert f"/activity/jobs/{fixture.paused}/resume" in reachable
+    assert f"/activity/jobs/{fixture.paused_second}/resume" in reachable
+    assert f"/activity/jobs/{fixture.failed}/retry" in reachable
+    # Two paused rows, two distinct targets -- the failure mode being ruled out
+    # is one shared endpoint that acts on whichever job the server picks.
+    assert f"/activity/jobs/{fixture.paused}/retry" != (
+        f"/activity/jobs/{fixture.paused_second}/retry"
+    )
+
+
+def test_the_costly_and_destructive_row_actions_ask_first(
+    tmp_path: Path,
+) -> None:
+    """EHBot.md 8.8: a second step in front of anything hard to undo.
+
+    Cancelling abandons work that has already run, and switching source can
+    spend GP. Retrying or resuming a job costs nothing and stays one click --
+    a confirmation on every button teaches an operator to dismiss them.
+    """
+    fixture = Fixture(tmp_path)
+    try:
+        body = fixture.client.get("/activity").text
+    finally:
+        fixture.close()
+
+    gated = gated_targets(body)
+    ungated = ungated_targets(body)
+
+    for job_id in (fixture.paused, fixture.failed, fixture.stalled):
+        assert f"/activity/jobs/{job_id}/cancel" in gated
+        assert f"/activity/jobs/{job_id}/cancel" not in ungated
+    # Both providers reached from the stalled torrent go through the same
+    # dialog-gated endpoint; one of them spends GP.
+    assert f"/activity/jobs/{fixture.stalled}/switch-source" in gated
+
+    assert f"/activity/jobs/{fixture.paused}/resume" in ungated
+    assert f"/activity/jobs/{fixture.failed}/retry" in ungated
+
+
+def test_a_gated_row_action_names_its_own_dialog(tmp_path: Path) -> None:
+    # `aria-labelledby` points at an id, and a queue of rows each offering
+    # 取消 would otherwise aim every one of them at the first dialog's title.
+    fixture = Fixture(tmp_path)
+    try:
+        body = fixture.client.get("/activity").text
+    finally:
+        fixture.close()
+
+    ids = re.findall(r'<h2 class="ui-dialog-title" id="([^"]+)"', body)
+    assert len(ids) == len(set(ids)), "two dialogs share one title id"
+    labels = re.findall(r'aria-labelledby="([^"]+)"', body)
+    assert labels, "no dialog rendered, so this test proves nothing"
+    for label in labels:
+        assert label in ids, label

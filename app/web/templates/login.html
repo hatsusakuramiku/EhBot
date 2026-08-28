@@ -1,24 +1,68 @@
+{#
+  The sign-in page (R9).
+
+  The only page that does not extend `base.html`: there is no navigation to show
+  somebody who is not signed in, and a shell whose every link 302s back here is
+  worse than no shell. That also means this file repeats the head — the theme
+  bootstrap especially, because a login screen that ignores the operator's dark
+  theme is the first thing they see and the one page that flashes white.
+
+  Rewritten off `app.css` in R9. The two-column marketing split went with it: on
+  a self-hosted service for one administrator, the left half was explaining the
+  product to the person who installed it.
+#}
+{% import "components/ui.html" as ui %}
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>登录 - EhBot</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <title>登录 · EhBot</title>
+  {#- Same pre-paint bootstrap as `base.html`, and for the same reason: a
+      deferred script runs after the first paint, which flashes light. Kept in
+      sync by hand because this page loads no other script at all. -#}
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("ehbot.theme");
+        if (t && t !== "auto") document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.setAttribute(
+          "data-density", localStorage.getItem("ehbot.density") || "comfortable"
+        );
+      } catch (e) {
+        document.documentElement.setAttribute("data-density", "comfortable");
+      }
+    })();
+  </script>
+  <link rel="stylesheet" href="{{ url_for('static', path='/ui.css') }}">
 </head>
-<body>
-  <main class="auth-layout">
-    <section class="auth-intro">
-      <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
-      <div><span class="eyebrow">本地内容工作流</span><h1>EhBot</h1><p>消息接入、审核与归档控制台</p></div>
-    </section>
-    <section class="auth-panel">
-      <div class="auth-heading"><h2>管理员登录</h2><p>使用服务启动时生成的密码登录</p></div>
-      <form method="post" action="{{ url_for('login') }}">
+<body class="ui-page">
+  <main class="ui-auth" id="main">
+    <section class="ui-auth-card">
+      <div class="ui-auth-brand">
+        <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="">
+        <div>
+          <span class="ui-eyebrow">本地内容工作流</span>
+          <h1 class="ui-title">EhBot</h1>
+        </div>
+      </div>
+      <div>
+        <h2 class="ui-section-title">管理员登录</h2>
+        <p class="ui-hint" style="margin: 0">使用服务启动时生成的密码登录</p>
+      </div>
+      {#- The error is above the field, inside the form, and it is the same
+          callout every other page uses. `role="alert"` because it appears on a
+          reload the operator just caused: a wrong password has to be announced,
+          not merely rendered. -#}
+      {% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
+      <form class="ui-form" method="post" action="{{ url_for('login') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
-        <div class="field-group"><label for="password">管理员密码</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus></div>
-        <button class="primary-button" type="submit">登录</button>
+        <div class="ui-field">
+          <label for="password">管理员密码</label>
+          <input class="ui-input" id="password" name="password" type="password"
+                 autocomplete="current-password" required autofocus>
+        </div>
+        <button class="ui-btn" data-variant="primary" type="submit">登录</button>
       </form>
     </section>
   </main>

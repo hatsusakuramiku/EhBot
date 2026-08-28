@@ -1793,58 +1793,119 @@ Three things landed with it that were not page work. The archive path template `
 - **Condition groups do not nest.** The editor builds one flat AND/OR group, which is what `autobrr`'s common case looks like. `validate_rule_ast` accepts nested groups, so a nested rule stored by hand still evaluates and still renders its DSL -- the editor just cannot compose one.
 - **`main.py` is ~2960 lines.** The settings routes moved into the domain but not out of the file; R9 owns the split and its target.
 
-## Handoff: Next Session (start of R9)
+### Phase R9: Switchover, Cleanup And Acceptance
 
-### Where The Refactor Stands
-R0-R3 (the foundation phases), **R4 (activity)**, **R5 (candidates)**, **R6 (the unified work detail page)** and **R8 (settings)** are complete. R7 was deleted from the plan with the scope narrowing. **R9 is the last phase**, and it is a different kind of work from the eight before it: nothing new gets built, the old things get removed and the whole thing gets verified against `EHBot.md` §8.
+**Status: complete.** Test baseline moved 809 -> **820 passed / 12 skipped / 0 failed** (+11 tests, zero regressions).
 
-Every domain now has the same shape: one server-computed snapshot, one template, macros for repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. `/settings/{section}` is the widest example -- seven bodies rendered from one shell, each with a JSON endpoint reading the same builder, and a test asserting the page context is a superset of the JSON body.
+The last phase built nothing new. Eight orphaned templates and one whole stylesheet came out, the three pre-refactor pages were rewritten so that removal was possible, `app/main.py` went from ~2960 lines to **120**, and the two remaining `EHBot.md` §8 gaps -- the first-paint skeleton and the second step in front of a destructive action -- were closed. Two real bugs surfaced along the way, one of them a per-row action on `/activity` that had never worked.
 
-**Three reachable pages are still pre-refactor**, pinned to light by the `data-legacy="true"` that `base.html` supplies by default: `dashboard.html`, `manual_add.html` and `login.html`. R8 removed five of the eight that were left (`connections`, `sources`, `auto_approval_rules`, `archive_settings`, `change_password`). **This is what stands between R9 and `rm app.css`** — the file is 296 lines of light surfaces that those three still render against, and `base.html` links it unconditionally. Either rewrite them first or move what they need into `ui.css`; deleting the stylesheet while a page still needs it drops that page below the contrast floor R3 set.
+#### Actions Taken
 
-Test baseline to protect: **809 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected -- the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
+1. **The eight orphaned templates are gone.** `connections.html`, `sources.html`, `auto_approval_rules.html`, `archive_settings.html`, `change_password.html` (superseded by R8's seven tabs) plus `downloads.html`, `downloads_history.html` and `candidate_detail.html`. Each was proved unreferenced three ways before deletion -- no `TemplateResponse` names it, no `url_for` names the handler that used to render it, and nothing includes or extends it -- because the failure mode of a deletion phase is a page that still renders with something it needed missing.
+2. **`dashboard.html`, `manual_add.html` and `login.html` were rewritten on the design tokens**, and `data-legacy="true"` came off each in the same commit that rewrote it. `base.html` no longer supplies the attribute at all, so there is no longer such a thing as a legacy page.
+3. **`app.css` was deleted outright.** It was 296 lines of light surfaces, and the R3 decision to make it a separate *file* rather than a section of `ui.css` is what made this `rm` instead of a careful cut. The `<link>` came out of `base.html` and `login.html`; `ui.css` is now the only stylesheet, which a test asserts by scanning every page's `<link rel="stylesheet">` set.
+4. **`app/main.py` is 120 lines.** It builds the app, mounts the static directory, includes the routers and nothing else. What came out went to `app/wiring.py` (the lifespan: every service constructed, started and torn down in order), `app/web/deps.py` (the page layer's request-scoped accessors), `app/web/rendering.py` (the template response helper and the redirect helpers), `app/web/settings_view.py`, and eleven route modules under `app/web/routes/` named after their domain.
+5. **The page layer got its own `deps`, deliberately separate from `app/api/deps.py`.** A page redirects an unauthenticated caller to `/login`; an API returns 401, because `fetch` follows a redirect silently and hands the caller a login page as a 200. The two layers had been sharing one accessor set through `app/main.py`, which is exactly where that distinction gets lost.
+6. **A cover that has not arrived shimmers.** `.ui-card-cover` takes `data-pending="true"` when the card has an image to wait for, which paints the skeleton gradient behind the reserved 2:3 box; `ui.js` removes the attribute on the image's `load` or `error`. CSS cannot see an image's load state, and `loading="lazy"` means the request may not start until the card is scrolled into view, so the removal has to be scripted -- with a *capturing* listener on the document, because `load` does not bubble.
+7. **Destructive and costly actions ask first.** `ui.confirm` grew three parameters: `form` points the dialog's submit button at a form already on the page, `field`/`value` name the action for a form that serves several, and `formaction` retargets that one submission. Gated now: cancelling a job (per row and in batch), rejecting a candidate (per work and in batch), switching a stalled torrent's source, taking the ExHentai Archive Download, disconnecting Telegram or ExHentai, and deleting a vault password. Retrying, resuming, pausing, approving and stopping seeding are still one click -- a confirmation on every button is a confirmation on none.
+8. **`README.md` gained a 「Web 界面」 section**: the four-domain information architecture with every tab, the note that the old bookmarked paths 307 rather than 404, that a page keeps its whole state in the query string so a URL can be shared, and that theme and density are per-browser. Its 「系统设置」 subsection documents the three settings that only exist in the database.
+9. **`compose.yaml` had two real gaps, not cosmetic ones.** `THUMBNAILS_ENABLED` and `APP_SECRET_KEY` were read by `Settings.from_env()` and documented in `.env.example`, but were never passed into the container -- so setting either one did nothing. Both are passed now, the secret defaulting to empty because `resolve_session_secret` generates and stores its own on first start and only uses a configured value when there is one.
 
-### The One Thing To Understand First
-R9 deletes things. The failure mode of a deletion phase is not a broken page, it is a page that still renders while something it needed is gone -- so **before deleting a template, prove no route renders it and no `url_for` names its handler**, and before deleting `app.css`, prove no template links it. Grep for the filename, the handler name and the route path separately; the R6 handoff records a case where the template was orphaned but a `url_for` still pointed at the function that used to render it.
+#### Files Created
+- `app/wiring.py` (525) -- `create_app`'s lifespan: the whole service graph, in order, with its teardown.
+- `app/web/deps.py`, `app/web/rendering.py`, `app/web/settings_view.py` -- the page layer's accessors, its template/redirect helpers, and the settings page's view assembly.
+- `app/web/routes/activity.py`, `auth.py`, `auto_approval.py`, `candidates.py`, `connections.py`, `dashboard.py`, `health.py`, `manual_add.py`, `settings_pages.py`, `works.py` -- one module per domain, joining the `shell.py` and `ui_kit.py` that were already there.
+- `tests/integration/markup.py` -- two HTML parsers shared by the page tests: one finds a `<form>` the browser would discard, the other sorts submitting controls by whether a dialog stands in front of them.
 
-The rules from the earlier phases still hold, because R9 touches the same files:
+#### Files Modified
+- `app/main.py` -- 2960 lines to 120.
+- `app/web/templates/base.html` -- the `app.css` link and the `data-legacy` default both gone.
+- `app/web/templates/dashboard.html`, `manual_add.html`, `login.html` -- rewritten on the tokens.
+- `app/web/templates/components/ui.html` -- `confirm` gained `form`/`field`/`value`/`formaction`/`key`/`hint`; `cover_card` marks a pending cover.
+- `app/web/templates/activity.html` -- the row action cell rewritten off nested forms (see below), confirmations on cancel and switch-source.
+- `app/web/templates/candidates.html`, `work_detail.html` -- confirmations on batch reject, per-work reject, job cancel and the GP-spending source.
+- `app/web/static/ui.css` -- the cover skeleton; `app.css` deleted.
+- `app/web/static/ui.js` -- the cover pass.
+- `README.md`, `.env.example`, `compose.yaml` -- see actions 8 and 9.
+- `tests/integration/test_activity_web.py` (+4), `test_candidates_web.py` (+2), `test_work_detail_web.py` (+3), `test_ui_shell.py` (+2) -- the markup invariants and the skeleton.
 
-1. **Do not write a Chinese state label in a template or in JavaScript.** `app/api/status.py` is the only vocabulary -- including for attributes only a screen reader reads. R8 added three tables to it (`SETTINGS_SECTION_STATUS`, `TOGGLE_STATUS`, `DEPENDENCY_STATUS`); a fourth belongs there too, not in a template.
-2. **Do not add a rule to `app.css`** -- R9 removes the file once the last three pages that need it are rewritten. New rules go in `ui.css`, class-scoped.
-3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; only a leaf claims `aria-current="page"`.
-4. **When two callers share a coroutine, the argument checking belongs inside it.**
-5. **A route with a typed path parameter must be declared below every literal sibling.** R8 depends on this twice: `POST /settings/system` resolves only because it is declared below `GET /settings/{section}`.
-6. **Any redirect target a page hands the server is an open-redirect surface** -- validate to a rooted local path (`local_return_to`).
+#### Bugs Found And Fixed
 
-### Next Phase: R9 (Switchover, Cleanup, Acceptance, 3-4 person-days)
-See `DEVELOPMENT_PLAN.md` §3. Four separable pieces:
+1. **Every per-row action button on `/activity` submitted the wrong thing.** Each row's form was nested inside the batch form, and HTML does not nest forms: a `<form>` start tag inside another one is *ignored*, so the row's `action` was discarded and its buttons submitted `/activity/jobs/batch` with no `action` field. Retry, resume, pause, switch-source and stop-seeding had all been dead from the row. Nothing caught it -- the integration tests POST the endpoints directly, and `activity.js` does not intercept these. The fix is `formaction` on each button, which is the workaround `candidates.html` already documented for the same reason. `tests/integration/markup.py` now parses every page for the nested form the browser would drop, on the activity tabs, both candidate views and the work page.
+2. **Two callers survived the `main.py` split unqualified** and raised `NameError` on the first request: a multi-line `require_authenticated(` in `settings_pages.py` that the extraction pattern required to be on one line, and a bare `review_orchestrator` in `candidates.py` passed as an argument rather than called. Both were found by the suite; the whole dependency-name set was then swept with one PCRE pass in call and non-call position, and these were the only two.
+3. **`compose.yaml` silently ignored two settings.** See action 9 -- found by diffing what `Settings.from_env()` reads against what the compose file passes, not by anything failing.
 
-- **Delete the eight orphaned templates.** The five R8 superseded (`connections.html`, `sources.html`, `auto_approval_rules.html`, `archive_settings.html`, `change_password.html`) plus `downloads.html`, `downloads_history.html`, `candidate_detail.html`. Deleting `candidate_detail.html` was refused once as unrequested local destruction -- this phase is the explicit instruction, but confirm the list with the operator before removing anything.
-- **Rewrite `dashboard`, `manual_add` and `login`, then remove `app.css`.** In that order: the stylesheet is what those three currently look like, so it goes last. That is also the moment `data-legacy` and the `base.html` default can go.
-- **Split `main.py` and verify <500 lines.** It is ~2960 now. The routes are already grouped by domain and every one of them redirects through a helper or renders one snapshot, which is what makes the move mechanical. The six 307 retirements can move with their domain.
-- **Documentation and configuration.** `README.md`, `.env.example` (R8's system settings are stored in the database, not the environment -- check whether anything actually belongs there), `compose.yaml` if changed.
-- **Acceptance that cannot be done from here.** The low-resource pass (1C512M / 1GB), the real-credential `docker compose up` end-to-end with a real qBittorrent, registering `local_save_path`, and the manual accessibility and mobile walkthrough. These need a host this one is not.
+#### Problems Encountered
 
-### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is ~2960 lines, not <500.** Every domain's routes moved into its own snapshot and helpers, but not out of the file. R9 owns the split; splitting earlier would have migrated each route twice.
-- **Eight templates are orphaned but present.** See above -- R9 deletes them, with the operator's confirmation.
-- **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan; see the R2 scope note. `PUT /api/v1/settings/{section}` was considered in R8 and deliberately not written -- every settings write is a form POST with its own refusal message, and a JSON writer would be a second gate per section.
-- **Condition groups do not nest in the rule editor**, though `validate_rule_ast` accepts nested groups. See "Deferred From R8".
-- **Theme and density are not stored on the server.** They are per-screen, not per-deployment; see R8 decision 3.
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| A byte-level replacement in `.env.example` matched nothing | The file is CRLF, so an `\n`-terminated needle cannot match | Use `\r\n` needles; `read_bytes`/`write_bytes` rather than `read_text` throughout, since `pathlib` folds and restores line endings |
+| A regex for the gated 驳回 button matched nothing | The button carries an Alpine `x-init` whose arrow function contains `>`, so no attribute pattern bounded by `>` reaches the end of the tag | Slice from the label back to the opening `<button` instead of matching |
+| `data-variant="None"` would have rendered | `work_detail.html` passes `variant=None` for a costly-but-not-destructive action, and Jinja prints `None` as text | Guard the attribute on the trigger; the dialog's own submit falls back to `primary`, so the acting button always has a variant |
+| Whether to wrap the generated modules at 79 columns | The repo was assumed to have a column limit | Measured: 543 committed ASCII lines already exceed 79, the longest at 152. There is no such rule; no code was churned for it |
+
+#### Decisions And Their Reasoning
+
+1. **The confirmation lives in the dialog, and the dialog is teleported.** `x-teleport="body"` is what keeps a modal out of the page's stacking and clipping contexts, but it also moves the button out of the form it belongs to. HTML's `form="<id>"` attribute is the only thing that reconnects them, which is why `ui.confirm` grew a `form` parameter rather than a second copy of each form inside each dialog.
+2. **Not every action gets a confirmation.** Cancelling destroys work in flight and Archive Download spends GP; retrying a failed job costs nothing. Gating the cheap actions too is how an operator learns to dismiss the dialog without reading it, which would defeat the gate on the two that matter.
+3. **The skeleton attribute is removed by script, not expired by animation.** A fixed-delay fade would either uncover an empty box on a slow proxy fetch or shimmer over an image that already arrived. `load`/`error` is the only honest signal, and `error` is included so a failed cover settles into its alt box rather than promising an image forever.
+4. **Each dialog's `id` is disambiguated by a caller-supplied `key`.** Fifty queue rows each offering 取消 would otherwise point fifty `aria-labelledby` attributes at one title element. A test asserts the ids on a rendered queue are unique and that every `aria-labelledby` resolves to one of them.
+5. **The structural tests parse rather than grep.** Both rules R9 added -- no dropped form, a dialog in front of a destructive submit -- are enforced by the browser's parser, and a template that breaks either renders fine and returns 200. A substring assertion cannot see the difference; `html.parser` can, including the `<template>` exemption that makes the teleported dialog forms legal in the first place.
+6. **`app/web/deps.py` duplicates a few accessor names from `app/api/deps.py` on purpose.** They differ in exactly one behaviour that must never be shared: what an unauthenticated caller gets back.
+
+#### Deferred From R9 (Not Done, Not Doable Here)
+These three acceptance items need a host this one is not, and are **not** claimed as satisfied:
+- **The low-resource pass (1C512M / 1GB).** Inherited from v1's phase 6. Needs a constrained box; this is a Windows dev machine.
+- **The real-credential `docker compose up` end-to-end with a real qBittorrent**, including registering `local_save_path`. Needs real ExHentai credentials and a real torrent client, neither of which belongs in a test environment.
+- **The manual accessibility and mobile walkthrough.** Keyboard reachability, `aria-live` announcement and the single mobile navigation structure all have tests; a screen-reader and real-device pass is a person's job.
+
+## Handoff: Next Session (the refactor is complete)
+
+### Where This Stands
+**All nine phases are done** (R0-R6, R8; R7 was deleted from the plan with the scope narrowing). The v2 web refactor is finished as specified, with three acceptance items deferred because they need a host this one is not -- see "Not Verifiable Here" below. Nothing is half-migrated: there is no legacy page, no orphaned template, no second stylesheet, and no route left in `app/main.py`.
+
+Test baseline to protect: **820 passed / 12 skipped / 0 failed.** The skips are pre-existing and expected -- the real-7-Zip tests need a toolchain this Windows dev machine cannot host.
+
+### The Shape Of The Code Now
+- `app/main.py` (120 lines) builds the app and includes routers. `app/wiring.py` owns the lifespan and the whole service graph.
+- Every page route is in `app/web/routes/<domain>.py`; every JSON route in `app/api/`. The two layers have separate `deps` modules and they differ in one thing that must stay different: a page redirects an unauthenticated caller, an API returns 401.
+- Every domain page is one server-computed snapshot feeding both a template and a `/api/v1/*` endpoint, with a test asserting the two cannot disagree.
+- `app/api/status.py` is the only place a state's Chinese label exists. `app/web/static/ui.css` is the only stylesheet. `NAV_ITEMS` in `app/web/routes/shell.py` is the only navigation source.
+- `/ui-kit` renders every shared component in its real states from fixtures, with no database access. Open it after touching `ui.css` or `components/ui.html`.
+
+### Two Rules The Browser Enforces And Python Cannot
+Both are locked by `tests/integration/markup.py`, and both fail *silently* -- the page renders, returns 200, and does the wrong thing when a person clicks.
+
+1. **HTML does not nest forms.** A `<form>` start tag inside another form is ignored and its children join the outer form. A row inside a batch form therefore cannot have its own form: use `formaction` on the button. Content inside a `<template>` is exempt, which is what makes the teleported dialog forms legal.
+2. **A teleported dialog's button is outside its form.** `x-teleport="body"` moves the markup, so a submit button in a dialog needs HTML's `form="<id>"` to reconnect it -- that is what `ui.confirm`'s `form` parameter is for, with `field`/`value` when the form serves several actions and `formaction` to retarget one.
+
+### Not Verifiable Here (Still Open, Deliberately)
+- **Low-resource pass: 1C512M / 1GB.** Inherited from v1's phase 6.
+- **Real-credential `docker compose up` end-to-end with a real qBittorrent**, including registering `local_save_path`.
+- **Manual accessibility and mobile walkthrough** -- a screen reader and a real phone. The mechanical parts (keyboard reachability, `aria-live` regions, one navigation structure, per-cell labels below 640px, contrast tokens) have tests.
+
+Everything else on the `EHBot.md` §8 list is satisfied and has a test naming it.
+
+### Deliberately Not Built (Do Not Treat As Bugs)
+- **`GET /api/v1/library` will never exist.** The library domain (old R7) was deleted with the scope narrowing: this project ends at the archive.
+- **`PUT /api/v1/settings/{section}` was considered and refused.** Every settings write is a form POST with its own validation and refusal message; a JSON writer would be a second gate per section.
+- **Condition groups do not nest in the rule editor**, though `validate_rule_ast` accepts nested groups. A hand-written nested rule still evaluates and still renders its DSL.
+- **Theme and density are not stored server-side.** They describe one screen, not the deployment.
 - Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".
-- Connection transitions do not publish SSE events. Candidate, download and conversion all do.
-- Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration -- the first and last are R9's.
+- Connection transitions publish no SSE events. Candidate, download and conversion all do.
+- A recorded encrypted-RAR fixture and the `BRIDGE` profile protocol remain outstanding from the original project phases.
 
-### Invariants No Phase May Break
+### Invariants No Change May Break
 These are business rules, not preferences. Several have tests locking them:
 - Nothing downloads before review; only `APPROVED`/`DOWNLOADED` may enqueue.
 - ExHentai is the sole authority for metadata.
-- ExHentai Archive Download is **never** routed automatically — it spends GP, so it stays an explicit operator action.
+- ExHentai Archive Download is **never** routed automatically — it spends GP, so it stays an explicit operator action, and it is now behind a confirmation as well.
 - A stalled torrent is not a failure; it is `WAITING_TORRENT` under 需干预, shows its stall duration, keeps every action, and waits for a decision.
 - Packaging is an explicit decision; `auto_pack_after_download` and `torrent_auto_pack` default to off.
 - A packaging job is not a download job: `PROVIDER_CONVERSION` stays out of `SUPPORTED_PROVIDERS`, the download worker never claims one, and the two queues stay separate in the view and in the API.
 - Credentials are never stored in plaintext, never echoed back to a page, never logged.
 - Security gates (path traversal, decompression bombs, SSRF, image magic numbers) must not be loosened. The thumbnail proxy is inside this rule: it reuses the telegraph SSRF guard and the shared `looks_like_image` gate, and must never accept a caller-supplied URL.
 - Idempotency: retries reuse the same job row and increment `attempt_count`; a replayed bulk action changes nothing the first one did.
+- A destructive or GP-spending action takes two steps; a cheap one takes one. Adding a confirmation to every button is how the gate stops being read.
 - **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it.
 - **One navigation source, one current-page marker, one state vocabulary, one authoritative stylesheet.** R3 established these; each is one careless template away from being two again.

@@ -56,7 +56,7 @@ def test_root_path_is_included_in_generated_web_urls(tmp_path: Path) -> None:
         login_page = client.get("/login")
 
     assert redirect.headers["location"] == "/ehbot/login"
-    assert 'href="http://testserver/ehbot/static/app.css"' in login_page.text
+    assert 'href="http://testserver/ehbot/static/ui.css"' in login_page.text
 
 
 def test_login_rejects_invalid_csrf_token(tmp_path: Path) -> None:

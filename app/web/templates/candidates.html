@@ -24,8 +24,6 @@
 
 {% block title %}{{ tab_title }} · EhBot{% endblock %}
 
-{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
-{% block main_attrs %}{% endblock %}
 {% block content_class %}ui-content{% endblock %}
 
 {# ------------------------------------------------------------- one candidate #}
@@ -159,7 +157,7 @@
     {#- One form around both views. The selection count is recomputed from the
         checkboxes on every change rather than bound per input, so the keyboard
         toggles, the select-all tools and a plain click all agree on it. -#}
-    <form data-candidate-form method="post" action="/candidates/batch-review"
+    <form data-candidate-form id="candidate-batch" method="post" action="/candidates/batch-review"
           x-data="{ selected: 0 }"
           @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -197,8 +195,15 @@
         {% call ui.bulk_toolbar(0, total=total, noun="条候选", count_binding="selected") %}
           <button class="ui-btn" data-variant="primary" data-size="sm" type="submit"
                   name="action" value="approve">批量通过并下载</button>
-          <button class="ui-btn" data-size="sm" data-variant="danger" type="submit"
-                  name="action" value="reject">批量驳回</button>
+          {#- The one destructive action on this page, so it is the one that gets
+              a second step. The dialog's button carries `form="candidate-batch"`
+              because the dialog is teleported to `<body>`: it submits the same
+              form, with the same selection, and the same `action=reject` the
+              plain button used to send. -#}
+          {{ ui.confirm("批量驳回", "驳回选中的候选",
+                        "候选会进入「已驳回」队列，不会被删除；需要时可在该队列里重新排队。",
+                        confirm_label="确认驳回", form="candidate-batch",
+                        field="action", value="reject", size="sm") }}
         {% endcall %}
       </div>
       {% endif %}

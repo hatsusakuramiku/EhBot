@@ -1,14 +1,32 @@
+{#
+  The workbench (R9).
+
+  It is the page an operator opens first, so it answers three questions and
+  stops: is the process healthy, is anything waiting on me, and are the two
+  external connections up. Everything else is a link away — this page owning a
+  fourth panel is how a workbench turns into a second copy of every other page.
+
+  Rewritten off `app.css` in R9. What changed beyond the class names: the header
+  badge used to be a hardcoded 「系统正常」 beside a green dot, which said the
+  same thing on a deployment whose library directory was read-only. It now comes
+  from `system_health_view`, resolved from the same `startup_errors` that decides
+  whether `/readyz` answers 503.
+#}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
-{% block title %}工作台 - EhBot{% endblock %}
+
+{% block title %}工作台 · EhBot{% endblock %}
+
+{% block content_class %}ui-content{% endblock %}
+
 {% block content %}
-<div class="page-heading">
+<div class="ui-page-head">
   <div>
-    <span class="eyebrow">总览</span>
-    <h1>审核工作台</h1>
-    <p>本地服务状态与接入概览</p>
+    <span class="ui-eyebrow">总览</span>
+    <h1 class="ui-title">审核工作台</h1>
+    <p class="ui-subtitle">本地服务状态与接入概览</p>
   </div>
-  <span class="status status-connected"><i></i>系统正常</span>
+  {{ ui.badge(health) }}
 </div>
 
 {#- Everything waiting on the operator, rolled up from the same
@@ -25,40 +43,62 @@
     {% endfor %}
   </span>
   <span class="ui-callout-actions">
-    <a class="ui-btn" data-size="sm" href="/activity">前往队列</a>
+    <a class="ui-btn" data-size="sm" href="{{ url_for('activity_queue') }}">前往队列</a>
   </span>
 {% endcall %}
 {% endif %}
 
-<section class="metrics" aria-label="任务概览">
+<section class="ui-section" aria-label="任务概览">
   {#- The number and the word both come from the candidate vocabulary: the count
       is tallied by tab, and the name is the tab's own, so a metric here cannot
       disagree with the tab strip it links to. 处理中 became 已通过 in R5, when
       `/candidates/processing` folded into the approved tab. -#}
-  <a class="metric" href="{{ url_for('candidate_queue') }}"><strong>{{ candidate_counts.pending }}</strong><span>{{ candidate_tab_view('pending').label }}</span></a>
-  <a class="metric" href="{{ url_for('needs_info_queue') }}"><strong>{{ candidate_counts.needs_info }}</strong><span>{{ candidate_tab_view('needs_info').label }}</span></a>
-  <a class="metric" href="{{ url_for('approved_queue') }}"><strong>{{ candidate_counts.approved }}</strong><span>{{ candidate_tab_view('approved').label }}</span></a>
-  <a class="metric metric-alert" href="{{ url_for('failed_queue') }}"><strong>{{ candidate_counts.failed }}</strong><span>{{ candidate_tab_view('failed').label }}</span></a>
+  <div class="ui-metrics">
+    <a class="ui-metric" href="{{ url_for('candidate_queue') }}">
+      <strong>{{ candidate_counts.pending }}</strong>
+      <span>{{ candidate_tab_view('pending').label }}</span>
+    </a>
+    <a class="ui-metric" href="{{ url_for('needs_info_queue') }}">
+      <strong>{{ candidate_counts.needs_info }}</strong>
+      <span>{{ candidate_tab_view('needs_info').label }}</span>
+    </a>
+    <a class="ui-metric" href="{{ url_for('approved_queue') }}">
+      <strong>{{ candidate_counts.approved }}</strong>
+      <span>{{ candidate_tab_view('approved').label }}</span>
+    </a>
+    {#- The failed tile carries a tone only when there is something in it. A
+        permanently red 0 trains an operator to ignore the colour. -#}
+    <a class="ui-metric" href="{{ url_for('failed_queue') }}"
+       {% if candidate_counts.failed %}data-tone="danger"{% endif %}>
+      <strong>{{ candidate_counts.failed }}</strong>
+      <span>{{ candidate_tab_view('failed').label }}</span>
+    </a>
+  </div>
 </section>
 
-<section class="section-block" aria-labelledby="connection-heading">
-  <div class="section-heading">
-    <div><h2 id="connection-heading">外部连接</h2><p>消息入口与内容源会话</p></div>
-    <a class="text-action" href="{{ url_for('connections_page') }}">管理连接</a>
+<section class="ui-section" aria-labelledby="connection-heading">
+  <h2 class="ui-section-title" id="connection-heading">外部连接</h2>
+  <p class="ui-hint">消息入口与内容源会话</p>
+  {#- The state's Chinese comes from `connection_view`, not from a chain of
+      inline conditionals. The old chain was written out twice here, so a fifth
+      connection state would have read「尚未配置」on both rows -- and adding one
+      meant editing two places that were already one edit apart. -#}
+  <div class="ui-record">
+    <div class="ui-record-head">
+      <span class="ui-record-title">Telegram Bot</span>
+      <span class="ui-record-meta">{{ connections.telegram.identity or "Bot API" }}</span>
+      <span class="ui-record-badges">{{ ui.badge(connections.telegram.state | connection_view) }}</span>
+    </div>
   </div>
-  <div class="connection-summary">
-    {#- The state's Chinese comes from `connection_view`, not from a chain of
-        inline conditionals. The old chain was written out twice here, so a fifth
-        connection state would have read「尚未配置」on both rows -- and adding one
-        meant editing two places that were already one edit apart. -#}
-    <div class="summary-row">
-      <div><strong>Telegram Bot</strong><span>{{ connections.telegram.identity or "Bot API" }}</span></div>
-      {{ ui.badge(connections.telegram.state | connection_view) }}
+  <div class="ui-record">
+    <div class="ui-record-head">
+      <span class="ui-record-title">ExHentai</span>
+      <span class="ui-record-meta">{{ connections.exhentai.identity or "Cookie 会话" }}</span>
+      <span class="ui-record-badges">{{ ui.badge(connections.exhentai.state | connection_view) }}</span>
     </div>
-    <div class="summary-row">
-      <div><strong>ExHentai</strong><span>{{ connections.exhentai.identity or "Cookie 会话" }}</span></div>
-      {{ ui.badge(connections.exhentai.state | connection_view) }}
-    </div>
+  </div>
+  <div class="ui-form-actions" style="margin-top: var(--s-3)">
+    <a class="ui-btn" data-size="sm" href="{{ url_for('settings_section', section='connections') }}">管理连接</a>
   </div>
 </section>
 {% endblock %}

@@ -27,8 +27,6 @@
 
 {% block title %}{{ work.title or "未命名作品" }} · EhBot{% endblock %}
 
-{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
-{% block main_attrs %}{% endblock %}
 {% block content_class %}ui-content{% endblock %}
 
 {# --------------------------------------------------------------- one action #}
@@ -227,7 +225,17 @@
             {% if node.actions.retry %}{{ job_button(node.job.job_id, "retry", "重试", csrf_token, work_href) }}{% endif %}
             {% if node.actions.pause %}{{ job_button(node.job.job_id, "pause", "暂停", csrf_token, work_href) }}{% endif %}
             {% if node.actions.resume %}{{ job_button(node.job.job_id, "resume", "继续", csrf_token, work_href) }}{% endif %}
-            {% if node.actions.cancel %}{{ job_button(node.job.job_id, "cancel", "取消", csrf_token, work_href, variant="danger") }}{% endif %}
+            {#- The one job action that cannot be undone from here, so it asks
+                first. `hidden` carries the return path the plain buttons put in
+                their own form. -#}
+            {% if node.actions.cancel %}
+            {{ ui.confirm("取消", "取消这项任务",
+                          "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                          confirm_label="确认取消",
+                          action="/activity/jobs/" ~ node.job.job_id ~ "/cancel",
+                          csrf_token=csrf_token, hidden={"return_to": work_href},
+                          size="sm", key=node.job.job_id) }}
+            {% endif %}
           {% endcall %}
         {% else %}
           {{ ui.timeline_node(node.at, node.action.label, actor=node.actor,
@@ -256,7 +264,12 @@
     {{ post_button(base ~ "/needs-revision", "要求修订", csrf_token) }}
     {% endif %}
     {% if work.actions.reject %}
-    {{ post_button(base ~ "/reject", "驳回", csrf_token, variant="danger") }}
+    {#- Reversible from the 已驳回 queue, but it is the action that takes a book
+        out of the pipeline, and on this page it sits beside 通过并下载. -#}
+    {{ ui.confirm("驳回", "驳回这件作品",
+                  "候选会进入「已驳回」队列，不会被删除；需要时可在该队列里重新排队。",
+                  confirm_label="确认驳回", action=base ~ "/reject",
+                  csrf_token=csrf_token, size="sm") }}
     {% endif %}
     {% if work.actions.requeue %}
     {{ post_button(base ~ "/requeue", "重新排队", csrf_token) }}
@@ -272,10 +285,22 @@
 
     {#- The four sources, always all four. An unavailable one is disabled with
         the reason in its tooltip rather than hidden: an operator who cannot find
-        「EX 种子」cannot tell a missing torrent from a broken page. -#}
+        「EX 种子」cannot tell a missing torrent from a broken page.
+
+        ExHentai Archive Download spends GP, and the pipeline never routes to it
+        on its own for exactly that reason -- so when it is the operator choosing
+        it by hand, the page says what it costs before the request is made. A
+        disabled one keeps the plain button: there is nothing to confirm. -#}
     {% for source in work.actions.sources %}
+    {% if source.provider.code == "EXHENTAI" and source.available %}
+    {{ ui.confirm(source.provider.label, "用 Archive Download 取原档",
+                  "Archive Download 会消耗 GP。种子与预览页都不花 GP，可先确认这两条是否可用。",
+                  confirm_label="确认消耗 GP", action=source.action,
+                  csrf_token=csrf_token, variant=None, size="sm") }}
+    {% else %}
     {{ post_button(source.action, source.provider.label, csrf_token,
                    disabled=not source.available, hint=source.hint) }}
+    {% endif %}
     {% endfor %}
   </div>
 </div>

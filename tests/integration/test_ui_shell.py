@@ -159,31 +159,42 @@ def test_theme_is_applied_before_first_paint(tmp_path: Path) -> None:
     assert 'data-theme="auto"' not in body
 
 
-def test_legacy_pages_keep_the_light_lock(tmp_path: Path) -> None:
-    # `app.css` still hardcodes a light background and a light `--ink`. Until a
-    # page is rewritten it must stay pinned to light, or dark mode renders its
-    # muted text at about 3.2:1 -- below the 4.5:1 this phase must meet.
+def test_no_page_carries_the_legacy_light_lock(tmp_path: Path) -> None:
+    # R9 rewrote the last three pre-refactor pages, so `data-legacy="true"` and
+    # the `.ui-main[data-legacy]` rule that pinned a page to light are both gone.
+    # This asserts the direction of travel: a new page must be built on `ui.css`,
+    # not by reintroducing an escape hatch that opts out of the theme.
     client, _ = _client(tmp_path)
     try:
-        legacy = client.get("/manual-add").text
-        rewritten = client.get("/ui-kit").text
+        pages = [
+            client.get(path).text
+            for path in ("/", "/manual-add", "/activity", "/candidates", "/ui-kit")
+        ]
     finally:
         client.__exit__(None, None, None)
 
-    assert 'data-legacy="true"' in legacy
-    assert 'data-legacy="true"' not in rewritten
+    for body in pages:
+        assert "data-legacy" not in body
 
 
-def test_both_stylesheets_load_in_order(tmp_path: Path) -> None:
+def test_ui_css_is_the_only_stylesheet(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     try:
-        body = client.get("/").text
+        shell = client.get("/").text
+        # The login page does not extend `base.html` -- there is no navigation to
+        # show somebody who is not signed in -- so it links its own stylesheet and
+        # is the one that would be left behind by a cleanup done in `base.html`.
+        login = client.get("/login").text
+        missing = client.get("/static/app.css")
     finally:
         client.__exit__(None, None, None)
 
-    # `ui.css` must come second: it is the authoritative layer, and the split
-    # exists so R9's cleanup is `rm app.css` rather than a careful cut.
-    assert body.index("app.css") < body.index("ui.css")
+    for body in (shell, login):
+        assert "ui.css" in body
+        assert "app.css" not in body
+    # Deleted, not merely unlinked: a stylesheet still being served is a
+    # stylesheet a future page can link again.
+    assert missing.status_code == 404
 
 
 def test_vendored_assets_are_served_not_fetched(tmp_path: Path) -> None:
@@ -314,3 +325,56 @@ def test_table_cells_carry_labels_for_the_phone_layout(tmp_path: Path) -> None:
     # `data-label`. A cell without one becomes an anonymous value on a phone.
     assert 'data-label="状态"' in body
     assert 'data-label="来源"' in body
+
+
+def test_a_cover_that_has_not_arrived_shimmers_instead_of_sitting_empty(
+    tmp_path: Path,
+) -> None:
+    """EHBot.md 8.2: the wait is visible, and it is the shape of the answer.
+
+    Covers are lazy-loaded proxy fetches, so a grid paints before any of them
+    exist. A flat rectangle reads as「this work has no cover」; the skeleton
+    shimmer reads as「it is on the way」, and the image lands on top of it with
+    no layout shift because the container already reserves the 2:3 box.
+    """
+    client, _ = _client(tmp_path)
+    try:
+        body = client.get("/ui-kit").text
+    finally:
+        client.__exit__(None, None, None)
+
+    covers = re.findall(r'<div class="ui-card-cover"([^>]*)>\s*<?', body)
+    assert covers, "no cover card rendered, so this test proves nothing"
+    pending = [attrs for attrs in covers if "data-pending" in attrs]
+    assert pending, "no cover is waiting, so the skeleton is never exercised"
+
+    # Every waiting cover holds an image; 「无封面」 is a final answer, and
+    # shimmering there would promise a cover that is never coming.
+    for match in re.finditer(
+        r'<div class="ui-card-cover"([^>]*)>\s*(<[a-z]+)', body
+    ):
+        attrs, first_child = match.group(1), match.group(2)
+        assert ("data-pending" in attrs) == (first_child == "<img"), match.group(0)
+
+
+def test_the_skeleton_attribute_is_known_to_the_css_and_the_script(
+    tmp_path: Path,
+) -> None:
+    """Three files have to agree on one attribute name.
+
+    The template writes it, `ui.css` animates it, and `ui.js` removes it once the
+    image has loaded — CSS cannot observe an image's load state, and a lazy
+    image may not even start its request until it is scrolled into view. Rename
+    it in one place and the shimmer either never appears or never stops.
+    """
+    static = Path(__file__).resolve().parents[2] / "app" / "web" / "static"
+    css = (static / "ui.css").read_text(encoding="utf-8")
+    script = (static / "ui.js").read_text(encoding="utf-8")
+
+    assert '.ui-card-cover[data-pending="true"]' in css
+    assert "ui-shimmer" in css
+    assert "data-pending" in script
+    # `load` does not bubble, so a delegated listener has to capture; bound on
+    # the document it also covers cards HTMX swaps in later.
+    assert 'addEventListener("load"' in script
+    assert 'addEventListener("error"' in script

@@ -10,6 +10,11 @@ from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
 from app.main import create_app
+from tests.integration.markup import (
+    gated_targets,
+    nested_form_lines,
+    ungated_targets,
+)
 
 
 def make_settings(root: Path) -> Settings:
@@ -567,10 +572,18 @@ def test_dashboard_uses_persisted_candidate_counts(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     # Counted by tab, and named by the tab vocabulary, so these four metrics
-    # cannot disagree with the tab strip they link to.
-    assert "<strong>1</strong><span>待审核</span>" in response.text
-    assert "<strong>0</strong><span>待补充</span>" in response.text
-    assert "<strong>0</strong><span>已通过</span>" in response.text
+    # cannot disagree with the tab strip they link to. Matched as a pair rather
+    # than as literal adjacent markup: the assertion is that this number belongs
+    # to this label, and reindenting the template must not be able to break it.
+    metrics = dict(
+        (label, int(count))
+        for count, label in re.findall(
+            r"<strong>(\d+)</strong>\s*<span>([^<]+)</span>", response.text
+        )
+    )
+    assert metrics["待审核"] == 1
+    assert metrics["待补充"] == 0
+    assert metrics["已通过"] == 0
     assert "/candidates/approved" in response.text
     assert "/candidates/processing" not in response.text
 
@@ -589,3 +602,57 @@ def test_pending_queue_excludes_candidates_in_other_states(tmp_path: Path) -> No
     assert response.status_code == 200
     assert "Queue Fixture Comic" not in response.text
     assert "暂无待审核候选" in response.text
+
+
+# ------------------------------------------------ the markup a click needs
+
+
+def test_the_batch_forms_are_not_nested_in_one_another(tmp_path: Path) -> None:
+    # Both views put the whole list inside one batch form, and HTML drops a
+    # `<form>` nested in another rather than reporting it.
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        pages = [
+            client.get("/candidates").text,
+            client.get("/candidates?view=table").text,
+        ]
+
+    for page in pages:
+        assert nested_form_lines(page) == []
+
+
+def test_a_batch_rejection_asks_before_it_runs(tmp_path: Path) -> None:
+    """EHBot.md 8.8, for the action that can move a whole page of works.
+
+    The dialog is teleported to `<body>`, so its button is outside the batch
+    form and HTML's `form` attribute is what reconnects it. Without that the
+    click submits nothing, which looks exactly like a rejection that worked.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        body = client.get("/candidates").text
+
+    assert "candidate-batch" in gated_targets(body)
+    assert 'id="candidate-batch"' in body
+    # The gated button names the action itself, because the batch form serves
+    # several of them and the endpoint reads `action` to tell them apart.
+    # Sliced rather than matched with a regex: the button carries an Alpine
+    # `x-init` whose arrow function contains a `>`, so no attribute pattern
+    # bounded by `>` can reach the end of the tag.
+    closing = body.index("确认驳回</button>")
+    reject = body[body.rindex("<button", 0, closing) : closing]
+    assert 'form="candidate-batch"' in reject
+    assert 'name="action"' in reject
+    assert 'value="reject"' in reject
+
+    # Approving is not gated: it is the action the queue exists for, and it is
+    # reversible from the 已通过 tab.
+    assert "/candidates/1/approve" in ungated_targets(body)

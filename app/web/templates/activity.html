@@ -24,8 +24,6 @@
 
 {% block title %}{{ tab_title }} · EhBot{% endblock %}
 
-{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
-{% block main_attrs %}{% endblock %}
 {% block content_class %}ui-content{% endblock %}
 
 {# ------------------------------------------------------------ one queue row #}
@@ -72,51 +70,59 @@
     </td>
     {% if selectable %}
     <td data-label="操作">
+      {#- `formaction` rather than a nested form, for the reason the candidate
+          rows give: the row lives inside the batch form, and HTML does not nest
+          forms -- a `<form>` start tag inside another one is *ignored*, which
+          would leave every one of these buttons submitting the batch instead of
+          its own job. Each therefore retargets the batch form at its own
+          single-job endpoint. The batch form's `job_ids` and `priority` ride
+          along and those endpoints ignore them; `switch-source` gets its
+          `provider` from the button rather than a hidden input, because two rows
+          would otherwise contribute two of them to one form. -#}
+      {%- set job_base = "/activity/jobs/" ~ job.job_id -%}
       <div class="ui-row-actions">
         {% if job.actions.retry %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/retry">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="ui-btn" data-size="sm" type="submit">重试</button>
-        </form>
+        <button class="ui-btn" data-size="sm" type="submit"
+                formaction="{{ job_base }}/retry">重试</button>
         {% endif %}
         {% if job.actions.resume %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/resume">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="ui-btn" data-size="sm" type="submit">继续</button>
-        </form>
+        <button class="ui-btn" data-size="sm" type="submit"
+                formaction="{{ job_base }}/resume">继续</button>
         {% endif %}
         {% if job.actions.pause %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/pause">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="ui-btn" data-size="sm" type="submit">暂停</button>
-        </form>
+        <button class="ui-btn" data-size="sm" type="submit"
+                formaction="{{ job_base }}/pause">暂停</button>
         {% endif %}
         {% if job.torrent.waiting_for_peers %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/switch-source">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="provider" value="TELEGRAPH">
-          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
-                  title="1280px 重编码，约为原档 5%–10%">改用预览图源</button>
-        </form>
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/switch-source">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="provider" value="EXHENTAI">
-          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
-                  title="消耗 GP">用 Archive Download</button>
-        </form>
+        {#- Both of these end the torrent, so both ask first: one drops the book
+            to reading grade, the other spends GP. Neither is a decision to take
+            on a mis-click. -#}
+        {{ ui.confirm("改用预览图源", "改用预览图源",
+                      "当前种子会从 qBittorrent 移除，改从预览页抓取：成品是统一缩到宽 1280 的重编码版本，约为原档 5%–10%。",
+                      confirm_label="确认改用预览图源", form="queue-batch",
+                      field="provider", value="TELEGRAPH",
+                      formaction=job_base ~ "/switch-source",
+                      variant="ghost", size="sm", key=job.job_id) }}
+        {{ ui.confirm("用 Archive Download", "用 Archive Download 取原档",
+                      "当前种子会从 qBittorrent 移除，改用 ExHentai 的 Archive Download 取原档，这会消耗 GP。",
+                      confirm_label="确认消耗 GP", form="queue-batch",
+                      field="provider", value="EXHENTAI",
+                      formaction=job_base ~ "/switch-source",
+                      variant="ghost", size="sm", key=job.job_id) }}
         {% endif %}
         {% if job.actions.stop_seeding %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/stop-seeding">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
-                  title="从 qBittorrent 移除条目，不删除已归档的文件">停止做种</button>
-        </form>
+        {#- Plain: it removes the client entry and nothing else. The archived
+            files stay where they were published. -#}
+        <button class="ui-btn" data-size="sm" data-variant="ghost" type="submit"
+                formaction="{{ job_base }}/stop-seeding"
+                title="从 qBittorrent 移除条目，不删除已归档的文件">停止做种</button>
         {% endif %}
         {% if job.actions.cancel %}
-        <form method="post" action="/activity/jobs/{{ job.job_id }}/cancel">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="ui-btn" data-size="sm" data-variant="danger" type="submit">取消</button>
-        </form>
+        {{ ui.confirm("取消", "取消这项任务",
+                      "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                      confirm_label="确认取消", form="queue-batch",
+                      formaction=job_base ~ "/cancel",
+                      size="sm", key=job.job_id) }}
         {% endif %}
       </div>
     </td>
@@ -192,7 +198,7 @@
 {% else %}
 
 {%- set sections = snapshot.packing if tab == "packing" else snapshot.downloads -%}
-<form data-queue-form
+<form data-queue-form id="queue-batch"
       x-data="{ selected: [], priority: {{ default_priority }} }"
       method="post" action="/activity/jobs/batch">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -215,8 +221,14 @@
              style="width: 6em" aria-describedby="bulk-priority-hint">
       <span class="ui-hint" id="bulk-priority-hint" style="margin: 0">数值越小越靠前</span>
       <button class="ui-btn" data-size="sm" type="submit" name="action" value="priority">调整优先级</button>
-      <button class="ui-btn" data-size="sm" data-variant="danger" type="submit"
-              name="action" value="cancel">批量取消</button>
+      {#- A cancelled job terminates and its candidate goes back to the review
+          queue, and a parked torrent is removed from the client with it, so this
+          one asks first. The dialog's button submits this form by id -- see the
+          `confirm` macro -- and carries the same `action=cancel`. -#}
+      {{ ui.confirm("批量取消", "取消选中的任务",
+                    "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                    confirm_label="确认取消", form="queue-batch",
+                    field="action", value="cancel", size="sm") }}
     {% endcall %}
   </div>
   {% endif %}

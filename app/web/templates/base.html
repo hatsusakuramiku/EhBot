@@ -11,11 +11,10 @@
   domains with their sub-pages, the tab bar shows the four domains, and the
   drawer shows the sub-pages. Change the list and all three change together.
 
-  `main_attrs` carries `data-legacy="true"` by default, which locks the content
-  column to the light palette. `app.css` hardcodes light surfaces and a light
-  ink ramp, so a pre-refactor page shown on the dark ground would put ~3.2:1
-  muted grey on near-black. A page rewritten in R4–R8 overrides the block to
-  drop the lock, and the lock disappears entirely with `app.css` in R9.
+  R9 removed `main_attrs` and its `data-legacy="true"` default. It existed to
+  pin an un-rewritten page's content column to the light palette while `app.css`
+  hardcoded light surfaces; every page is now on `ui.css`, `app.css` is gone,
+  and the whole document follows the operator's theme.
 #}
 <!doctype html>
 <html lang="zh-CN">
@@ -44,7 +43,6 @@
       }
     })();
   </script>
-  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', path='/ui.css') }}">
   <script defer src="{{ url_for('static', path='/vendor/htmx-2.0.4.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>
@@ -101,7 +99,7 @@
       </div>
     </aside>
 
-    <div class="ui-main" {% block main_attrs %}data-legacy="true"{% endblock %}>
+    <div class="ui-main">
       <header class="ui-topbar">
         <a class="ui-brand ui-topbar-mobile-brand" href="/">
           <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="EhBot">
@@ -120,7 +118,7 @@
         </div>
       </header>
 
-      <main class="{% block content_class %}page-shell{% endblock %}" id="main">{% block content %}{% endblock %}</main>
+      <main class="{% block content_class %}ui-content{% endblock %}" id="main">{% block content %}{% endblock %}</main>
 
       {# -------- phone: the same list as a tab bar. Sub-pages move into a
                  drawer rather than a second set of links. -------- #}

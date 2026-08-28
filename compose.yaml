@@ -10,6 +10,10 @@ services:
       DATA_PATH: /app/data
       LIBRARY_PATH: /library
       WORK_PATH: /work
+      # Optional and normally left empty: the application generates and stores
+      # its own session key on first start. Passed through so that a multi-replica
+      # deployment can share one key by setting it in `.env`.
+      APP_SECRET_KEY: "${APP_SECRET_KEY:-}"
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
       TRUST_PROXY_HEADERS: "${TRUST_PROXY_HEADERS:-false}"
       TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:-}"
@@ -27,6 +31,7 @@ services:
       TORRENT_POLL_SECONDS: "${TORRENT_POLL_SECONDS:-15}"
       TORRENT_CATEGORY: "${TORRENT_CATEGORY:-ehbot}"
       TORRENT_KEEP_SEEDING: "${TORRENT_KEEP_SEEDING:-true}"
+      THUMBNAILS_ENABLED: "${THUMBNAILS_ENABLED:-true}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./data:/app/data

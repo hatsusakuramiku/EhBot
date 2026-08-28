@@ -28,6 +28,11 @@ from app.db.database import Database
 from app.downloads.models import PROVIDER_CONVERSION, PROVIDER_TELEGRAM
 from app.main import create_app
 from app.review.models import AUTO_OPERATOR
+from tests.integration.markup import (
+    gated_targets,
+    nested_form_lines,
+    ungated_targets,
+)
 
 
 #: Distinct idempotency keys across the whole module.
@@ -422,3 +427,105 @@ def test_a_work_that_does_not_exist_is_a_404_at_both_surfaces(
         authenticate(client, settings)
         assert client.get("/works/9999").status_code == 404
         assert client.get("/api/v1/works/9999").status_code == 404
+
+
+# ------------------------------------------------ the markup a click needs
+
+
+def attach_gallery(database: Database, candidate_id: int) -> None:
+    """Give the work an ExHentai gallery, which is what offers the GP source.
+
+    `_source_actions` only offers Archive Download when the candidate has a
+    gallery id, so without this the button renders disabled and the test would
+    pass on a control nobody can press.
+    """
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ? WHERE id = ?",
+            (987654, "appletoken99", candidate_id),
+        )
+
+
+def test_the_actions_that_spend_or_destroy_ask_first(tmp_path: Path) -> None:
+    """EHBot.md 8.8, on the page that offers every action at once.
+
+    Archive Download spends GP and rejecting sends a work back out of the queue;
+    both get a dialog. Taking a torrent or a preview page costs nothing and is
+    left as one click, because a confirmation on every button is a confirmation
+    on none.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    attach_gallery(database, candidate_id)
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+        assert page.status_code == 200
+        body = page.text
+
+        set_status(database, candidate_id, "PROCESSING")
+        job_id = insert_job(database, candidate_id, state="PAUSED")
+        download_body = client.get(f"/works/{candidate_id}").text
+
+    base = f"/candidates/{candidate_id}"
+    gated, ungated = gated_targets(body), ungated_targets(body)
+    # Offered at all -- otherwise the assertion below holds vacuously.
+    assert any(
+        source["provider"]["code"] == "EXHENTAI" and source["available"]
+        for source in page.context["work"]["actions"]["sources"]
+    )
+    assert f"{base}/exhentai-archive" in gated
+    assert f"{base}/exhentai-archive" not in ungated
+    assert f"{base}/reject" in gated
+    assert f"{base}/reject" not in ungated
+
+    assert f"{base}/torrent" in ungated
+    assert f"{base}/telegraph" in ungated
+    assert f"{base}/approve" in ungated
+
+    # A task on the timeline is cancelled here as well, and cancelling is as
+    # destructive here as it is on the queue.
+    assert f"/activity/jobs/{job_id}/cancel" in gated_targets(download_body)
+    assert f"/activity/jobs/{job_id}/resume" in ungated_targets(download_body)
+
+
+def test_no_action_form_is_swallowed_by_another(tmp_path: Path) -> None:
+    # HTML drops a `<form>` nested in another, and this page stacks a review
+    # bar, a source bar and one form per timeline node.
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    attach_gallery(database, candidate_id)
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        pages = [client.get(f"/works/{candidate_id}").text]
+        set_status(database, candidate_id, "PROCESSING")
+        insert_job(database, candidate_id, state="PAUSED")
+        pages.append(client.get(f"/works/{candidate_id}").text)
+
+    for page in pages:
+        assert nested_form_lines(page) == []
+
+
+def test_a_gated_action_returns_to_this_page(tmp_path: Path) -> None:
+    """The dialog carries the same `return_to` the plain button did.
+
+    A confirmation that loses the return target sends the operator to the queue
+    instead of back to the work they were reading.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="PROCESSING"))
+    job_id = insert_job(database, candidate_id, state="PAUSED")
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        body = client.get(f"/works/{candidate_id}").text
+
+    dialog = body.split(f'action="/activity/jobs/{job_id}/cancel"')[1]
+    dialog = dialog.split("</form>")[0]
+    assert 'name="return_to"' in dialog
+    assert f'value="/works/{candidate_id}"' in dialog

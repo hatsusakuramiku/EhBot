@@ -14,6 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi import APIRouter, Request
+
+from app.web import deps
+
 #: Every candidate state, in lifecycle order rather than dict order, so the
 #: gallery reads as a timeline and a missing tone is obvious.
 CANDIDATE_STATES: tuple[str, ...] = (
@@ -199,3 +203,20 @@ def ui_kit_context() -> dict[str, Any]:
 
 
 __all__ = ["ui_kit_context"]
+
+router = APIRouter()
+
+
+@router.get("/ui-kit")
+async def ui_kit_page(request: Request):
+    # Behind the session like every other page: it is a developer tool, not
+    # public documentation, and an unauthenticated route here would be one
+    # more surface to keep honest for no benefit.
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    return deps.templates(request).TemplateResponse(
+        request=request,
+        name="ui_kit.html",
+        context={"demo": ui_kit_context()},
+    )

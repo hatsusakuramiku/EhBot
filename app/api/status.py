@@ -278,6 +278,21 @@ DEPENDENCY_STATUS: dict[str, StatusView] = {
     DEPENDENCY_MISSING: _view(DEPENDENCY_MISSING, "未就绪", TONE_MUTED),
 }
 
+#: Whether the process itself came up clean. `Settings.readiness_errors()` plus
+#: the writability checks feed `/readyz`; this is the same fact rendered for a
+#: person. The workbench used to print 「系统正常」 as a literal beside a green
+#: dot, which was a lie in the one situation that matters -- a deployment whose
+#: library directory is read-only said 「系统正常」 while every pack failed. The
+#: codes are prefixed because `READY` already belongs to `DEPENDENCY_STATUS`: an
+#: unprefixed pair would put two different meanings behind one code.
+SYSTEM_HEALTHY = "SYSTEM_HEALTHY"
+SYSTEM_DEGRADED = "SYSTEM_DEGRADED"
+
+SYSTEM_HEALTH_STATUS: dict[str, StatusView] = {
+    SYSTEM_HEALTHY: _view(SYSTEM_HEALTHY, "运行正常", TONE_SUCCESS),
+    SYSTEM_DEGRADED: _view(SYSTEM_DEGRADED, "启动异常", TONE_DANGER),
+}
+
 #: Audit-trail verbs (`review_actions.action`), for the timeline. The codes are
 #: exactly what the writers insert -- `REVIEW_ACTIONS` plus the two nobody types
 #: -- rather than a parallel list, so an entry can never render as a raw
@@ -465,6 +480,18 @@ def dependency_view(ready: bool | None) -> StatusView:
     return DEPENDENCY_STATUS[DEPENDENCY_READY if ready else DEPENDENCY_MISSING]
 
 
+def system_health_view(errors: object = None) -> StatusView:
+    """Resolve the startup-error list into one badge for the workbench.
+
+    Takes the collection rather than a boolean because that is what
+    `app.state.startup_errors` holds, and an empty list is the healthy case —
+    the caller does not have to decide what「没有错误」looks like. Anything
+    truthy is degraded: a single unwritable directory is enough, since `/readyz`
+    answers 503 for exactly the same input.
+    """
+    return SYSTEM_HEALTH_STATUS[SYSTEM_DEGRADED if errors else SYSTEM_HEALTHY]
+
+
 def review_action_view(action: str | None) -> StatusView:
     """Resolve an audit-trail verb, falling back to the raw code.
 
@@ -532,6 +559,9 @@ __all__ = [
     "STAGE_ARCHIVED",
     "STAGE_CANDIDATE",
     "STAGE_DOWNLOAD",
+    "SYSTEM_DEGRADED",
+    "SYSTEM_HEALTHY",
+    "SYSTEM_HEALTH_STATUS",
     "StatusView",
     "TONE_ACTIVE",
     "TONE_DANGER",
@@ -560,6 +590,7 @@ __all__ = [
     "status_label",
     "status_tone",
     "status_view",
+    "system_health_view",
     "toggle_view",
     "work_stage_view",
 ]

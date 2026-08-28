@@ -33,8 +33,8 @@ from app.downloads.models import (
     PROVIDER_TELEGRAPH,
     DownloadJobSummary,
 )
-from app.main import local_return_to
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR, ReviewActionEntry
+from app.web.deps import local_return_to
 
 
 ALL_SOURCES = frozenset(

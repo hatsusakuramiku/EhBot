@@ -40,7 +40,10 @@
       used verbatim — never rebuilt here, and never pointed at an upstream
       image host. -#}
   <article class="ui-card" {% if selected %}data-selected="true"{% endif %}>
-    <div class="ui-card-cover">
+    {#- `data-pending` runs the skeleton shimmer underneath a cover that has not
+        arrived yet; `ui.js` removes it on load. Only set when there is an image
+        to wait for -- 「无封面」 is a final answer, not a wait. -#}
+    <div class="ui-card-cover"{% if cover and cover.url %} data-pending="true"{% endif %}>
       {% if cover and cover.url %}
         {#- Lazy + async: a grid of 50 covers must not block first paint, and
             each request is a proxy fetch that may be a cache miss. -#}
@@ -189,26 +192,56 @@
 
 {# ------------------------------------------------------- confirm dialog #}
 
-{% macro confirm(label, title, body, confirm_label="确认", action=None, method="post", variant="danger", csrf_token=None) -%}
+{% macro confirm(label, title, body, confirm_label="确认", action=None, method="post", variant="danger", csrf_token=None, hidden=None, form=None, field=None, value=None, formaction=None, size=None, key="", hint=None) -%}
   {#- Destructive actions get a second step. The confirm button submits a real
       form, so the action still works with JavaScript disabled once the dialog
-      is bypassed — the guard is UX, not the authorisation. -#}
+      is bypassed — the guard is UX, not the authorisation.
+
+      Three ways to name the form, because the pages need three. `action` builds
+      one inside the dialog, for a button that stands alone; `hidden` adds the
+      fields that form needs beyond the token. `form` points at a form already on
+      the page by id, which is the only way to gate a button that lives inside
+      another form: the dialog is teleported to `<body>`, so a
+      nested submit button would be outside the form it belongs to, and HTML's
+      `form` attribute is what reconnects them. `field`/`value` ride along for a
+      form whose several buttons each mean a different action, and `formaction`
+      retargets that one submission at a different endpoint.
+
+      `key` disambiguates the dialog's `id` when a page renders the same label
+      more than once -- fifty queue rows each offering 取消 would otherwise
+      point fifty `aria-labelledby` attributes at one element. -#}
+  {%- set dialog_id = "dlg-" ~ (label ~ key) | replace(" ", "") -%}
+  {#- The trigger takes the caller's variant, which may be none -- a costly
+      action is not necessarily a red one. The confirm button inside always has a
+      variant, because it is the one thing in the dialog that acts. -#}
+  {%- set confirm_variant = variant or "primary" -%}
   <div x-data="{ open: false }">
-    <button class="ui-btn" data-variant="{{ variant }}" type="button" @click="open = true">{{ label }}</button>
+    <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
+            {% if size %}data-size="{{ size }}"{% endif %}
+            {% if hint %}title="{{ hint }}"{% endif %}
+            type="button" @click="open = true">{{ label }}</button>
     <template x-teleport="body">
       <div x-show="open" x-cloak @keydown.escape.window="open = false">
         <div class="ui-scrim" @click="open = false"></div>
-        <div class="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-{{ label | replace(' ', '') }}">
+        <div class="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="{{ dialog_id }}">
           <div class="ui-dialog-panel" @click.outside="open = false">
-            <h2 class="ui-dialog-title" id="dlg-{{ label | replace(' ', '') }}">{{ title }}</h2>
+            <h2 class="ui-dialog-title" id="{{ dialog_id }}">{{ title }}</h2>
             <p class="ui-dialog-body">{{ body }}</p>
             <div class="ui-dialog-foot">
               <button class="ui-btn" type="button" @click="open = false">取消</button>
               {% if action %}
                 <form method="{{ method }}" action="{{ action }}">
                   {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
-                  <button class="ui-btn" data-variant="{{ variant }}" type="submit" x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
+                  {% for hidden_name, hidden_value in (hidden or {}).items() %}
+                  <input type="hidden" name="{{ hidden_name }}" value="{{ hidden_value }}">
+                  {% endfor %}
+                  <button class="ui-btn" data-variant="{{ confirm_variant }}" type="submit" x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
                 </form>
+              {% elif form %}
+                <button class="ui-btn" data-variant="{{ confirm_variant }}" type="submit" form="{{ form }}"
+                        {% if field %}name="{{ field }}" value="{{ value }}"{% endif %}
+                        {% if formaction %}formaction="{{ formaction }}"{% endif %}
+                        x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
               {% else %}
                 <button class="ui-btn" data-variant="{{ variant }}" type="button" @click="open = false">{{ confirm_label }}</button>
               {% endif %}

@@ -65,12 +65,12 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 809 passed / 12 skipped / 0 failed.** Ending below this is a
+**Baseline: 820 passed / 12 skipped / 0 failed.** Ending below this is a
 regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
 need a toolchain this dev machine cannot host. (Baseline moves per phase:
-R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809.
-There is no R7 — the library domain was deleted from the plan. An older note
-claiming "0 skipped" was wrong.)
+R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
+R9 820. There is no R7 — the library domain was deleted from the plan. An older
+note claiming "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
 lifespan always starts the download worker and there is no toggle, so the worker
@@ -100,6 +100,22 @@ Timezone validation is by shape for the same reason a slim container has the sam
 gap.
 
 ## Architecture rules
+
+**Where code goes.** `app/main.py` (120 lines) builds the app, mounts static
+files and includes routers — nothing else belongs in it. `app/wiring.py` owns the
+lifespan and constructs every service in dependency order. A page route lives in
+`app/web/routes/<domain>.py`, a JSON route in `app/api/`. The two layers have
+separate dependency modules on purpose: `app/api/deps.py` raises a 503 `ApiError`
+and never redirects, `app/web/deps.py` raises `HTTPException` or returns a 303 to
+`/login`. A few accessor names are duplicated between them, and the one
+difference — what an unauthenticated caller gets back — is the reason.
+
+**Router include order is load-bearing.** Starlette matches in declaration order,
+so a router carrying a typed path parameter (`/settings/{section}`,
+`/works/{work_id}`) has to be included after every literal sibling, and inside a
+module a typed route has to be declared below its literal ones. `app/wiring.py`
+orders the includes; a route that suddenly 404s or lands on the wrong handler is
+this.
 
 `/ui-kit` renders every shared component in its real states from fixtures in
 `app/web/routes/ui_kit.py` — no database access, so it works on a fresh install.
@@ -152,20 +168,17 @@ operator navigation).
 - **Job claim is `ORDER BY priority, id`, never `ORDER BY priority` alone.**
   Every pre-column job is priority 100, so within one priority the queue must
   stay FIFO — promoting one job reorders that job and nothing else.
-- **`app/web/static/ui.css` is the authoritative stylesheet; `app.css` is
-  frozen.** New rules go in `ui.css`. `app.css` holds only pre-refactor page CSS
-  and is deleted outright in R9 — the split is a file boundary rather than two
-  halves of one file precisely so that deletion is `rm` and not a careful cut.
-- **Every rule in `ui.css` is class-scoped, deliberately.** `app.css` still
-  hardcodes a light `body` background and a light `--ink`, so a bare `body` or
-  `p` rule in `ui.css` would put muted grey on near-black across the pages not
-  yet rewritten — about 3.2:1, under the 4.5:1 the project is held to. Pages
-  awaiting rewrite carry `data-legacy="true"` on `.ui-main`, which pins them to
-  light with `color-scheme` included; drop that attribute in the same commit that
-  rewrites the page, never before. `base.html` supplies the attribute by default,
-  so a page is legacy unless it overrides `main_attrs` — after R8 that leaves
-  `dashboard.html`, `manual_add.html` and `login.html`, and **`app.css` cannot be
-  deleted while any of the three still renders against it.**
+- **`app/web/static/ui.css` is the only stylesheet.** `app.css` was deleted in
+  R9 together with the three pre-refactor pages that rendered against it, and
+  `data-legacy` no longer exists — there is no such thing as a legacy page now. A
+  test scans every page's `<link rel="stylesheet">` set, so a second stylesheet
+  fails the suite rather than drifting.
+- **Every rule in `ui.css` is class-scoped, and stays that way.** The original
+  reason (a frozen `app.css` hardcoding light surfaces) is gone, but the property
+  it bought is not: a bare `body`, `p` or `a` rule reaches `/ui-kit`, every email-
+  shaped fragment HTMX swaps in, and any page added later, so a contrast
+  regression from one unscoped selector lands everywhere at once and shows up
+  nowhere in particular.
 - **`NAV_ITEMS` in `app/web/routes/shell.py` is the only navigation source.**
   The sidebar, the phone tab bar and its drawer all render from it. Three
   renderings of one list is not three lists — the previous hand-written pair had
@@ -193,10 +206,31 @@ operator navigation).
   attachment's kind from `attachment_kind_view`. Page copy that is not a state —
   a heading's subtitle, an empty state's two lines, a disabled button's reason —
   stays with the page.
+- **HTML does not nest forms, and nothing warns you.** A `<form>` start tag
+  inside another form is *ignored* by the parser: the element is never created
+  and its children — including its submit button and its `action` — join the
+  outer form. Every row on `/activity` and `/candidates` lives inside a batch
+  form, so a row action is a `<button formaction="…">`, never a form of its own.
+  This shipped broken once: R9 found every per-row action on `/activity`
+  submitting the batch endpoint with no action, rendering 200 the whole time.
+  `tests/integration/markup.py` parses each page for it. Content inside a
+  `<template>` is exempt — a template's contents are a separate fragment, which
+  is what makes the teleported dialog forms legal.
+- **A destructive or GP-spending action takes two steps; a cheap one takes
+  one.** `ui.confirm` in `components/ui.html` is the only dialog. Because
+  `x-teleport="body"` moves the dialog out of the form it was written in, the
+  confirm button reconnects through HTML's `form="<id>"` attribute (`form=`),
+  names its action when the form serves several (`field=`/`value=`), and can
+  retarget one submission (`formaction=`). Pass a `key=` whenever the same label
+  appears on more than one row, or every `aria-labelledby` on the page points at
+  the first dialog's title. Do not gate retry, resume, pause or approve: a
+  confirmation on every button is how an operator learns to dismiss them
+  unread.
 - **`/activity`, `/candidates` and `/works/{id}` are the reference
   implementations for a domain page.** One server-computed snapshot
   (`queue_snapshot` in `app/api/activity.py`, `_render_candidates` in
-  `app/main.py`, `work_snapshot` in `app/api/works.py`) feeding both the
+  `app/web/routes/candidates.py`, `work_snapshot` in `app/api/works.py`) feeding
+  both the
   JSON endpoint and the template, one template for its tabs, macros for
   repeated markup, a `data-field` contract with its script, and real forms
   underneath so the page works with JavaScript off. Read them before writing the
@@ -216,7 +250,8 @@ operator navigation).
   with a new job in flight stays 入库期.
 - **Any redirect target a page hands the server is an open-redirect surface.**
   The job-action forms carry a hidden `return_to` so an action taken on
-  `/works/{id}` comes back there; `local_return_to` in `app/main.py` accepts only
+  `/works/{id}` comes back there; `local_return_to` in `app/web/deps.py` accepts
+  only
   a rooted path — no scheme, no `//host` (browsers treat a protocol-relative
   target as another origin), no backslash (some parsers normalise it to one), no
   control characters — and a refused target falls back to a known-good redirect

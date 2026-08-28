@@ -1,17 +1,17 @@
 /* ==========================================================================
-   EhBot UI layer — design tokens + components (R3)
+   EhBot UI layer — design tokens + components (R3, sole stylesheet since R9)
    --------------------------------------------------------------------------
-   This file is the authoritative stylesheet. `app.css` holds the pre-refactor
-   page rules and is deleted in R9; keeping them in two files rather than two
-   commented halves of one file means that deletion is `rm`, not a careful cut.
+   This is the only stylesheet. `app.css` held the pre-refactor page rules and
+   was deleted in R9 once the last three pages — the workbench, manual add and
+   login — were rewritten; keeping the two layers in two files rather than two
+   halves of one made that deletion an `rm` instead of a careful cut.
 
-   Every rule here is CLASS-SCOPED ON PURPOSE. `app.css` still hardcodes
-   `body { background: #f3f5f6 }` and a light `--ink`, so a bare `body` or `p`
-   rule here would put muted grey text on a dark page background on the 13
-   legacy pages — about 3.5:1, below the 4.5:1 this phase is required to meet.
-   Legacy pages therefore stay exactly as they are; the token values flip with
-   the theme but only components in this file read them. When R9 removes
-   `app.css`, `.ui-page` on `<body>` takes over globally.
+   Every rule is still CLASS-SCOPED, and that outlives the split. `.ui-page` on
+   `<body>` now owns the page ground, so nothing here needs to win against a
+   hardcoded `body { background }` any more — but a bare `p` or `a` rule would
+   reach into the markup of every page at once, which is what made the previous
+   stylesheet impossible to delete a page at a time. Adding one is how the next
+   `app.css` gets started.
 
    Tone names are semantic (`success`, `waiting`), never colour names, so the
    status registry in `app/api/status.py` never has to know what a tone looks
@@ -407,35 +407,6 @@
 
 .ui-main { min-width: 0; display: flex; flex-direction: column; }
 
-/* Legacy content lock.
-   `app.css` hardcodes light surfaces (`--surface: #ffffff`) and a light ink
-   ramp (`--muted: #68747c`), so a pre-refactor page rendered on the dark ground
-   would put roughly 3.2:1 grey on near-black — below the 4.5:1 this phase must
-   meet. The whole content column, gutters included, is therefore pinned light
-   until its page is rewritten. `color-scheme` is pinned too, or the browser
-   paints dark scrollbars and form controls into a light page.
-
-   A page rewritten in R4–R8 overrides `{% block main_attrs %}` to drop the
-   attribute; the rule dies with `app.css` in R9. */
-.ui-main[data-legacy="true"] {
-  color-scheme: light;
-  background: #f3f5f6;
-  color: #20272d;
-  /* The tokens are re-pointed at light values for the whole locked column, not
-     just the topbar: an unconverted page can host a design-system component
-     (the dashboard's needs-attention callout is the first), and a component
-     reading the dark surface token inside a hardwired-light page renders as a
-     dark box floating on a light one. Converted pages drop the attribute and
-     get the real theme back. */
-  --t-surface: #ffffff;
-  --t-surface-sunken: #eef1f2;
-  --t-line: #dce2e5;
-  --t-line-strong: #c3cbcf;
-  --t-ink: #20272d;
-  --t-ink-muted: #4a555c;
-  --t-accent: #16756b;
-}
-
 /* Nav links reused outside the dark chrome (the mobile drawer) need the page
    ink, not the chrome ink, or they are grey-on-white. */
 .ui-nav-link-plain { color: var(--t-ink); }
@@ -527,6 +498,33 @@
 .ui-section { margin-top: var(--s-8); }
 .ui-section-title { margin: 0 0 var(--s-3); color: var(--t-ink); font-size: 16px; font-weight: 650; }
 .ui-hint { margin: var(--s-2) 0 0; color: var(--t-ink-muted); font-size: var(--font-small); }
+
+/* A row of count-plus-name tiles, each a link to the list it counts. `auto-fit`
+   rather than a fixed column count so the same markup holds four tiles on a
+   desktop and two on a phone without a media query per breakpoint. The tone
+   attribute is opt-in: a tile that is always red is a tile nobody reads, so the
+   caller sets it only when the number is non-zero. */
+.ui-metrics {
+  display: grid;
+  gap: var(--s-4);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.ui-metric {
+  display: grid;
+  gap: var(--s-1);
+  padding: var(--s-5);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+  color: inherit;
+  text-decoration: none;
+}
+
+.ui-metric:hover { border-color: var(--t-line-strong); }
+.ui-metric strong { color: var(--t-ink); font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.ui-metric span { color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-metric[data-tone="danger"] strong { color: var(--tone-danger-fg); }
 
 .ui-panel {
   padding: var(--s-5);
@@ -972,12 +970,22 @@
    11. Skeleton and progress
    -------------------------------------------------------------------------- */
 
-.ui-skeleton {
+/* A cover that is still loading shimmers with the same gradient as a skeleton
+   placeholder: the thumbnail is a proxy fetch that may be a cache miss, and a
+   grid of flat rectangles reads as "these works have no cover" rather than
+   "they are on the way". The shimmer is on the container, so the image paints
+   over it with no layout shift, and `ui.js` drops `data-pending` on load so
+   the animation does not keep running behind fifty opaque images. */
+.ui-skeleton,
+.ui-card-cover[data-pending="true"] {
   border-radius: var(--r-sm);
   background: linear-gradient(90deg, var(--t-surface-sunken) 25%, var(--t-line) 37%, var(--t-surface-sunken) 63%);
   background-size: 400% 100%;
   animation: ui-shimmer 1.4s ease-in-out infinite;
 }
+/* The card clips its own corners; rounding the cover again would show the
+   sunken surface through the notch while the shimmer runs. */
+.ui-card-cover[data-pending="true"] { border-radius: 0; }
 .ui-skeleton[data-shape="text"] { height: 12px; }
 .ui-skeleton[data-shape="title"] { height: 18px; }
 .ui-skeleton[data-shape="cover"] { aspect-ratio: 2 / 3; border-radius: var(--r-lg); }
@@ -1226,6 +1234,18 @@
 }
 .ui-code:empty { display: none; }
 
+/* The same monospace treatment inside a sentence. A `.ui-code` block dropped
+   into running text puts a padded box mid-paragraph and breaks the line height
+   around it, so an example URL quoted in a hint uses this instead. */
+.ui-code-inline {
+  padding: 0 var(--s-1);
+  border-radius: var(--r-sm);
+  background: var(--t-surface-sunken);
+  color: var(--t-ink);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
 /* The placeholder chips under the path-template field. Buttons, not text: with
    JavaScript on they insert their token at the cursor, and with it off they are
    still the list of what the template understands. */
@@ -1233,7 +1253,41 @@
 .ui-token { font-family: var(--font-mono); font-size: var(--font-small); }
 
 /* --------------------------------------------------------------------------
-   15. Demo page only
+   15. Login (R9)
+   The only page outside the shell: there is no navigation to show somebody who
+   is not signed in yet. It carries its own centring because `.ui-content` is a
+   column inside the shell grid, and this page has no grid around it.
+   -------------------------------------------------------------------------- */
+
+.ui-auth {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--s-8) var(--s-5);
+}
+
+.ui-auth-card {
+  width: min(400px, 100%);
+  display: grid;
+  gap: var(--s-6);
+  padding: var(--s-8);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-lg);
+  background: var(--t-surface);
+}
+
+@media (max-width: 640px) {
+  /* No card edge on a phone: a 400px panel inset inside a 360px viewport wastes
+     both margins. The surface becomes the page. */
+  .ui-auth { padding: var(--s-6) var(--s-4); align-items: start; }
+  .ui-auth-card { padding: var(--s-5); border: 0; background: none; }
+}
+
+.ui-auth-brand { display: flex; align-items: center; gap: var(--s-3); }
+.ui-auth-brand img { width: 36px; height: 36px; }
+
+/* --------------------------------------------------------------------------
+   16. Demo page only
    -------------------------------------------------------------------------- */
 
 .ui-demo-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }

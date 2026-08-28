@@ -250,6 +250,49 @@
     return element;
   }
 
+  /* ------------------------------------------------------------ covers */
+
+  /* A cover card renders with `data-pending="true"`, which shimmers a skeleton
+   * under the thumbnail while the proxy fetch is in flight. Clearing it here
+   * rather than in CSS is the only option: `loading="lazy"` means the request
+   * may not even start until the card is scrolled into view, and CSS cannot
+   * observe an image's load state.
+   *
+   * `error` settles it too — a failed proxy fetch shows the alt box, and
+   * shimmering forever would promise an image that is never coming. */
+  function settleCover(image) {
+    var cover = image.closest(".ui-card-cover");
+    if (cover) {
+      cover.removeAttribute("data-pending");
+    }
+  }
+
+  function settleLoadedCovers() {
+    var images = document.querySelectorAll('.ui-card-cover[data-pending="true"] img');
+    for (var i = 0; i < images.length; i += 1) {
+      /* Cached covers can finish before this file runs, and a `load` listener
+       * added afterwards never fires for them. */
+      if (images[i].complete) {
+        settleCover(images[i]);
+      }
+    }
+  }
+
+  function bindCovers() {
+    /* `load` and `error` do not bubble, so the listener has to capture. One
+     * pair on the document covers every card, including the ones HTMX swaps in
+     * later. */
+    function handler(event) {
+      var target = event.target;
+      if (target && target.tagName === "IMG") {
+        settleCover(target);
+      }
+    }
+    document.addEventListener("load", handler, true);
+    document.addEventListener("error", handler, true);
+    settleLoadedCovers();
+  }
+
   /* ------------------------------------------------------------ wiring */
 
   function bind() {
@@ -277,12 +320,16 @@
     reflect("[data-density-option]", "densityOption", currentDensity());
     applyNav(read(KEYS.nav, "expanded") === "collapsed");
     formatTimes();
+    bindCovers();
 
     /* HTMX replaces markup long after this file ran, so timestamps that arrive
      * with a swap need the same pass. Re-scanning the whole document is cheaper
      * than it looks: `data-localized` makes every element already handled a
      * single attribute read. */
     document.body.addEventListener("htmx:load", formatTimes);
+    /* A swapped-in card whose cover was already in the browser cache is
+     * `complete` on arrival, so it needs the same catch-up pass. */
+    document.body.addEventListener("htmx:load", settleLoadedCovers);
   }
 
   if (document.readyState === "loading") {
