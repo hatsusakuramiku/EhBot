@@ -17,6 +17,7 @@ from app.api.actions import router as actions_router
 from app.api.activity import router as activity_router
 from app.api.candidates import router as candidates_router
 from app.api.events import EventBus
+from app.api.settings import router as settings_router
 from app.api.summary import router as summary_router
 from app.api.thumbnails import router as thumbnails_router
 from app.api.works import router as works_router
@@ -38,6 +39,7 @@ router.include_router(summary_router)
 router.include_router(candidates_router)
 router.include_router(works_router)
 router.include_router(activity_router)
+router.include_router(settings_router)
 router.include_router(thumbnails_router)
 router.include_router(actions_router)
 
@@ -60,6 +62,7 @@ async def api_meta(request: Request) -> dict:
     """
     deps.require_session(request)
     settings = request.app.state.settings
+    system = await request.app.state.system_settings_service.snapshot()
     return {
         "statuses": {
             "candidate": {
@@ -91,11 +94,18 @@ async def api_meta(request: Request) -> dict:
             "tag_translation": bool(settings.tag_translation_enabled),
         },
         "polling": {
-            # Visible-tab interval. The stream is the primary signal; polling
-            # is the fallback for a proxy that buffers SSE.
-            "interval_ms": 2000,
-            "idle_interval_ms": 15000,
+            # Operator-set cadence (设置 › 系统), not a constant: the stream is
+            # the primary signal and polling is the fallback for a proxy that
+            # buffers SSE, so how hard that fallback works belongs to whoever
+            # runs the deployment. Every polling client reads it from here, so
+            # one saved value retunes the whole interface on the next load.
+            "interval_ms": system["poll_interval_ms"],
+            "idle_interval_ms": system["idle_poll_interval_ms"],
         },
+        # The zone timestamps are read in. Served rather than applied server
+        # side because the browser has the full IANA database and a slim
+        # container may have none at all.
+        "timezone": system["timezone"],
     }
 
 

@@ -8,13 +8,17 @@ mobile view can never disagree with the desktop one.
 
 Why the tree has two levels
 ---------------------------
-The target information architecture is four flat domains. But 设置 does not
-exist yet -- it arrives in R8 -- and 来源规则 / 自动审批 / 归档设置 / 外部连接
-are live pages an operator uses today. A flat four-item nav would make them
-unreachable, trading a real regression for a cosmetic match with the plan. So a
-domain carries the pages it will eventually absorb as ``children``, and when R8
-lands `/settings` those children become tabs inside it and this file shrinks by
-one edit. The nav never points at a route that does not exist.
+The target information architecture is four flat domains, but three of them own
+several pages an operator switches between constantly -- the six candidate tabs,
+the three activity queues, the seven settings sections -- and a flat nav would
+put those behind a page they had to load first. So a domain carries its sections
+as ``children``, the sidebar renders both levels, and only a leaf ever claims
+``aria-current="page"``.
+
+R8 collapsed the settings domain into `/settings/{section}`: 来源规则, 自动审批,
+归档设置 and 外部连接 used to be four top-level pages listed here by hand, each
+with its own URL. They are now tabs named from `settings_section_view`, so this
+file no longer contains a settings label at all.
 """
 
 from __future__ import annotations
@@ -23,7 +27,23 @@ from dataclasses import dataclass, field
 
 from fastapi import Request
 
-from app.api.status import candidate_tab_view
+from app.api.status import (
+    SETTINGS_ARCHIVE,
+    SETTINGS_AUTO_APPROVAL,
+    SETTINGS_CONNECTIONS,
+    SETTINGS_PASSWORDS,
+    SETTINGS_PATHS,
+    SETTINGS_SOURCES,
+    SETTINGS_SYSTEM,
+    candidate_tab_view,
+    settings_section_view,
+)
+
+#: The zone timestamps are rendered in when nothing has been stored yet. Kept
+#: here as a literal rather than imported from `app.settings.service` so the
+#: shell has no dependency on the database layer: the real value arrives on
+#: `app.state`, and this is only what a page shows before the store is read.
+FALLBACK_TIMEZONE = "UTC"
 
 #: Themes the shell will apply. `auto` follows the operating system.
 THEMES: tuple[str, ...] = ("auto", "light", "dark")
@@ -197,26 +217,65 @@ NAV_ITEMS: tuple[NavItem, ...] = (
         "settings",
         "设置",
         "设置",
-        "/connections",
-        "/connections",
+        "/settings",
+        "/settings",
         icon="⚙",
         children=(
+            #: The seven tabs of the settings domain, named by
+            #: `settings_section_view` rather than by a string typed here, for
+            #: the same reason the candidate tabs are: the tab, the URL segment
+            #: and the JSON payload must be one vocabulary. 外部连接 is the index
+            #: child because `/settings` renders it -- a deployment is not usable
+            #: until Telegram is connected, so it is the first thing an operator
+            #: needs -- and so it is the one that gives up prefix matching.
             NavItem(
-                "connections", "外部连接", "连接", "/connections",
-                "/connections", exact=True,
+                "connections",
+                settings_section_view(SETTINGS_CONNECTIONS).label,
+                "连接",
+                f"/settings/{SETTINGS_CONNECTIONS}",
+                f"/settings/{SETTINGS_CONNECTIONS}",
             ),
-            NavItem("sources", "来源规则", "来源", "/sources", "/sources"),
             NavItem(
-                "auto_approval", "自动审批", "审批",
-                "/auto-approval-rules", "/auto-approval-rules",
+                "sources",
+                settings_section_view(SETTINGS_SOURCES).label,
+                "来源",
+                f"/settings/{SETTINGS_SOURCES}",
+                f"/settings/{SETTINGS_SOURCES}",
             ),
             NavItem(
-                "archive", "归档设置", "归档",
-                "/archive-settings", "/archive-settings",
+                "auto_approval",
+                settings_section_view(SETTINGS_AUTO_APPROVAL).label,
+                "审批",
+                f"/settings/{SETTINGS_AUTO_APPROVAL}",
+                f"/settings/{SETTINGS_AUTO_APPROVAL}",
             ),
             NavItem(
-                "change_password", "修改密码", "密码",
-                "/change-password", "/change-password",
+                "archive",
+                settings_section_view(SETTINGS_ARCHIVE).label,
+                "归档",
+                f"/settings/{SETTINGS_ARCHIVE}",
+                f"/settings/{SETTINGS_ARCHIVE}",
+            ),
+            NavItem(
+                "paths",
+                settings_section_view(SETTINGS_PATHS).label,
+                "路径",
+                f"/settings/{SETTINGS_PATHS}",
+                f"/settings/{SETTINGS_PATHS}",
+            ),
+            NavItem(
+                "passwords",
+                settings_section_view(SETTINGS_PASSWORDS).label,
+                "密码",
+                f"/settings/{SETTINGS_PASSWORDS}",
+                f"/settings/{SETTINGS_PASSWORDS}",
+            ),
+            NavItem(
+                "system",
+                settings_section_view(SETTINGS_SYSTEM).label,
+                "系统",
+                f"/settings/{SETTINGS_SYSTEM}",
+                f"/settings/{SETTINGS_SYSTEM}",
             ),
         ),
     ),
@@ -237,6 +296,12 @@ def shell_context(request: Request) -> dict:
     The CSRF token is included because HTMX reads it from a meta tag and
     attaches it to every state-changing request, which removes the per-form
     hidden input the old templates each had to remember.
+
+    The timezone is read off `app.state` rather than from the database, because
+    this runs for every rendered page and is synchronous. The route that saves it
+    refreshes the cached value, so a change applies on the next page without a
+    restart -- and a deployment that never opened the settings page renders the
+    fallback rather than paying for a query per page.
     """
     current_path = request.url.path
     domain = active_domain(current_path)
@@ -246,11 +311,15 @@ def shell_context(request: Request) -> dict:
         "active_domain": domain,
         "active_children": domain.children if domain is not None else (),
         "csrf_token": request.session.get("csrf_token", ""),
+        "display_timezone": getattr(
+            request.app.state, "display_timezone", FALLBACK_TIMEZONE
+        ),
     }
 
 
 __all__ = [
     "DENSITIES",
+    "FALLBACK_TIMEZONE",
     "NAV_ITEMS",
     "THEMES",
     "NavItem",

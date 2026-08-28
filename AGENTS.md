@@ -65,10 +65,11 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 708 passed / 12 skipped / 0 failed.** Ending below this is a
+**Baseline: 809 passed / 12 skipped / 0 failed.** Ending below this is a
 regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
 need a toolchain this dev machine cannot host. (Baseline moves per phase:
-R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708. An older note
+R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809.
+There is no R7 — the library domain was deleted from the plan. An older note
 claiming "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
@@ -85,6 +86,18 @@ endpoint function directly and pull frames off `response.body_iterator` with
 **Do not verify routing by inspecting `app.routes`.** This FastAPI version defers
 `include_router`, showing one `_IncludedRouter` with `path=None`. Issue a real
 request instead.
+
+**`response.context` exists only when the final response is a template.** It is
+attached through the `http.response.debug` ASGI extension, so a client with
+`follow_redirects=False` that stops on a 307 gets a plain `Response` and
+`AttributeError`. Forty-eight tests broke this way when the old settings paths
+became redirects — the fix is to request the tab that owns what the test asserts,
+not to follow the redirect.
+
+**`zoneinfo` has no tz database on this Windows host.** A test that asserts a
+zone name round-trips is fine; one that asks `ZoneInfo` to resolve it is not.
+Timezone validation is by shape for the same reason a slim container has the same
+gap.
 
 ## Architecture rules
 
@@ -148,8 +161,11 @@ operator navigation).
   `p` rule in `ui.css` would put muted grey on near-black across the pages not
   yet rewritten — about 3.2:1, under the 4.5:1 the project is held to. Pages
   awaiting rewrite carry `data-legacy="true"` on `.ui-main`, which pins them to
-  light with `color-scheme` included; drop that attribute in the same commit
-  that rewrites the page, never before.
+  light with `color-scheme` included; drop that attribute in the same commit that
+  rewrites the page, never before. `base.html` supplies the attribute by default,
+  so a page is legacy unless it overrides `main_attrs` — after R8 that leaves
+  `dashboard.html`, `manual_add.html` and `login.html`, and **`app.css` cannot be
+  deleted while any of the three still renders against it.**
 - **`NAV_ITEMS` in `app/web/routes/shell.py` is the only navigation source.**
   The sidebar, the phone tab bar and its drawer all render from it. Three
   renderings of one list is not three lists — the previous hand-written pair had
@@ -258,6 +274,74 @@ operator navigation).
   stay separate in the view and in the API.
 - **The theme/density script in `<head>` is inline and blocking on purpose.**
   Deferring it flashes the light theme for one frame on every navigation.
+- **`/settings/{section}` is one page with seven bodies, and a section code is
+  vocabulary.** `SETTINGS_SECTION_STATUS` in `app/api/status.py` names each tab,
+  its URL segment, its nav entry and its JSON payload in one place; every section
+  is `neutral`, because a section is a place, not a state. `settings_section_view`
+  is the one resolver there that *raises* on an unknown code rather than falling
+  back: the others describe stored history, where a row written by an older
+  version must still render, but a section code arrives in a URL an operator
+  typed, so `/settings/nonsense` must 404 rather than render a page titled with
+  the typo.
+- **A settings page and its endpoint read one builder.** `settings_snapshot` in
+  `app/api/settings.py` dispatches through `_SECTION_BUILDERS`; the render and
+  `GET /api/v1/settings/{section}` call the same function, and a test asserts the
+  page context is a superset of the JSON body for all seven — the page adds
+  `csrf_token`, `error`, `notice` and nothing else. There is deliberately no
+  `PUT`: every write is a form POST with its own validation and refusal message,
+  and a JSON writer would be a second gate per section.
+- **The retired settings paths 307; they do not 404.** `/connections`,
+  `/sources`, `/auto-approval-rules`, `/archive-settings` and `/change-password`
+  redirect to the tab that replaced them, and each keeps its route *function*
+  name because `url_for` still calls several of them. 307 rather than 301 so a
+  browser does not cache a tab layout that can still change. `settings_redirect`
+  is the shared helper for saves and hardcodes 303, which is why the retirements
+  build their 307 inline.
+- **The archive layout template is validated as a path, because it is one.**
+  `validate_library_template` refuses an absolute template, a `..` anywhere, an
+  unknown placeholder and a template with no `{title}`; `render_library_path`
+  sanitises each rendered value, collapses slashes inside a value so a volume
+  name cannot invent a directory level, truncates each segment and falls back to
+  未分类 / 未知作者 / `candidate-{id}`. The operator's template and an
+  ExHentai artist name are both untrusted input to a path join. Preview is a
+  convenience and never the gate — `save_library_template` validates again —
+  while `_library_target` *falls back* on a stored template that no longer
+  validates, because by then the book is downloaded and refusing to publish it
+  over a settings mistake is the worse outcome.
+- **An empty settings submission restores the default.** For the layout template
+  that is the difference between 「恢复默认」 and putting every book in the
+  library root; the three system preferences behave the same way, which is what
+  makes the hint on the form true. Do not "fix" a handler to store the empty
+  value.
+- **A rule trial run reads and only reads.** `AutomaticApprovalService.dry_run`
+  takes a condition rather than a stored rule — the point is to find out before
+  saving — scans a bounded window of recent candidates in every status, and
+  reports a count plus up to five titles. `evaluate_rule` is pure and every
+  database call on that path is a read; a test asserts the candidate's status,
+  `review_actions` and `auto_approval_rules` are all untouched afterwards.
+- **`settings.js` previews; `validate_rule_ast` decides.** The browser renders
+  the DSL and compiles the regex for immediate feedback, and the server compiles
+  every pattern again at save time. A disagreement between the two can cost one
+  refused save and never an unchecked one.
+- **Live settings go through a provider callable; the timezone is the one
+  exception.** The conversion service reads the layout template per job,
+  `TelegraphService` takes a `concurrency_provider`, `/api/v1/meta` reads the
+  cadence per request. `shell_context` runs for every page and is synchronous, so
+  it reads `app.state.display_timezone`, which `refresh_display_timezone()`
+  re-caches at startup and after the system form saves — the only two moments it
+  can change. The idle cadence is *derived* from the active one, so no operator
+  can make a background tab poll faster than a foreground one.
+- **Timestamps are localised in the browser, and `datetime` is never rewritten.**
+  `ui.js` reads the zone from `<meta name="display-timezone">` and replaces each
+  `<time>` element's text through `Intl.DateTimeFormat`; the attribute keeps the
+  machine-readable UTC value, which the server also renders as the text, so a
+  browser with JavaScript off shows a complete timestamp. Validation of a zone is
+  by shape because a slim container may ship no tz database, while the browser
+  always has the full list.
+- **Theme and density are not stored on the server.** They answer how one screen
+  looks, not how the deployment runs; a stored theme follows an operator onto a
+  screen where it is wrong. The 系统 tab points at the topbar controls rather
+  than rendering a second pair that could disagree.
 
 ## Business invariants
 

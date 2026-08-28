@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -55,6 +56,7 @@ class TelegraphService:
         *,
         require_filecount_match: bool = True,
         work_path_provider=None,
+        concurrency_provider=None,
         resolver=None,
     ) -> None:
         self._database = database
@@ -65,7 +67,20 @@ class TelegraphService:
         # Resolved per download so an operator directory change applies
         # without a restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
+        # Same contract for the image concurrency: the settings page writes a
+        # number, and the next download honours it. Only this one limit is
+        # operator-editable -- the byte and count ceilings are safety limits
+        # against a hostile page, not a preference.
+        self._concurrency_provider = concurrency_provider
         self._resolver = resolver
+
+    async def _effective_limits(self) -> FetchLimits:
+        if self._concurrency_provider is None:
+            return self._limits
+        concurrency = await self._concurrency_provider()
+        if not concurrency:
+            return self._limits
+        return replace(self._limits, concurrency=int(concurrency))
 
     async def _effective_work_path(self) -> Path:
         if self._work_path_provider is None:
@@ -90,7 +105,7 @@ class TelegraphService:
         page = await TelegraphClient(client).fetch_page(preview_url)
         self._check_page_count(page, expected_pages)
         images = await TelegraphFetcher(
-            client, self._limits, resolver=self._resolver
+            client, await self._effective_limits(), resolver=self._resolver
         ).fetch_all(page.url, page.image_urls)
         # The count is re-checked because a host can drop a page mid-fetch.
         if (

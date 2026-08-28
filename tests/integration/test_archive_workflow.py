@@ -45,7 +45,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
@@ -102,22 +102,25 @@ def job_state(database: Database, job_id: int) -> tuple[str, str | None]:
 
 def test_archive_settings_page_requires_authentication(tmp_path: Path) -> None:
     with TestClient(create_app(make_settings(tmp_path))) as client:
-        response = client.get("/archive-settings", follow_redirects=False)
+        response = client.get("/settings/archive", follow_redirects=False)
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
 
 
 def test_archive_settings_page_lists_registered_profiles(tmp_path: Path) -> None:
+    """归档 shows the tool profiles; 路径 shows the directories they write to."""
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
+        paths = client.get("/settings/paths")
 
     assert page.status_code == 200
     assert "zipfile-default" in page.text
     assert "7zz-default" in page.text
-    assert str(settings.library_path) in page.text
+    assert paths.status_code == 200
+    assert str(settings.library_path) in paths.text
 
 
 def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
@@ -125,7 +128,7 @@ def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
     app = create_app(settings)
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         csrf_token = page.context["csrf_token"]
         limits_response = client.post(
             "/archive-settings/limits",
@@ -149,7 +152,7 @@ def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
             },
             follow_redirects=False,
         )
-        updated = client.get("/archive-settings")
+        updated = client.get("/settings/archive")
 
     assert limits_response.status_code == 303
     assert profile_response.status_code == 303
@@ -166,7 +169,7 @@ def test_image_quality_defaults_to_original_and_round_trips(
     app = create_app(settings)
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         assert page.context["image_quality"]["selected"] == "original"
         saved = client.post(
             "/archive-settings/limits",
@@ -181,7 +184,7 @@ def test_image_quality_defaults_to_original_and_round_trips(
             },
             follow_redirects=False,
         )
-        updated = client.get("/archive-settings")
+        updated = client.get("/settings/archive")
 
     assert saved.status_code == 303
     assert updated.context["image_quality"]["selected"] == "medium"
@@ -193,7 +196,7 @@ def test_unknown_image_quality_is_rejected(tmp_path: Path) -> None:
     app = create_app(settings)
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         response = client.post(
             "/archive-settings/limits",
             data={
@@ -201,7 +204,7 @@ def test_unknown_image_quality_is_rejected(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        after = client.get("/archive-settings")
+        after = client.get("/settings/archive")
 
     assert response.status_code == 400
     assert after.context["image_quality"]["selected"] == "original"
@@ -211,7 +214,7 @@ def test_invalid_limit_is_rejected_without_saving(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        csrf_token = client.get("/archive-settings").context["csrf_token"]
+        csrf_token = client.get("/settings/archive").context["csrf_token"]
         response = client.post(
             "/archive-settings/limits",
             data={"max_members": "-3", "csrf_token": csrf_token},
@@ -226,7 +229,7 @@ def test_password_is_stored_encrypted_and_never_echoed(tmp_path: Path) -> None:
     app = create_app(settings)
     with TestClient(app) as client:
         authenticate(client, settings)
-        csrf_token = client.get("/archive-settings").context["csrf_token"]
+        csrf_token = client.get("/settings/passwords").context["csrf_token"]
         created = client.post(
             "/archive-settings/passwords",
             data={
@@ -238,7 +241,7 @@ def test_password_is_stored_encrypted_and_never_echoed(tmp_path: Path) -> None:
             },
             follow_redirects=False,
         )
-        listed = client.get("/archive-settings")
+        listed = client.get("/settings/passwords")
 
     assert created.status_code == 303
     assert "shared" in listed.text
@@ -261,7 +264,7 @@ def test_admin_can_delete_password_entry(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        csrf_token = client.get("/archive-settings").context["csrf_token"]
+        csrf_token = client.get("/settings/passwords").context["csrf_token"]
         client.post(
             "/archive-settings/passwords",
             data={
@@ -276,7 +279,7 @@ def test_admin_can_delete_password_entry(tmp_path: Path) -> None:
             "/archive-settings/passwords/1/delete",
             data={"csrf_token": csrf_token},
         )
-        listed = client.get("/archive-settings")
+        listed = client.get("/settings/passwords")
 
     assert "temporary" not in listed.text
 
@@ -577,7 +580,7 @@ def test_startup_survives_a_failing_toolchain_install(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         assert client.get("/healthz").status_code == 200
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         assert page.status_code == 200
 
 
@@ -588,7 +591,7 @@ def test_paths_can_be_changed_from_the_settings_page(tmp_path: Path) -> None:
     new_work = tmp_path / "moved-work"
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/paths")
         response = client.post(
             "/archive-settings/paths",
             data={
@@ -600,7 +603,7 @@ def test_paths_can_be_changed_from_the_settings_page(tmp_path: Path) -> None:
         )
         assert response.status_code == 303
 
-        updated = client.get("/archive-settings")
+        updated = client.get("/settings/paths")
         assert str(new_library) in updated.text
         assert str(new_work) in updated.text
 
@@ -613,7 +616,7 @@ def test_relative_path_is_rejected(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/paths")
         response = client.post(
             "/archive-settings/paths",
             data={
@@ -631,7 +634,7 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
     override = tmp_path / "temporary-library"
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/paths")
         client.post(
             "/archive-settings/paths",
             data={
@@ -640,7 +643,7 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        page = client.get("/archive-settings")
+        page = client.get("/settings/paths")
         assert str(override) in page.text
 
         client.post(
@@ -651,7 +654,7 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        restored = client.get("/archive-settings")
+        restored = client.get("/settings/paths")
         assert str(settings.library_path) in restored.text
 
 

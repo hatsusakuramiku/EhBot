@@ -221,6 +221,63 @@ WORK_STAGE_STATUS: dict[str, StatusView] = {
     STAGE_ARCHIVED: _view(STAGE_ARCHIVED, "入库期", TONE_SUCCESS),
 }
 
+#: The seven settings sections. Codes are the URL segment of `/settings/{section}`
+#: as well as the tab label's key, so a tab, its link, its JSON payload and the
+#: nav entry that reaches it all name the same thing once. They are `neutral`
+#: throughout: a section is a place, not a state, and giving one a tone would
+#: imply the settings inside it were healthy or in trouble.
+SETTINGS_CONNECTIONS = "connections"
+SETTINGS_SOURCES = "sources"
+SETTINGS_AUTO_APPROVAL = "auto-approval"
+SETTINGS_ARCHIVE = "archive"
+SETTINGS_PATHS = "paths"
+SETTINGS_PASSWORDS = "passwords"
+SETTINGS_SYSTEM = "system"
+
+SETTINGS_SECTION_STATUS: dict[str, StatusView] = {
+    SETTINGS_CONNECTIONS: _view(SETTINGS_CONNECTIONS, "外部连接", TONE_NEUTRAL),
+    SETTINGS_SOURCES: _view(SETTINGS_SOURCES, "来源规则", TONE_NEUTRAL),
+    SETTINGS_AUTO_APPROVAL: _view(
+        SETTINGS_AUTO_APPROVAL, "自动审批", TONE_NEUTRAL
+    ),
+    SETTINGS_ARCHIVE: _view(SETTINGS_ARCHIVE, "归档", TONE_NEUTRAL),
+    SETTINGS_PATHS: _view(SETTINGS_PATHS, "路径", TONE_NEUTRAL),
+    SETTINGS_PASSWORDS: _view(SETTINGS_PASSWORDS, "密码库", TONE_NEUTRAL),
+    SETTINGS_SYSTEM: _view(SETTINGS_SYSTEM, "系统", TONE_NEUTRAL),
+}
+
+#: Tab order, derived from the mapping rather than written out again: a second
+#: list would be a second place to forget a section.
+SETTINGS_SECTIONS: tuple[str, ...] = tuple(SETTINGS_SECTION_STATUS)
+
+#: Whether a stored row is switched on. The settings page shows this for a
+#: Telegram source, an approval rule, a tool profile and a vault password -- four
+#: lists that would otherwise each write 「已启用」 by hand, which is exactly the
+#: duplication the vocabulary exists to prevent. `active` and `muted` rather than
+#: success and danger: a disabled rule is a decision the operator made, not a
+#: fault, and an enabled one is working rather than finished.
+TOGGLE_ENABLED = "ENABLED"
+TOGGLE_DISABLED = "DISABLED"
+
+TOGGLE_STATUS: dict[str, StatusView] = {
+    TOGGLE_ENABLED: _view(TOGGLE_ENABLED, "已启用", TONE_ACTIVE),
+    TOGGLE_DISABLED: _view(TOGGLE_DISABLED, "已停用", TONE_MUTED),
+}
+
+#: Whether something the pipeline depends on is present -- the 7-Zip binary, a
+#: registered qBittorrent WebUI. Distinct from `TOGGLE_STATUS` because it is not
+#: a switch the operator flipped: 「未就绪」 is a thing to go and fix, where
+#: 「已停用」 is a decision already made. `muted` rather than `danger` on the
+#: missing side, because neither dependency is required to run: an installation
+#: with no torrent client still ingests from Telegram perfectly well.
+DEPENDENCY_READY = "READY"
+DEPENDENCY_MISSING = "MISSING"
+
+DEPENDENCY_STATUS: dict[str, StatusView] = {
+    DEPENDENCY_READY: _view(DEPENDENCY_READY, "已就绪", TONE_SUCCESS),
+    DEPENDENCY_MISSING: _view(DEPENDENCY_MISSING, "未就绪", TONE_MUTED),
+}
+
 #: Audit-trail verbs (`review_actions.action`), for the timeline. The codes are
 #: exactly what the writers insert -- `REVIEW_ACTIONS` plus the two nobody types
 #: -- rather than a parallel list, so an entry can never render as a raw
@@ -380,6 +437,34 @@ def work_stage_view(stage: str | None) -> StatusView:
     )
 
 
+def settings_section_view(section: str | None) -> StatusView:
+    """Resolve a settings section, raising on one that does not exist.
+
+    Unlike every other resolver here this one does not fall back. The others
+    describe stored history, where an unknown code is a row written by an older
+    version and must still render; a section code arrives in a URL an operator
+    typed, and answering `/settings/nonsense` with a page titled 「nonsense」
+    would invent a tab. `KeyError` is what the route turns into a 404.
+    """
+    return SETTINGS_SECTION_STATUS[section or ""]
+
+
+def toggle_view(enabled: bool | int | None) -> StatusView:
+    """Resolve whether a stored row is switched on.
+
+    Takes the stored value rather than a code because that is what the callers
+    have: `enabled` is an SQLite integer on a source, a rule and a tool profile.
+    Coercing here means four templates ask 「这条开着吗」 the same way instead of
+    each deciding what `0` looks like.
+    """
+    return TOGGLE_STATUS[TOGGLE_ENABLED if enabled else TOGGLE_DISABLED]
+
+
+def dependency_view(ready: bool | None) -> StatusView:
+    """Resolve whether an external dependency is usable."""
+    return DEPENDENCY_STATUS[DEPENDENCY_READY if ready else DEPENDENCY_MISSING]
+
+
 def review_action_view(action: str | None) -> StatusView:
     """Resolve an audit-trail verb, falling back to the raw code.
 
@@ -425,6 +510,9 @@ __all__ = [
     "CANDIDATE_TAB_STATUS",
     "CONNECTION_STATUS",
     "CONVERSION_STATUS",
+    "DEPENDENCY_MISSING",
+    "DEPENDENCY_READY",
+    "DEPENDENCY_STATUS",
     "DOWNLOAD_STATUS",
     "METADATA_SOURCE_STATUS",
     "NOTE_SEEDING",
@@ -432,6 +520,15 @@ __all__ = [
     "QUEUE_GROUP_STATUS",
     "REVIEW_ACTION_STATUS",
     "ROW_NOTE_STATUS",
+    "SETTINGS_ARCHIVE",
+    "SETTINGS_AUTO_APPROVAL",
+    "SETTINGS_CONNECTIONS",
+    "SETTINGS_PASSWORDS",
+    "SETTINGS_PATHS",
+    "SETTINGS_SECTIONS",
+    "SETTINGS_SECTION_STATUS",
+    "SETTINGS_SOURCES",
+    "SETTINGS_SYSTEM",
     "STAGE_ARCHIVED",
     "STAGE_CANDIDATE",
     "STAGE_DOWNLOAD",
@@ -442,6 +539,9 @@ __all__ = [
     "TONE_NEUTRAL",
     "TONE_SUCCESS",
     "TONE_WAITING",
+    "TOGGLE_DISABLED",
+    "TOGGLE_ENABLED",
+    "TOGGLE_STATUS",
     "WORK_STAGE_STATUS",
     "actor_kind",
     "actor_view",
@@ -449,14 +549,17 @@ __all__ = [
     "attention_view",
     "candidate_tab_view",
     "connection_view",
+    "dependency_view",
     "is_live",
     "metadata_source_view",
     "provider_label",
     "queue_group_view",
     "review_action_view",
     "row_note_view",
+    "settings_section_view",
     "status_label",
     "status_tone",
     "status_view",
+    "toggle_view",
     "work_stage_view",
 ]

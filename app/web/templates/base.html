@@ -24,6 +24,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}EhBot{% endblock %}</title>
   <meta name="csrf-token" content="{{ csrf_token }}">
+  {#- The 时区 chosen on the 系统 tab. `ui.js` reads it from here to rewrite every
+      `<time>` element's text; the raw UTC value stays in `datetime`, so a
+      browser without JavaScript still shows a complete timestamp. -#}
+  <meta name="display-timezone" content="{{ display_timezone }}">
   {#- Theme and density are applied before the first paint. A deferred script
       runs after it, which flashes the light theme on every navigation. This is
       the only inline script in the app, and it is why `ui.js` does not do it. -#}

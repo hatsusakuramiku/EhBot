@@ -116,6 +116,10 @@
   --shadow-lg: 0 12px 32px rgba(23, 29, 33, 0.16);
 
   --font-ui: "Segoe UI", "Microsoft YaHei", sans-serif;
+  /* For text an operator reads literally -- a rule DSL, an archive path, a
+     rendered template. Aligned columns are the point: a stray space or a
+     lookalike character has to be visible. */
+  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
 
   /* Density-driven measurements. Tables, cards and the cover grid all read
      these, so the toggle affects the whole interface consistently and no
@@ -1163,7 +1167,73 @@
 }
 
 /* --------------------------------------------------------------------------
-   14. Demo page only
+   14. Settings (R8)
+   Seven tabs at one URL shape, so these classes are written for「一个编辑器加一
+   份清单」and reused by all seven rather than styled per section.
+   -------------------------------------------------------------------------- */
+
+/* Editor on the left, what is already stored on the right. Below 1024px the
+   editor comes first: an operator opening a tab on a phone is usually adding
+   something, and the list is what they scroll to check afterwards. */
+.ui-settings-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s-6); align-items: start; margin-top: var(--s-5); }
+.ui-settings-col { display: grid; gap: var(--s-5); min-width: 0; }
+
+@media (max-width: 1024px) {
+  .ui-settings-layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A form is a grid of fields, never a table: a settings field and its label are
+   one unit that has to wrap together. `.ui-form-grid` pairs two short fields on
+   a wide screen and stacks them on a narrow one. */
+.ui-form { display: grid; gap: var(--s-4); margin: 0; }
+.ui-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--s-4); }
+.ui-form-actions { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.ui-form-actions form { margin: 0; }
+
+.ui-fieldset { display: grid; gap: var(--s-2); margin: 0; padding: var(--s-3) var(--s-4) var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-md); }
+.ui-fieldset > legend { padding: 0 var(--s-2); color: var(--t-ink-muted); font-size: var(--font-small); font-weight: 600; }
+
+/* A checkbox and its word travel together, so the label is the flex container
+   and the whole phrase is the hit target. */
+.ui-checkline { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--t-ink); font-size: var(--font-body); cursor: pointer; }
+.ui-checkgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--s-2); }
+
+/* One stored row -- a source, a rule, a tool profile, a vault entry. The four
+   are one component because an operator reads them the same way: what it is, a
+   badge saying whether it is on, and the buttons that change it. */
+.ui-record { display: grid; gap: var(--s-3); padding: var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-md); background: var(--t-surface); }
+.ui-record + .ui-record { margin-top: var(--s-3); }
+.ui-record-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.ui-record-title { color: var(--t-ink); font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+.ui-record-meta { color: var(--t-ink-muted); font-size: var(--font-small); font-variant-numeric: tabular-nums; }
+.ui-record-badges { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-left: auto; }
+
+/* Rendered output the operator is meant to read literally: a DSL snapshot, an
+   archive path, a resolved template. Wraps rather than scrolls, because a long
+   path truncated at the right edge hides exactly the part in question. */
+.ui-code {
+  margin: 0;
+  padding: var(--s-3);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-sm);
+  background: var(--t-surface-sunken);
+  color: var(--t-ink);
+  font-family: var(--font-mono);
+  font-size: var(--font-small);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-code:empty { display: none; }
+
+/* The placeholder chips under the path-template field. Buttons, not text: with
+   JavaScript on they insert their token at the cursor, and with it off they are
+   still the list of what the template understands. */
+.ui-token-list { display: flex; gap: var(--s-2); flex-wrap: wrap; }
+.ui-token { font-family: var(--font-mono); font-size: var(--font-small); }
+
+/* --------------------------------------------------------------------------
+   15. Demo page only
    -------------------------------------------------------------------------- */
 
 .ui-demo-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }

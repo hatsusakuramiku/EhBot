@@ -40,7 +40,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
@@ -82,10 +82,13 @@ def test_every_page_marks_exactly_one_destination_as_current(
             "/activity",
             "/activity/packing",
             "/activity/history",
-            "/connections",
-            "/sources",
-            "/auto-approval-rules",
-            "/archive-settings",
+            "/settings/connections",
+            "/settings/sources",
+            "/settings/auto-approval",
+            "/settings/archive",
+            "/settings/paths",
+            "/settings/passwords",
+            "/settings/system",
         ):
             body = client.get(path).text
             marked = _CURRENT_LINK.findall(body)
@@ -162,7 +165,7 @@ def test_legacy_pages_keep_the_light_lock(tmp_path: Path) -> None:
     # muted text at about 3.2:1 -- below the 4.5:1 this phase must meet.
     client, _ = _client(tmp_path)
     try:
-        legacy = client.get("/sources").text
+        legacy = client.get("/manual-add").text
         rewritten = client.get("/ui-kit").text
     finally:
         client.__exit__(None, None, None)

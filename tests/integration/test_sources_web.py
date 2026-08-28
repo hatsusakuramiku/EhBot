@@ -29,7 +29,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
@@ -43,7 +43,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
 
 def test_source_rules_page_requires_authentication(tmp_path: Path) -> None:
     with TestClient(create_app(make_settings(tmp_path))) as client:
-        response = client.get("/sources", follow_redirects=False)
+        response = client.get("/settings/sources", follow_redirects=False)
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
@@ -54,7 +54,7 @@ def test_admin_can_add_and_update_source_rules(tmp_path: Path) -> None:
     app = create_app(settings)
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/sources")
+        page = client.get("/settings/sources")
         csrf_token = page.context["csrf_token"]
         created = client.post(
             "/sources",
@@ -69,13 +69,18 @@ def test_admin_can_add_and_update_source_rules(tmp_path: Path) -> None:
             },
             follow_redirects=False,
         )
-        configured_page = client.get("/sources")
+        configured_page = client.get("/settings/sources")
 
     assert created.status_code == 303
-    assert created.headers["location"] == "/sources"
+    assert created.headers["location"] == "/settings/sources"
     assert "Configured Channel" in configured_page.text
-    assert "ZIP、CBZ" in configured_page.text
-    assert "256 MB" in configured_page.text
+    # The tab renders a stored source as its own editable form, so what was
+    # saved is asserted on the snapshot the page and the JSON endpoint share
+    # rather than on a rendered summary line.
+    stored = configured_page.context["sources"][0]
+    assert stored["allowed_archive_formats"] == ["zip", "cbz"]
+    assert stored["max_attachment_size_mb"] == 256
+    assert stored["enabled"] is True
 
 
 def test_needs_info_queue_is_separate_from_pending_queue(tmp_path: Path) -> None:

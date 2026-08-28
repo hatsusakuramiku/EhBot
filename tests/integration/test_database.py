@@ -56,7 +56,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(thumbnails)")
         }
 
-    assert migration_count == 12
+    assert migration_count == 13
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",

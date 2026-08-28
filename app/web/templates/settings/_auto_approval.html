@@ -1,0 +1,189 @@
+{#
+  自动审批 tab: the rule editor, and the trial run that says what a rule would do
+  before it is allowed to do it.
+
+  A rule that fires approves a candidate for download without an operator seeing
+  it, so the editor is built around not being able to save something you have not
+  checked. The condition rows and the two buttons are ONE form: 试跑 and 保存
+  submit the same fields to different `formaction`s, so what was tried is exactly
+  what gets saved -- a separate preview form could drift from the editor above it
+  by a character and still look right.
+
+  A row is either a comparison (`{Field} OPERATOR value`) or a regex
+  (`Regex({Field}, 'pattern')`). Rows are combined by the group operator into the
+  `group` node `validate_rule_ast` already understands. One row saves as itself
+  rather than as a group of one, so a simple rule reads simply in the DSL.
+
+  Field and operator lists come from `vocabulary`, built in
+  `app/api/settings.py` from the engine's own tables. A field the evaluator does
+  not support therefore cannot be offered -- the dropdown cannot drift from
+  `ALLOWED_FIELDS`, because it is generated from it.
+
+  Live syntax checking is `settings.js` and is a convenience only. The save
+  handler validates through `validate_rule_ast` regardless, so an invalid regex
+  is refused whether or not JavaScript ran.
+#}
+
+{% macro condition_row(index, vocabulary) -%}
+  {#- One condition. Rows submit as parallel lists (`condition_kind` and
+      friends), which is what an HTML form does natively with repeated names --
+      no JSON in a hidden field, so the rows survive with JavaScript off. A row
+      whose field is blank is skipped server-side, which is how the extra empty
+      row costs nothing. -#}
+  <fieldset class="ui-fieldset" data-condition-row>
+    <legend>条件 {{ index }}</legend>
+    <div class="ui-form-grid">
+      <div class="ui-field">
+        <label for="kind-{{ index }}">匹配方式</label>
+        <select class="ui-select" id="kind-{{ index }}" name="condition_kind" data-row-kind>
+          <option value="condition">比较</option>
+          <option value="regex">正则</option>
+        </select>
+      </div>
+      <div class="ui-field">
+        <label for="field-{{ index }}">字段</label>
+        <select class="ui-select" id="field-{{ index }}" name="condition_field" data-row-field>
+          <option value="">（不使用此条件）</option>
+          {% for field in vocabulary.fields %}
+            <option value="{{ field.code }}"
+                    data-regex-capable="{{ 'true' if field.code in vocabulary.regex_fields else 'false' }}">
+              {{ field.label }}（{{ field.code }}）
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="ui-field">
+        <label for="op-{{ index }}">运算符</label>
+        <select class="ui-select" id="op-{{ index }}" name="condition_operator" data-row-operator>
+          {% for operator in vocabulary.operators %}
+            <option value="{{ operator }}">{{ operator }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="ui-field">
+      <label for="value-{{ index }}">值 / 正则</label>
+      <input class="ui-input" id="value-{{ index }}" name="condition_value" type="text"
+             data-row-value placeholder="如 chinese 或 (futa|chinpo)">
+      <small>正则使用 <code>re.search</code>，区分大小写。忽略大小写写作 <code>(?i)...</code>，整串匹配写作 <code>^...$</code>。EXISTS / NOT_EXISTS 不需要值。</small>
+    </div>
+  </fieldset>
+{%- endmacro %}
+
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">新增规则</h2>
+      <p class="ui-hint">命中即自动加入下载队列；未命中的候选始终保留人工审核。保存前请先试跑。</p>
+      <form class="ui-form" method="post" action="{{ url_for('save_auto_approval_rule') }}"
+            data-rule-editor style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-form-grid">
+          <div class="ui-field">
+            <label for="rule-name">名称</label>
+            <input class="ui-input" id="rule-name" name="name" maxlength="80" required>
+          </div>
+          <div class="ui-field">
+            <label for="rule-priority">优先级</label>
+            <input class="ui-input" id="rule-priority" name="priority" type="number"
+                   value="100" required>
+            <small>从小到大执行。</small>
+          </div>
+          <div class="ui-field">
+            <label for="group-operator">条件组合</label>
+            <select class="ui-select" id="group-operator" name="group_operator">
+              <option value="AND">全部满足（AND）</option>
+              <option value="OR">任一满足（OR）</option>
+            </select>
+          </div>
+        </div>
+
+        {% for index in range(1, 4) %}
+          {{ condition_row(index, vocabulary) }}
+        {% endfor %}
+
+        {#- The rendered DSL, filled by `settings.js`. Empty until then, and
+            `.ui-code:empty` takes no space, so the no-JS page has no blank box.
+            The authoritative rendering is `render_rule_dsl` on save. -#}
+        <pre class="ui-code" data-dsl-preview aria-live="polite"></pre>
+        <p class="ui-hint" data-syntax-error role="alert" hidden></p>
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="enabled" type="checkbox" checked>
+          <span>保存后启用</span>
+        </label>
+        <div class="ui-form-actions">
+          {#- Same fields, two destinations. 试跑 is first because it is the one
+              that should be pressed first. -#}
+          <button class="ui-btn" type="submit"
+                  formaction="{{ url_for('dry_run_auto_approval_rule') }}">试跑</button>
+          <button class="ui-btn" data-variant="primary" type="submit">保存规则</button>
+        </div>
+      </form>
+    </section>
+
+    {% if dry_run %}
+      <section class="ui-panel">
+        <h2 class="ui-section-title">试跑结果</h2>
+        <p class="ui-hint">
+          在最近 {{ dry_run.scanned }} 个候选中命中 {{ dry_run.matched }} 个{% if dry_run.truncated %}（历史还有更早的候选未纳入本次试跑，上限 {{ dry_run_scan_limit }}）{% endif %}。
+          试跑不写入任何数据，也不会触发下载。
+        </p>
+        {% if dry_run.hits %}
+          <ul class="ui-form" style="margin: var(--s-4) 0 0; padding-left: var(--s-5)">
+            {% for hit in dry_run.hits %}
+              <li>
+                <a href="{{ hit.href }}">{{ hit.title or "未命名候选" }}</a>
+                {{ ui.badge(hit.status) }}
+              </li>
+            {% endfor %}
+          </ul>
+          {% if dry_run.matched > dry_run.hits|length %}
+            <p class="ui-hint">以上是前 {{ dry_run.hits|length }} 个样例。</p>
+          {% endif %}
+        {% else %}
+          {{ ui.empty_state("没有命中", "这条规则不会改变任何现有候选的状态。") }}
+        {% endif %}
+      </section>
+    {% endif %}
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">已保存规则</h2>
+        <span class="ui-record-meta">{{ rules|length }} 项</span>
+      </div>
+      {% for rule in rules %}
+        <article class="ui-record" style="margin-top: var(--s-4)">
+          <div class="ui-record-head">
+            <span class="ui-record-title">{{ rule.name }}</span>
+            <span class="ui-record-meta">优先级 {{ rule.priority }} · 版本 {{ rule.version }}</span>
+            <div class="ui-record-badges">{{ ui.badge(rule.enablement) }}</div>
+          </div>
+          {#- The stored rendering, not one recomputed here: the browser has no
+              business owning a second DSL writer. -#}
+          <pre class="ui-code">{{ rule.dsl }}</pre>
+          <div class="ui-form-actions">
+            <form method="post" action="{{ url_for('toggle_auto_approval_rule', rule_id=rule.rule_id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ 'off' if rule.enabled else 'on' }}">
+              <button class="ui-btn" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
+            </form>
+            <form method="post" action="{{ url_for('preview_auto_approval_rule', rule_id=rule.rule_id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ui-btn" type="submit">试跑此规则</button>
+            </form>
+          </div>
+          {% if preview_rule_id == rule.rule_id %}
+            <p class="ui-hint">
+              命中候选：{% if preview_ids %}{{ preview_ids|join('、') }}{% else %}无{% endif %}
+            </p>
+          {% endif %}
+        </article>
+      {% else %}
+        {{ ui.empty_state("暂无自动审批规则", "没有规则时，每个候选都需要人工审核。") }}
+      {% endfor %}
+    </section>
+  </div>
+</div>

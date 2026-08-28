@@ -105,6 +105,11 @@ FIELD_LABELS: dict[str, str] = {
     "CharacterRaw": "原始角色",
     "LanguageRaw": "原始语言",
     "CategoryRaw": "原始分类",
+    # Not a metadata field: the automatic-approval DSL's collection pseudo-field,
+    # which matches against the tag set rather than one stored value. It is
+    # labelled here because the rule editor offers it in the same dropdown as the
+    # real fields, and a lone `TAG` among Chinese labels reads as a bug.
+    "TAG": "标签集合",
 }
 
 

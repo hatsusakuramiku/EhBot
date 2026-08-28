@@ -45,7 +45,7 @@ def log_in(client: TestClient, settings: Settings) -> None:
         },
         follow_redirects=False,
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={

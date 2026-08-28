@@ -1,0 +1,188 @@
+{#
+  来源规则 tab: the Telegram chat whitelist and each entry's ingestion filters.
+
+  A source is a whitelist entry, not a subscription: a message from a chat that
+  is not here is never read. Both the add form and each stored row post to the
+  same `configure_source` endpoint, keyed by `(source_type, chat_id)` -- which is
+  why the row form carries those two as hidden fields and does not let them be
+  edited. Changing a chat id would mean creating a different source, and doing it
+  through an「更新」button would silently orphan the old one.
+
+  The filter lists submit as comma-separated text because that is what an
+  operator types; the snapshot returns them as arrays, so `join(', ')` here is
+  rendering, not parsing.
+#}
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">添加来源</h2>
+      <p class="ui-hint">按 Telegram Chat ID 建立白名单项。频道为负数 ID，私聊为正数。</p>
+      <form class="ui-form" method="post" action="{{ url_for('configure_source') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-form-grid">
+          <div class="ui-field">
+            <label for="source-type">来源类型</label>
+            <select class="ui-select" id="source-type" name="source_type">
+              {% for kind in source_types %}
+                <option value="{{ kind.code }}">{{ kind.label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="ui-field">
+            <label for="chat-id">Chat ID</label>
+            <input class="ui-input" id="chat-id" name="chat_id" type="number" required>
+          </div>
+        </div>
+        <div class="ui-field">
+          <label for="display-name">显示名称</label>
+          <input class="ui-input" id="display-name" name="display_name" required>
+        </div>
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="enabled" type="checkbox" checked>
+          <span>保存后启用</span>
+        </label>
+        <fieldset class="ui-fieldset">
+          <legend>允许的压缩格式</legend>
+          <div class="ui-checkgrid">
+            {% for format in archive_formats %}
+              <label class="ui-checkline">
+                <input class="ui-checkbox" name="allowed_archive_formats" type="checkbox"
+                       value="{{ format }}" checked>
+                <span>{{ format|upper }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </fieldset>
+        <div class="ui-field">
+          <label for="max-size">附件上限（MB）</label>
+          <input class="ui-input" id="max-size" name="max_attachment_size_mb" type="number"
+                 min="1" placeholder="不限">
+        </div>
+        <details class="ui-fieldset">
+          <summary>元数据过滤</summary>
+          <div class="ui-field">
+            <label for="required-tags">必需 Tag</label>
+            <input class="ui-input" id="required-tags" name="required_tags" type="text"
+                   placeholder="language:chinese, female:big_breasts">
+          </div>
+          <div class="ui-field">
+            <label for="forbidden-tags">禁用 Tag</label>
+            <input class="ui-input" id="forbidden-tags" name="forbidden_tags" type="text"
+                   placeholder="male:only, lolicon">
+          </div>
+          <div class="ui-field">
+            <label for="allowed-languages">允许语言</label>
+            <input class="ui-input" id="allowed-languages" name="allowed_languages" type="text"
+                   placeholder="chinese, japanese, english">
+          </div>
+          <div class="ui-field">
+            <label for="allowed-categories">允许类别</label>
+            <input class="ui-input" id="allowed-categories" name="allowed_categories" type="text"
+                   placeholder="doujinshi, manga">
+          </div>
+          <div class="ui-field">
+            <label for="min-rating">最低评分</label>
+            <input class="ui-input" id="min-rating" name="min_rating" type="number"
+                   step="0.1" min="0" max="5" placeholder="不限">
+          </div>
+        </details>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">保存来源</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">已配置来源</h2>
+        <span class="ui-record-meta">{{ sources|length }} 项</span>
+      </div>
+      {% for source in sources %}
+        <form class="ui-record" method="post" action="{{ url_for('configure_source') }}"
+              style="margin-top: var(--s-4)">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {#- Identity, not editable: these two are the key the endpoint upserts on. -#}
+          <input type="hidden" name="source_type" value="{{ source.source_type }}">
+          <input type="hidden" name="chat_id" value="{{ source.chat_id }}">
+          <div class="ui-record-head">
+            <span class="ui-record-title">{{ source.display_name }}</span>
+            <span class="ui-record-meta">{{ source.chat_id }}</span>
+            <div class="ui-record-badges">{{ ui.badge(source.enablement) }}</div>
+          </div>
+          <div class="ui-field">
+            <label for="name-{{ source.source_id }}">显示名称</label>
+            <input class="ui-input" id="name-{{ source.source_id }}" name="display_name"
+                   value="{{ source.display_name }}" required>
+          </div>
+          <label class="ui-checkline">
+            <input class="ui-checkbox" name="enabled" type="checkbox"
+                   {% if source.enabled %}checked{% endif %}>
+            <span>启用此来源</span>
+          </label>
+          <fieldset class="ui-fieldset">
+            <legend>允许的压缩格式</legend>
+            <div class="ui-checkgrid">
+              {% for format in archive_formats %}
+                <label class="ui-checkline">
+                  <input class="ui-checkbox" name="allowed_archive_formats" type="checkbox"
+                         value="{{ format }}"
+                         {% if format in source.allowed_archive_formats %}checked{% endif %}>
+                  <span>{{ format|upper }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <div class="ui-field">
+            <label for="size-{{ source.source_id }}">附件上限（MB）</label>
+            <input class="ui-input" id="size-{{ source.source_id }}"
+                   name="max_attachment_size_mb" type="number" min="1"
+                   value="{{ source.max_attachment_size_mb if source.max_attachment_size_mb else '' }}"
+                   placeholder="不限">
+          </div>
+          <details class="ui-fieldset">
+            <summary>元数据过滤</summary>
+            <div class="ui-field">
+              <label for="req-{{ source.source_id }}">必需 Tag</label>
+              <input class="ui-input" id="req-{{ source.source_id }}" name="required_tags"
+                     type="text" value="{{ source.required_tags|join(', ') }}"
+                     placeholder="language:chinese">
+            </div>
+            <div class="ui-field">
+              <label for="forb-{{ source.source_id }}">禁用 Tag</label>
+              <input class="ui-input" id="forb-{{ source.source_id }}" name="forbidden_tags"
+                     type="text" value="{{ source.forbidden_tags|join(', ') }}"
+                     placeholder="male:only">
+            </div>
+            <div class="ui-field">
+              <label for="lang-{{ source.source_id }}">允许语言</label>
+              <input class="ui-input" id="lang-{{ source.source_id }}" name="allowed_languages"
+                     type="text" value="{{ source.allowed_languages|join(', ') }}"
+                     placeholder="chinese, japanese">
+            </div>
+            <div class="ui-field">
+              <label for="cat-{{ source.source_id }}">允许类别</label>
+              <input class="ui-input" id="cat-{{ source.source_id }}" name="allowed_categories"
+                     type="text" value="{{ source.allowed_categories|join(', ') }}"
+                     placeholder="doujinshi, manga">
+            </div>
+            <div class="ui-field">
+              <label for="rating-{{ source.source_id }}">最低评分</label>
+              <input class="ui-input" id="rating-{{ source.source_id }}" name="min_rating"
+                     type="number" step="0.1" min="0" max="5"
+                     value="{{ source.min_rating if source.min_rating is not none else '' }}"
+                     placeholder="不限">
+            </div>
+          </details>
+          <div class="ui-form-actions">
+            <button class="ui-btn" type="submit">更新规则</button>
+          </div>
+        </form>
+      {% else %}
+        {{ ui.empty_state("暂无来源", "新来源默认以停用状态创建，确认过滤规则后再启用。") }}
+      {% endfor %}
+    </section>
+  </div>
+</div>

@@ -1,10 +1,16 @@
-/* Shell behaviour: theme, density, sidebar state, and the toast region.
+/* Shell behaviour: theme, density, sidebar state, timestamps, and the toast
+ * region.
  *
  * No build step and no framework — R0 vendored HTMX and Alpine at fixed
- * versions and this file is plain ES2019. Everything here is per-browser
- * preference, so it is stored in localStorage rather than on the server: the
- * operator's choice of theme is not something the API should have an opinion
- * about, and R8's settings page is where a server-side default would belong.
+ * versions and this file is plain ES2019. Theme, density and the sidebar are
+ * per-browser preference, so they are stored in localStorage rather than on the
+ * server: the operator's choice of theme is not something the API should have
+ * an opinion about.
+ *
+ * The 时区 is the one setting here that is NOT a browser preference — it is
+ * stored server-side on the 系统 tab, published as a meta tag by the shell, and
+ * read from there rather than from localStorage, so every browser looking at
+ * this deployment reads the same clock.
  *
  * The theme is applied by an inline snippet in <head> (see `base.html`), not by
  * this file. A deferred script runs after first paint, which would show the
@@ -88,6 +94,99 @@
         "aria-pressed",
         buttons[i].dataset[dataKey] === value ? "true" : "false"
       );
+    }
+  }
+
+  /* -------------------------------------------------- timestamps */
+
+  /* Every server-rendered `<time>` carries the stored UTC value in both its
+   * `datetime` attribute and its text, so a browser with no JavaScript still
+   * shows a complete timestamp. This pass rewrites the TEXT into the 时区 the
+   * operator chose on the 系统 tab, and leaves `datetime` alone: that attribute
+   * is the machine-readable value, and a local string there would be a lie.
+   *
+   * Progressive enhancement, not a requirement -- if the meta tag is missing,
+   * the zone name is unusable, or a value will not parse, the page keeps the raw
+   * UTC text rather than showing nothing or "Invalid Date". */
+  function displayTimezone() {
+    var meta = document.querySelector('meta[name="display-timezone"]');
+    return (meta && meta.getAttribute("content")) || "UTC";
+  }
+
+  /* `false` means "this browser cannot format at all"; `null` means "not built
+   * yet". Built once, because the zone cannot change without a page load. */
+  var timeFormatter = null;
+
+  function formatter() {
+    if (timeFormatter !== null) {
+      return timeFormatter;
+    }
+    var options = {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZone: displayTimezone(),
+    };
+    try {
+      timeFormatter = new Intl.DateTimeFormat("zh-CN", options);
+    } catch (error) {
+      /* A zone the server accepted by shape but this engine does not know. UTC
+       * is wrong by an offset; unformatted is wrong by a whole timestamp. */
+      options.timeZone = "UTC";
+      try {
+        timeFormatter = new Intl.DateTimeFormat("zh-CN", options);
+      } catch (fallbackError) {
+        timeFormatter = false;
+      }
+    }
+    return timeFormatter;
+  }
+
+  /* SQLite writes `CURRENT_TIMESTAMP` as "2026-08-26 07:18:45" — a space
+   * separator and no zone marker. Safari rejects that form outright, and the
+   * engines that accept it read it as LOCAL time, which silently shifts every
+   * timestamp by the viewer's offset. Both are fixed by making the UTC that the
+   * database means explicit before parsing. A value that already carries an
+   * offset (a Telegram message date) is left as it is. */
+  function parseTimestamp(raw) {
+    var text = String(raw || "").trim();
+    if (!text) {
+      return null;
+    }
+    var normalized = text.replace(" ", "T");
+    if (!/(Z|[+-]\d{2}:?\d{2})$/.test(normalized)) {
+      normalized += "Z";
+    }
+    var parsed = new Date(normalized);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  function formatTimes() {
+    var format = formatter();
+    if (!format) {
+      return;
+    }
+    var elements = document.querySelectorAll("time[datetime]");
+    for (var i = 0; i < elements.length; i += 1) {
+      var element = elements[i];
+      if (element.dataset.localized === "true") {
+        continue;
+      }
+      var parsed = parseTimestamp(element.getAttribute("datetime"));
+      if (parsed === null) {
+        continue;
+      }
+      element.textContent = format.format(parsed);
+      /* The original stays reachable on hover, so an operator comparing a page
+       * against a log line does not have to convert back by hand. */
+      if (!element.title) {
+        element.title = element.getAttribute("datetime") + " UTC";
+      }
+      element.dataset.localized = "true";
     }
   }
 
@@ -177,6 +276,13 @@
     reflect("[data-theme-option]", "themeOption", currentTheme());
     reflect("[data-density-option]", "densityOption", currentDensity());
     applyNav(read(KEYS.nav, "expanded") === "collapsed");
+    formatTimes();
+
+    /* HTMX replaces markup long after this file ran, so timestamps that arrive
+     * with a swap need the same pass. Re-scanning the whole document is cheaper
+     * than it looks: `data-localized` makes every element already handled a
+     * single attribute read. */
+    document.body.addEventListener("htmx:load", formatTimes);
   }
 
   if (document.readyState === "loading") {
@@ -191,5 +297,6 @@
     applyDensity: applyDensity,
     currentTheme: currentTheme,
     currentDensity: currentDensity,
+    formatTimes: formatTimes,
   };
 })();

@@ -57,7 +57,7 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
     )
     login = client.get("/login")
     client.post("/login", data={"password": password, "csrf_token": login.context["csrf_token"]})
-    change = client.get("/change-password")
+    change = client.get("/settings/passwords")
     client.post("/change-password", data={"current_password": password, "new_password": "new-password-with-12-characters", "confirmation": "new-password-with-12-characters", "csrf_token": change.context["csrf_token"]})
 
 
@@ -86,8 +86,9 @@ def test_first_matching_auto_rule_approves_enqueues_and_audits(tmp_path: Path) -
         _authenticate(client, settings)
         response = client.get("/candidates")
         assert response.status_code == 200
-        page = client.get("/auto-approval-rules")
-        assert "自动审批规则" in page.text
+        page = client.get("/settings/auto-approval")
+        assert "已保存规则" in page.text
+        assert "First" in page.text
 
     jobs = asyncio.run(DownloadService(database, settings.work_path).list_jobs_for_candidate(candidate_id))
     actions = asyncio.run(database.list_review_actions(candidate_id))

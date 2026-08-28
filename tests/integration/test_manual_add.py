@@ -26,7 +26,7 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
         "/login",
         data={"password": password, "csrf_token": login.context["csrf_token"]},
     )
-    change = client.get("/change-password")
+    change = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={

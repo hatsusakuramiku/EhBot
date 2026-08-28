@@ -2223,6 +2223,33 @@ class Database:
                 )
 
 
+    async def system_settings(self) -> dict[str, str]:
+        return await asyncio.to_thread(self._system_settings_sync)
+
+
+    def _system_settings_sync(self) -> dict[str, str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT key, value FROM system_settings"
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+
+    async def save_system_settings(self, values: dict[str, str]) -> None:
+        await asyncio.to_thread(self._save_system_settings_sync, values)
+
+
+    def _save_system_settings_sync(self, values: dict[str, str]) -> None:
+        with self._connect() as connection:
+            for key, value in values.items():
+                connection.execute(
+                    "INSERT INTO system_settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (str(key), str(value)),
+                )
+
+
     @staticmethod
     def _safe_json(value: str | None) -> dict:
         if not value:

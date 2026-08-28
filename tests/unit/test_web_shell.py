@@ -66,11 +66,13 @@ def test_exactly_one_item_in_the_whole_tree_is_ever_current() -> None:
         "/activity",
         "/activity/packing",
         "/activity/history",
-        "/connections",
-        "/sources",
-        "/auto-approval-rules",
-        "/archive-settings",
-        "/change-password",
+        "/settings/connections",
+        "/settings/sources",
+        "/settings/auto-approval",
+        "/settings/archive",
+        "/settings/paths",
+        "/settings/passwords",
+        "/settings/system",
     ):
         current = [i.key for i in _walk(NAV_ITEMS) if i.is_current(path)]
         assert len(current) == 1, f"{path} produced {current}"
@@ -100,11 +102,13 @@ def test_every_live_page_resolves_to_exactly_one_domain() -> None:
         "/activity",
         "/activity/packing",
         "/activity/history",
-        "/connections",
-        "/sources",
-        "/auto-approval-rules",
-        "/archive-settings",
-        "/change-password",
+        "/settings/connections",
+        "/settings/sources",
+        "/settings/auto-approval",
+        "/settings/archive",
+        "/settings/paths",
+        "/settings/passwords",
+        "/settings/system",
     ):
         matched = [item for item in NAV_ITEMS if item.is_active(path)]
         assert len(matched) == 1, f"{path} matched {[i.key for i in matched]}"

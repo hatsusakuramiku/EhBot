@@ -88,6 +88,10 @@ def archive_settings_service(request: Request) -> Any:
     return _service(request, "archive_settings_service", "归档设置")
 
 
+def system_settings_service(request: Request) -> Any:
+    return _service(request, "system_settings_service", "系统设置")
+
+
 def exhentai_service(request: Request) -> Any:
     return _service(request, "exhentai_service", "ExHentai 服务")
 
@@ -139,6 +143,7 @@ __all__ = [
     "require_csrf",
     "require_session",
     "review_orchestrator",
+    "system_settings_service",
     "telegraph_service",
     "thumbnail_service",
     "torrent_service",

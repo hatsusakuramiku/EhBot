@@ -22,6 +22,7 @@ from app.api.status import (
     review_action_view,
     row_note_view,
     status_view,
+    toggle_view,
 )
 from app.review.models import (
     REVIEW_AUTO_APPROVE,
@@ -331,7 +332,125 @@ def connection_snapshot(snapshot: Any) -> dict[str, Any]:
     }
 
 
+def telegram_source(source: Any) -> dict[str, Any]:
+    """One configured Telegram source, filters included.
+
+    Nothing here is a secret: the bot token lives in the credential store and a
+    chat id is not one. The filter lists are returned as arrays rather than the
+    comma-joined text the form submits, so a client never has to re-parse what
+    the database already stores structured.
+
+    `enabled` stays beside `enablement` because the two answer different
+    questions: the form's checkbox needs the boolean, the row's badge needs the
+    words, and having the words come from `toggle_view` is what keeps 「已停用」
+    out of the template.
+    """
+    return {
+        "source_id": source.source_id,
+        "source_type": source.source_type,
+        "chat_id": source.chat_id,
+        "display_name": source.display_name,
+        "enabled": source.enabled,
+        "enablement": toggle_view(source.enabled).to_payload(),
+        "allowed_archive_formats": list(source.allowed_archive_formats),
+        "max_attachment_size_mb": source.max_attachment_size_mb,
+        "required_tags": list(source.required_tags),
+        "forbidden_tags": list(source.forbidden_tags),
+        "allowed_languages": list(source.allowed_languages),
+        "allowed_categories": list(source.allowed_categories),
+        "min_rating": source.min_rating,
+    }
+
+
+def auto_approval_rule(rule: Any) -> dict[str, Any]:
+    """One automatic-approval rule, with both its AST and its rendered text.
+
+    Both forms travel: the editor rebuilds its condition groups from `condition`,
+    while `dsl` is the non-executable rendering an operator reads to confirm the
+    rule says what they meant. Rendering it in the browser instead would put a
+    second DSL writer next to `render_rule_dsl`.
+    """
+    return {
+        "rule_id": rule.rule_id,
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "enablement": toggle_view(rule.enabled).to_payload(),
+        "priority": rule.priority,
+        "version": rule.version,
+        "condition": rule.condition,
+        "dsl": rule.dsl_snapshot,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+    }
+
+
+def auto_approval_dry_run(result: Any) -> dict[str, Any]:
+    """What a trial run found, counts beside the sample it names."""
+    return {
+        "scanned": result.scanned,
+        "matched": result.matched,
+        "truncated": result.truncated,
+        "hits": [
+            {
+                "candidate_id": hit.candidate_id,
+                "title": hit.title,
+                "status": status_payload(hit.status),
+                "href": f"/works/{hit.candidate_id}",
+            }
+            for hit in result.hits
+        ],
+    }
+
+
+def archive_password(entry: Any) -> dict[str, Any]:
+    """A vault entry as the page may see it -- never the password itself.
+
+    `last_success_at` is the field that makes the list useful: it is how an
+    operator tells a password that is still earning its place from one that has
+    not opened anything since it was added.
+    """
+    return {
+        "password_id": entry.password_id,
+        "name": entry.name,
+        "priority": entry.priority,
+        "enabled": entry.enabled,
+        "enablement": toggle_view(entry.enabled).to_payload(),
+        "last_success_at": entry.last_success_at,
+        "created_at": entry.created_at,
+    }
+
+
+def tool_profile(profile: Any) -> dict[str, Any]:
+    """One registered extraction tool. Operators never submit raw commands."""
+    return {
+        "profile_id": profile.profile_id,
+        "name": profile.name,
+        "backend": profile.backend,
+        "kind": profile.kind,
+        "executable_path": profile.executable_path,
+        "supported_formats": list(profile.supported_formats),
+        "timeout_seconds": profile.timeout_seconds,
+        "capabilities": list(profile.capabilities),
+        "enabled": profile.enabled,
+        "enablement": toggle_view(profile.enabled).to_payload(),
+    }
+
+
+def safety_limits(limits: Any) -> dict[str, Any]:
+    """The pre-extraction ceilings, keyed as the form fields that write them."""
+    return {
+        "max_members": limits.max_members,
+        "max_total_bytes": limits.max_total_bytes,
+        "max_member_bytes": limits.max_member_bytes,
+        "max_compression_ratio": limits.max_compression_ratio,
+        "max_depth": limits.max_depth,
+    }
+
+
 __all__ = [
+    "archive_password",
+    "auto_approval_dry_run",
+    "auto_approval_rule",
     "candidate_summary",
     "connection_snapshot",
     "job_summary",
@@ -339,5 +458,8 @@ __all__ = [
     "provider_connection",
     "queue_group_payload",
     "review_action",
+    "safety_limits",
     "status_payload",
+    "telegram_source",
+    "tool_profile",
 ]

@@ -30,6 +30,10 @@ EXPECTED_FIELD_LABELS = {
     "CharacterRaw": "原始角色",
     "LanguageRaw": "原始语言",
     "CategoryRaw": "原始分类",
+    # Not a metadata field: the automatic-approval DSL's tag-set pseudo-field.
+    # Listed here because the rule editor offers it in the same dropdown as the
+    # real fields and reads its label from the same table.
+    "TAG": "标签集合",
 }
 
 

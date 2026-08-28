@@ -1709,40 +1709,131 @@ The page's centre is a single timeline that merges `review_actions` and `downloa
 - **The page does not stream.** `work.js` subscribes to the SSE names but still polls for the snapshot, because the events carry no work id the page could filter on cheaply. The cadence comes from `/api/v1/meta`, so it is one setting away from changing.
 - **A conversion job's password/volume prompts are not on the timeline.** They are `CONVERSION_WAITING_*` states, which the node shows, but the prompt itself is still an activity-page interaction.
 
-## Handoff: Next Session (start of R8)
+### Phase R8: Settings Domain Convergence
+
+**Status: complete.** Test baseline moved 708 -> **809 passed / 12 skipped / 0 failed** (+101 tests, zero regressions).
+
+Five settings pages became seven tabs of one page. `/connections`, `/sources`, `/auto-approval-rules`, `/archive-settings` and `/change-password` each had their own template, their own layout and their own idea of how a stored row looks; `/settings/{section}` now renders all of them from one shell, and the five old paths 307 into the tab that replaced them.
+
+Three things landed with it that were not page work. The archive path template `{category}/{artist}/{title}` -- the one piece of the deleted R7 that stayed in scope -- is now a validated, previewable setting that the packer reads per job. `system_settings` (migration 013) makes the polling cadence, the source concurrency ceiling and the display timezone editable, all three taking effect without a restart. And `GET /api/v1/settings/{section}`, deferred since R1 because it needed this phase's grouping, reads the same snapshot the page renders.
+
+#### Actions Taken
+
+1. **Seven sections as vocabulary, not as a template list.** `SETTINGS_SECTION_STATUS` in `app/api/status.py` holds the code, the label and the tone for each section, and `SETTINGS_SECTIONS` is derived from it -- one place names a tab, its URL segment, its nav entry and its JSON payload. Every section is `neutral`: a section is a place, not a state, and a tone would imply the settings inside it were healthy or in trouble.
+2. **`settings_section_view` raises instead of falling back.** Every other resolver in `status.py` tolerates an unknown code, because those describe stored history and a row written by an older version must still render. A section code arrives in a URL an operator typed, so `/settings/nonsense` is a `KeyError` the route turns into a 404 rather than a page titled the operator's typo.
+3. **One snapshot per section, shared by the page and the API.** `app/api/settings.py` holds a builder per section and `settings_snapshot` dispatches through `_SECTION_BUILDERS`. The page render and `GET /api/v1/settings/{section}` call the same function, and a test asserts the page context is a superset of the JSON body for all seven -- the page adds `csrf_token`, `error`, `notice` and nothing else.
+4. **Two shared badge vocabularies, because four lists needed the same two words.** A Telegram source, an approval rule, a tool profile and a vault password are each on or off; `TOGGLE_STATUS`/`toggle_view` resolve that once instead of four templates writing the label by hand. `DEPENDENCY_STATUS`/`dependency_view` are deliberately separate: not-ready is something to go and fix, where disabled is a decision already made. Both use `muted` rather than `danger` on the negative side -- a disabled rule is not a fault, and an installation with no torrent client ingests from Telegram perfectly well. A test asserts the two code sets do not overlap.
+5. **The layout template is validated as a path, because that is what it is.** `validate_library_template` refuses an absolute template, a `..` anywhere, an unknown placeholder and a template with no `{title}`; `render_library_path` fills the placeholders, replaces the characters a filesystem will not take, collapses a value's own slashes so a volume name cannot invent a directory level, truncates each segment, and falls back to the unknown-category, unknown-artist and `candidate-{id}` segments for what the gallery did not supply. An operator's template and an ExHentai artist name are both untrusted input to a path join, and they are handled as such.
+6. **Preview and save are two submit buttons on one form.** `formaction` sends the same field to `/archive-settings/paths/template/preview` or to the save endpoint, so what was previewed is what gets saved. Preview writes nothing and is never the gate: `save_library_template` validates again, which is what keeps a `..` out of the store whether or not the button was pressed. The same shape gives the rule editor its dry-run/save pair.
+7. **The trial run reads and only reads.** `AutomaticApprovalService.dry_run` takes a condition rather than a stored rule -- the point of trying a rule is to find out before saving it -- scans a bounded window of recent candidates in every status, and reports a count plus up to five titles. `evaluate_rule` is pure and every database call in the path is a read. A test seeds a candidate the rule would approve and asserts afterwards that its status, the audit table and the rule table are all untouched.
+8. **Live settings through the mechanism that already existed.** The conversion service reads the layout template per job the same way it already read the library and work directories; `TelegraphService` takes a `concurrency_provider`; `/api/v1/meta` reads the cadence per request. The timezone is the one exception -- `shell_context` runs for every page and is synchronous, so it reads `app.state.display_timezone`, which `refresh_display_timezone()` re-caches on startup and after the system form saves. Those are the only two moments it can change.
+9. **Every POST kept its own path.** Roughly sixty call sites and any bookmarked form action still work; only the redirect target moved, to the tab the form lives on. The retired GETs keep their function names as well, because `url_for` is called on several of them. `settings_redirect` is the one helper the saves share, hardcoding 303; the six retirements build their 307 inline, because a retirement is not a save.
+10. **Timestamps are localised in the browser.** `ui.js` reads the zone from a `<meta name="display-timezone">` the shell renders and rewrites each `<time>` element's text through `Intl.DateTimeFormat`, leaving `datetime` alone -- that attribute is the machine-readable value. The server keeps rendering UTC into both, so a browser with no JavaScript shows a complete timestamp rather than nothing.
+11. **`settings.js` previews the DSL and compiles the regex, and is never the authority.** It renders what `render_rule_dsl` will produce and calls `new RegExp` for immediate feedback. `validate_rule_ast` compiles every pattern again at save time, so a disagreement between the two can cost the operator one refused save and never an unchecked one. The file writes no state vocabulary at all.
+
+#### Files Created
+- `app/api/settings.py` -- a builder per section, `settings_snapshot`, `section_tabs`, and the read-only endpoints.
+- `app/settings/service.py` -- `SystemSettingsService`: defaults, bounds, timezone shape, forgiving reads and strict writes.
+- `app/db/migrations/013_system_settings.sql` -- the key/value preference table.
+- `app/web/templates/settings.html` plus `settings/_connections.html`, `_sources.html`, `_auto_approval.html`, `_archive.html`, `_paths.html`, `_passwords.html`, `_system.html` -- the shell and its seven bodies.
+- `app/web/static/settings.js` -- DSL preview, browser-side regex check, template token insertion.
+- `tests/unit/test_library_template.py` (30) -- validation refusals by code, rendering and sanitisation, conflict suffixes, and the packer reading the stored template.
+- `tests/unit/test_system_settings.py` (19) -- defaults, clamping, unparsable stored values, the refusal table, and that a refused save stores nothing.
+- `tests/unit/test_settings_sections.py` (22) -- the vocabulary, the tab strip, the nav subtree, and the two shared badge tables.
+- `tests/integration/test_settings_web.py` (30) -- seven tabs at one URL shape, the five 307s, the auth gate, system saves, the template preview, the dry run, rule saving, and page/API parity.
+
+#### Files Modified
+- `app/api/status.py` -- `SETTINGS_SECTION_STATUS`/`settings_section_view`, `TOGGLE_STATUS`/`toggle_view`, `DEPENDENCY_STATUS`/`dependency_view`.
+- `app/api/serializers.py` -- the settings payloads, `auto_approval_dry_run`.
+- `app/api/v1.py`, `app/api/deps.py` -- the settings router, `system_settings_service`, the cadence in `/api/v1/meta`.
+- `app/conversion/naming.py` -- `validate_library_template`, `render_library_path`, `unique_library_target`, `MAX_SEGMENT_LENGTH`.
+- `app/conversion/service.py` -- `_library_target` reads the template per job and falls back rather than failing a downloaded book.
+- `app/archive/service.py` -- `library_template`/`save_library_template`.
+- `app/auto_approval/service.py`, `app/auto_approval/models.py` -- `dry_run`, `AutoApprovalDryRun`, `AutoApprovalDryRunHit`.
+- `app/telegraph/service.py` -- `concurrency_provider`.
+- `app/db/database.py` -- `system_settings`, `save_system_settings`.
+- `app/review/models.py` -- the `TAG` pseudo-field label the rule editor's dropdown reads.
+- `app/main.py` -- the seven-tab route, six 307 retirements, four new handlers, every settings POST repointed, `refresh_display_timezone`.
+- `app/web/routes/shell.py` -- the settings domain's children became the seven tabs.
+- `app/web/templates/base.html` -- the `display-timezone` meta tag.
+- `app/web/static/ui.css` -- `.ui-settings-*`, `.ui-form-*`, `.ui-fieldset`, `.ui-checkline`, `.ui-record*`, `.ui-token*`.
+- `app/web/static/ui.js` -- the timestamp pass.
+- Eighteen test files -- the legacy GET call sites, the migration count, the field-label table.
+
+#### Bugs Found And Fixed In This Phase's Own New Code
+
+1. **The notice comment in `settings.html` described something a 303 cannot do.** It said a refused save re-renders with a notice; a refusal returns 400 with `error`, and an accepted save redirects, so the only thing `notice` can carry is an action with nothing to save -- the connectivity test, which reports a version and stores nothing. Corrected in the comment rather than the code, because the code was right.
+2. **A refusal test asserted the wrong refusal.** `test_an_invalid_template_is_refused_at_save` posted an empty template, which the service documents as restore-the-default and answers with a 303. The test now posts an unknown placeholder and asserts nothing was stored, and a second test asserts the empty case restores the default.
+3. **`_seed_candidate` inserted a column that does not exist.** `candidates` has no `title`; a title is a metadata field with a source and a confidence like every other. Fixed to insert the `metadata_values` row only.
+4. **A dry-run test asserted a match without proving a non-match was possible**, and an extension test used a title with no dot, so `with_suffix` and append behaved identically. Both were strengthened rather than removed.
+
+#### Problems Encountered
+
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| 48 tests raised `AttributeError: 'Response' object has no attribute 'context'` | `response.context` is attached only when the final response is a `_TemplateResponse`, and these clients use `follow_redirects=False`, so they stopped at the new 307 | Repoint each legacy GET at the tab that owns what it asserts -- archive, paths or passwords -- rather than letting the redirect chain paper over the split |
+| Assertions on rendered summary lines failed | The new tabs render a stored source as its own editable form, so the formats and the size limit are field values now | Assert on `context["sources"][0]`, the snapshot the page and the JSON endpoint share |
+| A python replacement in `test_web_shell.py` matched nothing | Read with `newline=''` on a CRLF file, so a newline-joined pattern could not match | Normalise, replace, write back as CRLF |
+| A template with repeated separators was expected to collapse but raised `TEMPLATE_ABSOLUTE` | The leading-separator check runs before segment collapsing, deliberately | Change the case and document that a leading separator is refused, not tidied |
+
+#### Decisions And Their Reasoning
+
+1. **Seven tabs, not four.** The plan's own text says seven, and the alternative -- folding paths into archive and passwords into system -- puts a path-traversal-shaped setting on the same page as a re-encode preference. Each tab is one topic an operator opens for one reason.
+2. **The retired paths redirect; they do not 404 and they are not deleted.** A 307 keeps a bookmark working and, unlike a 301, is not cached, so the tab layout can still change. The five old templates stay in the tree as orphans for the same reason `candidate_detail.html` does: deleting them needs an explicit instruction.
+3. **Theme and density are not stored on the server**, though the plan lists them on the system tab. They answer how one screen looks, not how the deployment runs, and a server-stored theme follows an operator onto a screen where it is wrong. The tab says where the controls are instead of rendering a second pair that could disagree with the topbar's.
+4. **The timezone is validated by shape, not against `zoneinfo`.** A slim container may carry no tz database at all, and the formatting happens in the browser, which always has the full list. Shape is what keeps the value from being something other than a zone name.
+5. **An empty submission restores the default rather than storing an empty value.** For the layout template that is the difference between restoring the default and putting every book in the library root; for the three system preferences it is what makes the clear-to-restore hint on the form true.
+6. **A stored template that no longer validates falls back instead of failing the job.** By then the book is downloaded and no operator is watching; refusing to publish it over a settings mistake is the worse outcome. The settings page is where an invalid template is caught, and it cannot be saved through it.
+7. **The idle polling cadence is derived, not stored.** A second field would let an operator set a background tab to poll faster than the foreground one.
+8. **`TAG` is in `FIELD_LABELS` even though it is not a metadata field.** The rule editor offers it in the same dropdown as the real fields and reads its label from the same table; a second table for one pseudo-field would be the drift this vocabulary exists to prevent.
+
+#### Deferred From R8
+- **The five superseded templates are still in the tree** -- `connections.html`, `sources.html`, `auto_approval_rules.html`, `archive_settings.html`, `change_password.html`. Nothing renders them. R9 owns their removal, together with `downloads.html`, `downloads_history.html` and `candidate_detail.html`.
+- **`PUT /api/v1/settings/{section}` does not exist.** Only the reads landed. Every write is a form POST with its own validation and its own refusal message; a JSON writer would be a second gate per section, and no client needs one yet.
+- **Condition groups do not nest.** The editor builds one flat AND/OR group, which is what `autobrr`'s common case looks like. `validate_rule_ast` accepts nested groups, so a nested rule stored by hand still evaluates and still renders its DSL -- the editor just cannot compose one.
+- **`main.py` is ~2960 lines.** The settings routes moved into the domain but not out of the file; R9 owns the split and its target.
+
+## Handoff: Next Session (start of R9)
 
 ### Where The Refactor Stands
-R0-R3 (the foundation phases), **R4 (the activity domain)**, **R5 (the candidate domain)** and **R6 (the unified work detail page)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and three domains consuming all of it. R7 was deleted from the plan with the scope narrowing, so **R8 (the settings domain) is next**.
+R0-R3 (the foundation phases), **R4 (activity)**, **R5 (candidates)**, **R6 (the unified work detail page)** and **R8 (settings)** are complete. R7 was deleted from the plan with the scope narrowing. **R9 is the last phase**, and it is a different kind of work from the eight before it: nothing new gets built, the old things get removed and the whole thing gets verified against `EHBot.md` §8.
 
-`/activity`, `/candidates` and `/works/{id}` are the reference implementations for every remaining page: server-computed snapshot, one template per domain, macros for the repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. Read `/works/{id}` before writing R8 — it is the smallest complete example of a page and a JSON endpoint rendering one snapshot, with a test asserting they cannot disagree.
+Every domain now has the same shape: one server-computed snapshot, one template, macros for repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. `/settings/{section}` is the widest example -- seven bodies rendered from one shell, each with a JSON endpoint reading the same builder, and a test asserting the page context is a superset of the JSON body.
 
-Seven reachable templates remain pre-refactor, still pinned to light by `data-legacy="true"` — `dashboard`, `sources`, `connections`, `manual_add`, `archive_settings`, `auto_approval_rules`, `change_password` — three of which (`connections`, `archive_settings`, `auto_approval_rules`) R8 absorbs into `/settings`. Three more (`downloads.html`, `downloads_history.html`, `candidate_detail.html`) render nowhere; R9 deletes them.
+**Three reachable pages are still pre-refactor**, pinned to light by the `data-legacy="true"` that `base.html` supplies by default: `dashboard.html`, `manual_add.html` and `login.html`. R8 removed five of the eight that were left (`connections`, `sources`, `auto_approval_rules`, `archive_settings`, `change_password`). **This is what stands between R9 and `rm app.css`** — the file is 296 lines of light surfaces that those three still render against, and `base.html` links it unconditionally. Either rewrite them first or move what they need into `ui.css`; deleting the stylesheet while a page still needs it drops that page below the contrast floor R3 set.
 
-Test baseline to protect: **708 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
+Test baseline to protect: **809 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected -- the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
 
 ### The One Thing To Understand First
-The same three mistakes are available in every remaining phase:
+R9 deletes things. The failure mode of a deletion phase is not a broken page, it is a page that still renders while something it needed is gone -- so **before deleting a template, prove no route renders it and no `url_for` names its handler**, and before deleting `app.css`, prove no template links it. Grep for the filename, the handler name and the route path separately; the R6 handoff records a case where the template was orphaned but a `url_for` still pointed at the function that used to render it.
 
-1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out. R5 extended this to tab names (`candidate_tab_view`) and metadata provenance (`metadata_source_view`); R6 to stages, audit verbs, actors and attachment kinds. Page copy that is not a state — a heading's subtitle, an empty state's two lines, a disabled button's reason — stays with the page.
-2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** An unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit.
-3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. An "index" child sharing its parent's path needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
+The rules from the earlier phases still hold, because R9 touches the same files:
 
-A fourth, learned in R4 and used again in R5: **when two callers share a coroutine, the validation belongs inside it.** The form path and the JSON path had one copy of the batch logic and two copies of the argument checking, which is how one of them ended up with none.
+1. **Do not write a Chinese state label in a template or in JavaScript.** `app/api/status.py` is the only vocabulary -- including for attributes only a screen reader reads. R8 added three tables to it (`SETTINGS_SECTION_STATUS`, `TOGGLE_STATUS`, `DEPENDENCY_STATUS`); a fourth belongs there too, not in a template.
+2. **Do not add a rule to `app.css`** -- R9 removes the file once the last three pages that need it are rewritten. New rules go in `ui.css`, class-scoped.
+3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; only a leaf claims `aria-current="page"`.
+4. **When two callers share a coroutine, the argument checking belongs inside it.**
+5. **A route with a typed path parameter must be declared below every literal sibling.** R8 depends on this twice: `POST /settings/system` resolves only because it is declared below `GET /settings/{section}`.
+6. **Any redirect target a page hands the server is an open-redirect surface** -- validate to a rooted local path (`local_return_to`).
 
-A fifth, from R5: **a route that types a path parameter must be declared below every literal sibling.** `/candidates/{candidate_id}` is `int`, so a tab path declared after it is answered by the detail route and refused.
+### Next Phase: R9 (Switchover, Cleanup, Acceptance, 3-4 person-days)
+See `DEVELOPMENT_PLAN.md` §3. Four separable pieces:
 
-A sixth, from R6: **any redirect target a page sends the server is an open-redirect surface.** Validate it to a rooted local path — no scheme, no `//host`, no backslash, no control characters — and fall back to a known-good redirect rather than trusting it.
-
-### Next Phase: R8 (Settings Domain, 2-3 person-days)
-See `DEVELOPMENT_PLAN.md` §3. `/settings` with seven tabs (连接 / 来源规则 / 自动审批 / 归档 / 路径 / 密码库 / 系统), absorbing `connections`, `archive_settings` and `auto_approval_rules`; the archive path template `{category}/{artist}/{title}` with a pre-save preview and illegal-character handling; a rule editor that dry-runs against historical candidates; and a system tab for theme, density, concurrency and poll intervals. `/candidates`' six-tab renderer is the pattern for the tab strip, and `GET/PUT /api/v1/settings/{section}` — deferred since R1 — needs this phase's grouping before it can be written.
+- **Delete the eight orphaned templates.** The five R8 superseded (`connections.html`, `sources.html`, `auto_approval_rules.html`, `archive_settings.html`, `change_password.html`) plus `downloads.html`, `downloads_history.html`, `candidate_detail.html`. Deleting `candidate_detail.html` was refused once as unrequested local destruction -- this phase is the explicit instruction, but confirm the list with the operator before removing anything.
+- **Rewrite `dashboard`, `manual_add` and `login`, then remove `app.css`.** In that order: the stylesheet is what those three currently look like, so it goes last. That is also the moment `data-legacy` and the `base.html` default can go.
+- **Split `main.py` and verify <500 lines.** It is ~2960 now. The routes are already grouped by domain and every one of them redirects through a helper or renders one snapshot, which is what makes the move mechanical. The six 307 retirements can move with their domain.
+- **Documentation and configuration.** `README.md`, `.env.example` (R8's system settings are stored in the database, not the environment -- check whether anything actually belongs there), `compose.yaml` if changed.
+- **Acceptance that cannot be done from here.** The low-resource pass (1C512M / 1GB), the real-credential `docker compose up` end-to-end with a real qBittorrent, registering `local_save_path`, and the manual accessibility and mobile walkthrough. These need a host this one is not.
 
 ### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is ~2500 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
-- **`app/web/templates/downloads.html`, `downloads_history.html` and `candidate_detail.html` are orphaned but present.** R9 owns their removal; see "Deferred From R4" and "Deferred From R6".
-- **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan — see the R2 scope note. `GET/PUT /api/v1/settings/{section}` is still pending and needs the R8 settings grouping.
+- **`main.py` is ~2960 lines, not <500.** Every domain's routes moved into its own snapshot and helpers, but not out of the file. R9 owns the split; splitting earlier would have migrated each route twice.
+- **Eight templates are orphaned but present.** See above -- R9 deletes them, with the operator's confirmation.
+- **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan; see the R2 scope note. `PUT /api/v1/settings/{section}` was considered in R8 and deliberately not written -- every settings write is a form POST with its own refusal message, and a JSON writer would be a second gate per section.
+- **Condition groups do not nest in the rule editor**, though `validate_rule_ast` accepts nested groups. See "Deferred From R8".
+- **Theme and density are not stored on the server.** They are per-screen, not per-deployment; see R8 decision 3.
 - Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".
 - Connection transitions do not publish SSE events. Candidate, download and conversion all do.
-- Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration.
+- Still outstanding from the original project phases: the low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the online `local_save_path` registration -- the first and last are R9's.
 
 ### Invariants No Phase May Break
 These are business rules, not preferences. Several have tests locking them:

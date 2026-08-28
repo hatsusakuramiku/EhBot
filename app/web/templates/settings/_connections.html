@@ -1,0 +1,93 @@
+{#
+  连接 tab: the Telegram bot and the ExHentai session.
+
+  Every field here is a credential, so every one is `type="password"`,
+  `autocomplete="off"`, and empty on load. `connections` reports state and
+  identity -- never a token -- and a form that pre-filled its field would put
+  the secret in the page source, which is precisely what the credential store
+  exists to prevent.
+
+  `connections` is None before the connection manager exists (a page rendered
+  during startup, or after a startup that failed). That is a different fact from
+  「两个都没连」and is said differently.
+#}
+{% if connections is none %}
+  {{ ui.callout("连接管理尚未就绪", tone="waiting",
+                detail="服务仍在启动，或启动时出错。稍后重新载入本页。") }}
+{% else %}
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">Telegram Bot</h2>
+        <div class="ui-record-badges">{{ ui.badge(connections.telegram.state) }}</div>
+      </div>
+      <p class="ui-hint">{{ connections.telegram.identity or "Bot API 长轮询入口" }}</p>
+      {% if connections.telegram.error %}
+        {{ ui.callout(connections.telegram.error, tone="danger", role="alert") }}
+      {% endif %}
+      <form class="ui-form" method="post" action="{{ url_for('configure_telegram') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="bot-token">Bot Token</label>
+          <input class="ui-input" id="bot-token" name="bot_token" type="password"
+                 autocomplete="off" spellcheck="false" placeholder="123456:ABC..." required>
+          <small>保存后仅存入凭据库，本页不会再显示。</small>
+        </div>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">{{ "更新连接" if connections.telegram.configured else "连接 Bot" }}</button>
+          {% if connections.telegram.configured %}
+            {{ ui.confirm("断开连接", "断开 Telegram 连接",
+                          "断开后不再接收新消息，已入库的作品不受影响。",
+                          confirm_label="断开", action=url_for('disconnect_telegram'),
+                          csrf_token=csrf_token) }}
+          {% endif %}
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">ExHentai</h2>
+        <div class="ui-record-badges">{{ ui.badge(connections.exhentai.state) }}</div>
+      </div>
+      <p class="ui-hint">{{ connections.exhentai.identity or "Cookie 会话" }}</p>
+      {% if connections.exhentai.error %}
+        {{ ui.callout(connections.exhentai.error, tone="danger", role="alert") }}
+      {% endif %}
+      <form class="ui-form" method="post" action="{{ url_for('configure_exhentai') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="member-id">ipb_member_id</label>
+          <input class="ui-input" id="member-id" name="ipb_member_id" type="password"
+                 autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="ui-field">
+          <label for="pass-hash">ipb_pass_hash</label>
+          <input class="ui-input" id="pass-hash" name="ipb_pass_hash" type="password"
+                 autocomplete="off" spellcheck="false" required>
+        </div>
+        <div class="ui-field">
+          <label for="igneous">igneous</label>
+          <input class="ui-input" id="igneous" name="igneous" type="password"
+                 autocomplete="off" spellcheck="false" required>
+          <small>三项一起构成会话，缺一项无法访问 ExHentai。</small>
+        </div>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">{{ "更新会话" if connections.exhentai.configured else "连接 ExHentai" }}</button>
+          {% if connections.exhentai.configured %}
+            {{ ui.confirm("断开会话", "断开 ExHentai 会话",
+                          "断开后无法抓取画廊元数据与图片，已缓存的元数据保留。",
+                          confirm_label="断开", action=url_for('disconnect_exhentai'),
+                          csrf_token=csrf_token) }}
+          {% endif %}
+        </div>
+      </form>
+    </section>
+  </div>
+</div>
+{% endif %}

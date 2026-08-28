@@ -78,13 +78,13 @@ def test_bootstrap_password_requires_an_immediate_password_change(
     with TestClient(create_app(settings)) as client:
         response = log_in(client, read_bootstrap_password(settings))
         protected_page = client.get("/", follow_redirects=False)
-        change_page = client.get("/change-password")
+        change_page = client.get("/settings/passwords")
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/change-password"
-    assert protected_page.headers["location"] == "/change-password"
+    assert response.headers["location"] == "/settings/passwords"
+    assert protected_page.headers["location"] == "/settings/passwords"
     assert change_page.status_code == 200
-    assert "修改密码" in change_page.text
+    assert "管理员密码" in change_page.text
 
 
 def test_changing_password_removes_bootstrap_file_and_stops_rotation(
@@ -96,7 +96,7 @@ def test_changing_password_removes_bootstrap_file_and_stops_rotation(
     with TestClient(create_app(settings)) as client:
         bootstrap_password = read_bootstrap_password(settings)
         log_in(client, bootstrap_password)
-        change_page = client.get("/change-password")
+        change_page = client.get("/settings/passwords")
         response = client.post(
             "/change-password",
             data={
@@ -134,14 +134,14 @@ def test_unmodified_bootstrap_password_rotates_on_restart(tmp_path: Path) -> Non
 
     assert second_password != first_password
     assert old_password_response.status_code == 401
-    assert new_password_response.headers["location"] == "/change-password"
+    assert new_password_response.headers["location"] == "/settings/passwords"
 
 
 def test_authenticated_user_can_log_out(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         log_in(client, read_bootstrap_password(settings))
-        change_page = client.get("/change-password")
+        change_page = client.get("/settings/passwords")
         response = client.post(
             "/logout",
             data={"csrf_token": change_page.context["csrf_token"]},
@@ -201,7 +201,7 @@ def test_console_banner_is_absent_once_the_password_is_changed(
     with TestClient(create_app(settings)) as client:
         password = read_bootstrap_password(settings)
         log_in(client, password)
-        change_page = client.get("/change-password")
+        change_page = client.get("/settings/passwords")
         new_password = "rotated-console-password-2026"
         client.post(
             "/change-password",

@@ -1,0 +1,111 @@
+{#
+  系统 tab: 主题、密度、并发上限、轮询间隔、时区.
+
+  The tab has two halves that behave differently on purpose.
+
+  主题 and 密度 are per-browser, stored in `localStorage` and applied before the
+  first paint by the inline snippet in `base.html`. They are not server state:
+  one operator on a laptop and the same operator on a phone want different
+  answers, and a stored server preference would make the phone wrong. So those
+  two controls are the topbar's own segmented buttons, and this section only says
+  where they live -- it does not render a second pair that could disagree.
+
+  并发上限, 轮询间隔 and 时区 are server state, read per job through a provider
+  callable, so a save takes effect on the next task and nothing restarts. The
+  bounds in the `min`/`max` attributes come from the same constants the service
+  clamps with, so the form cannot offer a value the service would reject.
+
+  `zoneinfo` has no tz database on every host this runs on, so the zone is
+  validated by shape rather than against a list. The datalist below is a
+  convenience for the common cases, not the set of legal values.
+#}
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">运行参数</h2>
+      <p class="ui-hint">保存后下一个任务与下一次轮询即生效，无需重启。</p>
+      <form class="ui-form" method="post" action="{{ url_for('save_system_settings') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="sys-concurrency">来源并发上限</label>
+          <input class="ui-input" id="sys-concurrency" name="source_concurrency" type="number"
+                 min="{{ bounds.source_concurrency.minimum }}"
+                 max="{{ bounds.source_concurrency.maximum }}"
+                 value="{{ system.source_concurrency }}">
+          <small>
+            同时抓取的来源数，{{ bounds.source_concurrency.minimum }}–{{ bounds.source_concurrency.maximum }}。
+            {%- if not system.source_concurrency_overridden %} 当前为默认值。{% endif %}
+            置空恢复默认。
+          </small>
+        </div>
+        <div class="ui-field">
+          <label for="sys-poll">轮询间隔（毫秒）</label>
+          <input class="ui-input" id="sys-poll" name="poll_interval_ms" type="number"
+                 min="{{ bounds.poll_interval_ms.minimum }}"
+                 max="{{ bounds.poll_interval_ms.maximum }}"
+                 value="{{ system.poll_interval_ms }}">
+          <small>
+            页面刷新进行中任务的频率，{{ bounds.poll_interval_ms.minimum }}–{{ bounds.poll_interval_ms.maximum }}。
+            后台标签页使用 {{ system.idle_poll_interval_ms }} 毫秒，不会比前台更频繁。
+            {%- if not system.poll_interval_overridden %} 当前为默认值。{% endif %}
+          </small>
+        </div>
+        <div class="ui-field">
+          <label for="sys-timezone">时区</label>
+          <input class="ui-input" id="sys-timezone" name="timezone" list="timezone-options"
+                 value="{{ system.timezone }}" spellcheck="false"
+                 placeholder="Asia/Shanghai">
+          {#- The list is a shortcut, not a whitelist: the service accepts any
+              IANA-shaped name, because the host may have zones this list does
+              not. -#}
+          <datalist id="timezone-options">
+            <option value="UTC"></option>
+            <option value="Asia/Shanghai"></option>
+            <option value="Asia/Tokyo"></option>
+            <option value="Asia/Taipei"></option>
+            <option value="Asia/Hong_Kong"></option>
+            <option value="Europe/London"></option>
+            <option value="America/Los_Angeles"></option>
+          </datalist>
+          <small>
+            所有页面的时间按此时区显示。IANA 名称，如 <code>Asia/Shanghai</code>。
+            {%- if not system.timezone_overridden %} 当前为默认值。{% endif %}
+          </small>
+        </div>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">保存运行参数</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">外观</h2>
+      <p class="ui-hint">
+        主题与密度按浏览器保存，不随账号同步：同一个操作员在笔记本与手机上可以有不同的选择。
+        用右上角的两组切换按钮修改，效果立即可见。
+      </p>
+      {{ ui.kv([
+        {"label": "主题", "value": "跟随系统 / 浅色 / 深色", "note": "顶栏"},
+        {"label": "密度", "value": "舒适 / 紧凑", "note": "顶栏"},
+        {"label": "存储位置", "value": "浏览器 localStorage", "tone": "muted"},
+      ]) }}
+    </section>
+
+    <section class="ui-panel">
+      <h2 class="ui-section-title">当前生效值</h2>
+      {{ ui.kv([
+        {"label": "来源并发上限", "value": system.source_concurrency,
+         "note": none if system.source_concurrency_overridden else "默认"},
+        {"label": "轮询间隔", "value": system.poll_interval_ms ~ " ms",
+         "note": none if system.poll_interval_overridden else "默认"},
+        {"label": "后台轮询间隔", "value": system.idle_poll_interval_ms ~ " ms",
+         "note": "由轮询间隔推导"},
+        {"label": "时区", "value": system.timezone,
+         "note": none if system.timezone_overridden else "默认"},
+      ]) }}
+    </section>
+  </div>
+</div>

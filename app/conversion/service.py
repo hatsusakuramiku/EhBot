@@ -18,7 +18,13 @@ from app.archive.quality import quality_note
 from app.archive.service import ArchiveSettingsService
 from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
-from app.conversion.naming import safe_library_name
+from app.conversion.naming import (
+    DEFAULT_LIBRARY_TEMPLATE,
+    LibraryTemplateError,
+    render_library_path,
+    safe_library_name,
+    unique_library_target,
+)
 from app.db.database import Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -107,6 +113,68 @@ class ConversionService:
         library = await self._settings.library_path()
         work = await self._settings.work_path()
         return (library or self._library_path, work or self._work_path)
+
+    async def _library_target(
+        self,
+        candidate_id: int,
+        library_path: Path,
+        metadata,
+        title: str,
+    ) -> Path:
+        """Where this book's CBZ goes, per the operator's layout template.
+
+        Read per job for the same reason the directories are: a template saved
+        now applies to the next pack rather than after a restart. A stored
+        template that no longer validates falls back to the flat default instead
+        of failing the job -- the book is already downloaded, and refusing to
+        publish it over a settings mistake is the worse outcome. The settings
+        page is where an invalid template is caught, and it cannot be saved.
+        """
+        fallback = f"candidate-{candidate_id}"
+        template = await self._settings.library_template()
+        values = {
+            "category": _metadata_lookup(metadata, "Category"),
+            "artist": _metadata_lookup(metadata, "Artist"),
+            "title": title,
+        }
+        try:
+            relative = render_library_path(
+                template, values, title_fallback=fallback
+            )
+        except LibraryTemplateError:
+            logging.getLogger(__name__).warning(
+                "library_template_unusable",
+                extra={"error_code": "TEMPLATE_INVALID"},
+            )
+            relative = render_library_path(
+                DEFAULT_LIBRARY_TEMPLATE, values, title_fallback=fallback
+            )
+        # Appended rather than `with_suffix`, which would read 「Vol. 1」 as a
+        # name with a `. 1` extension and publish the book as `Vol.cbz`.
+        target = library_path / relative.parent / f"{relative.name}.cbz"
+        reserved = frozenset(
+            await asyncio.to_thread(self._existing_cbz_paths_sync, candidate_id)
+        )
+        return await asyncio.to_thread(
+            unique_library_target, target, reserved=reserved
+        )
+
+    def _existing_cbz_paths_sync(self, candidate_id: int) -> tuple[str, ...]:
+        """Paths already recorded as this book's own CBZ.
+
+        Re-packing must land on the file it replaces. Without this, the conflict
+        suffix would treat the previous CBZ as somebody else's book and every
+        重新打包 would leave `book.cbz`, `book (2).cbz`, `book (3).cbz` behind.
+        """
+        with self._database._connect() as connection:  # noqa: SLF001
+            rows = connection.execute(
+                "SELECT artifacts.path FROM artifacts "
+                "JOIN download_jobs ON download_jobs.id = artifacts.job_id "
+                "WHERE download_jobs.candidate_id = ? "
+                "AND artifacts.artifact_type = 'CBZ'",
+                (candidate_id,),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows if row[0])
 
     async def enqueue_for_candidate(self, candidate_id: int) -> int:
         return await asyncio.to_thread(
@@ -298,11 +366,10 @@ class ConversionService:
             _metadata_lookup(metadata, "Title")
             or f"Candidate {job['candidate_id']}"
         )
-        file_stem = safe_library_name(
-            title, fallback=f"candidate-{job['candidate_id']}"
-        )
         library_path, work_path = await self._effective_paths()
-        library_target = library_path / f"{file_stem}.cbz"
+        library_target = await self._library_target(
+            job["candidate_id"], library_path, metadata, title
+        )
         image_quality = await self._settings.image_quality()
         processor = await self._build_processor(image_quality)
         try:

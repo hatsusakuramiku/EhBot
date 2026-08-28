@@ -29,7 +29,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
@@ -64,7 +64,7 @@ def connection_transport(request: httpx.Request) -> httpx.Response:
 
 def test_connections_page_requires_authentication(tmp_path: Path) -> None:
     with TestClient(create_app(make_settings(tmp_path))) as client:
-        response = client.get("/connections", follow_redirects=False)
+        response = client.get("/settings/connections", follow_redirects=False)
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
@@ -82,7 +82,7 @@ def test_admin_can_connect_and_disconnect_providers_without_secret_echo(
     )
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/connections")
+        page = client.get("/settings/connections")
         csrf_token = page.context["csrf_token"]
 
         telegram = client.post(
@@ -100,7 +100,7 @@ def test_admin_can_connect_and_disconnect_providers_without_secret_echo(
             },
             follow_redirects=False,
         )
-        connected_page = client.get("/connections")
+        connected_page = client.get("/settings/connections")
         status = client.get("/api/connections/status")
 
         telegram_disconnect = client.post(

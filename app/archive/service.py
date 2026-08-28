@@ -31,6 +31,15 @@ from app.archive.vault import (
     encrypt_password,
     generate_master_key,
 )
+# The layout template is validated with the same code that renders it, so the
+# settings page and the packing path cannot disagree about what is legal. The
+# module holds nothing but string handling, so importing it here creates no
+# archive -> conversion dependency worth the name.
+from app.conversion.naming import (
+    DEFAULT_LIBRARY_TEMPLATE,
+    LibraryTemplateError,
+    validate_library_template,
+)
 from app.db.database import Database
 from app.private_files import write_private_text
 from app.storage.readiness import ensure_writable_directory
@@ -71,8 +80,6 @@ SETTING_TORRENT_AUTO_PACK = "torrent_auto_pack"
 #: Auto-pack on any download completion (Telegram, ExHentai, Telegraph, and
 #: the torrent route), independent of the torrent-specific toggle above.
 SETTING_AUTO_PACK_AFTER_DOWNLOAD = "auto_pack_after_download"
-
-DEFAULT_LIBRARY_TEMPLATE = "{title}"
 
 
 def _is_readable_directory(path: Path) -> bool:
@@ -388,6 +395,43 @@ class ArchiveSettingsService:
         await self._database.save_archive_settings(
             {SETTING_AUTO_PACK_AFTER_DOWNLOAD: "1" if enabled else "0"}
         )
+
+    async def library_template(self) -> str:
+        """The stored layout template, or the flat default.
+
+        Read without validating: a template stored by an older version, or one
+        whose placeholder set has since changed, still has to reach the settings
+        page so an operator can see and fix it. The packing path validates when
+        it renders, and falls back to the default there.
+        """
+        stored = await self._database.archive_settings()
+        return (
+            stored.get(SETTING_LIBRARY_TEMPLATE, "").strip()
+            or DEFAULT_LIBRARY_TEMPLATE
+        )
+
+    async def save_library_template(self, raw: str) -> str:
+        """Store a layout template, refusing one that cannot render safely.
+
+        Validation happens here rather than at packing time because that is
+        hours later, with the book already downloaded and no operator watching.
+        An empty submission restores the flat default instead of storing a
+        template that puts every book in the library root by accident.
+        """
+        text = (raw or "").strip()
+        if not text:
+            await self._database.save_archive_settings(
+                {SETTING_LIBRARY_TEMPLATE: ""}
+            )
+            return DEFAULT_LIBRARY_TEMPLATE
+        try:
+            template = validate_library_template(text)
+        except LibraryTemplateError as exc:
+            raise ArchiveSettingsError(exc.code, exc.public_message) from exc
+        await self._database.save_archive_settings(
+            {SETTING_LIBRARY_TEMPLATE: template}
+        )
+        return template
 
     async def image_quality(self) -> str:
         """The stored re-encode level, defaulting to the lossless original."""

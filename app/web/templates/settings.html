@@ -1,0 +1,78 @@
+{#
+  The unified settings page: seven sections at one URL shape (R8).
+
+  `/settings/{section}` renders 连接 / 来源规则 / 自动审批 / 归档 / 路径 / 密码库 /
+  系统. Five separate pages (`/connections`, `/sources`,
+  `/auto-approval-rules`, `/archive-settings`, `/change-password`) now redirect
+  into their tab, so「设置在哪」has one answer.
+
+  Rules this file follows:
+
+  * No state label is written here. Whether a source, rule, tool profile or
+    vault entry is switched on arrives as an `enablement` payload resolved by
+    `toggle_view` in `app/api/status.py`, and renders through `ui.badge`.
+    「已停用」is exactly the word the superseded `archive_settings.html` typed by
+    hand in six places.
+  * The tab strip comes from `section_tabs()`, not from a list written below.
+    A new section appears in the strip, the nav and the JSON endpoint together.
+  * Every form is a real form posting to the endpoint it always posted to. The
+    POST paths did not move in this rewrite -- only the page they render into --
+    so an operator's bookmarked action and every existing test still work.
+  * The section body is one include per tab. Seven `{% if %}` branches in one
+    file would make the archive tab's markup something you scroll past to reach
+    the system tab's.
+  * No credential is ever rendered. A password field is always empty on load;
+    the vault lists names and dates, never plaintext. That is enforced in
+    `app/api/settings.py`, and this file must not undo it by echoing a value
+    back into a `value=` attribute.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}{{ section.label }} · 设置 · EhBot{% endblock %}
+
+{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
+{% block main_attrs %}{% endblock %}
+{% block content_class %}ui-content{% endblock %}
+
+{% block content %}
+<div class="ui-page-head">
+  <div>
+    <span class="ui-eyebrow">设置</span>
+    <h1 class="ui-title">{{ section.label }}</h1>
+    <p class="ui-subtitle">保存后立即生效，无需重启。</p>
+  </div>
+</div>
+
+{{ ui.tabs(tabs, current=section.code, label="设置分区") }}
+
+{#- One notice slot for the whole page. A handler that refuses a save re-renders
+    its tab with `error` and a 400; one that accepts it redirects, so a reload
+    cannot repeat the write. `notice` is for the action that has nothing to save
+    -- 连通测试 reports a version and stores nothing, so it answers in place. -#}
+{% if error %}
+  {{ ui.callout(error, tone="danger", role="alert") }}
+{% elif notice %}
+  {{ ui.callout(notice, tone="success") }}
+{% endif %}
+
+{% if section.code == "connections" %}
+  {% include "settings/_connections.html" %}
+{% elif section.code == "sources" %}
+  {% include "settings/_sources.html" %}
+{% elif section.code == "auto-approval" %}
+  {% include "settings/_auto_approval.html" %}
+{% elif section.code == "archive" %}
+  {% include "settings/_archive.html" %}
+{% elif section.code == "paths" %}
+  {% include "settings/_paths.html" %}
+{% elif section.code == "passwords" %}
+  {% include "settings/_passwords.html" %}
+{% elif section.code == "system" %}
+  {% include "settings/_system.html" %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script defer src="{{ url_for('static', path='/settings.js') }}"></script>
+{% endblock %}

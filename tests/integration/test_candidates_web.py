@@ -34,7 +34,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={

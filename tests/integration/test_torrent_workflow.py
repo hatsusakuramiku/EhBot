@@ -772,7 +772,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
             "csrf_token": login_page.context["csrf_token"],
         },
     )
-    change_page = client.get("/change-password")
+    change_page = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
@@ -970,7 +970,7 @@ def test_the_settings_page_saves_a_client_without_echoing_the_password(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         csrf = page.context["csrf_token"]
         saved = client.post(
             "/archive-settings/torrent",
@@ -986,7 +986,7 @@ def test_the_settings_page_saves_a_client_without_echoing_the_password(
             },
         )
         assert saved.status_code == 303
-        reloaded = client.get("/archive-settings")
+        reloaded = client.get("/settings/archive")
         assert "super-secret" not in reloaded.text
         assert "qb.example:8080" in reloaded.text
         tested = client.post(
@@ -1006,7 +1006,7 @@ def test_an_unreadable_local_save_path_is_refused_at_save_time(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         response = client.post(
             "/archive-settings/torrent",
             data={
@@ -1093,7 +1093,7 @@ def test_auto_pack_is_off_until_the_operator_turns_it_on(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         assert page.context["torrent"]["auto_pack"] is False
         client.post(
             "/archive-settings/torrent",
@@ -1104,7 +1104,7 @@ def test_auto_pack_is_off_until_the_operator_turns_it_on(
                 "auto_pack": "on",
             },
         )
-        reloaded = client.get("/archive-settings")
+        reloaded = client.get("/settings/archive")
         assert reloaded.context["torrent"]["auto_pack"] is True
         # Unchecking the box has to switch it back off, not just leave the
         # stored value alone.
@@ -1116,7 +1116,7 @@ def test_auto_pack_is_off_until_the_operator_turns_it_on(
                 "local_save_path": str(tmp_path),
             },
         )
-        assert client.get("/archive-settings").context["torrent"][
+        assert client.get("/settings/archive").context["torrent"][
             "auto_pack"
         ] is False
 
@@ -1135,7 +1135,7 @@ def test_auto_pack_cannot_be_enabled_without_a_local_save_path(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get("/archive-settings")
+        page = client.get("/settings/archive")
         response = client.post(
             "/archive-settings/torrent",
             data={
@@ -1149,7 +1149,7 @@ def test_auto_pack_cannot_be_enabled_without_a_local_save_path(
         assert response.status_code == 400
         assert "\u5fc5\u987b\u586b\u5199\u4fdd\u5b58\u76ee\u5f55" in response.text
         # Nothing was stored, so the flag did not sneak on behind the error.
-        assert client.get("/archive-settings").context["torrent"][
+        assert client.get("/settings/archive").context["torrent"][
             "auto_pack"
         ] is False
 

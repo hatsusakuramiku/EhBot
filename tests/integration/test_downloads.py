@@ -214,7 +214,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        page = client.get("/change-password")
+        page = client.get("/settings/passwords")
         client.post(
             "/change-password",
             data={
@@ -225,7 +225,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
             },
         )
         # Connect Telegram bot
-        page = client.get("/connections")
+        page = client.get("/settings/connections")
         client.post(
             "/connections/telegram",
             data={"csrf_token": page.context["csrf_token"], "bot_token": "test"},
@@ -279,7 +279,7 @@ def test_downloads_dashboard_renders(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        page = client.get("/change-password")
+        page = client.get("/settings/passwords")
         client.post(
             "/change-password",
             data={

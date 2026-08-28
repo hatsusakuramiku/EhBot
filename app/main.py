@@ -64,8 +64,21 @@ from app.api.events import (
     EVENT_DOWNLOAD,
     EventBus,
 )
-from app.api.serializers import candidate_summary, job_summary
+from app.api.serializers import (
+    auto_approval_dry_run,
+    candidate_summary,
+    job_summary,
+)
+from app.api.settings import settings_snapshot
 from app.api.status import (
+    SETTINGS_ARCHIVE,
+    SETTINGS_AUTO_APPROVAL,
+    SETTINGS_CONNECTIONS,
+    SETTINGS_PASSWORDS,
+    SETTINGS_PATHS,
+    SETTINGS_SECTIONS,
+    SETTINGS_SOURCES,
+    SETTINGS_SYSTEM,
     candidate_tab_view,
     connection_view,
     metadata_source_view,
@@ -87,6 +100,11 @@ from app.review.models import (
 )
 from app.review.orchestration import ReviewOrchestrator
 from app.review.service import ReviewError, ReviewService
+from app.settings.service import (
+    DEFAULT_TIMEZONE,
+    SystemSettingsError,
+    SystemSettingsService,
+)
 from app.downloads.models import (
     DEFAULT_JOB_PRIORITY,
     MAX_JOB_PRIORITY,
@@ -96,6 +114,11 @@ from app.downloads.models import (
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError, DownloadService
+from app.conversion.naming import (
+    LibraryTemplateError,
+    render_library_path,
+    validate_library_template,
+)
 from app.conversion.service import (
     ConversionError,
     ConversionService,
@@ -212,6 +235,10 @@ def create_app(
             ):
                 ensure_writable_directory(path)
             await database.initialize()
+            # The shell renders every page's timestamps in this zone and cannot
+            # await, so the stored value is cached on app.state here and
+            # refreshed whenever the 系统 form saves it.
+            await refresh_display_timezone()
             admin_auth = await database.get_admin_auth("admin")
             if admin_auth is None or not admin_auth[1]:
                 bootstrap_password = secrets.token_urlsafe(18)
@@ -295,6 +322,9 @@ def create_app(
                         app_settings.telegraph_require_filecount_match
                     ),
                     work_path_provider=archive_settings_service.work_path,
+                    concurrency_provider=(
+                        app.state.system_settings_service.source_concurrency
+                    ),
                     resolver=telegraph_resolver,
                 )
             if app_settings.torrent_enabled:
@@ -491,6 +521,17 @@ def create_app(
     )
     app.state.settings = app_settings
     app.state.database = database
+    # Constructed eagerly rather than in the lifespan: it holds nothing but the
+    # database handle, and `/api/v1/meta` serves the polling cadence from it on
+    # a request that can arrive before the workers have started.
+    app.state.system_settings_service = SystemSettingsService(
+        database,
+        default_source_concurrency=app_settings.telegraph_concurrency,
+    )
+    # Seeded with the default so a page rendered before startup finishes -- or
+    # after a startup that failed -- still has a zone to format in. The stored
+    # value replaces it once the database is open.
+    app.state.display_timezone = DEFAULT_TIMEZONE
     app.state.connection_manager = None
     app.state.download_service = None
     app.state.conversion_service = None
@@ -556,14 +597,29 @@ def create_app(
         ):
             raise HTTPException(status_code=403, detail="Invalid CSRF token")
 
-    def require_authenticated(request: Request) -> RedirectResponse | None:
+    def require_authenticated(
+        request: Request, *, allow_password_change: bool = False
+    ) -> RedirectResponse | None:
+        """Bounce a caller who may not see this page.
+
+        An operator still holding the bootstrap password is sent to the 密码库
+        tab, which is where the form that clears the flag lives.
+        `allow_password_change` is for that tab itself: bouncing a page off
+        itself is a loop with no exit, so the one destination of the bounce
+        opts out of it.
+        """
         if not request.session.get("authenticated"):
             return RedirectResponse(
                 request.url_for("login_page").path, status_code=303
             )
-        if request.session.get("must_change_password"):
+        if not allow_password_change and request.session.get(
+            "must_change_password"
+        ):
             return RedirectResponse(
-                request.url_for("change_password_page").path, status_code=303
+                request.url_for(
+                    "settings_section", section=SETTINGS_PASSWORDS
+                ).path,
+                status_code=303,
             )
         return None
 
@@ -608,6 +664,24 @@ def create_app(
                 status_code=503, detail="Archive settings are unavailable"
             )
         return service
+
+    def system_settings_service() -> SystemSettingsService:
+        # No None check: this one is constructed eagerly in `create_app`, because
+        # it holds nothing but the database handle and both `/api/v1/meta` and
+        # the settings page read it on requests that can arrive before the
+        # workers have started.
+        return app.state.system_settings_service
+
+    async def refresh_display_timezone() -> str:
+        """Re-cache the zone the shell renders timestamps in.
+
+        `shell_context` runs for every rendered page and is synchronous, so it
+        cannot read this from the database itself. Refreshed on startup and after
+        the 系统 form saves -- which together are every moment it can change.
+        """
+        zone = await system_settings_service().timezone()
+        app.state.display_timezone = zone
+        return zone
 
     def exhentai_service() -> ExHentaiService:
         service = app.state.exhentai_service
@@ -1029,20 +1103,90 @@ def create_app(
             status_code=status_code,
         )
 
+    def _parse_rule_condition(form) -> dict:
+        """Build one automatic-approval AST from the editor's submitted rows.
+
+        The editor submits parallel lists -- `condition_kind`, `condition_field`,
+        `condition_operator`, `condition_value` -- because that is what repeated
+        form field names give natively, so the rows survive with JavaScript off.
+        A row whose field is blank is skipped, which is how the spare empty row
+        the page always renders costs nothing.
+
+        One row becomes that row's node rather than a group of one, matching what
+        `render_rule_dsl` prints and what the browser previews: a simple rule
+        should read simply in the stored DSL.
+
+        A form carrying no rows at all falls back to the single `field`/`pattern`
+        pair the page used before the editor existed. That shape is exactly one
+        regex row, so nothing is lost by keeping it accepted.
+        """
+        kinds = form.getlist("condition_kind")
+        fields = form.getlist("condition_field")
+        operators = form.getlist("condition_operator")
+        values = form.getlist("condition_value")
+
+        def at(items: list, index: int, default: str = "") -> str:
+            """One row's value from a parallel list, or the default.
+
+            The lists can be short of each other: a browser omits an unchecked
+            control, and a hand-built request may send fewer of one name than
+            another. Reading by index with a default keeps that a missing value
+            rather than an IndexError.
+            """
+            return str(items[index]) if index < len(items) else default
+
+        children: list[dict] = []
+        for index, raw_field in enumerate(fields):
+            field = str(raw_field or "").strip()
+            if not field:
+                continue
+            raw_value = at(values, index).strip()
+            if at(kinds, index, "condition") == "regex":
+                children.append(
+                    {"kind": "regex", "field": field, "pattern": raw_value}
+                )
+                continue
+            operator = at(operators, index).upper()
+            node: dict = {
+                "kind": "condition",
+                "field": field,
+                "operator": operator,
+            }
+            if operator in {"HAS_ANY", "HAS_ALL"}:
+                # A list operator gets a list, split the way `settings.js`
+                # previews it, so 「chinese, futa」 means two tags in both places.
+                node["value"] = [
+                    item.strip() for item in raw_value.split(",") if item.strip()
+                ]
+            elif operator not in {"EXISTS", "NOT_EXISTS"}:
+                node["value"] = raw_value
+            children.append(node)
+        if not children:
+            return {
+                "kind": "regex",
+                "field": str(form.get("field") or "").strip(),
+                "pattern": str(form.get("pattern") or ""),
+            }
+        if len(children) == 1:
+            return children[0]
+        return {
+            "kind": "group",
+            "operator": str(form.get("group_operator") or "AND").upper(),
+            "children": children,
+        }
+
     @app.get("/auto-approval-rules")
     async def auto_approval_rules_page(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return templates.TemplateResponse(
-            request=request,
-            name="auto_approval_rules.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "rules": await database.list_auto_approval_rules(),
-                "preview_ids": (),
-                "error": None,
-            },
+        """Retired: 自动审批 is a tab of `/settings`.
+
+        307 rather than 301 so no browser caches the move, and a redirect rather
+        than a deletion so a bookmark still lands on the page that replaced it.
+        """
+        return RedirectResponse(
+            request.url_for(
+                "settings_section", section=SETTINGS_AUTO_APPROVAL
+            ).path,
+            status_code=307,
         )
 
     @app.post("/auto-approval-rules")
@@ -1057,15 +1201,10 @@ def create_app(
             if not name:
                 raise RuleValidationError("规则名称不能为空")
             priority = int(str(form.get("priority") or "100"))
-            # Rules are expressed as `Regex({Field}, 'pattern')`. The pattern is
-            # validated here (re.compile) so a syntax error can never be saved.
-            ast = validate_rule_ast(
-                {
-                    "kind": "regex",
-                    "field": str(form.get("field") or "").strip(),
-                    "pattern": str(form.get("pattern") or ""),
-                }
-            )
+            # `validate_rule_ast` is the gate, not the editor: every pattern is
+            # compiled here, so a regex the browser accepted and Python does not
+            # is refused at the moment it would be stored.
+            ast = validate_rule_ast(_parse_rule_condition(form))
             await database.save_auto_approval_rule(
                 rule_id=None,
                 name=name,
@@ -1075,19 +1214,42 @@ def create_app(
                 dsl_snapshot=render_rule_dsl(ast),
             )
         except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
-            return templates.TemplateResponse(
-                request=request,
-                name="auto_approval_rules.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "rules": await database.list_auto_approval_rules(),
-                    "preview_ids": (),
-                    "error": str(exc),
-                },
+            return await _render_settings(
+                request,
+                SETTINGS_AUTO_APPROVAL,
+                error=str(exc),
                 status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("auto_approval_rules_page").path, status_code=303
+        return settings_redirect(request, SETTINGS_AUTO_APPROVAL)
+
+    @app.post("/auto-approval-rules/dry-run")
+    async def dry_run_auto_approval_rule(request: Request):
+        """Report what the edited rule would match. Writes nothing.
+
+        The same fields the save button submits, sent to a different endpoint by
+        the same form, so what was tried is what gets saved. The condition is
+        validated first: a trial run of an unusable rule would report 「命中 0」
+        and read as「这条规则没用」rather than 「这条规则写错了」.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        form = await request.form()
+        validate_csrf(request, str(form.get("csrf_token") or ""))
+        try:
+            condition = validate_rule_ast(_parse_rule_condition(form))
+        except (RuleValidationError, ValueError) as exc:
+            return await _render_settings(
+                request,
+                SETTINGS_AUTO_APPROVAL,
+                error=str(exc),
+                status_code=400,
+            )
+        result = await AutomaticApprovalService(database).dry_run(condition)
+        return await _render_settings(
+            request,
+            SETTINGS_AUTO_APPROVAL,
+            dry_run=auto_approval_dry_run(result),
         )
 
     @app.post("/auto-approval-rules/{rule_id}/toggle")
@@ -1100,9 +1262,7 @@ def create_app(
         await database.set_auto_approval_rule_enabled(
             rule_id, form.get("enabled") == "on"
         )
-        return RedirectResponse(
-            request.url_for("auto_approval_rules_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_AUTO_APPROVAL)
 
     @app.post("/auto-approval-rules/{rule_id}/preview")
     async def preview_auto_approval_rule(rule_id: int, request: Request):
@@ -1114,16 +1274,11 @@ def create_app(
         rule = await database.get_auto_approval_rule(rule_id)
         if rule is None:
             raise HTTPException(status_code=404, detail="规则不存在")
-        return templates.TemplateResponse(
-            request=request,
-            name="auto_approval_rules.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "rules": await database.list_auto_approval_rules(),
-                "preview_ids": await AutomaticApprovalService(database).preview(rule),
-                "preview_rule_id": rule_id,
-                "error": None,
-            },
+        return await _render_settings(
+            request,
+            SETTINGS_AUTO_APPROVAL,
+            preview_ids=await AutomaticApprovalService(database).preview(rule),
+            preview_rule_id=rule_id,
         )
 
     @app.get("/")
@@ -2000,16 +2155,10 @@ def create_app(
 
     @app.get("/sources")
     async def sources_page(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return templates.TemplateResponse(
-            request=request,
-            name="sources.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "sources": await database.list_telegram_sources(),
-            },
+        """Retired: 来源规则 is a tab of `/settings`."""
+        return RedirectResponse(
+            request.url_for("settings_section", section=SETTINGS_SOURCES).path,
+            status_code=307,
         )
 
     @app.get("/ui-kit")
@@ -2049,14 +2198,10 @@ def create_app(
             source_type == "PRIVATE_CHAT" and chat_id > 0
         )
         if not valid_identity or not display_name or max_attachment_size_mb < 0:
-            return templates.TemplateResponse(
-                request=request,
-                name="sources.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "sources": await database.list_telegram_sources(),
-                    "error": "来源类型、ID、名称或附件上限无效",
-                },
+            return await _render_settings(
+                request,
+                SETTINGS_SOURCES,
+                error="来源类型、ID、名称或附件上限无效",
                 status_code=400,
             )
         submitted_formats = set(form.getlist("allowed_archive_formats"))
@@ -2085,14 +2230,10 @@ def create_app(
             except ValueError:
                 min_rating = -1.0
         if min_rating is not None and min_rating < 0:
-            return templates.TemplateResponse(
-                request=request,
-                name="sources.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "sources": await database.list_telegram_sources(),
-                    "error": "\u6700\u4f4e\u8bc4\u5206\u683c\u5f0f\u65e0\u6548",
-                },
+            return await _render_settings(
+                request,
+                SETTINGS_SOURCES,
+                error="最低评分格式无效",
                 status_code=400,
             )
         await database.configure_telegram_source(
@@ -2108,55 +2249,107 @@ def create_app(
             allowed_categories=allowed_categories,
             min_rating=min_rating,
         )
-        return RedirectResponse(request.url_for("sources_page").path, status_code=303)
+        return settings_redirect(request, SETTINGS_SOURCES)
 
-    async def _archive_settings_context(
+    async def _render_settings(
         request: Request,
+        section: str,
+        *,
         error: str | None = None,
         notice: str | None = None,
-    ) -> dict:
-        service = archive_settings_service()
-        return {
-            "csrf_token": request.session["csrf_token"],
-            "profiles": await service.profiles(),
-            "limits": await service.limits(),
-            "passwords": await service.passwords(),
-            "keep_original": await service.keep_original(),
-            "image_quality": await service.image_quality_view(),
-            "toolchain": await service.toolchain_status(),
-            "paths": await service.paths(),
-            "torrent": await service.torrent_client_view(),
-            "auto_pack_after_download": await service.auto_pack_after_download(),
-            "torrent_enabled": app.state.torrent_service is not None,
-            "notice": notice,
-            "default_paths": {
-                "library": str(app_settings.library_path),
-                "work": str(app_settings.work_path),
-            },
-            "error": error,
-        }
-
-    async def _render_archive_settings(
-        request: Request,
-        error: str | None = None,
         status_code: int = 200,
-        notice: str | None = None,
+        **extra: object,
     ):
+        """Render one settings tab from the shared snapshot.
+
+        Every settings response comes through here -- the seven GETs, and each of
+        the POSTs that refuses something -- so a rejected save re-renders the
+        page the operator was looking at rather than a reduced copy of it. R5's
+        lesson, applied to the last domain that still had two renderings of one
+        page.
+
+        The context is `settings_snapshot`, the same coroutine
+        `GET /api/v1/settings/{section}` serves. Anything a template needed that
+        the snapshot does not carry would be invisible to the endpoint, so there
+        is nothing computed here except the three things that belong to this one
+        request: the CSRF token and the outcome message.
+
+        `extra` is for the result of an action rather than a stored setting -- a
+        trial run, a rendered path preview. Those exist for exactly one response
+        and have no place in a snapshot of what is saved.
+        """
+        context = await settings_snapshot(request, section)
+        context.update(
+            {
+                "csrf_token": request.session["csrf_token"],
+                "error": error,
+                "notice": notice,
+            }
+        )
+        context.update(extra)
         return templates.TemplateResponse(
             request=request,
-            name="archive_settings.html",
-            context=await _archive_settings_context(
-                request, error, notice
-            ),
+            name="settings.html",
+            context=context,
             status_code=status_code,
         )
 
-    @app.get("/archive-settings")
-    async def archive_settings_page(request: Request):
-        redirect = require_authenticated(request)
+    def settings_redirect(request: Request, section: str) -> RedirectResponse:
+        """See-other back to the tab a save was submitted from.
+
+        Every settings POST keeps its own path -- an operator's bookmarked form
+        action still works -- and lands the browser back on the tab that owns the
+        form, so a save never navigates away from what was being edited.
+        """
+        return RedirectResponse(
+            request.url_for("settings_section", section=section).path,
+            status_code=303,
+        )
+
+    @app.get("/settings")
+    async def settings_index(request: Request):
+        """The settings domain has no landing page of its own -- open a tab.
+
+        Declared above `/settings/{section}` so the literal path wins the match,
+        and 307 so the browser does not cache a move that is really a default.
+        """
+        return RedirectResponse(
+            request.url_for(
+                "settings_section", section=SETTINGS_CONNECTIONS
+            ).path,
+            status_code=307,
+        )
+
+    @app.get("/settings/{section}")
+    async def settings_section(request: Request, section: str):
+        """One settings tab.
+
+        `allow_password_change` because 密码库 is where the bootstrap password is
+        replaced: it is the destination `require_authenticated` bounces to, so it
+        must not bounce. Every other tab stays behind the bounce, which is what
+        keeps an operator from configuring a deployment they have not finished
+        securing.
+
+        An unknown section is a 404 rather than a redirect to the first tab: a
+        mistyped URL is a mistake to report, and quietly rendering 外部连接 for
+        `/settings/nonsense` would invent a tab.
+        """
+        redirect = require_authenticated(
+            request, allow_password_change=section == SETTINGS_PASSWORDS
+        )
         if redirect:
             return redirect
-        return await _render_archive_settings(request)
+        if section not in SETTINGS_SECTIONS:
+            raise HTTPException(status_code=404, detail="设置分区不存在")
+        return await _render_settings(request, section)
+
+    @app.get("/archive-settings")
+    async def archive_settings_page(request: Request):
+        """Retired: 归档 is a tab of `/settings`."""
+        return RedirectResponse(
+            request.url_for("settings_section", section=SETTINGS_ARCHIVE).path,
+            status_code=307,
+        )
 
     @app.post("/archive-settings/auto-pack")
     async def save_auto_pack_after_download(
@@ -2170,9 +2363,7 @@ def create_app(
         await archive_settings_service().save_auto_pack_after_download(
             form.get("enabled") == "on"
         )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_ARCHIVE)
 
     @app.post("/archive-settings/paths")
     async def save_archive_paths(request: Request, csrf_token: str = Form()):
@@ -2189,12 +2380,150 @@ def create_app(
                 }
             )
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_PATHS,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
+        return settings_redirect(request, SETTINGS_PATHS)
+
+    #: The book a layout template is previewed against. Fixed rather than taken
+    #: from the queue, for two reasons: a preview has to be reproducible, and the
+    #: interesting half of the answer is what happens to characters a filesystem
+    #: will not take. So the sample title carries a colon and a slash on purpose
+    #: -- an operator who sees those come back replaced has learned the thing the
+    #: preview exists to teach.
+    LIBRARY_TEMPLATE_SAMPLE: dict[str, str] = {
+        "category": "同人志",
+        "artist": "示例作者",
+        "title": "示例标题: 上/下卷",
+    }
+
+    def _render_template_preview(template: str) -> dict[str, object]:
+        """Render the sample book's path, exactly as the packer would.
+
+        The suffix is appended rather than substituted for the same reason the
+        packer appends it: `with_suffix` would read 「Vol. 1」 as a name with a
+        `. 1` extension and publish the book as `Vol.cbz`. Reproducing the
+        packer's own two lines here keeps the preview from being a second,
+        prettier answer.
+        """
+        relative = render_library_path(
+            template,
+            dict(LIBRARY_TEMPLATE_SAMPLE),
+            title_fallback="candidate-1",
         )
+        rendered = (relative.parent / f"{relative.name}.cbz").as_posix()
+        return {
+            "template": template,
+            "rendered": rendered,
+            "sample": [
+                {
+                    "label": field_label("Category"),
+                    "value": LIBRARY_TEMPLATE_SAMPLE["category"],
+                },
+                {
+                    "label": field_label("Artist"),
+                    "value": LIBRARY_TEMPLATE_SAMPLE["artist"],
+                },
+                {
+                    "label": field_label("Title"),
+                    "value": LIBRARY_TEMPLATE_SAMPLE["title"],
+                },
+            ],
+        }
+
+    @app.post("/archive-settings/paths/template/preview")
+    async def preview_library_template(request: Request, csrf_token: str = Form()):
+        """Show what a layout template would produce. Stores nothing.
+
+        The same field the save button submits, sent by the same form to a
+        different endpoint, so what was previewed is what gets saved. Preview is
+        a convenience and never the gate: `save_library_template` validates
+        again, which is what keeps an absolute template or a `..` out of the
+        store whether or not this button was pressed.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        raw = str(form.get("library_template") or "")
+        try:
+            template = validate_library_template(raw)
+        except LibraryTemplateError as exc:
+            return await _render_settings(
+                request,
+                SETTINGS_PATHS,
+                error=exc.public_message,
+                status_code=400,
+            )
+        return await _render_settings(
+            request,
+            SETTINGS_PATHS,
+            template_preview=_render_template_preview(template),
+        )
+
+    @app.post("/archive-settings/paths/template")
+    async def save_library_template(request: Request, csrf_token: str = Form()):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        try:
+            await archive_settings_service().save_library_template(
+                str(form.get("library_template") or "")
+            )
+        except ArchiveSettingsError as exc:
+            return await _render_settings(
+                request,
+                SETTINGS_PATHS,
+                error=exc.public_message,
+                status_code=400,
+            )
+        return settings_redirect(request, SETTINGS_PATHS)
+
+    #: The 系统 tab's only writer, and the one settings endpoint with no legacy
+    #: path to inherit -- 并发上限, 轮询间隔 and 时区 had no page before R8 -- so it
+    #: is named for where it lives rather than for a retired form.
+    @app.post("/settings/system")
+    async def save_system_settings(request: Request, csrf_token: str = Form()):
+        """Store the three system preferences and make them current.
+
+        `refresh_display_timezone` is the whole reason this is not just a write:
+        the timezone is read by `shell_context`, which is synchronous and runs
+        for every page, so it lives on `app.state` and has to be re-read here.
+        The other two values are read per job through a provider callable and
+        need nothing -- which is why only one of the three is refreshed.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        validate_csrf(request, csrf_token)
+        form = await request.form()
+        try:
+            await system_settings_service().save(
+                {
+                    key: str(form.get(key) or "")
+                    for key in (
+                        "source_concurrency",
+                        "poll_interval_ms",
+                        "timezone",
+                    )
+                    if key in form
+                }
+            )
+        except SystemSettingsError as exc:
+            return await _render_settings(
+                request,
+                SETTINGS_SYSTEM,
+                error=exc.public_message,
+                status_code=400,
+            )
+        await refresh_display_timezone()
+        return settings_redirect(request, SETTINGS_SYSTEM)
 
     @app.post("/archive-settings/torrent")
     async def save_torrent_client_settings(
@@ -2219,12 +2548,13 @@ def create_app(
                 }
             )
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_ARCHIVE)
 
     @app.post("/archive-settings/torrent-test")
     async def test_torrent_client(request: Request, csrf_token: str = Form()):
@@ -2236,12 +2566,16 @@ def create_app(
         try:
             version = await torrent_service().check_connection()
         except TorrentError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error=exc.public_message,
+                status_code=400,
             )
-        return await _render_archive_settings(
+        return await _render_settings(
             request,
-            notice=f"qBittorrent \u8fde\u901a\uff0c\u7248\u672c {version}",
+            SETTINGS_ARCHIVE,
+            notice=f"qBittorrent 连通，版本 {version}",
         )
 
     @app.post("/archive-settings/limits")
@@ -2265,12 +2599,13 @@ def create_app(
                 str(form.get("image_quality") or "")
             )
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_ARCHIVE)
 
     @app.post("/archive-settings/profiles/{name}")
     async def save_archive_tool_profile(
@@ -2285,8 +2620,11 @@ def create_app(
         try:
             timeout_seconds = int(timeout_raw) if timeout_raw else None
         except ValueError:
-            return await _render_archive_settings(
-                request, "超时时长必须是整数", status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error="超时时长必须是整数",
+                status_code=400,
             )
         executable_raw = str(form.get("executable_path") or "").strip()
         try:
@@ -2297,12 +2635,13 @@ def create_app(
                 timeout_seconds=timeout_seconds,
             )
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_ARCHIVE)
 
     @app.post("/archive-settings/toolchain/install")
     async def install_archive_toolchain(
@@ -2315,12 +2654,13 @@ def create_app(
         try:
             await archive_settings_service().install_toolchain(force=True)
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_ARCHIVE,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_ARCHIVE)
 
     @app.post("/archive-settings/passwords")
     async def add_archive_password(request: Request, csrf_token: str = Form()):
@@ -2333,8 +2673,11 @@ def create_app(
         try:
             priority = int(priority_raw)
         except ValueError:
-            return await _render_archive_settings(
-                request, "优先级必须是整数", status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_PASSWORDS,
+                error="优先级必须是整数",
+                status_code=400,
             )
         try:
             await archive_settings_service().add_password(
@@ -2344,12 +2687,13 @@ def create_app(
                 enabled=form.get("enabled") == "on",
             )
         except ArchiveSettingsError as exc:
-            return await _render_archive_settings(
-                request, exc.public_message, status_code=400
+            return await _render_settings(
+                request,
+                SETTINGS_PASSWORDS,
+                error=exc.public_message,
+                status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_PASSWORDS)
 
     @app.post("/archive-settings/passwords/{password_id}/delete")
     async def delete_archive_password(
@@ -2360,22 +2704,16 @@ def create_app(
             return redirect
         validate_csrf(request, csrf_token)
         await archive_settings_service().delete_password(password_id)
-        return RedirectResponse(
-            request.url_for("archive_settings_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_PASSWORDS)
 
     @app.get("/connections")
     async def connections_page(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return templates.TemplateResponse(
-            request=request,
-            name="connections.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "connections": connection_manager().snapshot(),
-            },
+        """Retired: 外部连接 is a tab of `/settings`."""
+        return RedirectResponse(
+            request.url_for(
+                "settings_section", section=SETTINGS_CONNECTIONS
+            ).path,
+            status_code=307,
         )
 
     @app.post("/connections/telegram")
@@ -2390,19 +2728,17 @@ def create_app(
         validate_csrf(request, csrf_token)
         try:
             await connection_manager().configure_telegram(bot_token)
-        except ProviderConnectionError:
-            return templates.TemplateResponse(
-                request=request,
-                name="connections.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "connections": connection_manager().snapshot(),
-                },
+        except ProviderConnectionError as exc:
+            # The refusal is named rather than left to the snapshot: the
+            # provider records its own error, but a credential that was
+            # rejected before it could be stored leaves nothing there.
+            return await _render_settings(
+                request,
+                SETTINGS_CONNECTIONS,
+                error=exc.public_message,
                 status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("connections_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_CONNECTIONS)
 
     @app.post("/connections/telegram/disconnect")
     async def disconnect_telegram(request: Request, csrf_token: str = Form()):
@@ -2411,9 +2747,7 @@ def create_app(
             return redirect
         validate_csrf(request, csrf_token)
         await connection_manager().disconnect_telegram()
-        return RedirectResponse(
-            request.url_for("connections_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_CONNECTIONS)
 
     @app.post("/connections/exhentai")
     async def configure_exhentai(
@@ -2431,19 +2765,17 @@ def create_app(
             await connection_manager().configure_exhentai(
                 ExHentaiCredentials(ipb_member_id, ipb_pass_hash, igneous)
             )
-        except ProviderConnectionError:
-            return templates.TemplateResponse(
-                request=request,
-                name="connections.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "connections": connection_manager().snapshot(),
-                },
+        except ProviderConnectionError as exc:
+            # The refusal is named rather than left to the snapshot: the
+            # provider records its own error, but a credential that was
+            # rejected before it could be stored leaves nothing there.
+            return await _render_settings(
+                request,
+                SETTINGS_CONNECTIONS,
+                error=exc.public_message,
                 status_code=400,
             )
-        return RedirectResponse(
-            request.url_for("connections_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_CONNECTIONS)
 
     @app.post("/connections/exhentai/disconnect")
     async def disconnect_exhentai(request: Request, csrf_token: str = Form()):
@@ -2452,9 +2784,7 @@ def create_app(
             return redirect
         validate_csrf(request, csrf_token)
         await connection_manager().disconnect_exhentai()
-        return RedirectResponse(
-            request.url_for("connections_page").path, status_code=303
-        )
+        return settings_redirect(request, SETTINGS_CONNECTIONS)
 
     @app.get("/api/connections/status")
     async def connection_status(request: Request):
@@ -2520,7 +2850,9 @@ def create_app(
         request.session["csrf_token"] = secrets.token_urlsafe(32)
         request.session["must_change_password"] = not admin_auth[1]
         destination = (
-            request.url_for("change_password_page").path
+            request.url_for(
+                "settings_section", section=SETTINGS_PASSWORDS
+            ).path
             if not admin_auth[1]
             else request.url_for("dashboard").path
         )
@@ -2528,14 +2860,20 @@ def create_app(
 
     @app.get("/change-password")
     async def change_password_page(request: Request):
-        if not request.session.get("authenticated"):
-            return RedirectResponse(
-                request.url_for("login_page").path, status_code=303
-            )
-        return templates.TemplateResponse(
-            request=request,
-            name="change_password.html",
-            context={"csrf_token": request.session["csrf_token"]},
+        """Retired: the administrator password is changed on the 密码库 tab.
+
+        A 307 rather than a deletion because this is the path a first login used
+        to land on, and an operator who bookmarked it during setup should reach
+        the form rather than a 404. The destination tab is the one section
+        `require_authenticated` lets through while the bootstrap password is
+        still in place, so the redirect works during exactly the situation it
+        was written for.
+        """
+        return RedirectResponse(
+            request.url_for(
+                "settings_section", section=SETTINGS_PASSWORDS
+            ).path,
+            status_code=307,
         )
 
     @app.post("/change-password")
@@ -2570,13 +2908,10 @@ def create_app(
         if not current_password_matches:
             error = "当前密码不正确"
         if error:
-            return templates.TemplateResponse(
-                request=request,
-                name="change_password.html",
-                context={
-                    "csrf_token": request.session["csrf_token"],
-                    "error": error,
-                },
+            return await _render_settings(
+                request,
+                SETTINGS_PASSWORDS,
+                error=error,
                 status_code=400,
             )
         new_password_hash = await asyncio.to_thread(

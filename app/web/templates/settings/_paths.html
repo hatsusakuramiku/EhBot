@@ -1,0 +1,100 @@
+{#
+  路径 tab: where files live, and how a book's own path inside the library is
+  composed.
+
+  Two forms. 运行目录 changes take effect on the next task -- the pipeline reads
+  the paths through a provider callable, so nothing restarts -- but already
+  published files are not moved, and the page says so rather than leaving the
+  operator to discover it.
+
+  The layout template is `{category}/{artist}/{title}`-style. It is the one
+  setting here that can be written wrong in an interesting way, so 预览 renders
+  it against a sample book and shows the exact relative path that would be
+  created, illegal characters already replaced. Preview is a POST that only
+  reads: it validates and renders, and writes nothing.
+
+  `validate_library_template` refuses an absolute template, `..`, an unknown
+  placeholder and a template with no `{title}`. The first two are path traversal
+  expressed as a setting, so the preview button is a convenience and never the
+  gate -- saving validates again regardless of what was previewed.
+#}
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">运行目录</h2>
+      <p class="ui-hint">修改后下一个任务即使用新目录；已发布的文件不会自动迁移。</p>
+      <form class="ui-form" method="post" action="{{ url_for('save_archive_paths') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="path-data">数据目录</label>
+          <input class="ui-input" id="path-data" value="{{ paths.data }}" disabled>
+          <small>数据库与密钥位置，只能通过 DATA_PATH 环境变量修改。</small>
+        </div>
+        <div class="ui-field">
+          <label for="path-library">书库目录</label>
+          <input class="ui-input" id="path-library" name="library_path" value="{{ paths.library }}"
+                 placeholder="{{ default_paths.library }}">
+          <small>CBZ 发布位置{% if paths.library_overridden %}（已自定义，默认 {{ default_paths.library }}）{% else %}（当前为默认值）{% endif %}。</small>
+        </div>
+        <div class="ui-field">
+          <label for="path-work">工作目录</label>
+          <input class="ui-input" id="path-work" name="work_path" value="{{ paths.work }}"
+                 placeholder="{{ default_paths.work }}">
+          <small>下载与解压的临时位置{% if paths.work_overridden %}（已自定义，默认 {{ default_paths.work }}）{% else %}（当前为默认值）{% endif %}。</small>
+        </div>
+        <p class="ui-hint">必须是绝对路径，保存前会验证目录可写入。置空则恢复为环境变量默认值。</p>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">保存目录</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">归档路径模板</h2>
+      <p class="ui-hint">每本书在书库目录内的相对路径。用 <code>/</code> 分层，最后一层是文件名（<code>.cbz</code> 自动追加）。</p>
+      <form class="ui-form" method="post" action="{{ url_for('save_library_template') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="library-template">模板</label>
+          <input class="ui-input" id="library-template" name="library_template"
+                 value="{{ library_template }}" placeholder="{{ template.default }}"
+                 spellcheck="false" data-template-input required>
+          <small>必须包含 <code>{title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。每层最多 {{ template.max_segment_length }} 个字符。</small>
+        </div>
+        <fieldset class="ui-fieldset">
+          <legend>可用字段</legend>
+          <div class="ui-token-list">
+            {% for placeholder in template.placeholders %}
+              {#- A button, so `settings.js` can insert the token at the cursor.
+                  With JavaScript off it is still the list of what the template
+                  understands, which is the reason it is in the markup. -#}
+              <button class="ui-btn ui-token" data-size="sm" type="button"
+                      data-template-token="{{ placeholder.token }}">
+                {{ placeholder.token }} {{ placeholder.label }}
+              </button>
+            {% endfor %}
+          </div>
+          <p class="ui-hint">缺失的字段会用「未分类」「未知作者」补位；文件系统不允许的字符会被替换。</p>
+        </fieldset>
+        <div class="ui-form-actions">
+          {#- 预览 and 保存 submit the same field to different endpoints, so what
+              was previewed is what gets saved. -#}
+          <button class="ui-btn" type="submit"
+                  formaction="{{ url_for('preview_library_template') }}">预览</button>
+          <button class="ui-btn" data-variant="primary" type="submit">保存模板</button>
+        </div>
+      </form>
+
+      {% if template_preview %}
+        <h3 class="ui-section-title" style="margin-top: var(--s-5)">预览</h3>
+        <p class="ui-hint">对示例元数据渲染的结果，非法字符已替换：</p>
+        <pre class="ui-code">{{ template_preview.rendered }}</pre>
+        {{ ui.kv(template_preview.sample) }}
+      {% endif %}
+    </section>
+  </div>
+</div>
