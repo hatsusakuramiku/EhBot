@@ -552,9 +552,14 @@ def test_review_views_show_original_and_chinese_tag_rows(tmp_path: Path) -> None
         authenticate(client, settings)
         queue = client.get("/candidates")
         assert queue.status_code == 200
-        assert queue.text.index("female:big breasts") < queue.text.index("巨乳")
-        assert '<b>原始</b>' in queue.text
-        assert '<b>中文</b>' in queue.text
+        # The R5 list shows the translated tags on the card -- a grid of fifty
+        # has no room for both rows -- and keeps the originals reachable through
+        # the 「标签」 facet, which reads `Tags` and `TagsRaw` together. Both
+        # halves of a bilingual candidate are therefore still on the page.
+        assert '<span class="ui-tag">巨乳</span>' in queue.text
+        assert '<span class="ui-tag">汉语</span>' in queue.text
+        assert 'name="tags" value="female:big breasts"' in queue.text
+        assert 'name="tags" value="language:chinese"' in queue.text
 
         detail = client.get(f"/candidates/{candidate_id}")
         assert detail.status_code == 200
@@ -602,9 +607,11 @@ def test_processing_and_failed_dashboard_queues_filter_candidates(
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         dashboard = client.get("/")
-        assert "/candidates/processing" in dashboard.text
+        # PROCESSING lives under 「已通过」: the tab covers everything the
+        # operator has already let through, from APPROVED to DOWNLOADED.
+        assert "/candidates/approved" in dashboard.text
         assert "/candidates/failed" in dashboard.text
-        processing = client.get("/candidates/processing")
+        processing = client.get("/candidates/approved")
         assert "Processing Candidate" in processing.text
         assert "Failed Candidate" not in processing.text
         failed = client.get("/candidates/failed")

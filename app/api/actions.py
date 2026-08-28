@@ -184,42 +184,110 @@ def _check_priority(raw: object) -> int:
     return priority
 
 
-@router.post("/candidates/batch")
-async def batch_review(request: Request) -> dict:
-    """Approve or reject several candidates at once."""
-    operator = _guard(request)
-    payload = await _body(request)
-    action = str(payload.get("action") or "")
-    if action not in {"approve", "reject"}:
+#: Review actions a batch may run. Named here so the JSON endpoint and the
+#: `/candidates` form fallback reject the same set of words.
+REVIEW_BATCH_ACTIONS: frozenset[str] = frozenset({"approve", "reject"})
+
+
+async def apply_review_batch(
+    orchestrator,
+    action: str,
+    candidate_ids: list[int],
+    operator: str,
+    *,
+    announce_candidate: Callable[[int], None] | None = None,
+    announce_job: Callable[[int], None] | None = None,
+) -> dict:
+    """Approve or reject a selection, one candidate at a time.
+
+    Shared by the JSON endpoint below and by the HTML form fallback on
+    `/candidates`, so the two can never disagree about what a batch does; the
+    action name is checked here rather than in each caller, because the form
+    path posts a raw field and would otherwise reach the orchestrator with
+    whatever the operator's browser sent.
+
+    `approve_and_enqueue` is deliberately all-or-nothing over the ids it gets,
+    so this passes it **one id at a time**: each candidate is still validated and
+    routed atomically, but a selection containing one already-approved or
+    unroutable item no longer refuses the other forty-nine. That is what makes a
+    batch replay-safe -- re-sending it after a partial run approves only what is
+    still pending and reports the rest under ``skipped`` with the reason, which
+    is what an operator who double-clicked\u300c\u5168\u90e8\u901a\u8fc7\u300dneeds. Auditing is
+    unaffected: the orchestrator writes one `review_actions` row per candidate it
+    actually acts on, so a skip leaves no trace of an action that did not happen.
+    """
+    if action not in REVIEW_BATCH_ACTIONS:
         raise ApiError(
             "ACTION_UNKNOWN",
             f"\u672a\u77e5\u7684\u5ba1\u6838\u52a8\u4f5c\uff1a{action}",
-            details={"allowed": ["approve", "reject"]},
+            details={"allowed": sorted(REVIEW_BATCH_ACTIONS)},
         )
-    candidate_ids = _candidate_ids(payload.get("candidate_ids"))
 
-    orchestrator = deps.review_orchestrator(request)
-    try:
-        if action == "approve":
-            job_ids = await orchestrator.approve_and_enqueue(
-                candidate_ids, operator
-            )
-        else:
-            await orchestrator.reject(candidate_ids, operator)
-            job_ids = ()
-    except ReviewError as exc:
-        raise ApiError(exc.code, exc.public_message) from exc
-
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
-        _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    for job_id in job_ids:
-        _publish(request, EVENT_DOWNLOAD, job_id=job_id)
+        try:
+            if action == "approve":
+                job_ids = await orchestrator.approve_and_enqueue(
+                    [candidate_id], operator
+                )
+            else:
+                await orchestrator.reject([candidate_id], operator)
+                job_ids = ()
+        except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
+            translated = _translate(exc)
+            if not isinstance(translated, ApiError):
+                # A domain refusal is a skip; anything else is a fault, and
+                # reporting it as a skip would hide it behind a tidy 200.
+                raise translated from exc
+            skipped.append(
+                {
+                    "candidate_id": candidate_id,
+                    "code": translated.code,
+                    "message": translated.message,
+                }
+            )
+            continue
+        applied.append(
+            {"candidate_id": candidate_id, "job_ids": [int(j) for j in job_ids]}
+        )
+        if announce_candidate is not None:
+            announce_candidate(candidate_id)
+        if announce_job is not None:
+            for job_id in job_ids:
+                announce_job(int(job_id))
 
     return {
         "action": action,
-        "candidate_ids": candidate_ids,
-        "job_ids": list(job_ids),
+        "requested": len(candidate_ids),
+        "applied": applied,
+        "skipped": skipped,
     }
+
+
+@router.post("/candidates/batch")
+async def batch_review(request: Request) -> dict:
+    """Approve or reject several candidates at once.
+
+    Reports per-candidate outcomes instead of failing the selection on the first
+    refusal; the loop lives in `apply_review_batch`, which the `/candidates`
+    form posts through as well.
+    """
+    operator = _guard(request)
+    payload = await _body(request)
+    candidate_ids = _candidate_ids(payload.get("candidate_ids"))
+    return await apply_review_batch(
+        deps.review_orchestrator(request),
+        str(payload.get("action") or ""),
+        candidate_ids,
+        operator,
+        announce_candidate=lambda candidate_id: _publish(
+            request, EVENT_CANDIDATE, candidate_id=candidate_id
+        ),
+        announce_job=lambda job_id: _publish(
+            request, EVENT_DOWNLOAD, job_id=job_id
+        ),
+    )
 
 
 async def apply_job_batch(
@@ -495,6 +563,8 @@ __all__ = [
     "JOB_ACTION_PRIORITY",
     "JOB_ACTION_SWITCH_SOURCE",
     "MAX_BATCH",
+    "REVIEW_BATCH_ACTIONS",
     "apply_job_batch",
+    "apply_review_batch",
     "router",
 ]

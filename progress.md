@@ -1563,39 +1563,115 @@ The fix was not to validate in the route. Both checks moved **into** `apply_job_
 - **`switch_source` still only offers TELEGRAPH and EXHENTAI**, which is the whole set of alternatives to a stalled torrent. Nothing in the queue view constrains it further.
 - **No page-visible audit trail for a batch.** The skip reasons reach the operator in the redirect message and in the JSON response; the timeline that records who did what belongs to R6.
 
-## Handoff: Next Session (start of R5)
+### Phase R5: Candidate Domain And Review Flow
+
+**Status: complete.** Test baseline moved 635 -> **663 passed / 12 skipped / 0 failed** (+28, zero regressions).
+
+Four near-identical queue pages (`/candidates`, `/candidates/needs-info`, `/candidates/processing`, `/candidates/failed`) became one page with six tabs — 全部 / 待审核 / 待补充 / 已通过 / 驳回 / 失败 — that pages, sorts, searches and filters in SQL. The pre-R5 page read a fixed slice per status with no way to reach row 101, and had no filter at all; every one of those controls is now a query parameter, which is what makes a link an operator sends themselves reopen the same list.
+
+The review flow on top of it is a bulk toolbar, an inline quick-approve, `j/k/a/x` keyboard control and a metadata drawer that edits in place with provenance badges and per-field locks. All of it is an addition to a page that already works with JavaScript off.
+
+#### Actions Taken
+
+1. **One template, one renderer, six routes.** `_render_candidates` reads the whole page state off `request.query_params` (search / sort / view / facets / page) rather than declaring eight parameters on each of six routes, and `CANDIDATE_TABS` in `app/api/candidates.py` is the single tab → statuses map that both the HTML page and `GET /api/v1/candidates` select and count through. The six literal paths are declared **above** `/candidates/{candidate_id}`, because Starlette matches in declaration order and that route types its parameter as `int` — below it, `/candidates/approved` would be answered by the detail page and refused as an unparsable id.
+2. **Tab counts derived, never queried a second time.** `candidate_tab_counts` adds up exactly the statuses each tab selects; 「全部」 uses the table's own total so a candidate in a state no tab claims is still counted somewhere. The dashboard metrics read the same function, which is what makes 待审核 on the workbench and 待审核 on the tab strip one number.
+3. **Filtering in SQL, with the facet table as the whitelist.** `CANDIDATE_FACETS` in `app/db/database.py` names the four dimensions (标签 / 作者 / 语言 / 分类) and decides how each is matched: `Tags` is comma-joined, so a value is matched inside it and two selected tags AND together; the single-valued fields are matched exactly and several selections OR together. An unknown facet name raises rather than being ignored — a silently dropped filter shows more rows than the operator asked for and looks like the filter working. `MAX_FACET_VALUES = 8` keeps a hand-edited or looping URL from building fifty EXISTS subqueries.
+4. **The sidebar offers only what the tab contains.** `candidate_facets` counts over distinct candidates in Python rather than with `COUNT(DISTINCT)`, because one candidate can carry the same tag in both `Tags` and `TagsRaw` and two GROUP BY rows would count it twice — a badge that overstates its own list. It is scoped to the tab's statuses but deliberately **not** to the other selected facets, which is what keeps a group from becoming a dead end that cannot be widened without clearing it.
+5. **Grid / list and paging are links, not scripted buttons.** `_query_href` merges one parameter into the current URL via `request.url.include_query_params`, so no call site re-lists the filters and none can forget `search`. `ui.pagination` gained an anchor shape (`prev_href`/`next_href` with `rel="prev"`/`rel="next"`) alongside its original `data-page` buttons.
+6. **Inline quick approve without a nested form.** The rows live inside the batch form and HTML cannot nest another one, so the row button is a submit carrying `formaction="/candidates/{id}/approve"` — the same route the detail page posts to. An optional hidden `tab` field is what says 「回到列表」; without it the route still redirects to the detail page, so there is one approve path rather than a list-only shortcut.
+7. **Bulk review through the shared coroutine.** `POST /candidates/batch-review` runs `apply_review_batch`, the same one `POST /api/v1/candidates/batch` uses, including the action-name check — the form posts a raw field, so that check belongs inside the coroutine. Skips are folded into the redirect message, since a form post has nowhere else to report that three of eight were already approved.
+8. **`candidates.js` (343 lines): keyboard, selection, drawer.** `j/k` move a cursor between `data-candidate-id` elements, `x` toggles selection, `a` fires that row's quick approve; all four are skipped while the operator is typing or the drawer is open. The count in the floating toolbar is recounted from the checkboxes on any bubbling `change`, so the script never computes it and the macro's checkbox needed no Alpine binding. The drawer fetches `/api/v1/works/{id}`, clones the page's `<template data-metadata-row>`, and `PATCH`es only the fields whose value or lock the operator actually touched.
+9. **Field provenance and locking, surfaced.** `METADATA_SOURCE_STATUS` in `app/api/status.py` gives each `value_source` its Chinese name, and the drawer renders it as a badge beside the value. The lock checkbox writes through the `locks` argument of `PATCH /api/v1/works/{id}/metadata` — the reader for `metadata_values.is_locked` that R2 added and left with no writer above the API.
+10. **`/works/{id}` now leads somewhere.** `candidate_summary` hands every client that link and nothing served it. It 307s to the detail page until R6 makes it real, so the API's own link is not a 404.
+
+#### Files Created
+- `app/web/static/candidates.js` — reveal, selection, keyboard, drawer.
+- `tests/unit/test_candidate_tabs.py` — tab counts and facet-selection cleaning.
+- `tests/unit/test_review_batch.py` — the shared batch loop: argument checking, partial runs, idempotence, announcements.
+
+#### Files Modified
+- `app/web/templates/candidates.html` — rewritten from 45 lines to one tabbed page with the `candidate_row`, `candidate_actions` and `candidate_meta` macros; `data-legacy="true"` removed.
+- `app/api/candidates.py` — `CANDIDATE_TABS`, `CANDIDATE_SORTS`, `candidate_tab_counts`, `candidate_facet_selection`, `MAX_FACET_VALUES`.
+- `app/api/status.py` — `CANDIDATE_TAB_STATUS` / `candidate_tab_view`, `METADATA_SOURCE_STATUS` / `metadata_source_view`.
+- `app/api/serializers.py` — the `actions` block on `candidate_summary`.
+- `app/api/actions.py` — `apply_review_batch` and `REVIEW_BATCH_ACTIONS`.
+- `app/db/database.py` — `CandidateFacet`, `CANDIDATE_FACETS`, facet clauses in `list_candidates_page`, `candidate_facets`.
+- `app/main.py` — the six tab routes, `_render_candidates`, `_query_href`, `_candidates_redirect`, the batch-review form endpoint, the `tab` field on approve, the two 307s, dashboard counts by tab.
+- `app/web/routes/shell.py` — six tab children named from `candidate_tab_view`; `candidates_processing` gone.
+- `app/web/templates/components/ui.html` — `pagination` anchors; a `caller()` slot in `cover_card`.
+- `app/web/templates/dashboard.html` — metrics by tab, words from the vocabulary.
+- `app/web/static/ui.css` — `.ui-segmented` extended to anchors.
+- `tests/integration/test_candidates_web.py` (rewritten), `test_api_domains.py`, `test_review_actions.py`, `test_sources_web.py`, `test_ui_shell.py`, `tests/unit/test_web_shell.py`.
+
+#### Bugs Found And Fixed In This Phase's Own New Code
+
+1. **The template invented a DTO field.** `item.actions.approve` was written in the page before `candidate_summary` had an `actions` block, so every card rendered without its approve button. Fixed by adding the block to the serializer rather than deriving it from the status in Jinja: the grid, the list and a JSON client all need the same answer, and a page that re-derived it would be a second copy of `REVIEWABLE_STATUSES`.
+2. **Segmented anchors were unstyled.** `.ui-segmented button` matched only buttons, and the view switch is two links. Both selectors now name `a` as well.
+3. **A save message was clobbered by its own reload.** The drawer re-reads after a `PATCH` to show what the server stored, and the re-read reset the status line — so 「已保存」 vanished instantly. `openDrawer` takes the note to display.
+
+#### Problems Encountered
+
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| The pagination test's page 2 rendered as page 1 | The test replayed the href as extracted, so the server received `amp;search=Paged` | `html.unescape` in the test helper, with the reason in its docstring — a browser unescapes before requesting, and the test has to as well |
+| `test_every_page_marks_exactly_one_destination_as_current` failed on `/candidates/processing` | The path list still walked the retired path, which now 307s to `/candidates/approved` | Walk the six tab paths instead |
+| `test_review_views_show_original_and_chinese_tag_rows` failed on `<b>原始</b>` | Legacy queue markup rendered both tag rows per candidate | The card shows the translated tags and the 标签 facet reads `Tags` and `TagsRaw` together, so the test now asserts both halves are still reachable |
+| `test_approving_an_unroutable_candidate_is_refused` expected a 400 | The batch is per-candidate now, so an unroutable item is a `skipped` entry, not a failed request | Rewritten against the per-candidate contract; the status-unchanged half of the assertion is unchanged |
+
+#### Decisions And Their Reasoning
+
+1. **Six tabs, one template, one renderer.** A candidate crosses three of them in the first minute after approval, and four templates were four copies of the row markup. The page state lives entirely in the query string, so a filter survives a tab switch.
+2. **`/candidates` renders 待审核, not 全部.** The domain's front door should be the queue an operator opens it to work, the way `/activity` is 队列. 全部 is listed first in the strip because it is the superset, and it is the escape hatch for a state no tab claims.
+3. **Tab words come from `status.py`, including in the sidebar and on the dashboard.** `NAV_ITEMS` calls `candidate_tab_view`, which also removed a pre-existing rule-1 violation: the dashboard's four metric labels were literals, and 处理中 among them was about to become wrong.
+4. **Policy on the DTO, not in the template.** `candidate_summary.actions` answers what a candidate may still do. Downloadability is deliberately left out of it — deciding that takes routing each candidate's sources, which is the per-candidate read the list shape exists to avoid for a page of fifty; an unroutable approval fails loudly at the point of action instead.
+5. **Idempotence by construction, one candidate at a time.** `approve_and_enqueue` is all-or-nothing over the ids it gets, so `apply_review_batch` hands it one id per call: each is still validated and routed atomically, but a selection containing one already-approved item no longer refuses the other forty-nine. Re-sending approves only what is still pending and reports the rest under `skipped`. Auditing is unaffected — the orchestrator writes one `review_actions` row per candidate it actually acts on, so a skip leaves no trace of an action that did not happen.
+6. **The keyboard drives real controls.** `a` clicks the row's own quick-approve button rather than calling an endpoint, and `x` toggles the row's own checkbox. There is no second code path to keep in step with the form, and every shortcut is something an operator could also do with a mouse.
+7. **The drawer sends only what changed.** Each field and lock carries `data-original`, and `changes()` diffs against it. A drawer that PATCHed all twenty-one fields would re-stamp every one as operator-edited and quietly outrank the next scrape on all of them.
+8. **A filtered-empty list gets its own empty state.** 「没有符合条件的候选」 rather than 「暂无待审核候选」: the second reads as an empty queue and hides the filter that is actually responsible.
+9. **Facet groups with no values are omitted.** 「语言」 with nothing under it reads as a broken filter rather than as an absent dimension.
+10. **307 on `/candidates/processing` and on `/works/{id}`.** The first is a bookmark that used to work; the second is a link the API already hands out. Neither is a 301, for the reason R4 established — a cached permanent redirect makes the path unreclaimable.
+
+#### Deferred From R5
+- **The candidate detail page is untouched.** `/candidates/{id}` is still the pre-refactor template with `data-legacy="true"`; **R6 owns it** as the unified `/works/{id}`, which is also what will replace the 307. Rewriting it here would mean rewriting it twice.
+- **The list does not poll.** 已通过 covers PROCESSING and is marked `live` in the vocabulary, but nothing on the page acts on that yet — the tab strip's counts and a moving row both need a refresh. The SSE names and `activity.js`'s pattern are both there when it earns the complexity.
+- **Enrichment still happens on render, in 待审核 only.** It is now bounded to the page being looked at rather than the whole status, which the pre-R5 version was not, but an ingest-time job would be the honest home for it.
+- **No page-visible audit trail.** Skip reasons reach the operator in the redirect message; the timeline that records who did what and when belongs to R6.
+- **`ui.drawer` is unused by this page.** The macro renders its content inline for one trigger; the candidate drawer has fifty triggers and fetches its content, so the page hand-writes the same classes. If a third caller wants the fetched shape, that is the time to grow the macro.
+
+## Handoff: Next Session (start of R6)
 
 ### Where The Refactor Stands
-R0-R3 (the foundation phases) and **R4 (the activity domain)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and now one domain actually consuming all of it.
+R0-R3 (the foundation phases), **R4 (the activity domain)** and **R5 (the candidate domain)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and two domains consuming all of it.
 
-`/activity` is the reference implementation for every remaining page: server-computed snapshot, one template, macros for the repeated markup, a `data-field` contract with its script, real forms underneath, and no state label written anywhere but `app/api/status.py`. Read it before writing R5.
+`/activity` and `/candidates` are the reference implementations for every remaining page: server-computed snapshot, one template per domain, macros for the repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. Read both before writing R6 — `/candidates` in particular for how a page keeps its whole state in the query string and how a bulk action shares one coroutine with the JSON API.
 
-Eleven pre-refactor templates remain, still pinned to light by `data-legacy="true"`.
+Eight reachable templates remain pre-refactor, still pinned to light by `data-legacy="true"` — `dashboard`, `sources`, `connections`, `manual_add`, `candidate_detail`, `archive_settings`, `auto_approval_rules`, `change_password` — including the candidate detail page R6 replaces. Two more (`downloads.html`, `downloads_history.html`) still carry the attribute but no route renders them; R9 deletes them.
 
-Test baseline to protect: **635 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
+Test baseline to protect: **663 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
 
 ### The One Thing To Understand First
 The same three mistakes are available in every remaining phase:
 
-1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out.
+1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out. R5 extended this to tab names (`candidate_tab_view`) and metadata provenance (`metadata_source_view`); page copy that is not a state — a heading's subtitle, an empty state's two lines — stays with the page.
 2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** An unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit.
 3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. An "index" child sharing its parent's path needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
 
-A fourth, learned in R4: **when two callers share a coroutine, the validation belongs inside it.** The form path and the JSON path had one copy of the batch logic and two copies of the argument checking, which is how one of them ended up with none.
+A fourth, learned in R4 and used again in R5: **when two callers share a coroutine, the validation belongs inside it.** The form path and the JSON path had one copy of the batch logic and two copies of the argument checking, which is how one of them ended up with none.
 
-### Next Phase: R5 (Candidate Domain And Review Flow, 4-5 person-days)
+A fifth, from R5: **a route that types a path parameter must be declared below every literal sibling.** `/candidates/{candidate_id}` is `int`, so a tab path declared after it is answered by the detail route and refused.
+
+### Next Phase: R6 (Unified Work Detail And Lifecycle, 3-4 person-days)
 See `DEVELOPMENT_PLAN.md` §3. In dependency order:
-1. **`/candidates` with six tabs** (全部/待审核/待补充/已通过/驳回/失败) replacing the four separate pages. The `tabs` macro and one `_render_candidates` mirroring `_render_activity`.
-2. **Cover grid / list toggle, sorting, and a multi-condition filter sidebar** (tag / artist / language / category / status). `cover_card`, `filter_group` and `sort_button` all exist; the handler that acts on `data-sort-key` does not.
-3. **Bulk review** (select all / invert / count / floating toolbar), inline quick-approve, and the `j/k/a/x` keyboard shortcuts. The bulk pattern is `apply_job_batch`'s: one shared coroutine, per-item refusals reported rather than fatal.
-4. **In-drawer metadata editing** with field provenance (gdata / translation / manual) and field locking. `metadata_values.is_locked` arrived with the R2 migration and has no writer yet.
+1. **`/works/{id}` as the one detail page** for a work at any stage — candidate, downloading, packaged. It currently 307s to `/candidates/{id}`; R6 inverts that, and `candidate_summary.href` already points at it, so every card and JSON client follows along for free.
+2. **A status timeline** whose nodes carry a timestamp, an actor (automatic rule / operator / system), a reason and the actions available at that point. `review_actions` already records the operator ones and `AUTO_APPROVE` with its full rule snapshot; download and conversion history come off `download_jobs`.
+3. **A stage-dependent action bar** (candidate: 通过/驳回/移除; download: 暂停/取消/切来源; archived: 重打包/改路径/重下载/删除). Every one of those actions already exists behind an endpoint — R6 is about which ones a stage offers, which is DTO policy, not template `if`s.
 
-Acceptance: bulk review is idempotent and audited; a locked field survives a re-scrape; the whole flow is operable from the keyboard.
+Acceptance: a work at any stage opens at the same URL; the timeline reaches back to the automatic rule that matched and to each operator action.
 
-Note: review orchestration is already shared (`app/review/`), so R5 is a page phase, not a logic phase. Resist adding policy to the template — the R4 shape puts it on the DTO and the words in `status.py`.
+Note: the candidate detail template is still pre-refactor. Replace it rather than porting it — the metadata drawer in `candidates.html` and `candidates.js` already renders provenance and locks, and the detail page should read from the same `/api/v1/works/{id}` payload rather than growing a second shape.
 
 ### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is ~2280 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R5-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
+- **`main.py` is ~2500 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R6-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
 - **`app/web/templates/downloads.html` and `downloads_history.html` are orphaned but present.** R9 owns their removal; see "Deferred From R4".
 - **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan — see the R2 scope note. `GET/PUT /api/v1/settings/{section}` is still pending and needs the R8 settings grouping.
 - Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".

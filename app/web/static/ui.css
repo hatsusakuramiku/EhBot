@@ -684,9 +684,14 @@
 }
 .ui-checkbox { width: 16px; height: 16px; accent-color: var(--t-accent); }
 
-/* Segmented control, used for the theme and density toggles. */
+/* Segmented control, used for the theme and density toggles, and for a view
+ * switch whose two states are two URLs -- so a segment is either a button or a
+ * link, and both have to look the same. */
 .ui-segmented { display: inline-flex; padding: 2px; border: 1px solid var(--t-line); border-radius: var(--r-md); background: var(--t-surface-sunken); }
-.ui-segmented button {
+.ui-segmented button,
+.ui-segmented a {
+  display: inline-flex;
+  align-items: center;
   min-height: 26px;
   padding: 0 var(--s-3);
   border: 0;
@@ -696,9 +701,11 @@
   font: inherit;
   font-size: var(--font-small);
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }
-.ui-segmented button[aria-pressed="true"] { color: var(--t-ink); background: var(--t-surface); box-shadow: var(--shadow-sm); }
+.ui-segmented button[aria-pressed="true"],
+.ui-segmented a[aria-pressed="true"] { color: var(--t-ink); background: var(--t-surface); box-shadow: var(--shadow-sm); }
 
 /* --------------------------------------------------------------------------
    6. Status badge

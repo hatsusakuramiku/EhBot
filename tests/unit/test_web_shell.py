@@ -52,12 +52,15 @@ def test_parent_is_active_but_only_the_child_is_current() -> None:
 def test_exactly_one_item_in_the_whole_tree_is_ever_current() -> None:
     # The same prefix trap exists between siblings: `/candidates` is a prefix of
     # `/candidates/needs-info`, so without `exact=True` on the index child both
-    # 全部候选 and 待补充 would announce themselves as the current page.
+    # 待审核 (which owns `/candidates`) and 待补充 would announce themselves as
+    # the current page.
     for path in (
         "/",
         "/candidates",
+        "/candidates/all",
         "/candidates/needs-info",
-        "/candidates/processing",
+        "/candidates/approved",
+        "/candidates/rejected",
         "/candidates/failed",
         "/manual-add",
         "/activity",
@@ -88,8 +91,10 @@ def test_every_live_page_resolves_to_exactly_one_domain() -> None:
     for path in (
         "/",
         "/candidates",
+        "/candidates/all",
         "/candidates/needs-info",
-        "/candidates/processing",
+        "/candidates/approved",
+        "/candidates/rejected",
         "/candidates/failed",
         "/manual-add",
         "/activity",

@@ -31,10 +31,14 @@
 {% endif %}
 
 <section class="metrics" aria-label="任务概览">
-  <a class="metric" href="{{ url_for('candidate_queue') }}"><strong>{{ candidate_counts.pending_review }}</strong><span>待审核</span></a>
-  <a class="metric" href="{{ url_for('needs_info_queue') }}"><strong>{{ candidate_counts.needs_info }}</strong><span>待补充</span></a>
-  <a class="metric" href="{{ url_for('processing_queue') }}"><strong>{{ candidate_counts.processing }}</strong><span>处理中</span></a>
-  <a class="metric metric-alert" href="{{ url_for('failed_queue') }}"><strong>{{ candidate_counts.failed }}</strong><span>失败</span></a>
+  {#- The number and the word both come from the candidate vocabulary: the count
+      is tallied by tab, and the name is the tab's own, so a metric here cannot
+      disagree with the tab strip it links to. 处理中 became 已通过 in R5, when
+      `/candidates/processing` folded into the approved tab. -#}
+  <a class="metric" href="{{ url_for('candidate_queue') }}"><strong>{{ candidate_counts.pending }}</strong><span>{{ candidate_tab_view('pending').label }}</span></a>
+  <a class="metric" href="{{ url_for('needs_info_queue') }}"><strong>{{ candidate_counts.needs_info }}</strong><span>{{ candidate_tab_view('needs_info').label }}</span></a>
+  <a class="metric" href="{{ url_for('approved_queue') }}"><strong>{{ candidate_counts.approved }}</strong><span>{{ candidate_tab_view('approved').label }}</span></a>
+  <a class="metric metric-alert" href="{{ url_for('failed_queue') }}"><strong>{{ candidate_counts.failed }}</strong><span>{{ candidate_tab_view('failed').label }}</span></a>
 </section>
 
 <section class="section-block" aria-labelledby="connection-heading">

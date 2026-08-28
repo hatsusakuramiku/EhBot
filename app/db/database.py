@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.archive.models import ArchivePasswordEntry, ToolProfile
@@ -76,6 +77,57 @@ _CANDIDATE_LIST_SELECT = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateFacet:
+    """One filterable metadata dimension in the candidate sidebar.
+
+    `multi_valued` decides both how a row is matched and how several selected
+    values combine, and the two follow from each other. `Tags` holds a
+    comma-joined list, so a value is matched inside it and picking two tags
+    means「同时带这两个标签」-- each selection narrows. `Artist`, `Language` and
+    `Category` hold one value per candidate, so they are matched exactly and
+    several selections mean「任选其一」: requiring all of them would always
+    return nothing, which reads as a broken filter rather than as a narrow one.
+    """
+
+    #: Metadata field names carrying this dimension, most-preferred first. Tags
+    #: are searched in both the translated and the raw field so a filter still
+    #: works on a candidate that was never enriched.
+    fields: tuple[str, ...]
+    multi_valued: bool = False
+
+
+#: Facet name -> definition. The names are the query-string keys, so this table
+#: is also the whitelist: `_list_candidates_page_sync` refuses a name that is
+#: not here rather than interpolating it into SQL.
+CANDIDATE_FACETS: dict[str, CandidateFacet] = {
+    "tags": CandidateFacet(fields=("Tags", "TagsRaw"), multi_valued=True),
+    "artist": CandidateFacet(fields=("Artist",)),
+    "language": CandidateFacet(fields=("Language",)),
+    "category": CandidateFacet(fields=("Category",)),
+}
+
+#: How many values one facet group offers. A sidebar listing every tag in the
+#: library is not a filter, it is a second scroll region -- the operator reaches
+#: an unlisted value through the search box instead.
+CANDIDATE_FACET_LIMIT = 24
+
+#: How many metadata rows one facet group reads before it stops counting. The
+#: sidebar is a convenience, not a report: an install large enough to hit this
+#: still gets the common values, and the cap is what keeps a page render from
+#: walking the whole metadata table.
+_FACET_SCAN_LIMIT = 20000
+
+#: Match one value inside a comma-joined field. The value is wrapped in commas
+#: on both sides so 「loli」 does not match 「lolicon」; the two `replace` calls
+#: normalise the separator first, because the writers join with ", " and the
+#: message parser can leave newlines behind.
+_FACET_CONTAINS_SQL = (
+    "',' || replace(replace(mv.field_value, char(10), ','), ', ', ',') || ',' "
+    "LIKE ? ESCAPE '\\'"
+)
+
+
 def _escape_like(value: str) -> str:
     """Neutralise LIKE wildcards in operator-supplied search text.
 
@@ -85,6 +137,26 @@ def _escape_like(value: str) -> str:
     return (
         value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     )
+
+
+def _split_facet_values(raw: object) -> list[str]:
+    """Split a stored field into its display values, case preserved.
+
+    `Database._parse_tag_list` lowercases for rule matching; a sidebar has to
+    show the operator the tag as it is written, so this keeps the original text
+    and only folds case when deciding whether two entries are the same one.
+    """
+    if not isinstance(raw, str):
+        return []
+    seen: set[str] = set()
+    values: list[str] = []
+    for item in raw.replace("\n", ",").split(","):
+        token = item.strip()
+        key = token.casefold()
+        if token and key not in seen:
+            seen.add(key)
+            values.append(token)
+    return values
 
 
 def _candidate_list_item(row: Sequence[object]) -> CandidateListItem:
@@ -1027,6 +1099,7 @@ class Database:
         *,
         statuses: Sequence[str] | None = None,
         search: str | None = None,
+        facets: Mapping[str, Sequence[str]] | None = None,
         sort: str = "newest",
         offset: int = 0,
         limit: int = 50,
@@ -1037,11 +1110,21 @@ class Database:
         both to render a pager, and computing it in a second round trip from
         the caller would let the two disagree when an ingest lands between the
         queries.
+
+        `facets` selects on metadata dimensions named in `CANDIDATE_FACETS`; an
+        unknown name raises rather than being ignored, because a silently
+        dropped filter shows the operator more rows than they asked for and
+        looks like the filter working.
         """
         return await asyncio.to_thread(
             self._list_candidates_page_sync,
             tuple(statuses) if statuses else (),
             search or "",
+            {
+                name: tuple(values)
+                for name, values in (facets or {}).items()
+                if values
+            },
             sort,
             offset,
             limit,
@@ -1051,6 +1134,7 @@ class Database:
         self,
         statuses: tuple[str, ...],
         search: str,
+        facets: Mapping[str, tuple[str, ...]],
         sort: str,
         offset: int,
         limit: int,
@@ -1076,6 +1160,32 @@ class Database:
                 "   AND mv.field_value LIKE ? ESCAPE '\\')"
             )
             params.append(f"%{_escape_like(needle)}%")
+        for name, values in facets.items():
+            facet = CANDIDATE_FACETS.get(name)
+            if facet is None:
+                raise ValueError(f"unknown candidate facet: {name}")
+            fields = ", ".join("?" for _ in facet.fields)
+            if facet.multi_valued:
+                # One EXISTS per value, so the selections AND together.
+                for value in values:
+                    where.append(
+                        "EXISTS (SELECT 1 FROM metadata_values mv "
+                        " WHERE mv.candidate_id = c.id "
+                        f"   AND mv.field_name IN ({fields}) "
+                        f"   AND {_FACET_CONTAINS_SQL})"
+                    )
+                    params.extend(facet.fields)
+                    params.append(f"%,{_escape_like(value)},%")
+            else:
+                chosen = ", ".join("?" for _ in values)
+                where.append(
+                    "EXISTS (SELECT 1 FROM metadata_values mv "
+                    " WHERE mv.candidate_id = c.id "
+                    f"   AND mv.field_name IN ({fields}) "
+                    f"   AND mv.field_value IN ({chosen}))"
+                )
+                params.extend(facet.fields)
+                params.extend(values)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
 
         # Whitelisted so a hand-typed query string can never reach the SQL
@@ -1128,6 +1238,72 @@ class Database:
             if key is not None:
                 counts[key] = int(count)
         return counts
+
+    async def candidate_facets(
+        self, *, statuses: Sequence[str] | None = None
+    ) -> dict[str, tuple[tuple[str, int], ...]]:
+        """Values worth offering in the filter sidebar, with their row counts.
+
+        Scoped to the same statuses as the list it filters, so the sidebar never
+        offers a tag that would return nothing in the tab the operator is
+        looking at. Not scoped to the *other* selected facets: a facet group
+        that removes its own alternatives as soon as one is picked cannot be
+        widened again without clearing it, which is the classic dead-end filter.
+        """
+        return await asyncio.to_thread(
+            self._candidate_facets_sync,
+            tuple(statuses) if statuses else (),
+        )
+
+    def _candidate_facets_sync(
+        self, statuses: tuple[str, ...]
+    ) -> dict[str, tuple[tuple[str, int], ...]]:
+        status_clause = ""
+        status_params: tuple[str, ...] = ()
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            status_clause = f" AND c.status IN ({placeholders})"
+            status_params = statuses
+        options: dict[str, tuple[tuple[str, int], ...]] = {}
+        with self._connect() as connection:
+            for name, facet in CANDIDATE_FACETS.items():
+                fields = ", ".join("?" for _ in facet.fields)
+                rows = connection.execute(
+                    "SELECT mv.candidate_id, mv.field_value "
+                    "FROM candidates c JOIN metadata_values mv "
+                    "ON mv.candidate_id = c.id "
+                    f"WHERE mv.field_name IN ({fields}) "
+                    "  AND mv.field_value IS NOT NULL "
+                    "  AND mv.field_value <> ''"
+                    f"{status_clause} LIMIT ?",
+                    (*facet.fields, *status_params, _FACET_SCAN_LIMIT),
+                ).fetchall()
+                # Counted over distinct candidates in Python rather than with
+                # COUNT(DISTINCT) in SQL, because one candidate can carry the
+                # same tag in both `Tags` and `TagsRaw` and two GROUP BY rows
+                # would count it twice -- a badge that overstates its own list.
+                seen: dict[str, set[int]] = {}
+                display: dict[str, str] = {}
+                for candidate_id, value in rows:
+                    if facet.multi_valued:
+                        tokens = _split_facet_values(value)
+                    else:
+                        # Kept verbatim: the filter matches this string exactly,
+                        # so a trimmed display value would select nothing.
+                        tokens = [str(value)]
+                    for token in tokens:
+                        key = token.casefold()
+                        display.setdefault(key, token)
+                        seen.setdefault(key, set()).add(int(candidate_id))
+                ranked = sorted(
+                    seen.items(),
+                    key=lambda item: (-len(item[1]), display[item[0]]),
+                )
+                options[name] = tuple(
+                    (display[key], len(ids))
+                    for key, ids in ranked[:CANDIDATE_FACET_LIMIT]
+                )
+        return options
 
     async def get_candidate(self, candidate_id: int) -> CandidateDetail | None:
         return await asyncio.to_thread(self._get_candidate_sync, candidate_id)

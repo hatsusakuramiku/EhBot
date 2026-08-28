@@ -262,9 +262,15 @@ class TestWriteGates:
             )
             status = client.get("/api/v1/works/1").json()["status"]["code"]
 
-        # No attachment, no torrent, no preview: nothing to download.
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "CANDIDATE_NOT_DOWNLOADABLE"
+        # No attachment, no torrent, no preview: nothing to download. The batch
+        # reports that per candidate rather than failing the whole selection --
+        # one unroutable item must not refuse the other forty-nine -- so the
+        # refusal is a `skipped` entry carrying the domain code.
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["applied"] == []
+        assert [entry["candidate_id"] for entry in payload["skipped"]] == [1]
+        assert payload["skipped"][0]["code"] == "CANDIDATE_NOT_DOWNLOADABLE"
         # And the refusal must leave the candidate untouched.
         assert status == "PENDING_REVIEW"
 

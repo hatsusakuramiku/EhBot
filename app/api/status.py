@@ -62,6 +62,42 @@ CANDIDATE_STATUS: dict[str, StatusView] = {
     "FAILED": _view("FAILED", "失败", TONE_DANGER),
 }
 
+#: The six candidate tabs. Keyed by the tab names in `app.api.candidates`,
+#: which owns the tab -> statuses mapping; only the words live here, so the
+#: template never writes 「待审核」 next to a link and drifts from the status set
+#: the link actually selects. `all` is deliberately not a status union: it is
+#: the escape hatch that shows a candidate whose state has no tab yet.
+#: 「已通过」 is `live` because it covers PROCESSING -- that tab keeps moving
+#: without the operator touching anything, and the page polls while it is open.
+CANDIDATE_TAB_STATUS: dict[str, StatusView] = {
+    "all": _view("all", "全部", TONE_NEUTRAL),
+    "pending": _view("pending", "待审核", TONE_WAITING),
+    "needs_info": _view("needs_info", "待补充", TONE_WAITING),
+    "approved": _view("approved", "已通过", TONE_ACTIVE, live=True),
+    "rejected": _view("rejected", "驳回", TONE_MUTED),
+    "failed": _view("failed", "失败", TONE_DANGER),
+}
+
+#: Where a metadata value came from, for the review drawer. An operator
+#: approving a title needs to know whether it came off the gallery page, out of
+#: the message that introduced the candidate, or from their own earlier edit --
+#: the three carry very different confidence, and「这个字段是谁写的」is the
+#: question the drawer exists to answer. Codes are the `value_source` literals
+#: the writers actually insert, not a parallel vocabulary: EXHENTAI from
+#: `app/exhentai`, TELEGRAPH / EH_TORRENT from the two `ScanInformation`
+#: writers, OPERATOR from `set_manual_metadata`, and FILENAME / INFERRED /
+#: TELEGRAM / MANUAL_ADD from the message parser and the manual-add form.
+METADATA_SOURCE_STATUS: dict[str, StatusView] = {
+    "EXHENTAI": _view("EXHENTAI", "画廊数据", TONE_SUCCESS),
+    "OPERATOR": _view("OPERATOR", "手动编辑", TONE_ACTIVE),
+    "MANUAL_ADD": _view("MANUAL_ADD", "手动添加", TONE_ACTIVE),
+    "TELEGRAM": _view("TELEGRAM", "消息标题", TONE_NEUTRAL),
+    "TELEGRAPH": _view("TELEGRAPH", "预览页", TONE_NEUTRAL),
+    "EH_TORRENT": _view("EH_TORRENT", "种子内容", TONE_NEUTRAL),
+    "FILENAME": _view("FILENAME", "文件名", TONE_MUTED),
+    "INFERRED": _view("INFERRED", "推断", TONE_MUTED),
+}
+
 #: Download queue (`download_jobs.state` for the four download providers).
 DOWNLOAD_STATUS: dict[str, StatusView] = {
     "PENDING": _view("PENDING", "排队中", TONE_WAITING, live=True),
@@ -213,6 +249,26 @@ def queue_group_view(group: str | None) -> StatusView:
     )
 
 
+def candidate_tab_view(tab: str | None) -> StatusView:
+    """Resolve a candidate tab name into its label and tone.
+
+    Falls back to the raw name rather than raising, for the same reason
+    `status_view` does: the routes validate the tab before it ever gets here, so
+    a miss means a new tab was added without its words -- which should look
+    unfinished, not take the page down.
+    """
+    return CANDIDATE_TAB_STATUS.get(
+        tab or "", _view(tab or "", tab or "—", TONE_NEUTRAL)
+    )
+
+
+def metadata_source_view(source: str | None) -> StatusView:
+    """Resolve where a metadata value came from, for the review drawer."""
+    if not source:
+        return _view("", "未知", TONE_MUTED)
+    return METADATA_SOURCE_STATUS.get(source, _view(source, source, TONE_NEUTRAL))
+
+
 def attention_view(reason: str | None) -> StatusView | None:
     """Resolve an attention reason, or None when the job needs nothing.
 
@@ -245,9 +301,11 @@ def row_note_view(code: str | None) -> StatusView | None:
 __all__ = [
     "ATTENTION_STATUS",
     "CANDIDATE_STATUS",
+    "CANDIDATE_TAB_STATUS",
     "CONNECTION_STATUS",
     "CONVERSION_STATUS",
     "DOWNLOAD_STATUS",
+    "METADATA_SOURCE_STATUS",
     "NOTE_SEEDING",
     "PROVIDER_STATUS",
     "QUEUE_GROUP_STATUS",
@@ -260,8 +318,10 @@ __all__ = [
     "TONE_SUCCESS",
     "TONE_WAITING",
     "attention_view",
+    "candidate_tab_view",
     "connection_view",
     "is_live",
+    "metadata_source_view",
     "provider_label",
     "queue_group_view",
     "row_note_view",

@@ -46,14 +46,29 @@ from app.db.database import Database
 from app.api.actions import (
     BATCH_JOB_ACTIONS,
     JOB_ACTIONS,
+    REVIEW_BATCH_ACTIONS,
     apply_job_batch,
+    apply_review_batch,
 )
 from app.api.activity import queue_snapshot
-from app.api.contracts import ApiError, api_error_handler
-from app.api.events import EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
-from app.api.serializers import job_summary
+from app.api.candidates import (
+    CANDIDATE_SORTS,
+    CANDIDATE_TABS,
+    candidate_facet_selection,
+    candidate_tab_counts,
+)
+from app.api.contracts import ApiError, PageParams, api_error_handler
+from app.api.events import (
+    EVENT_CANDIDATE,
+    EVENT_CONVERSION,
+    EVENT_DOWNLOAD,
+    EventBus,
+)
+from app.api.serializers import candidate_summary, job_summary
 from app.api.status import (
+    candidate_tab_view,
     connection_view,
+    metadata_source_view,
     provider_label,
     status_label,
     status_tone,
@@ -65,6 +80,7 @@ from app.logging import configure_logging
 
 from app.review.models import (
     METADATA_FIELDS,
+    REVIEWABLE_STATUSES,
     field_label,
     split_metadata_entries,
 )
@@ -501,6 +517,10 @@ def create_app(
     templates.env.globals["status_view"] = status_view
     templates.env.filters["connection_view"] = connection_view
     templates.env.globals["connection_view"] = connection_view
+    # Tab names for the workbench metrics, from the same vocabulary the tab
+    # strip uses: 待审核 on the dashboard and 待审核 on `/candidates` are one
+    # string in `app/api/status.py`.
+    templates.env.globals["candidate_tab_view"] = candidate_tab_view
     app.mount(
         "/static",
         StaticFiles(directory=Path(__file__).parent / "web" / "static"),
@@ -731,41 +751,257 @@ def create_app(
     async def _apply_automatic_approval(candidate_id: int) -> bool:
         return await review_orchestrator.apply_automatic_approval(candidate_id)
 
-    async def _reject_candidates(
-        candidate_ids: list[int], operator: str
-    ) -> None:
-        await review_orchestrator.reject(candidate_ids, operator)
+    #: The six candidate tabs, in the order the strip shows them. The label is
+    #: *not* here: it comes from `candidate_tab_view`, so a tab name reads the
+    #: same in the strip, in a JSON payload and in a badge. What is here is page
+    #: copy -- the sentence under the heading and the two lines an empty tab
+    #: shows -- which belongs to the page and to nothing else.
+    #:
+    #: 「全部」 is listed first because it is the superset, but `/candidates`
+    #: renders 待审核: the domain's front door should be the queue an operator
+    #: opens it to work, the way `/activity` is 队列 rather than a combined view.
+    CANDIDATE_PAGE_TABS: tuple[dict[str, str], ...] = (
+        {
+            "key": "all",
+            "href": "/candidates/all",
+            "description": "全部候选，包含已结束的记录",
+            "empty_title": "还没有任何候选",
+            "empty_hint": "白名单来源的新消息与手动添加的链接都会落到这里",
+        },
+        {
+            "key": "pending",
+            "href": "/candidates",
+            "description": "确认元数据后可批量加入下载队列",
+            "empty_title": "暂无待审核候选",
+            "empty_hint": "白名单来源的新候选会显示在这里",
+        },
+        {
+            "key": "needs_info",
+            "href": "/candidates/needs-info",
+            "description": "缺标题、缺附件或需要修订的候选",
+            "empty_title": "暂无待补充候选",
+            "empty_hint": "信息不足的候选会显示在这里",
+        },
+        {
+            "key": "approved",
+            "href": "/candidates/approved",
+            "description": "已通过审核、正在下载或已完成的候选",
+            "empty_title": "暂无已通过候选",
+            "empty_hint": "通过审核的候选会进入下载队列并显示在这里",
+        },
+        {
+            "key": "rejected",
+            "href": "/candidates/rejected",
+            "description": "已驳回的候选，可在详情页重新入队",
+            "empty_title": "暂无驳回记录",
+            "empty_hint": "驳回不会删除候选，随时可以改主意",
+        },
+        {
+            "key": "failed",
+            "href": "/candidates/failed",
+            "description": "下载或打包失败、需要检查后重试的候选",
+            "empty_title": "暂无失败候选",
+            "empty_hint": "失败的候选会显示在这里，附带失败原因",
+        },
+    )
 
-    async def _render_candidate_queue(
+    #: Sort keys offered in the toolbar, with the words for each. The keys are
+    #: `CANDIDATE_SORTS`; the database owns what each one means in SQL.
+    CANDIDATE_SORT_OPTIONS: tuple[tuple[str, str], ...] = (
+        ("newest", "最新发现"),
+        ("oldest", "最早发现"),
+        ("updated", "最近更新"),
+        ("title", "按标题"),
+    )
+
+    #: Facet name -> sidebar heading. The names are `CANDIDATE_FACETS`, which is
+    #: what decides how each one is matched in SQL.
+    CANDIDATE_FILTER_GROUPS: tuple[tuple[str, str], ...] = (
+        ("tags", "标签"),
+        ("artist", "作者"),
+        ("language", "语言"),
+        ("category", "分类"),
+    )
+
+    def _int_param(raw: str | None) -> int | None:
+        """A query-string integer, or None when it is absent or junk.
+
+        A hand-edited `?page=abc` should show page one, not a 422: the page is a
+        place an operator lands from a bookmark, and nothing about it is worth
+        refusing a render for.
+        """
+        try:
+            return int(raw) if raw not in (None, "") else None
+        except ValueError:
+            return None
+
+    def _query_href(request: Request, **params: object) -> str:
+        """This URL with some query parameters replaced.
+
+        A view toggle and a page link each differ from the current page by one
+        parameter. Rebuilding the query string in the template would mean
+        re-listing every filter at four call sites, and the first one to forget
+        `search` would silently drop it; Starlette does the merge instead.
+
+        Returned as a path so the rendered link is relative, which keeps the
+        page correct behind a reverse proxy that terminates a different scheme.
+        """
+        url = request.url.include_query_params(**params)
+        return f"{url.path}?{url.query}" if url.query else url.path
+
+    async def _render_candidates(
         request: Request,
+        tab: str,
         *,
-        status: str,
-        queue_title: str,
-        queue_description: str,
-        empty_title: str,
-        empty_text: str,
-        batch_enabled: bool = False,
         error: str | None = None,
         status_code: int = 200,
     ):
-        candidates = await database.list_candidates(status=status)
-        if batch_enabled:
-            await exhentai_service().enrich_candidates_for_review(candidates)
-            candidates = await database.list_candidates(status=status)
-            for candidate in candidates:
+        """Render one candidate tab.
+
+        Replaces the four near-identical queue pages. Every tab reads the same
+        query string -- search, sort, view, facets, page -- so a filter survives
+        a tab switch instead of being a per-page feature, and the tab counts are
+        shown on all six because「待审核还有多少」is not a question worth changing
+        tab to answer.
+
+        Arguments are read from `request.query_params` rather than declared on
+        each route: six routes repeating eight parameters is six chances for one
+        of them to drift, and everything here is optional by construction.
+        """
+        params = request.query_params
+        search = (params.get("search") or "").strip()
+        sort = params.get("sort") or "newest"
+        if sort not in CANDIDATE_SORTS:
+            # Forgiving on purpose, unlike the JSON endpoint: a bookmarked link
+            # with a sort we have since renamed should still show the list.
+            sort = "newest"
+        view = params.get("view") if params.get("view") in {"grid", "list"} else "grid"
+        try:
+            facets = candidate_facet_selection(
+                {name: params.getlist(name) for name, _ in CANDIDATE_FILTER_GROUPS}
+            )
+        except ApiError as exc:
+            facets = {}
+            error = error or exc.message
+        page = PageParams.clamp(
+            _int_param(params.get("page")), _int_param(params.get("page_size"))
+        )
+        statuses = CANDIDATE_TABS[tab]
+
+        if tab == "pending":
+            # Kept from the old queue page: opening 待审核 is what enriches new
+            # candidates and lets an auto-approval rule fire. Bounded to the
+            # page the operator is looking at, which the pre-R5 version was not.
+            first, _ = await database.list_candidates_page(
+                statuses=statuses,
+                search=search,
+                facets=facets,
+                sort=sort,
+                offset=page.offset,
+                limit=page.limit,
+            )
+            await exhentai_service().enrich_candidates_for_review(first)
+            for candidate in first:
                 await _apply_automatic_approval(candidate.candidate_id)
-            candidates = await database.list_candidates(status=status)
+
+        items, total = await database.list_candidates_page(
+            statuses=statuses,
+            search=search,
+            facets=facets,
+            sort=sort,
+            offset=page.offset,
+            limit=page.limit,
+        )
+        counts = candidate_tab_counts(await database.candidate_counts())
+        options = await database.candidate_facets(statuses=statuses)
+        current = next(
+            entry for entry in CANDIDATE_PAGE_TABS if entry["key"] == tab
+        )
+        # Batch review is offered wherever a candidate can still be reviewed.
+        # `REVIEWABLE_STATUSES` decides that, not the tab name, and 「全部」 has
+        # no status filter so it always offers it.
+        batch_enabled = not statuses or bool(set(statuses) & REVIEWABLE_STATUSES)
         return templates.TemplateResponse(
             request=request,
             name="candidates.html",
             context={
                 "csrf_token": request.session["csrf_token"],
-                "candidates": candidates,
-                "queue_title": queue_title,
-                "queue_description": queue_description,
-                "empty_title": empty_title,
-                "empty_text": empty_text,
+                "tab": tab,
+                "tab_title": candidate_tab_view(tab).label,
+                "tab_description": current["description"],
+                # The tab's own path, with no query string: what 「清除」 goes to
+                # and what the filter form posts back to.
+                "tab_href": current["href"],
+                "tabs": [
+                    {
+                        "key": entry["key"],
+                        "href": entry["href"],
+                        "label": candidate_tab_view(entry["key"]).label,
+                        "count": counts.get(entry["key"], 0),
+                    }
+                    for entry in CANDIDATE_PAGE_TABS
+                ],
+                # Serialised through the same function the JSON list uses, so a
+                # card and an API client describe a candidate identically -- the
+                # cover URL included, which is a proxy path and never upstream.
+                "candidates": [candidate_summary(item) for item in items],
+                "total": total,
+                "page": page.page,
+                "page_size": page.page_size,
+                # Paging and the view switch are links rather than scripted
+                # buttons, so both survive JavaScript being off and a shared URL
+                # reopens exactly what the sender was looking at.
+                "prev_href": _query_href(request, page=page.page - 1),
+                "next_href": _query_href(request, page=page.page + 1),
+                "grid_href": _query_href(request, view="grid"),
+                "list_href": _query_href(request, view="list"),
+                "sort": sort,
+                "sorts": [
+                    {"key": key, "label": label}
+                    for key, label in CANDIDATE_SORT_OPTIONS
+                ],
+                "search": search,
+                "view": view,
+                # List-view headers. The select and action columns are dropped
+                # where the tab cannot review anything, so a terminal tab does
+                # not show an empty checkbox column.
+                "columns": [
+                    *(
+                        [{"key": "select", "label": "选择"}]
+                        if batch_enabled
+                        else []
+                    ),
+                    {"key": "candidate", "label": "候选"},
+                    {"key": "status", "label": "状态"},
+                    {"key": "tags", "label": "标签"},
+                    {"key": "messages", "label": "消息", "numeric": True},
+                    {"key": "updated", "label": "更新"},
+                    {"key": "actions", "label": "操作"},
+                ],
+                "filters": [
+                    {
+                        "name": name,
+                        "title": title,
+                        "options": [
+                            {
+                                "value": value,
+                                "label": value,
+                                "count": count,
+                                "checked": value in facets.get(name, ()),
+                            }
+                            for value, count in options.get(name, ())
+                        ],
+                    }
+                    for name, title in CANDIDATE_FILTER_GROUPS
+                ],
+                "active_filters": sum(
+                    len(values) for values in facets.values()
+                ),
+                # Batch review is offered wherever a candidate can still be
+                # reviewed -- see `batch_enabled` above.
                 "batch_enabled": batch_enabled,
+                "empty_title": current["empty_title"],
+                "empty_hint": current["empty_hint"],
                 "error": error,
             },
             status_code=status_code,
@@ -885,25 +1121,77 @@ def create_app(
             context={
                 "csrf_token": request.session["csrf_token"],
                 "connections": connection_manager().snapshot(),
-                "candidate_counts": await database.candidate_counts(),
+                # Tallied by tab rather than by raw status, so a metric here and
+                # the tab strip on `/candidates` can never show two different
+                # numbers for the same queue.
+                "candidate_counts": candidate_tab_counts(
+                    await database.candidate_counts()
+                ),
                 "attention": snapshot["attention"],
             },
         )
 
+    #: The six tab routes. Declared above `/candidates/{candidate_id}` because
+    #: Starlette matches in declaration order and that route types its parameter
+    #: as `int`: below it, `/candidates/approved` would be answered by the detail
+    #: page and refused as an unparsable id.
     @app.get("/candidates")
-    async def candidate_queue(request: Request):
+    async def candidate_queue(request: Request, error: str | None = None):
         redirect = require_authenticated(request)
         if redirect:
             return redirect
-        return await _render_candidate_queue(
-            request,
-            status="PENDING_REVIEW",
-            queue_title="待审核队列",
-            queue_description="确认元数据后可批量加入下载队列",
-            empty_title="暂无待审核候选",
-            empty_text="白名单来源的新候选会显示在这里",
-            batch_enabled=True,
-        )
+        return await _render_candidates(request, "pending", error=error)
+
+    @app.get("/candidates/all")
+    async def all_candidates(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidates(request, "all", error=error)
+
+    @app.get("/candidates/needs-info")
+    async def needs_info_queue(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidates(request, "needs_info", error=error)
+
+    @app.get("/candidates/approved")
+    async def approved_queue(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidates(request, "approved", error=error)
+
+    @app.get("/candidates/rejected")
+    async def rejected_queue(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidates(request, "rejected", error=error)
+
+    @app.get("/candidates/failed")
+    async def failed_queue(request: Request, error: str | None = None):
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_candidates(request, "failed", error=error)
+
+    #: 处理中 was its own page before R5 and is now part of 已通过, which covers
+    #: APPROVED, PROCESSING and DOWNLOADED. Kept as a redirect rather than
+    #: deleted, for the reason `/downloads` was: a bookmark that used to work
+    #: should not 404. 307 so no browser caches it and makes the path
+    #: unreclaimable.
+    @app.get("/candidates/processing")
+    async def processing_queue(request: Request):
+        return RedirectResponse("/candidates/approved", status_code=307)
+
+    #: The JSON list hands clients `href: /works/{id}`, which had no page behind
+    #: it. R6 makes that the real detail page; until then it lands where the
+    #: detail actually lives, so the API's own link is not a 404.
+    @app.get("/works/{candidate_id}")
+    async def work_detail_redirect(request: Request, candidate_id: int):
+        return RedirectResponse(f"/candidates/{candidate_id}", status_code=307)
 
     @app.get("/manual-add")
     async def manual_add_page(request: Request):
@@ -950,50 +1238,36 @@ def create_app(
             status_code=303,
         )
 
-    @app.get("/candidates/needs-info")
-    async def needs_info_queue(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return await _render_candidate_queue(
-            request,
-            status="NEEDS_INFO",
-            queue_title="待补充队列",
-            queue_description="需要补全标题或附件信息的漫画候选",
-            empty_title="暂无待补充候选",
-            empty_text="信息不足的候选会显示在这里",
-        )
+    async def _candidates_redirect(
+        request: Request, error: str | None = None
+    ) -> RedirectResponse:
+        """Back to the tab the operator submitted from, error and all.
 
-    @app.get("/candidates/processing")
-    async def processing_queue(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return await _render_candidate_queue(
-            request,
-            status="PROCESSING",
-            queue_title="处理中队列",
-            queue_description="已审核并正在下载的候选",
-            empty_title="暂无处理中候选",
-            empty_text="下载 Worker 领取任务后会显示在这里",
+        The tab travels in a hidden form field rather than being read off the
+        referer: a batch approved from 待补充 must not drop the operator onto
+        待审核, and unlike the activity page the choice is one of six, which is
+        more than a header sniff should be deciding.
+        """
+        target = str((await request.form()).get("tab") or "")
+        entry = next(
+            (item for item in CANDIDATE_PAGE_TABS if item["key"] == target),
+            CANDIDATE_PAGE_TABS[1],
         )
-
-    @app.get("/candidates/failed")
-    async def failed_queue(request: Request):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        return await _render_candidate_queue(
-            request,
-            status="FAILED",
-            queue_title="失败队列",
-            queue_description="下载失败、需要检查后重新处理的候选",
-            empty_title="暂无失败候选",
-            empty_text="下载失败的候选会显示在这里",
-        )
+        href = entry["href"]
+        if error:
+            href = f"{href}?error={quote_plus(error)}"
+        return RedirectResponse(href, status_code=303)
 
     @app.post("/candidates/batch-review")
     async def batch_review(request: Request):
+        """The bulk toolbar, without JavaScript.
+
+        Runs through `apply_review_batch`, the same coroutine
+        `POST /api/v1/candidates/batch` uses, so the form and the API cannot
+        disagree about what a batch does or about which candidates it skips.
+        Skips are folded into the redirect's message: a form post has nowhere
+        else to report that three of eight were already approved.
+        """
         redirect = require_authenticated(request)
         if redirect:
             return redirect
@@ -1008,38 +1282,37 @@ def create_app(
             )
         except ValueError:
             candidate_ids = []
-        if not candidate_ids or action not in {"approve", "reject"}:
-            return await _render_candidate_queue(
-                request,
-                status="PENDING_REVIEW",
-                queue_title="待审核队列",
-                queue_description="确认元数据后可批量加入下载队列",
-                empty_title="暂无待审核候选",
-                empty_text="白名单来源的新候选会显示在这里",
-                batch_enabled=True,
-                error="请选择至少一条候选并指定审核操作",
-                status_code=400,
+        if action not in REVIEW_BATCH_ACTIONS:
+            return await _candidates_redirect(
+                request, f"未知的审核动作：{action}"
             )
+        if not candidate_ids:
+            return await _candidates_redirect(request, "请至少选择一条候选")
         operator = request.session.get("username", "admin")
         try:
-            if action == "approve":
-                await _approve_candidates_and_enqueue(candidate_ids, operator)
-            else:
-                await _reject_candidates(candidate_ids, operator)
-        except ReviewError as exc:
-            return await _render_candidate_queue(
-                request,
-                status="PENDING_REVIEW",
-                queue_title="待审核队列",
-                queue_description="确认元数据后可批量加入下载队列",
-                empty_title="暂无待审核候选",
-                empty_text="白名单来源的新候选会显示在这里",
-                batch_enabled=True,
-                error=exc.public_message,
-                status_code=400,
+            result = await apply_review_batch(
+                review_orchestrator,
+                action,
+                candidate_ids,
+                operator,
+                announce_candidate=lambda candidate_id: (
+                    app.state.event_bus.publish(
+                        EVENT_CANDIDATE, candidate_id=candidate_id
+                    )
+                ),
+                announce_job=lambda job_id: app.state.event_bus.publish(
+                    EVENT_DOWNLOAD, job_id=job_id
+                ),
             )
-        return RedirectResponse(
-            request.url_for("candidate_queue").path, status_code=303
+        except ApiError as exc:
+            return await _candidates_redirect(request, exc.message)
+        skipped = result["skipped"]
+        if not skipped:
+            return await _candidates_redirect(request)
+        return await _candidates_redirect(
+            request,
+            f"{len(result['applied'])} 条已处理，{len(skipped)} 条跳过："
+            f"{skipped[0]['message']}",
         )
 
     @app.get("/candidates/{candidate_id}")
@@ -1096,7 +1369,16 @@ def create_app(
         request: Request,
         candidate_id: int,
         csrf_token: str = Form(),
+        tab: str | None = Form(None),
     ):
+        """Approve one candidate and enqueue its download.
+
+        Both the detail page and the list's 行内快速通过 post here, so there is
+        one approve path rather than a shortcut that could drift from it. `tab`
+        is only sent by the list, and its presence is what says「回到列表」: a
+        quick approve must not teleport the operator into a detail page they did
+        not ask to open.
+        """
         redirect = require_authenticated(request)
         if redirect:
             return redirect
@@ -1105,11 +1387,15 @@ def create_app(
         try:
             await _approve_candidates_and_enqueue([candidate_id], operator)
         except ReviewError as exc:
+            if tab is not None:
+                return await _candidates_redirect(request, exc.public_message)
             return await _render_review_error(
                 request,
                 candidate_id,
                 exc.public_message,
             )
+        if tab is not None:
+            return await _candidates_redirect(request)
         return RedirectResponse(
             request.url_for("candidate_detail", candidate_id=candidate_id).path,
             status_code=303,

@@ -1,45 +1,267 @@
+{#
+  The candidate domain: 全部 / 待审核 / 待补充 / 已通过 / 驳回 / 失败 (R5).
+
+  One template for six tabs, selected by `tab`, replacing four near-identical
+  queue pages. They are tabs rather than pages because they are six views of one
+  table, and because a candidate crosses three of them in the first minute after
+  it is approved -- 待审核 → 已通过 → (失败). Search, sort, view and the facet
+  sidebar all live in the query string, so a filter survives a tab switch and a
+  link an operator sends themselves reopens the same list.
+
+  Rules this file follows:
+
+  * No state label is written here. Tab names, statuses and metadata provenance
+    all arrive as `StatusView` payloads that `app/api/status.py` resolved, and
+    render through `ui.badge`. A label typed into this file would be a second
+    vocabulary the JSON API could contradict.
+  * Every action is a real form. `candidates.js` adds keyboard control, the
+    select-all tools and the metadata drawer on top, but with JavaScript off the
+    list still filters, pages, opens a candidate and approves one or many.
+  * Row and card markup exists once each, in the two macros below.
+#}
 {% extends "base.html" %}
-{% block title %}候选队列 - EhBot{% endblock %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}{{ tab_title }} · EhBot{% endblock %}
+
+{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
+{% block main_attrs %}{% endblock %}
+{% block content_class %}ui-content{% endblock %}
+
+{# ------------------------------------------------------------- one candidate #}
+
+{%- macro candidate_meta(item) -%}
+  {#- The one-line summary under a title. Built from whichever of the three
+      fields the scrape actually produced, so a candidate with no artist does
+      not render a row of separators. -#}
+  {{- [item.artist, item.category, item.language] | select | join(" · ") -}}
+{%- endmacro %}
+
+{% macro candidate_actions(item) -%}
+  {#- `formaction` rather than a nested form: the row lives inside the batch
+      form, and HTML has no way to nest another one. Quick approve therefore
+      posts to the single-candidate route -- the same one the detail page uses --
+      which keeps one approve path instead of a list-only shortcut. The hidden
+      `tab` field in the form is what brings the operator back to this tab. -#}
+  <div class="ui-row-actions">
+    {% if item.actions.approve %}
+    <button class="ui-btn" data-size="sm" type="submit" data-quick-approve
+            formaction="/candidates/{{ item.candidate_id }}/approve">通过并下载</button>
+    {% endif %}
+    {#- Hidden until `candidates.js` runs: the drawer is the one control here
+        that cannot work without it, and a dead button is worse than none. -#}
+    <button class="ui-btn" data-size="sm" data-variant="ghost" type="button"
+            data-metadata-open="{{ item.candidate_id }}" hidden>元数据</button>
+  </div>
+{%- endmacro %}
+
+{% macro candidate_row(item, selectable=true) -%}
+  {#- `data-candidate-id` is the contract with `candidates.js`: it moves a
+      cursor between these elements and toggles their checkbox, and never builds
+      one itself. -#}
+  <tr data-candidate-id="{{ item.candidate_id }}">
+    {% if selectable %}
+    <td data-label="选择">
+      <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ item.candidate_id }}"
+             aria-label="选择「{{ item.title or '未命名候选' }}」">
+    </td>
+    {% endif %}
+    <td data-label="候选">
+      <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名候选" }}</a></span>
+      {%- set meta = candidate_meta(item) -%}
+      {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
+    </td>
+    <td data-label="状态">{{ ui.badge(item.status) }}</td>
+    <td data-label="标签">
+      {% if item.tags %}
+      <div class="ui-card-tags">
+        {% for tag in item.tags[:6] %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
+      </div>
+      {% else %}<span class="ui-table-secondary">—</span>{% endif %}
+    </td>
+    <td data-label="消息" data-numeric="true">{{ item.message_count }}</td>
+    <td data-label="更新"><span class="ui-table-secondary">{{ item.updated_at or "—" }}</span></td>
+    <td data-label="操作">{{ candidate_actions(item) }}</td>
+  </tr>
+{%- endmacro %}
+
 {% block content %}
-<div class="page-heading">
+<header class="ui-page-head">
   <div>
-    <span class="eyebrow">审核</span>
-    <h1>{{ queue_title }}</h1>
-    <p>{{ queue_description }}</p>
+    <p class="ui-eyebrow">候选</p>
+    <h1 class="ui-title">{{ tab_title }}</h1>
+    <p class="ui-subtitle">{{ tab_description }}</p>
   </div>
-  <span class="queue-count">{{ candidates|length }} 项</span>
-</div>
+</header>
 
-{% if error %}<div class="form-error" role="alert">{{ error }}</div>{% endif %}
+{{ ui.tabs(tabs, tab, "候选分区") }}
 
-<form method="post" action="{{ url_for('batch_review') }}">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-<section class="queue-table candidate-queue" aria-label="{{ queue_title }}">
-  <div class="queue-header"><span>{{ "选择" if batch_enabled else "" }}</span><span>候选</span><span>元数据</span><span>消息</span><span>状态</span><span></span></div>
-  {% for candidate in candidates %}
-  <div class="queue-row">
-    <span class="candidate-select">{% if batch_enabled %}<input type="checkbox" name="candidate_ids" value="{{ candidate.candidate_id }}" aria-label="选择候选 {{ candidate.title or candidate.candidate_id }}" />{% endif %}</span>
-    <a class="candidate-title" href="{{ url_for('candidate_detail', candidate_id=candidate.candidate_id) }}"><strong>{{ candidate.title or "未命名候选" }}</strong>{% if candidate.ex_gid %}<small>ExHentai #{{ candidate.ex_gid }}</small>{% endif %}</a>
-    <span class="candidate-metadata">
-      <strong>{{ candidate.artist or "作者待补充" }}</strong>
-      <small>{{ candidate.category or "分类待补充" }}{% if candidate.language %} · {{ candidate.language }}{% endif %}</small>
-      {% if candidate.raw_tags %}<small class="candidate-tags"><b>原始</b>{% for tag in candidate.raw_tags.split(", ") %}<span>{{ tag }}</span>{% endfor %}</small>{% endif %}
-      {% if candidate.tags %}<small class="candidate-tags"><b>中文</b>{% for tag in candidate.tags.split(", ") %}<span>{{ tag }}</span>{% endfor %}</small>{% endif %}
-    </span>
-    <span>{{ candidate.message_count }} 条</span>
-    <span><span class="status status-connecting"><i></i>{{ status_label(candidate.status) }}</span></span>
-    <span class="row-arrow" aria-hidden="true">›</span>
-  </div>
-  {% else %}
-  <div class="empty-state"><strong>{{ empty_title }}</strong><p>{{ empty_text }}</p></div>
-  {% endfor %}
-</section>
-{% if batch_enabled and candidates %}
-<div class="batch-actions" aria-label="批量审核操作">
-  <span>对已选择记录执行</span>
-  <button type="submit" name="action" value="reject" class="danger-button">批量驳回</button>
-  <button type="submit" name="action" value="approve" class="primary-button">批量通过并下载</button>
-</div>
+{% if error %}
+{{ ui.callout(error, tone="danger", role="alert") }}
 {% endif %}
-</form>
+
+<div class="ui-filter-layout">
+  {#- The sidebar is a plain GET form: submitting it rewrites the query string,
+      which is the page's whole state. `view` rides along hidden so applying a
+      filter does not throw away the operator's choice of grid or list. -#}
+  <form class="ui-filters" id="candidate-filters" method="get" action="{{ tab_href }}">
+    <input type="hidden" name="view" value="{{ view }}">
+    <div class="ui-field">
+      <label for="candidate-search">搜索</label>
+      <input class="ui-input" id="candidate-search" name="search" type="search"
+             value="{{ search }}" placeholder="标题、作者或标签">
+    </div>
+    <div class="ui-field">
+      <label for="candidate-sort">排序</label>
+      <select class="ui-select" id="candidate-sort" name="sort" data-autosubmit>
+        {% for option in sorts %}
+        <option value="{{ option.key }}" {% if option.key == sort %}selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% for group in filters %}
+      {#- A facet with no values in this tab is omitted rather than rendered
+          empty: 「语言」 with nothing under it reads as a broken filter. -#}
+      {% if group.options %}{{ ui.filter_group(group.title, group.options, group.name) }}{% endif %}
+    {% endfor %}
+    <div class="ui-row-actions">
+      <button class="ui-btn" data-variant="primary" data-size="sm" type="submit">应用</button>
+      {% if search or active_filters or sort != "newest" %}
+      <a class="ui-btn" data-size="sm" href="{{ tab_href }}">清除</a>
+      {% endif %}
+    </div>
+  </form>
+
+  <div>
+    <div class="ui-table-toolbar">
+      <span class="ui-hint" style="margin: 0">
+        共 {{ total }} 条{% if active_filters %}，已启用 {{ active_filters }} 个筛选条件{% endif %}
+      </span>
+      {#- Grid or list, as two links rather than a toggle script: the choice is
+          part of the URL, so it survives a reload and a shared link. -#}
+      <div class="ui-segmented" role="group" aria-label="视图">
+        <a href="{{ grid_href }}" aria-pressed="{{ 'true' if view == 'grid' else 'false' }}">封面</a>
+        <a href="{{ list_href }}" aria-pressed="{{ 'true' if view == 'list' else 'false' }}">列表</a>
+      </div>
+      {% if batch_enabled and candidates %}
+      {#- Unhidden by `candidates.js`. Select-all across a page of 50 is the one
+          selection task a mouse is bad at, and there is no no-script fallback
+          worth faking with 50 hidden checkboxes. -#}
+      <div class="ui-row-actions" data-select-tools hidden>
+        <button class="ui-btn" data-size="sm" type="button" data-select="all">全选</button>
+        <button class="ui-btn" data-size="sm" type="button" data-select="invert">反选</button>
+        <button class="ui-btn" data-size="sm" type="button" data-select="none">清空</button>
+      </div>
+      {% endif %}
+    </div>
+
+    {% if candidates %}
+    {#- One form around both views. The selection count is recomputed from the
+        checkboxes on every change rather than bound per input, so the keyboard
+        toggles, the select-all tools and a plain click all agree on it. -#}
+    <form data-candidate-form method="post" action="/candidates/batch-review"
+          x-data="{ selected: 0 }"
+          @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="tab" value="{{ tab }}">
+
+      {% if view == "list" %}
+      {#- No sortable column headers: sorting is a query parameter the sidebar
+          owns, and a header button that needed JavaScript to rewrite the URL
+          would be a second, worse copy of it. -#}
+      {% call ui.table(columns, caption=tab_title) %}
+        {% for item in candidates %}{{ candidate_row(item, selectable=batch_enabled) }}{% endfor %}
+      {% endcall %}
+      {% else %}
+      <div class="ui-cover-grid">
+        {% for item in candidates %}
+        <div data-candidate-id="{{ item.candidate_id }}">
+          {% call ui.cover_card(
+                item.title or "未命名候选",
+                href=item.href,
+                cover=item.cover,
+                meta=candidate_meta(item),
+                tags=item.tags[:4],
+                status=item.status,
+                selectable=batch_enabled,
+                value=item.candidate_id) %}
+            {{ candidate_actions(item) }}
+          {% endcall %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if batch_enabled %}
+      <div x-show="selected > 0" x-cloak>
+        {% call ui.bulk_toolbar(0, total=total, noun="条候选", count_binding="selected") %}
+          <button class="ui-btn" data-variant="primary" data-size="sm" type="submit"
+                  name="action" value="approve">批量通过并下载</button>
+          <button class="ui-btn" data-size="sm" data-variant="danger" type="submit"
+                  name="action" value="reject">批量驳回</button>
+        {% endcall %}
+      </div>
+      {% endif %}
+    </form>
+
+    {{ ui.pagination(page, page_size, total, prev_href=prev_href, next_href=next_href) }}
+    {% else %}
+    {#- Two empty states, one element: a tab with nothing in it says so in the
+        words `CANDIDATE_PAGE_TABS` gives it, but a filter that matched nothing
+        has to say that instead, or the operator reads it as an empty queue. -#}
+    {% if search or active_filters %}
+    {{ ui.empty_state("没有符合条件的候选", "换个关键词，或清除筛选条件后重试") }}
+    {% else %}
+    {{ ui.empty_state(empty_title, empty_hint) }}
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{#- The drawer's row markup, authored here and cloned by `candidates.js`. The
+    provenance badge and the field label both come from the payload: the script
+    fills slots, it does not name anything. -#}
+<template data-metadata-row>
+  <div class="ui-field" data-metadata-field>
+    <label>
+      <span data-field="label"></span>
+      <span data-field="source"></span>
+    </label>
+    <input class="ui-input" type="text" data-field="value">
+    <label class="ui-filter-option">
+      <input class="ui-checkbox" type="checkbox" data-field="lock">
+      <span>锁定，重新刮削时不覆盖</span>
+    </label>
+  </div>
+</template>
+
+{#- One drawer for the whole page, opened against whichever candidate was
+    clicked. `ui.drawer` is not used here because it owns both its trigger and
+    its content: this one has fifty triggers and its content is fetched. The
+    markup, the classes and the escape-to-close behaviour still match it. -#}
+<div data-metadata-drawer hidden>
+  <div class="ui-scrim" data-metadata-close></div>
+  <aside class="ui-drawer" data-side="right" role="dialog" aria-modal="true"
+         aria-labelledby="metadata-drawer-title">
+    <header class="ui-drawer-head">
+      <h2 class="ui-drawer-title" id="metadata-drawer-title">元数据</h2>
+      <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
+              data-metadata-close aria-label="关闭">✕</button>
+    </header>
+    <div class="ui-drawer-body">
+      <p class="ui-hint" data-metadata-status role="status" aria-live="polite"></p>
+      <div data-metadata-rows></div>
+    </div>
+    <div class="ui-drawer-foot">
+      <a class="ui-btn" data-size="sm" data-metadata-detail href="#">打开详情</a>
+      <button class="ui-btn" data-variant="primary" data-size="sm" type="button"
+              data-metadata-save>保存</button>
+    </div>
+  </aside>
+</div>
+
+<div data-candidates-root data-tab="{{ tab }}" data-csrf="{{ csrf_token }}" hidden></div>
+<script defer src="{{ url_for('static', path='/candidates.js') }}"></script>
 {% endblock %}

@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 
 from fastapi import Request
 
+from app.api.status import candidate_tab_view
+
 #: Themes the shell will apply. `auto` follows the operating system.
 THEMES: tuple[str, ...] = ("auto", "light", "dark")
 
@@ -108,21 +110,57 @@ NAV_ITEMS: tuple[NavItem, ...] = (
         "/candidates",
         icon="▤",
         children=(
+            #: The six tabs of the candidate domain, named by
+            #: `candidate_tab_view` rather than by a string typed here: a tab
+            #: called 待审核 in the sidebar, 待审核 in the tab strip and
+            #: `pending` in JSON is one vocabulary in `app/api/status.py`, and a
+            #: literal here would be the second copy that drifts.
+            #:
+            #: 待审核 is the index child because `/candidates` renders it -- the
+            #: domain's front door is the queue an operator opens it to work --
+            #: so it is the one that gives up prefix matching.
             NavItem(
-                "candidates_all", "全部候选", "全部", "/candidates",
-                "/candidates", exact=True,
+                "candidates_pending",
+                candidate_tab_view("pending").label,
+                candidate_tab_view("pending").label,
+                "/candidates",
+                "/candidates",
+                exact=True,
             ),
             NavItem(
-                "candidates_needs_info", "待补充", "待补充",
-                "/candidates/needs-info", "/candidates/needs-info",
+                "candidates_all",
+                candidate_tab_view("all").label,
+                candidate_tab_view("all").label,
+                "/candidates/all",
+                "/candidates/all",
             ),
             NavItem(
-                "candidates_processing", "处理中", "处理中",
-                "/candidates/processing", "/candidates/processing",
+                "candidates_needs_info",
+                candidate_tab_view("needs_info").label,
+                candidate_tab_view("needs_info").label,
+                "/candidates/needs-info",
+                "/candidates/needs-info",
             ),
             NavItem(
-                "candidates_failed", "失败", "失败",
-                "/candidates/failed", "/candidates/failed",
+                "candidates_approved",
+                candidate_tab_view("approved").label,
+                candidate_tab_view("approved").label,
+                "/candidates/approved",
+                "/candidates/approved",
+            ),
+            NavItem(
+                "candidates_rejected",
+                candidate_tab_view("rejected").label,
+                candidate_tab_view("rejected").label,
+                "/candidates/rejected",
+                "/candidates/rejected",
+            ),
+            NavItem(
+                "candidates_failed",
+                candidate_tab_view("failed").label,
+                candidate_tab_view("failed").label,
+                "/candidates/failed",
+                "/candidates/failed",
             ),
             NavItem(
                 "manual_add", "手动添加", "手动", "/manual-add", "/manual-add",

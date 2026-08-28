@@ -86,5 +86,9 @@ def test_needs_info_queue_is_separate_from_pending_queue(tmp_path: Path) -> None
         response = client.get("/candidates/needs-info")
 
     assert response.status_code == 200
-    assert "待补充队列" in response.text
+    # 「待补充」 is a tab of the one candidate list now, so what identifies it is
+    # its own heading and its own empty state -- the pending tab's words must not
+    # appear on it.
+    assert "待补充" in response.text
     assert "暂无待补充候选" in response.text
+    assert "暂无待审核候选" not in response.text

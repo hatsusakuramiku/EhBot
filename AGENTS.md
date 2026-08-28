@@ -65,10 +65,10 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 635 passed / 12 skipped / 0 failed.** Ending below this is a
+**Baseline: 663 passed / 12 skipped / 0 failed.** Ending below this is a
 regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
 need a toolchain this dev machine cannot host. (Baseline moves per phase:
-R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635. An older note claiming
+R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663. An older note claiming
 "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
@@ -170,13 +170,45 @@ operator navigation).
   raw code rides in `data-code`, never in `title`, because `title` reaches the
   hover tooltip and the accessibility tree. `data-theme="auto"` likewise never
   reaches the DOM: neither theme selector matches it, so `applyTheme("auto")`
-  *removes* the attribute.
-- **`/activity` is the reference implementation for a domain page.** One
-  server-computed snapshot (`queue_snapshot` in `app/api/activity.py`) feeding
-  both the JSON endpoint and the template, one template for its tabs, macros for
+  *removes* the attribute. This extends past job/candidate states to anything the
+  vocabulary owns: tab names come from `candidate_tab_view`, metadata provenance
+  from `metadata_source_view`. Page copy that is not a state — a heading's
+  subtitle, an empty state's two lines — stays with the page.
+- **`/activity` and `/candidates` are the reference implementations for a domain
+  page.** One server-computed snapshot (`queue_snapshot` in
+  `app/api/activity.py`, `_render_candidates` in `app/main.py`) feeding both the
+  JSON endpoint and the template, one template for its tabs, macros for
   repeated markup, a `data-field` contract with its script, and real forms
-  underneath so the page works with JavaScript off. Read it before writing the
-  next domain.
+  underneath so the page works with JavaScript off. Read them before writing the
+  next domain — `/candidates` in particular for how a page keeps its whole state
+  in the query string.
+- **A route with a typed path parameter must be declared below every literal
+  sibling.** Starlette matches in declaration order and `/candidates/{candidate_id}`
+  types its parameter as `int`, so a tab path declared after it is answered by the
+  detail route and refused as an unparsable id. The six tab paths are above it.
+- **A page's whole state lives in the query string, read in one place.**
+  `_render_candidates` reads search / sort / view / facets / page off
+  `request.query_params` rather than declaring eight parameters on each of six
+  routes, and `_query_href` merges one parameter into the current URL so no call
+  site re-lists the others and none can drop `search`. That is also what makes a
+  filtered list a link an operator can send themselves.
+- **An unknown facet name raises; it is never ignored.** A silently dropped
+  filter shows more rows than the operator asked for and looks like the filter
+  working. `CANDIDATE_FACETS` in `app/db/database.py` is the whitelist, and
+  `MAX_FACET_VALUES = 8` keeps a hand-edited or looping URL from building fifty
+  `EXISTS` subqueries.
+- **A batch is idempotent because it acts one candidate at a time.**
+  `approve_and_enqueue` is all-or-nothing over the ids it gets, so
+  `apply_review_batch` hands it one per call: each is still validated and routed
+  atomically, but a selection containing one already-approved item no longer
+  refuses the other forty-nine. A replay approves only what is still pending and
+  reports the rest under `skipped`. The orchestrator writes one `review_actions`
+  row per candidate it actually acts on, so a skip leaves no audit trace of an
+  action that did not happen.
+- **A metadata write sends only what changed.** Each field and lock in the
+  drawer carries `data-original` and `changes()` diffs against it. A PATCH of all
+  twenty-one fields would re-stamp every one as operator-edited and quietly
+  outrank the next scrape on all of them.
 - **`activity.js` patches fields; it never builds a row.** Row markup
   constructed in JS is a second copy of the `job_row` macro and the two drift. A
   poll that finds an unknown job shows a change notice instead.

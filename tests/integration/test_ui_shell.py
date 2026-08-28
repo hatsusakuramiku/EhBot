@@ -73,8 +73,10 @@ def test_every_page_marks_exactly_one_destination_as_current(
         for path in (
             "/",
             "/candidates",
+            "/candidates/all",
             "/candidates/needs-info",
-            "/candidates/processing",
+            "/candidates/approved",
+            "/candidates/rejected",
             "/candidates/failed",
             "/manual-add",
             "/activity",

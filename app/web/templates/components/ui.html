@@ -66,6 +66,10 @@
           {% for tag in tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
         </div>
       {% endif %}
+      {#- Card actions belong to the page: which ones a candidate offers is a
+          policy question the DTO answers, and a macro that guessed would answer
+          it a second time. Called with `{% raw %}{% call %}{% endraw %}`, absent otherwise. -#}
+      {% if caller %}{{ caller() }}{% endif %}
     </div>
   </article>
 {%- endmacro %}
@@ -107,15 +111,35 @@
   </div>
 {%- endmacro %}
 
-{% macro pagination(page, page_size, total) -%}
+{% macro pagination(page, page_size, total, prev_href=None, next_href=None) -%}
+  {#- Two shapes, one component. Given hrefs the arrows are anchors, which is
+      what a server-rendered list wants: paging then survives JavaScript being
+      off, and the URL stays the thing that describes the page. Without them
+      they are buttons carrying `data-page` for a list whose paging is
+      client-side. A caller that has a URL should pass it. -#}
   {%- set last = ((total - 1) // page_size + 1) if total > 0 else 1 -%}
   <nav class="ui-pagination" aria-label="分页">
     <span>共 {{ total }} 条，第 {{ page }} / {{ last }} 页</span>
     <span class="ui-pagination-pages">
-      <button class="ui-btn" data-size="sm" type="button" data-page="{{ page - 1 }}"
-              {% if page <= 1 %}disabled{% endif %}>上一页</button>
-      <button class="ui-btn" data-size="sm" type="button" data-page="{{ page + 1 }}"
-              {% if page >= last %}disabled{% endif %}>下一页</button>
+      {% if prev_href or next_href %}
+        {#- A disabled anchor does not exist, so the unavailable direction is
+            rendered as a disabled button rather than a link to nowhere. -#}
+        {% if page > 1 and prev_href %}
+          <a class="ui-btn" data-size="sm" href="{{ prev_href }}" rel="prev">上一页</a>
+        {% else %}
+          <button class="ui-btn" data-size="sm" type="button" disabled>上一页</button>
+        {% endif %}
+        {% if page < last and next_href %}
+          <a class="ui-btn" data-size="sm" href="{{ next_href }}" rel="next">下一页</a>
+        {% else %}
+          <button class="ui-btn" data-size="sm" type="button" disabled>下一页</button>
+        {% endif %}
+      {% else %}
+        <button class="ui-btn" data-size="sm" type="button" data-page="{{ page - 1 }}"
+                {% if page <= 1 %}disabled{% endif %}>上一页</button>
+        <button class="ui-btn" data-size="sm" type="button" data-page="{{ page + 1 }}"
+                {% if page >= last %}disabled{% endif %}>下一页</button>
+      {% endif %}
     </span>
   </nav>
 {%- endmacro %}

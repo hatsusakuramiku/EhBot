@@ -15,12 +15,13 @@ from app.api.status import (
     NOTE_SEEDING,
     attention_view,
     connection_view,
+    metadata_source_view,
     provider_label,
     queue_group_view,
     row_note_view,
     status_view,
 )
-from app.review.models import field_label
+from app.review.models import REVIEWABLE_STATUSES, field_label
 from app.thumbnails import THUMBNAIL_VARIANT_CARD, identity_hash
 
 
@@ -71,6 +72,19 @@ def candidate_summary(item: Any) -> dict[str, Any]:
         "ex_gid": item.ex_gid,
         "ex_gallery_token": item.ex_gallery_token,
         "cover": _cover(getattr(item, "thumb_url", None)),
+        # Which review actions this candidate can still take, decided here
+        # rather than in the template: the grid, the list and a JSON client all
+        # need the same answer, and a page that re-derived it from the status
+        # would be a second copy of `REVIEWABLE_STATUSES`.
+        #
+        # Downloadability is deliberately *not* folded in. It takes routing the
+        # candidate's sources, which is a per-candidate read this shape exists
+        # to avoid for a page of fifty; an unroutable approval fails loudly at
+        # the point of action instead.
+        "actions": {
+            "approve": item.status in REVIEWABLE_STATUSES,
+            "reject": item.status in REVIEWABLE_STATUSES,
+        },
         # The detail page is the one destination for a candidate at any stage,
         # so the list hands the client the link instead of each caller
         # rebuilding it.
@@ -117,12 +131,18 @@ def metadata_entry(entry: Any) -> dict[str, Any]:
     distinct from a value ExHentai supplied. ``is_locked`` is the third state:
     a value that came from ExHentai but which the operator has pinned, so a
     re-scrape leaves it alone.
+
+    ``source`` carries the resolved label beside the raw code for the same reason
+    every other state does: the drawer renders provenance in JavaScript, and a
+    lookup table there would be a second vocabulary to keep in step with
+    `app/api/status.py`.
     """
     return {
         "field_name": entry.field_name,
         "field_label": field_label(entry.field_name),
         "field_value": entry.field_value,
         "value_source": entry.value_source,
+        "source": metadata_source_view(entry.value_source).to_payload(),
         "confidence": entry.confidence,
         "is_manual": entry.is_manual,
         "is_locked": bool(getattr(entry, "is_locked", False)),
