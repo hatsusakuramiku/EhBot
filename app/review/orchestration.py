@@ -26,7 +26,7 @@ from app.downloads.models import (
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError
-from app.review.models import REVIEWABLE_STATUSES
+from app.review.models import AUTO_OPERATOR, REVIEWABLE_STATUSES
 from app.review.service import ReviewError, ReviewService
 
 
@@ -37,9 +37,10 @@ LOGGER = logging.getLogger(__name__)
 #: enqueueing a job that is guaranteed to fail.
 TELEGRAM_FILE_LIMIT = 20 * 1024 * 1024
 
-#: Operator name recorded for a rule-driven approval, so the audit trail
-#: distinguishes it from a human decision.
-AUTO_OPERATOR = "自动审批"
+#: Re-exported so existing importers keep working; the name itself now lives in
+#: `app.review.models`, beside the actions it signs, because the timeline has to
+#: resolve it into 「自动规则」 and a second copy of the string would be a second
+#: thing to keep in step.
 
 
 @dataclass(frozen=True, slots=True)

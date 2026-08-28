@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
+
 
 #: Semantic tones. The stylesheet maps each to a colour pair; nothing here
 #: knows about hex values.
@@ -96,6 +98,19 @@ METADATA_SOURCE_STATUS: dict[str, StatusView] = {
     "EH_TORRENT": _view("EH_TORRENT", "种子内容", TONE_NEUTRAL),
     "FILENAME": _view("FILENAME", "文件名", TONE_MUTED),
     "INFERRED": _view("INFERRED", "推断", TONE_MUTED),
+}
+
+#: What kind of file rode along with the source message. `app.candidates.ingestor`
+#: produces exactly these two kinds, and the detail page needs a word for each
+#: because a photo has no filename worth showing while an archive is nothing but
+#: its filename. Kept here rather than as a template ternary for the same reason
+#: every other label is: the page and the JSON client must say the same thing.
+ATTACHMENT_PHOTO = "photo"
+ATTACHMENT_ARCHIVE = "archive"
+
+ATTACHMENT_KIND_STATUS: dict[str, StatusView] = {
+    ATTACHMENT_PHOTO: _view(ATTACHMENT_PHOTO, "图片预览", TONE_NEUTRAL),
+    ATTACHMENT_ARCHIVE: _view(ATTACHMENT_ARCHIVE, "压缩包", TONE_NEUTRAL),
 }
 
 #: Download queue (`download_jobs.state` for the four download providers).
@@ -190,6 +205,54 @@ ROW_NOTE_STATUS: dict[str, StatusView] = {
     NOTE_SEEDING: _view(NOTE_SEEDING, "正在做种", TONE_ACTIVE),
 }
 
+#: The three stages one work passes through. A candidate, a download in flight
+#: and a packaged book are the same row at different points, which is why they
+#: share one detail page; the stage decides which actions that page offers, and
+#: it is derived from the candidate's status and its jobs rather than stored --
+#: a fourth column to keep in step with both would be a third answer to a
+#: question the other two already answer.
+STAGE_CANDIDATE = "CANDIDATE"
+STAGE_DOWNLOAD = "DOWNLOAD"
+STAGE_ARCHIVED = "ARCHIVED"
+
+WORK_STAGE_STATUS: dict[str, StatusView] = {
+    STAGE_CANDIDATE: _view(STAGE_CANDIDATE, "候选期", TONE_WAITING),
+    STAGE_DOWNLOAD: _view(STAGE_DOWNLOAD, "下载期", TONE_ACTIVE, live=True),
+    STAGE_ARCHIVED: _view(STAGE_ARCHIVED, "入库期", TONE_SUCCESS),
+}
+
+#: Audit-trail verbs (`review_actions.action`), for the timeline. The codes are
+#: exactly what the writers insert -- `REVIEW_ACTIONS` plus the two nobody types
+#: -- rather than a parallel list, so an entry can never render as a raw
+#: `NEEDS_REVISION` beside the same word spelled out. A rejection is `muted` for
+#: the same reason `REJECTED` is: it is a decision, not a fault.
+REVIEW_ACTION_STATUS: dict[str, StatusView] = {
+    "APPROVE": _view("APPROVE", "通过", TONE_SUCCESS),
+    "REJECT": _view("REJECT", "驳回", TONE_MUTED),
+    "NEEDS_REVISION": _view("NEEDS_REVISION", "要求修订", TONE_WAITING),
+    "REQUEUE": _view("REQUEUE", "重新排队", TONE_WAITING),
+    "EDIT_METADATA": _view("EDIT_METADATA", "编辑元数据", TONE_NEUTRAL),
+    "LOCK_METADATA": _view("LOCK_METADATA", "锁定字段", TONE_NEUTRAL),
+    "AUTO_APPROVE": _view("AUTO_APPROVE", "自动通过", TONE_ACTIVE),
+    "METADATA_RULE": _view("METADATA_RULE", "规则判定", TONE_NEUTRAL),
+}
+
+#: Who did it. The audit trail stores a name, not a kind, so the kind is
+#: resolved from the two reserved names in `app.review.models` -- which is also
+#: why the timeline can say 「自动规则」 for a row written before this vocabulary
+#: existed. An operator reading a timeline needs this distinction before they
+#: need anything else on the row: 「谁决定的」 decides whether they go argue with
+#: a rule or with a person.
+ACTOR_OPERATOR = "OPERATOR"
+ACTOR_AUTO_RULE = "AUTO_RULE"
+ACTOR_SYSTEM = "SYSTEM"
+
+ACTOR_STATUS: dict[str, StatusView] = {
+    ACTOR_OPERATOR: _view(ACTOR_OPERATOR, "操作员", TONE_ACTIVE),
+    ACTOR_AUTO_RULE: _view(ACTOR_AUTO_RULE, "自动规则", TONE_NEUTRAL),
+    ACTOR_SYSTEM: _view(ACTOR_SYSTEM, "系统", TONE_MUTED),
+}
+
 #: Lookup order for the generic helpers. Candidate statuses come first because
 #: `FAILED` means「候选失败」in the review context, which is the one an
 #: operator sees most often.
@@ -269,6 +332,18 @@ def metadata_source_view(source: str | None) -> StatusView:
     return METADATA_SOURCE_STATUS.get(source, _view(source, source, TONE_NEUTRAL))
 
 
+def attachment_kind_view(kind: str | None) -> StatusView:
+    """Resolve an attachment kind, falling back to the raw kind.
+
+    Falls back rather than raising because the ingestor may learn a third kind
+    before this registry does, and an unlabelled chip beside a real file is a
+    better outcome than a detail page that will not render.
+    """
+    if not kind:
+        return _view("", "附件", TONE_MUTED)
+    return ATTACHMENT_KIND_STATUS.get(kind, _view(kind, kind, TONE_NEUTRAL))
+
+
 def attention_view(reason: str | None) -> StatusView | None:
     """Resolve an attention reason, or None when the job needs nothing.
 
@@ -298,7 +373,53 @@ def row_note_view(code: str | None) -> StatusView | None:
     return ROW_NOTE_STATUS.get(code)
 
 
+def work_stage_view(stage: str | None) -> StatusView:
+    """Resolve a work's stage into its label and tone."""
+    return WORK_STAGE_STATUS.get(
+        stage or "", _view(stage or "", stage or "—", TONE_NEUTRAL)
+    )
+
+
+def review_action_view(action: str | None) -> StatusView:
+    """Resolve an audit-trail verb, falling back to the raw code.
+
+    Falling back rather than raising for the same reason `status_view` does: a
+    timeline is history, and a verb retired from the code is still in the table.
+    An operator seeing `SOMETHING_OLD` learns more than one seeing a blank row.
+    """
+    if not action:
+        return _view("", "—", TONE_MUTED)
+    return REVIEW_ACTION_STATUS.get(action, _view(action, action, TONE_NEUTRAL))
+
+
+def actor_kind(operator_name: str | None) -> str:
+    """Which of the three actors a stored `operator_name` is.
+
+    The column holds a login for a person and one of two reserved names
+    otherwise, so the kind is derived rather than stored. Deriving it also means
+    every row already in the table gets the right actor, including the ones
+    written before the timeline existed.
+    """
+    if operator_name == AUTO_OPERATOR:
+        return ACTOR_AUTO_RULE
+    if operator_name == SYSTEM_OPERATOR:
+        return ACTOR_SYSTEM
+    return ACTOR_OPERATOR
+
+
+def actor_view(operator_name: str | None) -> StatusView:
+    """Resolve who performed an action into 操作员 / 自动规则 / 系统."""
+    return ACTOR_STATUS[actor_kind(operator_name)]
+
+
 __all__ = [
+    "ACTOR_AUTO_RULE",
+    "ACTOR_OPERATOR",
+    "ACTOR_STATUS",
+    "ACTOR_SYSTEM",
+    "ATTACHMENT_ARCHIVE",
+    "ATTACHMENT_KIND_STATUS",
+    "ATTACHMENT_PHOTO",
     "ATTENTION_STATUS",
     "CANDIDATE_STATUS",
     "CANDIDATE_TAB_STATUS",
@@ -309,7 +430,11 @@ __all__ = [
     "NOTE_SEEDING",
     "PROVIDER_STATUS",
     "QUEUE_GROUP_STATUS",
+    "REVIEW_ACTION_STATUS",
     "ROW_NOTE_STATUS",
+    "STAGE_ARCHIVED",
+    "STAGE_CANDIDATE",
+    "STAGE_DOWNLOAD",
     "StatusView",
     "TONE_ACTIVE",
     "TONE_DANGER",
@@ -317,6 +442,10 @@ __all__ = [
     "TONE_NEUTRAL",
     "TONE_SUCCESS",
     "TONE_WAITING",
+    "WORK_STAGE_STATUS",
+    "actor_kind",
+    "actor_view",
+    "attachment_kind_view",
     "attention_view",
     "candidate_tab_view",
     "connection_view",
@@ -324,8 +453,10 @@ __all__ = [
     "metadata_source_view",
     "provider_label",
     "queue_group_view",
+    "review_action_view",
     "row_note_view",
     "status_label",
     "status_tone",
     "status_view",
+    "work_stage_view",
 ]

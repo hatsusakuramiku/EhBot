@@ -799,9 +799,11 @@ def test_the_review_page_offers_the_torrent_and_queues_it_once(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
-        assert "\u7528\u79cd\u5b50\u53d6\u539f\u6863" in detail.text
+        # R6 names the source buttons from the provider vocabulary rather than
+        # from page copy, so the button reads what every other surface calls it.
+        assert "EH \u79cd\u5b50" in detail.text
         response = client.post(
             f"/candidates/{candidate_id}/torrent", data={"csrf_token": csrf}
         )
@@ -837,7 +839,7 @@ def test_the_queue_shows_progress_and_offers_the_manual_actions(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get(f"/candidates/{candidate_id}")
+        page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
         client.post(
             "/archive-settings/torrent",
@@ -911,7 +913,7 @@ def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get(f"/candidates/{candidate_id}")
+        page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
         client.post(
             "/archive-settings/torrent",
@@ -1042,7 +1044,7 @@ def test_auto_pack_carries_a_delivered_torrent_into_the_library(
 
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        page = client.get(f"/candidates/{candidate_id}")
+        page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
         saved = client.post(
             "/archive-settings/torrent",

@@ -75,6 +75,7 @@ from app.api.status import (
     status_view,
 )
 from app.api.v1 import router as api_v1_router
+from app.api.works import configured_sources, work_snapshot
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
 
@@ -147,6 +148,27 @@ async def _load_tag_translator(data_path, client):
         reason,
     )
     return translator
+
+def local_return_to(raw: str | None) -> str | None:
+    """Accept a same-site path to come back to, or nothing.
+
+    Job actions live at `/activity/jobs/{id}/...` because the queue page owned
+    them first, but R6 lets the work detail page post the same forms, and an
+    operator who paused a download from `/works/12` must not land on the queue.
+    The page says where it wants to return in a hidden field, which makes this
+    an open-redirect surface: an absolute URL here would let a crafted form send
+    someone off-site with the app's own redirect. So only a rooted path is
+    honoured -- no scheme, no `//host` (protocol-relative, which browsers do
+    treat as another origin), no backslash (which some parsers normalise into
+    one), and no control characters.
+    """
+    target = (raw or "").strip()
+    if not target.startswith("/") or target.startswith("//"):
+        return None
+    if "\\" in target or any(char < " " or char == "\x7f" for char in target):
+        return None
+    return target
+
 
 def create_app(
     settings: Settings | None = None,
@@ -1186,12 +1208,68 @@ def create_app(
     async def processing_queue(request: Request):
         return RedirectResponse("/candidates/approved", status_code=307)
 
-    #: The JSON list hands clients `href: /works/{id}`, which had no page behind
-    #: it. R6 makes that the real detail page; until then it lands where the
-    #: detail actually lives, so the API's own link is not a 404.
+    async def _render_work(
+        request: Request,
+        candidate_id: int,
+        error: str | None = None,
+        message: str | None = None,
+        status_code: int = 200,
+    ):
+        """The one detail page, for a work at any stage.
+
+        Everything on it comes from `work_snapshot`, the same dict
+        `GET /api/v1/works/{id}` returns, so the page cannot offer an action the
+        API would refuse. The error path renders this same page rather than a
+        stripped-down variant: an operator whose approval was refused needs the
+        timeline and the metadata in front of them to decide what to do next.
+        """
+        snapshot = await work_snapshot(
+            database,
+            candidate_id,
+            download=download_service(),
+            sources=configured_sources(request),
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        return templates.TemplateResponse(
+            request=request,
+            name="work_detail.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "work": snapshot,
+                "error": error,
+                "message": message,
+                "metadata_fields": METADATA_FIELDS,
+                "field_label": field_label,
+                "current_user": request.session.get("username", "admin"),
+            },
+            status_code=status_code,
+        )
+
     @app.get("/works/{candidate_id}")
-    async def work_detail_redirect(request: Request, candidate_id: int):
-        return RedirectResponse(f"/candidates/{candidate_id}", status_code=307)
+    async def work_detail(
+        request: Request,
+        candidate_id: int,
+        error: str | None = None,
+        message: str | None = None,
+    ):
+        """The unified detail page: 候选期, 下载期 and 入库期 at one URL.
+
+        R6 replaced a 307 to `/candidates/{id}` with the page itself, and turned
+        that path around into the redirect. `/works/{id}` is what
+        `candidate_summary` has handed every client since R5, and what a work
+        keeps being called after it stops being a candidate.
+
+        `error` arrives in the query string because a redirect is the only way a
+        form post can report a refusal it could not render itself -- a job action
+        that came back here via `return_to`.
+        """
+        redirect = require_authenticated(request)
+        if redirect:
+            return redirect
+        return await _render_work(
+            request, candidate_id, error=error, message=message
+        )
 
     @app.get("/manual-add")
     async def manual_add_page(request: Request):
@@ -1234,7 +1312,7 @@ def create_app(
                 status_code=400,
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1317,51 +1395,18 @@ def create_app(
 
     @app.get("/candidates/{candidate_id}")
     async def candidate_detail(request: Request, candidate_id: int):
-        redirect = require_authenticated(request)
-        if redirect:
-            return redirect
-        candidate = await database.get_candidate(candidate_id)
-        if candidate is None:
-            raise HTTPException(status_code=404, detail="Candidate not found")
-        summary = await review_service().get_candidate_review_summary(candidate_id)
-        if summary is None:
-            raise HTTPException(status_code=404, detail="Candidate not found")
-        jobs = await download_service().list_jobs_for_candidate(candidate_id)
-        # Any provider that finished leaves an ARCHIVE artifact, and that is
-        # all conversion needs. Testing for TELEGRAM specifically used to hide
-        # the button for every other source.
-        archive_ready = any(
-            job.state == "COMPLETED" and job.artifact_path
-            for job in jobs
-        )
-        return templates.TemplateResponse(
-            request=request,
-            name="candidate_detail.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "candidate": candidate,
-                "metadata_entries": split_metadata_entries(
-                    summary.metadata
-                )[0],
-                "raw_metadata_entries": split_metadata_entries(
-                    summary.metadata
-                )[1],
-                "review_history": summary.review_history,
-                "download_jobs": jobs,
-                "archive_ready": archive_ready,
-                "preview_available": bool(
-                    candidate.preview_url
-                ) and app.state.telegraph_service is not None,
-                # The hash is what makes the route runnable; a count alone
-                # would offer a button that can only fail.
-                "torrent_available": bool(
-                    candidate.torrent_hash
-                ) and app.state.torrent_service is not None,
-                "torrent_enabled": app.state.torrent_service is not None,
-                "metadata_fields": METADATA_FIELDS,
-                "field_label": field_label,
-                "current_user": request.session.get("username", "admin"),
-            },
+        """The retired detail path, kept as a redirect to `/works/{id}`.
+
+        Until R6 this rendered the page and `/works/{id}` bounced here; the two
+        have swapped. 307 rather than 301 for the same reason as every other
+        retirement in this refactor — a permanent redirect cached in a browser
+        makes the path unreclaimable. The route keeps its name so that
+        `url_for('candidate_detail', ...)` in anything still holding the old
+        reference resolves instead of raising.
+        """
+        return RedirectResponse(
+            request.url_for("work_detail", candidate_id=candidate_id).path,
+            status_code=307,
         )
 
     @app.post("/candidates/{candidate_id}/approve")
@@ -1397,7 +1442,7 @@ def create_app(
         if tab is not None:
             return await _candidates_redirect(request)
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1419,7 +1464,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1444,7 +1489,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1468,7 +1513,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1494,7 +1539,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1531,7 +1576,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1734,18 +1779,35 @@ def create_app(
         )
 
     async def _job_action(
-        request: Request, csrf_token: str, action, job_id: int
+        request: Request,
+        csrf_token: str,
+        action,
+        job_id: int,
+        return_to: str | None = None,
     ):
-        """Run one queue action and return to the activity page either way."""
+        """Run one queue action and return where the form came from, either way.
+
+        `return_to` is how the work detail page keeps the operator on itself
+        without a second set of job routes; it is validated by
+        `local_return_to`, and anything else falls back to the activity page.
+        """
         redirect = require_authenticated(request)
         if redirect:
             return redirect
         validate_csrf(request, csrf_token)
+        target = local_return_to(return_to)
         try:
             await action(job_id)
         except DownloadError as exc:
+            if target:
+                return RedirectResponse(
+                    f"{target}?error={quote_plus(exc.public_message)}",
+                    status_code=303,
+                )
             return await _activity_redirect(request, exc.public_message)
         app.state.event_bus.publish(EVENT_DOWNLOAD, job_id=job_id)
+        if target:
+            return RedirectResponse(target, status_code=303)
         return await _activity_redirect(request)
 
     @app.post("/activity/jobs/{job_id}/switch-source")
@@ -1754,6 +1816,7 @@ def create_app(
         job_id: int,
         csrf_token: str = Form(),
         provider: str = Form(),
+        return_to: str | None = Form(None),
     ):
         """Move a stalled torrent to another source at the operator's request.
 
@@ -1770,6 +1833,7 @@ def create_app(
             csrf_token,
             lambda target: download_service().switch_source(target, provider),
             job_id,
+            return_to,
         )
 
     @app.post("/activity/jobs/{job_id}/{action}")
@@ -1778,6 +1842,7 @@ def create_app(
         job_id: int,
         action: str,
         csrf_token: str = Form(),
+        return_to: str | None = Form(None),
     ):
         """One row's action button, without JavaScript.
 
@@ -1786,12 +1851,19 @@ def create_app(
         """
         method_name = JOB_ACTIONS.get(action)
         if method_name is None:
+            local = local_return_to(return_to)
+            if local:
+                return RedirectResponse(
+                    f"{local}?error={quote_plus(f'未知的任务动作：{action}')}",
+                    status_code=303,
+                )
             return await _activity_redirect(request, f"未知的任务动作：{action}")
         return await _job_action(
             request,
             csrf_token,
             getattr(download_service(), method_name),
             job_id,
+            return_to,
         )
 
     @app.post("/candidates/{candidate_id}/exhentai-metadata")
@@ -1811,7 +1883,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1832,7 +1904,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1859,7 +1931,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1887,7 +1959,7 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
@@ -1908,38 +1980,22 @@ def create_app(
                 request, candidate_id, exc.public_message
             )
         return RedirectResponse(
-            request.url_for("candidate_detail", candidate_id=candidate_id).path,
+            request.url_for("work_detail", candidate_id=candidate_id).path,
             status_code=303,
         )
 
     async def _render_review_error(
         request: Request, candidate_id: int, message: str
     ):
-        candidate = await database.get_candidate(candidate_id)
-        if candidate is None:
-            raise HTTPException(status_code=404, detail="Candidate not found")
-        summary = await review_service().get_candidate_review_summary(candidate_id)
-        return templates.TemplateResponse(
-            request=request,
-            name="candidate_detail.html",
-            context={
-                "csrf_token": request.session["csrf_token"],
-                "candidate": candidate,
-                "metadata_entries": split_metadata_entries(
-                    summary.metadata if summary is not None else ()
-                )[0],
-                "raw_metadata_entries": split_metadata_entries(
-                    summary.metadata if summary is not None else ()
-                )[1],
-                "review_history": (
-                    summary.review_history if summary is not None else ()
-                ),
-                "metadata_fields": METADATA_FIELDS,
-                "field_label": field_label,
-                "current_user": request.session.get("username", "admin"),
-                "error": message,
-            },
-            status_code=400,
+        """A refused action re-renders the detail page with the reason on it.
+
+        This is one call into `_render_work` rather than a second assembly of the
+        same context: R5's lesson was that two renderings of one page drift, and
+        an operator reading「无法通过」needs the timeline that explains why, not a
+        reduced page that only carries the message.
+        """
+        return await _render_work(
+            request, candidate_id, error=message, status_code=400
         )
 
     @app.get("/sources")

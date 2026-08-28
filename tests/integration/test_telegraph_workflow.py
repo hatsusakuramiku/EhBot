@@ -314,7 +314,7 @@ def test_an_oversized_attachment_routes_to_the_preview_page(
     )
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
@@ -345,7 +345,7 @@ def test_a_small_attachment_still_wins_over_the_preview_page(
     )
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
@@ -373,9 +373,11 @@ def test_the_manual_preview_button_queues_one_job(tmp_path: Path) -> None:
     )
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
-        assert "用预览页下载" in detail.text
+        # R6 names the source buttons from the provider vocabulary rather than
+        # from page copy, so the button reads what every other surface calls it.
+        assert "预览页图源" in detail.text
         client.post(
             f"/candidates/{candidate_id}/approve", data={"csrf_token": csrf}
         )

@@ -279,11 +279,12 @@ def test_retired_processing_path_redirects_to_approved(tmp_path: Path) -> None:
 
 
 def test_the_link_the_api_hands_out_leads_somewhere(tmp_path: Path) -> None:
-    """`candidate_summary` links `/works/{id}`, which R6 will own.
+    """`candidate_summary` links `/works/{id}`, and R6 made it the real page.
 
-    The card and every JSON client already follow that link, so until the unified
-    detail page exists it redirects to where the detail actually lives -- the API
-    must not hand out a 404.
+    The card and every JSON client already follow that link. It renders the
+    unified detail page now instead of redirecting, and the retired
+    `/candidates/{id}` is what redirects -- 307, so a cached response cannot make
+    the old path unreclaimable.
     """
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
@@ -292,9 +293,11 @@ def test_the_link_the_api_hands_out_leads_somewhere(tmp_path: Path) -> None:
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
         response = client.get("/works/1")
+        retired = client.get("/candidates/1")
 
-    assert response.status_code == 307
-    assert response.headers["location"] == "/candidates/1"
+    assert response.status_code == 200
+    assert retired.status_code == 307
+    assert retired.headers["location"] == "/works/1"
 
 
 def test_search_narrows_the_list_and_says_so_when_nothing_matches(
@@ -525,17 +528,17 @@ def test_quick_approve_without_a_tab_still_lands_on_the_detail_page(
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
         )
 
     assert response.status_code == 303
-    assert response.headers["location"] == f"/candidates/{candidate_id}"
+    assert response.headers["location"] == f"/works/{candidate_id}"
 
 
-def test_candidate_detail_shows_source_message_and_attachment(
+def test_work_detail_shows_source_message_and_attachment(
     tmp_path: Path,
 ) -> None:
     settings = make_settings(tmp_path)
@@ -544,7 +547,7 @@ def test_candidate_detail_shows_source_message_and_attachment(
 
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
-        response = client.get("/candidates/1")
+        response = client.get("/works/1")
 
     assert response.status_code == 200
     assert "Queue Fixture Comic" in response.text

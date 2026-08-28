@@ -1,0 +1,286 @@
+{#
+  The unified work detail page: 候选期 / 下载期 / 入库期 at one URL (R6).
+
+  A candidate, a download in flight and a packaged book are the same work at
+  three points of its life, so `/works/{id}` opens all three. What changes with
+  the stage is the action bar at the bottom; everything above it -- overview,
+  metadata, timeline -- is the same page, because an operator asking「这本书怎么
+  了」asks it the same way whichever stage the work is in.
+
+  Rules this file follows:
+
+  * No state label is written here. The stage, the candidate status, every job
+    state, every timeline verb and every actor arrive as `StatusView` payloads
+    resolved by `app/api/status.py` and render through `ui.badge`. 「自动规则」is
+    exactly the kind of word this file would be tempted to type by hand.
+  * Every action is a real form. `work.js` adds live refresh and inline metadata
+    saving on top, but with JavaScript off the page still approves, rejects,
+    requeues, runs a source, pauses a job and repackages.
+  * What an action *is* comes from `work.actions`, never from the status: the
+    page must not be able to offer something `POST /api/v1/...` would refuse.
+  * Job actions post to `/activity/jobs/{id}/...` -- the queue's own routes --
+    with a hidden `return_to`, so there is one set of job endpoints rather than a
+    second copy under `/works`.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}{{ work.title or "未命名作品" }} · EhBot{% endblock %}
+
+{#- Rewritten for the design system, so it opts out of the legacy light lock. -#}
+{% block main_attrs %}{% endblock %}
+{% block content_class %}ui-content{% endblock %}
+
+{# --------------------------------------------------------------- one action #}
+
+{% macro post_button(action, label, csrf, variant=None, disabled=false, hint=None) -%}
+  {#- A one-button form, which is what every action on this page is. Rendered as
+      a form rather than a link because they all change state, and a GET that
+      approved a candidate would be followed by any crawler or prefetch.
+
+      The token and the return path are parameters rather than reads of the
+      surrounding context: a macro that reached for `csrf_token` on its own would
+      still work here and break the moment this file was imported anywhere. -#}
+  <form method="post" action="{{ action }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
+            data-size="sm" type="submit"
+            {% if disabled %}disabled{% if hint %} title="{{ hint }}"{% endif %}{% endif %}>{{ label }}</button>
+  </form>
+{%- endmacro %}
+
+{% macro job_button(job_id, action, label, csrf, return_to, variant=None) -%}
+  {#- `return_to` is why a pause taken here does not drop the operator onto the
+      queue page. It is validated server-side by `local_return_to`; a value that
+      is not a rooted local path is ignored rather than followed. -#}
+  <form method="post" action="/activity/jobs/{{ job_id }}/{{ action }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
+            data-size="sm" type="submit">{{ label }}</button>
+  </form>
+{%- endmacro %}
+
+{% block content %}
+{#- Where a job action returns to. Built once here rather than in the macro, so
+    the one place that knows this page's own URL is the page. -#}
+{% set work_href = "/works/" ~ work.candidate_id %}
+<header class="ui-page-head">
+  <div>
+    <p class="ui-eyebrow">作品 #{{ work.candidate_id }}</p>
+    <h1 class="ui-title">{{ work.title or "未命名作品" }}</h1>
+    <p class="ui-subtitle">
+      <span data-field="stage">{{ ui.badge(work.stage) }}</span>
+      <span data-field="status">{{ ui.badge(work.status) }}</span>
+      {% if work.archive %}<span class="ui-hint" style="margin: 0">已打包</span>{% endif %}
+    </p>
+  </div>
+  <div class="ui-row-actions">
+    <a class="ui-btn" data-size="sm" href="/candidates">返回候选列表</a>
+  </div>
+</header>
+
+{% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
+{% if message %}{{ ui.callout(message, tone="success") }}{% endif %}
+
+{#- Filled in by `work.js` when a poll finds a node the page has never rendered.
+    A line the operator can ignore, rather than a reload that would pull the page
+    out from under a half-typed metadata edit. -#}
+<div data-work-changed hidden></div>
+
+{#- `data-live` arms the polling in `work.js` and is the server's decision, not
+    the script's: the same flag the JSON payload carries. `data-timeline` is how
+    the script tells a value that changed from a node that did not exist. -#}
+<div class="ui-detail-layout" data-work-root data-work-id="{{ work.candidate_id }}"
+     data-csrf="{{ csrf_token }}" data-live="{{ 'true' if work.live else 'false' }}"
+     data-timeline="{{ work.timeline | length }}">
+  <div class="ui-detail-main">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">概览</h2>
+      {#- `torrent_count` of `None` means gdata has not answered yet, which is a
+          different thing from a gallery with no torrent, so the two read
+          differently rather than both showing「0」. -#}
+      {% set overview = [
+        {"label": "阶段", "value": work.stage.label},
+        {"label": "状态", "value": work.status.label},
+        {"label": "画廊", "value": work.ex_gid},
+        {"label": "种子", "value": work.torrent_count, "note": "尚未查询" if work.torrent_count is none else none},
+        {"label": "筛选结果", "value": work.filter_result, "note": work.filter_reason},
+      ] %}
+      {{ ui.kv(overview) }}
+      {% if work.preview_url %}
+      <p class="ui-hint">预览页：{{ work.preview_url }}</p>
+      {% endif %}
+    </section>
+
+    <section class="ui-panel">
+      <h2 class="ui-section-title">元数据</h2>
+      {% if work.metadata %}
+      {#- One form per field rather than one form for all of them: the audit
+          trail records EDIT_METADATA per field, and a single submit that wrote
+          every field would fill the timeline with edits the operator did not
+          make. `work.js` replaces this with an inline save; without it each row
+          is a working form. -#}
+      <div class="ui-kv" data-metadata-rows>
+        {% for entry in work.metadata %}
+        <div class="ui-kv-row" data-metadata-field="{{ entry.field_name }}">
+          <dt>
+            {{ entry.field_label }}
+            {{ ui.badge(entry.source) }}
+            {% if entry.is_locked %}<span class="ui-kv-note">已锁定</span>{% endif %}
+          </dt>
+          <dd>
+            {% if work.actions.edit_metadata %}
+            <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
+                  class="ui-row-actions">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="field_name" value="{{ entry.field_name }}">
+              <input class="ui-input" type="text" name="field_value"
+                     value="{{ entry.field_value or '' }}"
+                     aria-label="{{ entry.field_label }}">
+              <button class="ui-btn" data-size="sm" type="submit">保存</button>
+            </form>
+            {% else %}
+            {{ entry.field_value or "—" }}
+            {% endif %}
+          </dd>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      {{ ui.empty_state("还没有元数据", "从下方的来源拉取一次，或手动补充") }}
+      {% endif %}
+
+      {% if work.raw_metadata %}
+      <details class="ui-section">
+        <summary>原始字段（{{ work.raw_metadata | length }}）</summary>
+        <dl class="ui-kv">
+          {% for entry in work.raw_metadata %}
+          <div class="ui-kv-row">
+            <dt>{{ entry.field_label }}</dt>
+            <dd data-tone="muted">{{ entry.field_value or "—" }}</dd>
+          </div>
+          {% endfor %}
+        </dl>
+      </details>
+      {% endif %}
+    </section>
+
+    {% if work.messages %}
+    <section class="ui-panel">
+      <h2 class="ui-section-title">来源消息</h2>
+      <dl class="ui-kv">
+        {% for item in work.messages %}
+        <div class="ui-kv-row">
+          <dt>
+            {{ item.chat_title or "未知频道" }}
+            <span class="ui-kv-note">消息 #{{ item.message_id }}</span>
+          </dt>
+          <dd>
+            {{ item.message_text or "—" }}
+            {% if item.message_date %}
+            <time class="ui-kv-note" datetime="{{ item.message_date }}">{{ item.message_date }}</time>
+            {% endif %}
+            {% if item.attachments %}
+            <div class="ui-callout-items">
+              {% for attachment in item.attachments %}
+              {{ ui.badge(attachment.kind) }}
+              {% if attachment.file_name %}
+              <span class="ui-kv-note">{{ attachment.file_name }}</span>
+              {% endif %}
+              {% endfor %}
+            </div>
+            {% endif %}
+          </dd>
+        </div>
+        {% endfor %}
+      </dl>
+    </section>
+    {% endif %}
+  </div>
+
+  <aside class="ui-detail-side">
+    {% if work.archive %}
+    <section class="ui-panel">
+      <h2 class="ui-section-title">归档</h2>
+      {#- The path is shown because it is what the operator needs to find the
+          file, and this page is behind the session like every other. -#}
+      {{ ui.kv([
+        {"label": "文件", "value": work.archive.path},
+        {"label": "完成时间", "value": work.archive.completed_at},
+      ]) }}
+    </section>
+    {% endif %}
+
+    <section class="ui-panel">
+      <h2 class="ui-section-title">时间线</h2>
+      {% if work.timeline %}
+      {#- One list, newest first, merging the audit trail and the task history:
+          a rule's approval and the download it created are cause and effect. A
+          JOB node carries its own actions; a REVIEW node is history and has
+          none. -#}
+      {% call ui.timeline("作品时间线") %}
+        {% for node in work.timeline %}
+        {% if node.kind == "JOB" %}
+          {% call ui.timeline_node(node.at, node.provider.label, status=node.state,
+                                   reason=node.reason, key="job:" ~ node.job.job_id) %}
+            {% if node.actions.retry %}{{ job_button(node.job.job_id, "retry", "重试", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.pause %}{{ job_button(node.job.job_id, "pause", "暂停", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.resume %}{{ job_button(node.job.job_id, "resume", "继续", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.cancel %}{{ job_button(node.job.job_id, "cancel", "取消", csrf_token, work_href, variant="danger") }}{% endif %}
+          {% endcall %}
+        {% else %}
+          {{ ui.timeline_node(node.at, node.action.label, actor=node.actor,
+                              actor_name=node.operator_name, reason=node.reason) }}
+        {% endif %}
+        {% endfor %}
+      {% endcall %}
+      {% else %}
+      {{ ui.empty_state("还没有记录", "审核动作和下载任务都会出现在这里") }}
+      {% endif %}
+    </section>
+  </aside>
+</div>
+
+{#- The action area, switched by stage. Each stage shows what the pipeline can
+    actually do at that point: 改路径 and 删除 are absent because no endpoint
+    performs them and书库管理 is out of this project's scope. -#}
+<div class="ui-actionbar" role="group" aria-label="{{ work.stage.label }}操作">
+  <span class="ui-actionbar-stage">{{ ui.badge(work.stage) }}</span>
+  <div class="ui-actionbar-actions">
+    {% set base = "/candidates/" ~ work.candidate_id %}
+    {% if work.actions.approve %}
+    {{ post_button(base ~ "/approve", "通过并下载", csrf_token, variant="primary") }}
+    {% endif %}
+    {% if work.actions.needs_revision %}
+    {{ post_button(base ~ "/needs-revision", "要求修订", csrf_token) }}
+    {% endif %}
+    {% if work.actions.reject %}
+    {{ post_button(base ~ "/reject", "驳回", csrf_token, variant="danger") }}
+    {% endif %}
+    {% if work.actions.requeue %}
+    {{ post_button(base ~ "/requeue", "重新排队", csrf_token) }}
+    {% endif %}
+    {% if work.actions.fetch_metadata %}
+    {{ post_button(base ~ "/exhentai-metadata", "拉取元数据", csrf_token) }}
+    {% endif %}
+    {% if work.actions.reconvert %}
+    {{ post_button(base ~ "/convert", "重新打包", csrf_token) }}
+    {% elif work.actions.convert %}
+    {{ post_button(base ~ "/convert", "打包为 CBZ", csrf_token, variant="primary") }}
+    {% endif %}
+
+    {#- The four sources, always all four. An unavailable one is disabled with
+        the reason in its tooltip rather than hidden: an operator who cannot find
+        「EX 种子」cannot tell a missing torrent from a broken page. -#}
+    {% for source in work.actions.sources %}
+    {{ post_button(source.action, source.provider.label, csrf_token,
+                   disabled=not source.available, hint=source.hint) }}
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script defer src="{{ url_for('static', path='/work.js') }}"></script>
+{% endblock %}

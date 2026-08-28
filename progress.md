@@ -1638,21 +1638,92 @@ The review flow on top of it is a bulk toolbar, an inline quick-approve, `j/k/a/
 - **No page-visible audit trail.** Skip reasons reach the operator in the redirect message; the timeline that records who did what and when belongs to R6.
 - **`ui.drawer` is unused by this page.** The macro renders its content inline for one trigger; the candidate drawer has fifty triggers and fetches its content, so the page hand-writes the same classes. If a third caller wants the fetched shape, that is the time to grow the macro.
 
-## Handoff: Next Session (start of R6)
+### Phase R6: Unified Work Detail And Lifecycle
+
+**Status: complete.** Test baseline moved 663 -> **708 passed / 12 skipped / 0 failed** (+45, zero regressions).
+
+A work now has one address for its whole life. `/works/{id}` opens a candidate waiting for review, a work with a download in flight and a packaged book at the same URL; the only things that change are the stage badge and the action bar. `/candidates/{id}` — the last pre-refactor detail template — 307s to it, and every action that used to land back there now lands on the new page.
+
+The page's centre is a single timeline that merges `review_actions` and `download_jobs` into one reverse-chronological list. Before R6 those were two tables an operator read side by side and interleaved by timestamp in their head; a rule that approved a candidate and the download it created are cause and effect, and they now read as such, top to bottom.
+
+#### Actions Taken
+
+1. **One snapshot for the page and the JSON endpoint.** `work_snapshot` in `app/api/works.py` does the whole read — candidate, metadata split into primary and raw, review actions, jobs — and both `GET /api/v1/works/{id}` and the template render exactly its output. A test asserts the two are byte-identical, because the failure mode this shape exists to prevent is the page and the API disagreeing about what a work can do.
+2. **Stage from facts, not from a status column.** `work_stage` checks for a packaged CBZ artifact first, then whether the review flow can still act, then falls through to 下载期. Packaging leaves the candidate in whatever state the download left it, so the artifact is the only thing that can honestly say 「已入库」 — and a packaged work with a fresh job in flight stays 入库期, because the book on disk is what the operator came for.
+3. **A stage-dependent action bar, decided on the DTO.** `work_actions` returns the flags; the template renders whichever are true. Metadata stays editable at every stage on purpose — a wrong title found after packaging is exactly when an operator wants to fix it — and 重新排队 is offered only from `REJECTED`/`NEEDS_REVISION`, where it changes something.
+4. **All four sources, always, with a reason when they cannot run.** `_source_actions` marks an unavailable source disabled and says why (`没有关联画廊`, `没有预览页`, `画廊没有可用种子` / `尚未拉取种子信息`) rather than hiding it: an operator who cannot find 「EH 种子」 cannot tell a gallery with no torrent from a page that failed to render. NULL `torrent_count` and an explicit `0` say different things, as R2 intended.
+5. **The provider → route map lives in Python.** `_SOURCE_ROUTES` puts an `action` path on every source entry, so the page and a JSON client post to the same endpoint. Written in Jinja it would have been a second table to keep in step with `app/main.py`.
+6. **Timeline nodes carry timestamp, actor, reason and actions.** A job contributes exactly one node holding its current state — the queue keeps no transition history, and inventing a node per state passed through would be a timeline claiming to know more than the database — plus its own retry/pause/resume/cancel, so a failed task is retried where the operator finds out it failed. A review row carries `action_view`, `actor`, and the one-line reason `_review_reason` composes.
+7. **Actor is derived, not stored.** `review_actions.operator_name` holds a login for a person and one of two reserved names otherwise, so `actor_kind` resolves 操作员 / 自动规则 / 系统 from it. Deriving means every row already in the table gets the right actor, including ones written before this vocabulary existed. The two reserved names moved from `app/review/orchestration.py` to `app/review/models.py`, beside the actions they sign.
+8. **`return_to`, validated.** Job actions belong to the activity domain, but an operator who paused a download from `/works/12` must not be dropped on the queue. The forms carry a hidden `return_to`, which makes it an open-redirect surface — so `local_return_to` in `app/main.py` accepts only a rooted path: no scheme, no `//host` (browsers do treat a protocol-relative target as another origin), no backslash (some parsers normalise it into one), no control characters. A rejected target falls back to the queue redirect and the action still runs.
+9. **A refused action re-renders the whole page.** `_render_review_error` delegates to `_render_work`, so a rejection returns the same page with the reason on it — timeline included — rather than a second, drifting assembly of the same context.
+10. **Attachment kinds became vocabulary.** 「图片预览」/「压缩包」 was a ternary in the old template. `ATTACHMENT_KIND_STATUS` and `attachment_kind_view` now resolve it, and `work_snapshot` sends the resolved view down with each attachment.
+11. **`work.js` patches values and announces structure.** It polls `/api/v1/works/{id}` on the `/api/v1/meta` cadence and replaces the stage/status badges and each job node's state and reason in place. A job it has never rendered, or a changed timeline length, switches to announcing 「这本书有新的进展」 with a refresh button instead of re-rendering nodes in JavaScript — the same choice `activity.js` made.
+
+#### Files Created
+- `app/web/templates/work_detail.html` — the unified detail page.
+- `app/web/static/work.js` — the poll, the badge patch and the change announcement.
+- `tests/unit/test_work_detail.py` (36) — stage policy, action policy, timeline merge and ordering, attachment and actor vocabulary, `local_return_to`.
+- `tests/integration/test_work_detail_web.py` (9) — the page at all three stages, the timeline reaching back to a rule and to an operator, the `return_to` round trip and its refusal, page/API agreement.
+
+#### Files Modified
+- `app/api/works.py` — `work_stage`, `work_actions`, `_source_actions`, `_SOURCE_ROUTES`, `work_timeline`, `_packaged_job`, `_attachment_payload`, `work_snapshot`.
+- `app/api/status.py` — `WORK_STAGE_STATUS`/`work_stage_view`, `REVIEW_ACTION_STATUS`/`review_action_view`, `ACTOR_STATUS`/`actor_kind`/`actor_view`, `ATTACHMENT_KIND_STATUS`/`attachment_kind_view`.
+- `app/api/serializers.py` — `_review_reason`; `review_action` gained `action_view` and `actor`.
+- `app/review/models.py` — `REVIEW_AUTO_APPROVE`, `REVIEW_METADATA_RULE`, `AUTO_OPERATOR`, `SYSTEM_OPERATOR`.
+- `app/review/orchestration.py` — imports `AUTO_OPERATOR` instead of defining it.
+- `app/main.py` — `local_return_to`, `_render_work`, the `/works/{id}` route, `/candidates/{id}` as a 307, thirteen redirect targets, `_render_review_error` delegating, `return_to` on the job actions.
+- `app/web/templates/components/ui.html` — `timeline`, `timeline_node`, `kv` macros.
+- `app/web/static/ui.css` — `.ui-timeline*`, `.ui-kv*`, `.ui-detail-layout`, `.ui-actionbar*`.
+- `tests/integration/test_candidates_web.py`, `test_downloads.py`, `test_review_actions.py`, `test_telegraph_workflow.py`, `test_torrent_workflow.py` — the detail path, its context keys and the source-button words.
+
+#### Bugs Found And Fixed In This Phase's Own New Code
+
+1. **An insert Edit ate the `tabs` macro's own signature.** The new macros were inserted using the `tabs` declaration line as the anchor and the line was not re-emitted, leaving the tabs body headless — every page with a tab strip would have failed to render. Caught by reading the file back rather than by a test, because a Jinja syntax error in an unrelated macro is exactly what a green suite on the new page will not tell you.
+2. **`.ui-actionbar` used tokens that do not exist.** `--z-bulkbar`, `--shadow-md` on a bar that floats: the z tokens are `sticky`/`tabbar`/`drawer`/`modal`/`toast`, and `.ui-bulkbar` is the precedent. Now `--z-sticky`, `--t-line-strong`, `--t-surface-raised`, `--shadow-lg`.
+3. **A confirmed-zero torrent count was labelled as unqueried.** `none if work.torrent_count else "尚未查询"` treats `0` and NULL alike, which is the exact distinction R2 added the nullable column for. Corrected to test for NULL explicitly.
+4. **Macros read `csrf_token` out of the enclosing context.** A macro's view of the calling context is not something to rely on, and a child template's top-level `{% set %}` is not visible inside `{% block content %}`. Both now pass the token and the return path as explicit parameters.
+
+#### Problems Encountered
+
+| Problem | Cause | Resolution |
+| --- | --- | --- |
+| Twenty tests failed after the redirect swap | Seventeen read `response.context` from a `GET /candidates/{id}` that is now a 307, so `context` did not exist | Point them at `/works/{id}`; the two that assert the redirect itself now assert the 307 and its target |
+| `KeyError: 'metadata_entries'` | The old page put split metadata in two context keys; the new one has one `work` snapshot | Read `work["metadata"]` / `work["raw_metadata"]`, which is also what the JSON client sees |
+| `assert "用种子取原档" in detail.text` | Source buttons were page copy on the old template and are provider vocabulary now | Assert 「EH 种子」/「预览页图源」 — the words every other surface already uses for them |
+| Three new unit tests failed on their own fixtures | A timeline node is placed at the job's `created_at`, not `updated_at`, and the default fixture candidate carries an archive attachment so Telegram was available | Fixtures vary `created_at`; the all-unavailable case seeds a photo |
+| The pytest summary line never reaches a redirected file | The console encoding mangles the run's Chinese bootstrap output on this Windows host | Count from `--collect-only` and trust the exit code |
+
+#### Decisions And Their Reasoning
+
+1. **One URL, but no second write path.** Actions still POST to `/candidates/{id}/…`; R6 changed only where they redirect. Adding `/works/{id}/approve` would create a second approve path — precisely what R5 avoided with the list's quick-approve.
+2. **The retired route keeps its function name.** `/candidates/{id}` now only redirects, but it is still called `candidate_detail`, because `downloads.html` and `downloads_history.html` call `url_for('candidate_detail')`. Renaming it would make those templates raise if anything ever rendered them.
+3. **`return_to` rather than duplicate job routes.** The alternative — `/works/{id}/jobs/{job_id}/pause` — would be four more routes wrapping four that exist, and four more places for the pause semantics to drift.
+4. **Patch values, announce structure.** Re-rendering timeline nodes in JavaScript would put the node markup in two places. Announcing a change and offering a refresh keeps one renderer, and an operator watching a download does not need the new node to appear silently.
+5. **Metadata editing is not in `work.js`.** The drawer's `PATCH` already exists in `candidates.js`; a third implementation of the same request would be a third thing to keep in step. The page's per-field forms work with JavaScript off, which is what the stage needs.
+6. **No 改路径 and no 删除 in the archived action bar**, though the plan's original text listed them. Both are book management, which the 2026-08-26 scope narrowing hands to downstream tools; the archive path template itself belongs to R8's settings domain.
+7. **`_review_reason` lives in the serializer.** The timeline renders it in Jinja and `work.js` re-renders it after a poll. Composed in both, it would be two formats.
+
+#### Deferred From R6
+- **`candidate_detail.html` is no longer rendered by any route but has not been deleted.** It needs an explicit instruction; `downloads.html` and `downloads_history.html` are the same kind of orphan from R4.
+- **The page does not stream.** `work.js` subscribes to the SSE names but still polls for the snapshot, because the events carry no work id the page could filter on cheaply. The cadence comes from `/api/v1/meta`, so it is one setting away from changing.
+- **A conversion job's password/volume prompts are not on the timeline.** They are `CONVERSION_WAITING_*` states, which the node shows, but the prompt itself is still an activity-page interaction.
+
+## Handoff: Next Session (start of R8)
 
 ### Where The Refactor Stands
-R0-R3 (the foundation phases), **R4 (the activity domain)** and **R5 (the candidate domain)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and two domains consuming all of it.
+R0-R3 (the foundation phases), **R4 (the activity domain)**, **R5 (the candidate domain)** and **R6 (the unified work detail page)** are complete. There is a full read/write JSON surface under `/api/v1`, an SSE stream with a publisher for every event name it advertises, a cover-thumbnail proxy, a token-based stylesheet, a shared component set, one navigation source driving desktop and phone — and three domains consuming all of it. R7 was deleted from the plan with the scope narrowing, so **R8 (the settings domain) is next**.
 
-`/activity` and `/candidates` are the reference implementations for every remaining page: server-computed snapshot, one template per domain, macros for the repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. Read both before writing R6 — `/candidates` in particular for how a page keeps its whole state in the query string and how a bulk action shares one coroutine with the JSON API.
+`/activity`, `/candidates` and `/works/{id}` are the reference implementations for every remaining page: server-computed snapshot, one template per domain, macros for the repeated markup, a `data-*` contract with the domain's script, real forms and links underneath, and no state label written anywhere but `app/api/status.py`. Read `/works/{id}` before writing R8 — it is the smallest complete example of a page and a JSON endpoint rendering one snapshot, with a test asserting they cannot disagree.
 
-Eight reachable templates remain pre-refactor, still pinned to light by `data-legacy="true"` — `dashboard`, `sources`, `connections`, `manual_add`, `candidate_detail`, `archive_settings`, `auto_approval_rules`, `change_password` — including the candidate detail page R6 replaces. Two more (`downloads.html`, `downloads_history.html`) still carry the attribute but no route renders them; R9 deletes them.
+Seven reachable templates remain pre-refactor, still pinned to light by `data-legacy="true"` — `dashboard`, `sources`, `connections`, `manual_add`, `archive_settings`, `auto_approval_rules`, `change_password` — three of which (`connections`, `archive_settings`, `auto_approval_rules`) R8 absorbs into `/settings`. Three more (`downloads.html`, `downloads_history.html`, `candidate_detail.html`) render nowhere; R9 deletes them.
 
-Test baseline to protect: **663 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
+Test baseline to protect: **708 passed / 12 skipped / 0 failed**. (The 12 skips are pre-existing and expected — the real-7-Zip tests need a toolchain the Windows dev machine cannot host.)
 
 ### The One Thing To Understand First
 The same three mistakes are available in every remaining phase:
 
-1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out. R5 extended this to tab names (`candidate_tab_view`) and metadata provenance (`metadata_source_view`); page copy that is not a state — a heading's subtitle, an empty state's two lines — stays with the page.
+1. **Do not write a Chinese state label in a template or in JavaScript.** Call `{{ ui.badge(status_view(code)) }}` or `{{ ui.badge_for(code) }}`, or pass the payload's own resolved view. `app/api/status.py` is the only vocabulary — and per R4's first pre-existing bug, that includes attributes a person never sees on screen but a screen reader reads out. R5 extended this to tab names (`candidate_tab_view`) and metadata provenance (`metadata_source_view`); R6 to stages, audit verbs, actors and attachment kinds. Page copy that is not a state — a heading's subtitle, an empty state's two lines, a disabled button's reason — stays with the page.
 2. **Do not add a rule to `app.css`, and do not write an unscoped selector in `ui.css`.** An unscoped `body` rule drops the unrewritten pages below the contrast floor. When you rewrite a page, remove its `data-legacy="true"` in the same commit.
 3. **Do not add a navigation link to a template.** Add a `NavItem` to `NAV_ITEMS`; the sidebar, tab bar and drawer pick it up. An "index" child sharing its parent's path needs `exact=True`, and `aria-current` comes from `is_current()`, never `matches()`.
 
@@ -1660,19 +1731,14 @@ A fourth, learned in R4 and used again in R5: **when two callers share a corouti
 
 A fifth, from R5: **a route that types a path parameter must be declared below every literal sibling.** `/candidates/{candidate_id}` is `int`, so a tab path declared after it is answered by the detail route and refused.
 
-### Next Phase: R6 (Unified Work Detail And Lifecycle, 3-4 person-days)
-See `DEVELOPMENT_PLAN.md` §3. In dependency order:
-1. **`/works/{id}` as the one detail page** for a work at any stage — candidate, downloading, packaged. It currently 307s to `/candidates/{id}`; R6 inverts that, and `candidate_summary.href` already points at it, so every card and JSON client follows along for free.
-2. **A status timeline** whose nodes carry a timestamp, an actor (automatic rule / operator / system), a reason and the actions available at that point. `review_actions` already records the operator ones and `AUTO_APPROVE` with its full rule snapshot; download and conversion history come off `download_jobs`.
-3. **A stage-dependent action bar** (candidate: 通过/驳回/移除; download: 暂停/取消/切来源; archived: 重打包/改路径/重下载/删除). Every one of those actions already exists behind an endpoint — R6 is about which ones a stage offers, which is DTO policy, not template `if`s.
+A sixth, from R6: **any redirect target a page sends the server is an open-redirect surface.** Validate it to a rooted local path — no scheme, no `//host`, no backslash, no control characters — and fall back to a known-good redirect rather than trusting it.
 
-Acceptance: a work at any stage opens at the same URL; the timeline reaches back to the automatic rule that matched and to each operator action.
-
-Note: the candidate detail template is still pre-refactor. Replace it rather than porting it — the metadata drawer in `candidates.html` and `candidates.js` already renders provenance and locks, and the detail page should read from the same `/api/v1/works/{id}` payload rather than growing a second shape.
+### Next Phase: R8 (Settings Domain, 2-3 person-days)
+See `DEVELOPMENT_PLAN.md` §3. `/settings` with seven tabs (连接 / 来源规则 / 自动审批 / 归档 / 路径 / 密码库 / 系统), absorbing `connections`, `archive_settings` and `auto_approval_rules`; the archive path template `{category}/{artist}/{title}` with a pre-save preview and illegal-character handling; a rule editor that dry-runs against historical candidates; and a system tab for theme, density, concurrency and poll intervals. `/candidates`' six-tab renderer is the pattern for the tab strip, and `GET/PUT /api/v1/settings/{section}` — deferred since R1 — needs this phase's grouping before it can be written.
 
 ### Deliberately Deferred (Do Not Treat As Bugs)
-- **`main.py` is ~2500 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R6-R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
-- **`app/web/templates/downloads.html` and `downloads_history.html` are orphaned but present.** R9 owns their removal; see "Deferred From R4".
+- **`main.py` is ~2500 lines, not the planned <500.** The read/write API, orchestration, thumbnail and shell wiring are extracted; the legacy HTML routes remain. They move per-domain across R8 as each replacement page lands, and R9 verifies the count. Splitting them now would migrate every route twice.
+- **`app/web/templates/downloads.html`, `downloads_history.html` and `candidate_detail.html` are orphaned but present.** R9 owns their removal; see "Deferred From R4" and "Deferred From R6".
 - **`GET /api/v1/library` will never be implemented.** The library domain (old R7) was deleted from the plan — see the R2 scope note. `GET/PUT /api/v1/settings/{section}` is still pending and needs the R8 settings grouping.
 - Thumbnail eviction, background warming and failed-row retry do not exist; see "Deferred From R2".
 - Connection transitions do not publish SSE events. Candidate, download and conversion all do.

@@ -231,7 +231,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
             data={"csrf_token": page.context["csrf_token"], "bot_token": "test"},
         )
         # Trigger download
-        page = client.get(f"/candidates/{candidate_id}")
+        page = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/download",
             data={"csrf_token": page.context["csrf_token"]},

@@ -13,15 +13,22 @@ from typing import Any
 
 from app.api.status import (
     NOTE_SEEDING,
+    actor_view,
     attention_view,
     connection_view,
     metadata_source_view,
     provider_label,
     queue_group_view,
+    review_action_view,
     row_note_view,
     status_view,
 )
-from app.review.models import REVIEWABLE_STATUSES, field_label
+from app.review.models import (
+    REVIEW_AUTO_APPROVE,
+    REVIEW_LOCK_METADATA,
+    REVIEWABLE_STATUSES,
+    field_label,
+)
 from app.thumbnails import THUMBNAIL_VARIANT_CARD, identity_hash
 
 
@@ -150,11 +157,52 @@ def metadata_entry(entry: Any) -> dict[str, Any]:
     }
 
 
+def _review_reason(action: str, details: Any) -> str | None:
+    """The one line explaining why an audit entry happened, or None.
+
+    Composed here, beside `_torrent_detail`, for the same reason that one is: the
+    timeline renders it in Jinja and the page's script re-renders it after a
+    poll, so a format built twice would be two formats. The words are a sentence
+    about a past event, not a state label -- states in this payload arrive as
+    `StatusView`s from `app/api/status.py` and nothing here spells one out.
+
+    An entry with nothing to explain returns None rather than an empty string:
+    the timeline then omits the line instead of rendering a blank one.
+    """
+    if not isinstance(details, dict):
+        return None
+    explicit = details.get("note") or details.get("reason")
+    if explicit:
+        return str(explicit)
+    if action == REVIEW_AUTO_APPROVE:
+        name = details.get("rule_name")
+        return f"命中规则「{name}」" if name else None
+    field = details.get("field")
+    if not field:
+        return None
+    if action == REVIEW_LOCK_METADATA:
+        return f"{field_label(str(field))}{'已锁定' if details.get('locked') else '已解锁'}"
+    value = details.get("value")
+    if value in (None, ""):
+        return field_label(str(field))
+    return f"{field_label(str(field))}：{value}"
+
+
 def review_action(entry: Any) -> dict[str, Any]:
-    """One audit-trail entry, for the detail page timeline."""
+    """One audit-trail entry, for the detail page timeline.
+
+    The raw `action` and `operator_name` stay, because a client that stores or
+    groups entries needs the codes; `action_view` and `actor` carry the resolved
+    vocabulary beside them. `actor` is the answer to「谁决定的」-- an operator, a
+    rule or the system -- which the stored name alone does not give, since it
+    holds a login for a person and a reserved word otherwise.
+    """
     return {
         "action": entry.action,
+        "action_view": review_action_view(entry.action).to_payload(),
         "operator_name": entry.operator_name,
+        "actor": actor_view(entry.operator_name).to_payload(),
+        "reason": _review_reason(entry.action, entry.details),
         "details": entry.details,
         "created_at": entry.created_at,
     }

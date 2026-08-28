@@ -65,11 +65,11 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 663 passed / 12 skipped / 0 failed.** Ending below this is a
+**Baseline: 708 passed / 12 skipped / 0 failed.** Ending below this is a
 regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
 need a toolchain this dev machine cannot host. (Baseline moves per phase:
-R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663. An older note claiming
-"0 skipped" was wrong.)
+R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708. An older note
+claiming "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
 lifespan always starts the download worker and there is no toggle, so the worker
@@ -172,16 +172,48 @@ operator navigation).
   reaches the DOM: neither theme selector matches it, so `applyTheme("auto")`
   *removes* the attribute. This extends past job/candidate states to anything the
   vocabulary owns: tab names come from `candidate_tab_view`, metadata provenance
-  from `metadata_source_view`. Page copy that is not a state — a heading's
-  subtitle, an empty state's two lines — stays with the page.
-- **`/activity` and `/candidates` are the reference implementations for a domain
-  page.** One server-computed snapshot (`queue_snapshot` in
-  `app/api/activity.py`, `_render_candidates` in `app/main.py`) feeding both the
+  from `metadata_source_view`, a work's stage from `work_stage_view`, an audit
+  verb from `review_action_view`, who performed it from `actor_view`, and an
+  attachment's kind from `attachment_kind_view`. Page copy that is not a state —
+  a heading's subtitle, an empty state's two lines, a disabled button's reason —
+  stays with the page.
+- **`/activity`, `/candidates` and `/works/{id}` are the reference
+  implementations for a domain page.** One server-computed snapshot
+  (`queue_snapshot` in `app/api/activity.py`, `_render_candidates` in
+  `app/main.py`, `work_snapshot` in `app/api/works.py`) feeding both the
   JSON endpoint and the template, one template for its tabs, macros for
   repeated markup, a `data-field` contract with its script, and real forms
   underneath so the page works with JavaScript off. Read them before writing the
   next domain — `/candidates` in particular for how a page keeps its whole state
-  in the query string.
+  in the query string, `/works/{id}` for the smallest complete page-and-endpoint
+  pair, with a test asserting the two cannot disagree.
+- **`/works/{id}` is the one detail page for a work at every stage, and it added
+  no write routes.** Actions still POST to `/candidates/{id}/…`; R6 changed only
+  where they redirect. A second approve path is the thing to avoid, so do not add
+  `/works/{id}/approve`. `/candidates/{id}` 307s to the work page and keeps its
+  route *function* name `candidate_detail`, because orphaned templates still call
+  `url_for('candidate_detail')`.
+- **A work's stage comes from facts, not from the status column.** `work_stage`
+  checks for a packaged CBZ artifact, then whether the review flow can still act,
+  then falls through to 下载期. Packaging does not change the candidate's status,
+  so the artifact is the only honest evidence of 「已入库」 — and a packaged work
+  with a new job in flight stays 入库期.
+- **Any redirect target a page hands the server is an open-redirect surface.**
+  The job-action forms carry a hidden `return_to` so an action taken on
+  `/works/{id}` comes back there; `local_return_to` in `app/main.py` accepts only
+  a rooted path — no scheme, no `//host` (browsers treat a protocol-relative
+  target as another origin), no backslash (some parsers normalise it to one), no
+  control characters — and a refused target falls back to a known-good redirect
+  while the action still runs.
+- **A timeline node per job, never one per transition.** `download_jobs` keeps no
+  transition history, so a node holds the job's *current* state plus its own
+  retry/pause/resume/cancel. Inventing nodes for states a job passed through
+  would be a timeline claiming to know more than the database does.
+- **`review_actions.operator_name` holds a login or one of two reserved names,
+  and the actor is derived from it.** `AUTO_OPERATOR` / `SYSTEM_OPERATOR` live in
+  `app/review/models.py`; `actor_kind` resolves them to 自动规则 / 系统 and
+  everything else to 操作员. Deriving rather than storing is what gives rows
+  written before this vocabulary existed the right actor.
 - **A route with a typed path parameter must be declared below every literal
   sibling.** Starlette matches in declaration order and `/candidates/{candidate_id}`
   types its parameter as `int`, so a tab path declared after it is answered by the

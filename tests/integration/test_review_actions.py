@@ -135,7 +135,7 @@ def test_approve_automatically_enqueues_download(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         assert detail.status_code == 200
         csrf = detail.context["csrf_token"]
         response = client.post(
@@ -159,7 +159,7 @@ def test_reject_does_not_require_reason(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/reject",
@@ -182,7 +182,7 @@ def test_approve_without_download_source_keeps_candidate_pending(
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
@@ -223,7 +223,7 @@ def test_a_gallery_with_a_torrent_routes_to_the_torrent(
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
@@ -264,7 +264,7 @@ def test_archive_download_is_never_an_automatic_route(
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
             data={"csrf_token": detail.context["csrf_token"]},
@@ -287,7 +287,7 @@ def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/metadata",
@@ -315,7 +315,7 @@ def test_metadata_edit_rejects_unknown_field(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/metadata",
@@ -335,13 +335,13 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
         client.post(
             f"/candidates/{candidate_id}/reject",
             data={"csrf_token": csrf},
         )
-        rejected_detail = client.get(f"/candidates/{candidate_id}")
+        rejected_detail = client.get(f"/works/{candidate_id}")
         rejected_csrf = rejected_detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/requeue",
@@ -561,16 +561,20 @@ def test_review_views_show_original_and_chinese_tag_rows(tmp_path: Path) -> None
         assert 'name="tags" value="female:big breasts"' in queue.text
         assert 'name="tags" value="language:chinese"' in queue.text
 
-        detail = client.get(f"/candidates/{candidate_id}")
+        detail = client.get(f"/works/{candidate_id}")
         assert detail.status_code == 200
-        assert [
-            entry.field_name for entry in detail.context["metadata_entries"][-2:]
-        ] == ["TagsRaw", "Tags"]
+        work = detail.context["work"]
+        assert [entry["field_name"] for entry in work["metadata"][-2:]] == [
+            "TagsRaw",
+            "Tags",
+        ]
         assert all(
-            entry.field_name != "TagsRaw"
-            for entry in detail.context["raw_metadata_entries"]
+            entry["field_name"] != "TagsRaw" for entry in work["raw_metadata"]
         )
-        assert 'class="metadata-value metadata-tags"' in detail.text
+        # Both rows reach the page, so an operator comparing a translation with
+        # its original never has to open the JSON to do it.
+        assert "巨乳" in detail.text
+        assert "female:big breasts" in detail.text
 
 
 def test_processing_and_failed_dashboard_queues_filter_candidates(

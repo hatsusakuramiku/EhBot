@@ -301,6 +301,72 @@
   </div>
 {%- endmacro %}
 
+{# ------------------------------------------------------------- timeline #}
+
+{% macro timeline(label="时间线") -%}
+  {#- An ordered list, newest first, of things that already happened. `<ol>`
+      rather than a stack of divs so a screen reader announces「共 7 项」and the
+      order is part of the markup rather than of the stylesheet.
+
+      The nodes come from the caller in a loop, the way `table()` takes its rows:
+      a review entry and a download task carry different fields and different
+      actions, and a macro that tried to render both would be guessing which of
+      the two it had. -#}
+  <ol class="ui-timeline" aria-label="{{ label }}">{{ caller() }}</ol>
+{%- endmacro %}
+
+{% macro timeline_node(at, title, status=None, actor=None, actor_name=None, reason=None, key=None) -%}
+  {#- One node. `status` and `actor` are StatusViews (or their payloads), never
+      strings: 「自动规则」 and 「操作员」 are vocabulary from
+      `app/api/status.py`, and this is the place a template would be most
+      tempted to write them by hand. `actor_name` is a login, so it is data and
+      is rendered as text.
+
+      `at` is the stored timestamp and goes in `datetime` as well as in the
+      visible text -- the page has no timezone of its own to convert to, and a
+      relative「3 分钟前」computed here would be wrong the moment the page sat
+      open.
+
+      `key` and the `data-field` slots are the contract with a script that
+      refreshes a node in place: it patches these values and never builds a node,
+      the same arrangement `activity.html` has with `activity.js`. The caller
+      composes the key, because what identifies a node is the caller's business.
+      -#}
+  <li class="ui-timeline-node" {% if key %}data-timeline-key="{{ key }}"{% endif %}>
+    <span class="ui-timeline-mark" aria-hidden="true"></span>
+    <div class="ui-timeline-body">
+      <div class="ui-timeline-head">
+        <span class="ui-timeline-title">{{ title }}</span>
+        <span data-field="state">{% if status %}{{ badge(status) }}{% endif %}</span>
+        {% if actor %}{{ badge(actor) }}{% endif %}
+        {% if actor_name %}<span class="ui-timeline-actor">{{ actor_name }}</span>{% endif %}
+      </div>
+      {% if at %}<time class="ui-timeline-at" datetime="{{ at }}">{{ at }}</time>{% endif %}
+      <p class="ui-timeline-reason" data-field="reason">{{ reason or "" }}</p>
+      {% if caller %}<div class="ui-timeline-actions">{{ caller() }}</div>{% endif %}
+    </div>
+  </li>
+{%- endmacro %}
+
+{# ------------------------------------------------------------- key-values #}
+
+{% macro kv(items) -%}
+  {#- `items` is a list of {label, value, note?, tone?}. A definition list
+      because that is what it is: a field name and the value it has. `tone` puts
+      a provenance marker on the value without the page inventing a colour. -#}
+  <dl class="ui-kv">
+    {% for item in items %}
+      <div class="ui-kv-row">
+        <dt>{{ item.label }}</dt>
+        <dd {% if item.get('tone') %}data-tone="{{ item.tone }}"{% endif %}>
+          {{ item.value if item.value not in (none, "") else "—" }}
+          {% if item.get('note') %}<span class="ui-kv-note">{{ item.note }}</span>{% endif %}
+        </dd>
+      </div>
+    {% endfor %}
+  </dl>
+{%- endmacro %}
+
 {% macro tabs(items, current=None, label="分区") -%}
   {#- `items` is a list of {key, label, href, count?}. Six candidate states and
       seven settings sections both render through this, which is what makes
