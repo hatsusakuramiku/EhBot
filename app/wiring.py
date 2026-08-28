@@ -64,6 +64,7 @@ from app.torrent.service import TorrentService
 #: same missing service.
 TELEGRAPH_UNAVAILABLE = "Telegraph source is unavailable"
 TORRENT_UNAVAILABLE = "Torrent source is unavailable"
+TELEGRAM_USER_UNAVAILABLE = "Telegram user account is unavailable"
 #: The download service is not optional, but it does not exist until the lifespan
 #: has built it, so the orchestrator's lookup has to be able to fail the same way.
 DOWNLOADS_UNAVAILABLE = "Downloads are unavailable"
@@ -183,6 +184,14 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
         lambda: _required(app, "download_service", DOWNLOADS_UNAVAILABLE),
         torrent_available=lambda: app.state.torrent_service is not None,
         telegraph_available=lambda: app.state.telegraph_service is not None,
+        # Asked of the connection manager rather than of a setting: whether an
+        # oversized attachment can be fetched depends on a session being valid
+        # right now, which is the one thing the manager tracks and a boolean
+        # captured at startup cannot.
+        telegram_user_available=lambda: bool(
+            app.state.connection_manager is not None
+            and app.state.connection_manager.user_download_available()
+        ),
     )
 
 
@@ -193,6 +202,7 @@ def build_lifespan(
     session_secret,
     *,
     telegram_transport: httpx.AsyncBaseTransport | None = None,
+    telegram_user_client_factory=None,
     exhentai_transport: httpx.AsyncBaseTransport | None = None,
     tagdb_transport: httpx.AsyncBaseTransport | None = None,
     telegraph_transport: httpx.AsyncBaseTransport | None = None,
@@ -275,6 +285,7 @@ def build_lifespan(
                 telegram_client=telegram_client,
                 exhentai_client=exhentai_client,
                 candidate_ingestor=CandidateIngestor(database),
+                user_client_factory=telegram_user_client_factory,
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -363,6 +374,16 @@ def build_lifespan(
                 app_settings.work_path,
                 telegram_client_factory=(
                     lambda: _telegram_context(secret_store, telegram_client)
+                ),
+                # Handed out by the connection manager because it owns the
+                # session: a second reader of the credential store would be a
+                # second place that has to know how the api pair is encoded.
+                telegram_user_client=(
+                    lambda: _required(
+                        application,
+                        "connection_manager",
+                        TELEGRAM_USER_UNAVAILABLE,
+                    ).telegram_user_context()
                 ),
                 exhentai_download=(
                     lambda candidate_id: application.state.exhentai_service

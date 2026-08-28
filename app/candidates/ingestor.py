@@ -158,6 +158,14 @@ class CandidateIngestor:
                     "file_name": str(archive["file_name"]),
                     "mime_type": str(archive.get("mime_type") or ""),
                     "size_bytes": int(archive.get("file_size", 0)),
+                    # Where the attachment lives, not just what it is. A bot
+                    # `file_id` is useless to the MTProto route -- file
+                    # references are per-account -- so the user-account download
+                    # re-reads the message by these two numbers. They are stored
+                    # on the attachment rather than looked up later because a
+                    # download job carries the attachment and nothing else.
+                    "chat_id": int(chat["id"]),
+                    "message_id": int(message["message_id"]),
                 },
             )
         return ParsedSourceMessage(

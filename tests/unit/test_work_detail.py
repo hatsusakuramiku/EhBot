@@ -30,6 +30,7 @@ from app.downloads.models import (
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
     DownloadJobSummary,
 )
@@ -40,6 +41,7 @@ from app.web.deps import local_return_to
 ALL_SOURCES = frozenset(
     {
         PROVIDER_TELEGRAM,
+        PROVIDER_TELEGRAM_USER,
         PROVIDER_EXHENTAI,
         PROVIDER_TELEGRAPH,
         PROVIDER_EH_TORRENT,
@@ -251,7 +253,7 @@ def test_a_packaged_work_offers_repackaging_instead_of_packaging() -> None:
 
 
 def test_every_source_is_listed_even_when_it_cannot_run() -> None:
-    """All four sources, always -- an absent button is unreadable.
+    """Every source, always -- an absent button is unreadable.
 
     An operator who cannot find 「EH 种子」 cannot tell a gallery with no torrent
     from a page that forgot to render the button, so an unavailable source stays
@@ -271,12 +273,22 @@ def test_every_source_is_listed_even_when_it_cannot_run() -> None:
         PROVIDER_EXHENTAI,
         PROVIDER_TELEGRAPH,
         PROVIDER_TELEGRAM,
+        PROVIDER_TELEGRAM_USER,
     ]
-    assert [entry["available"] for entry in sources] == [False, False, False, False]
+    assert [entry["available"] for entry in sources] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
     by_provider = {entry["provider"]["code"]: entry for entry in sources}
     assert by_provider[PROVIDER_EH_TORRENT]["hint"] == "画廊没有可用种子"
     assert by_provider[PROVIDER_EXHENTAI]["hint"] == "没有关联画廊"
     assert by_provider[PROVIDER_TELEGRAPH]["hint"] == "没有预览页"
+    # This candidate arrived as a photo, so the user account has nothing to
+    # fetch either -- and says which of the two reasons it is.
+    assert by_provider[PROVIDER_TELEGRAM_USER]["hint"] == "来源消息没有压缩附件"
 
 
 def test_an_unqueried_gallery_says_so_instead_of_claiming_no_torrent() -> None:
@@ -322,6 +334,7 @@ def test_every_source_carries_the_route_that_runs_it() -> None:
         PROVIDER_EXHENTAI: "/candidates/7/exhentai-archive",
         PROVIDER_TELEGRAPH: "/candidates/7/telegraph",
         PROVIDER_TELEGRAM: "/candidates/7/download",
+        PROVIDER_TELEGRAM_USER: "/candidates/7/telegram-user",
     }
 
 

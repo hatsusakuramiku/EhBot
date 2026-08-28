@@ -325,10 +325,35 @@ def provider_connection(status: Any) -> dict[str, Any]:
     }
 
 
+def telegram_user_connection(account: Any) -> dict[str, Any]:
+    """The MTProto account's health, plus the pending login's phone.
+
+    `phone` is the number the operator typed on the login form, echoed so the
+    verification step can name where the code went. Nothing else about the
+    account leaves the server: the session string is a full account credential
+    and never appears in a payload or a page.
+    """
+    view = connection_view(account.state)
+    return {
+        "state": view.to_payload(),
+        "configured": account.configured,
+        "identity": account.identity,
+        "error": account.error,
+        "phone": account.phone,
+        # Resolved here rather than in the template: whether the login form is
+        # asking for a code or for a password is a fact about the state, and a
+        # template comparing raw state strings would be a second reader of the
+        # vocabulary.
+        "awaiting_code": account.state == "awaiting_code",
+        "awaiting_password": account.state == "awaiting_password",
+    }
+
+
 def connection_snapshot(snapshot: Any) -> dict[str, Any]:
     return {
         "telegram": provider_connection(snapshot.telegram),
         "exhentai": provider_connection(snapshot.exhentai),
+        "telegram_user": telegram_user_connection(snapshot.telegram_user),
     }
 
 
@@ -461,5 +486,6 @@ __all__ = [
     "safety_limits",
     "status_payload",
     "telegram_source",
+    "telegram_user_connection",
     "tool_profile",
 ]

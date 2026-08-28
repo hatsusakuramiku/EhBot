@@ -185,9 +185,10 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 
 Telegram 监听与消息摄取、消息归并、ExHentai 元数据与中文标签翻译、候选审核、正则自动审批、来源降级链下载、归档安全流水线、CBZ + `ComicInfo.xml` 发布、Docker 单容器部署。
 
+**Telegram 用户账户（MTProto）**：Bot API 的 20 MB 下载上限在协议里，所以另加一条 MTProto 通道用于取回超限附件。原先「不引入 MTProto/Telethon」的判断已于 2026-08-28 按操作者要求撤销——当时的替代方案是转种子或预览页，但前者依赖有人做种、后者只有 1280px 重编码，都不能等价替代上传者的原档。Bot 仍是收消息的一端，用户账户只负责下载；小于 20 MB 的附件仍走 Bot。
+
 ### 6.2 明确不做（⛔）
 
-- 不引入 MTProto/Telethon（Bot API 20MB 上限即转种子/预览页）。
 - 不逐页抓取 EH 画廊本体；仅抓频道自建 telegra.ph 预览页作兜底，有张数/字节/超时上限。
 - 不做 OCR、翻译、去水印、超分。
 - 不做多租户、公开注册、复杂 RBAC（单管理员）。

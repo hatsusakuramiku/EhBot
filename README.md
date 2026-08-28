@@ -19,7 +19,7 @@ python -m uv run uvicorn app.main:app --reload
 
 首次启动时，系统会创建 `admin` 管理员并生成临时密码，密码以横幅形式直接打印到控制台，同时写入 `data/bootstrap_admin_password` 作为备份（详见「首次登录」）。使用该密码登录后必须立即修改密码，成功后临时文件会被删除。只要密码尚未在 Web UI 修改，每次重启都会轮换临时密码。
 
-Telegram Token 和 ExHentai Cookie 保存在 `data/private/` 下的私密文件中。页面只显示连接状态和已验证身份，不会回显已保存凭据。
+Telegram Token、Telegram 用户账户会话与 ExHentai Cookie 保存在 `data/private/` 下的私密文件中。页面只显示连接状态和已验证身份，不会回显已保存凭据。
 
 ## Docker
 
@@ -79,7 +79,7 @@ Linux 默认以宿主 UID/GID `1000:1000` 运行。若当前用户不同，请�
 - **取消**：任务终止，候选退回「待审核」队列，不会丢失。已完成的任务不可取消。取消停放中的种子任务会同时从 qBittorrent 移除该种（不删文件）。
 - **等待种子**：`WAITING_TORRENT` 行额外展示进度百分比、做种者数、速度、ETA 与停滞时长，并提供切换来源的动作，详见下文。
 
-**Telegram 单文件 20 MB 上限**：Telegram Bot API 拒绝下载超过 20 MB 的文件（`getFile` 返回 `file is too big`）。这是官方接口限制，与代理、超时或重试无关。因此审核通过时不会把超限附件交给 Telegram 源，见下节的降级链路。
+**Telegram 单文件 20 MB 上限**：Telegram Bot API 拒绝下载超过 20 MB 的文件（`getFile` 返回 `file is too big`）。这是官方接口限制，与代理、超时或重试无关。上限属于**协议**而不是 Token，所以登录一个普通用户账户（MTProto）即可绕过：见下文「Telegram 用户账户」。未登录用户账户时，超限附件不会交给 Telegram 源，而是按下节的降级链路选路。
 
 ## 下载来源与降级链路
 
@@ -88,16 +88,36 @@ Linux 默认以宿主 UID/GID `1000:1000` 运行。若当前用户不同，请�
 | 顺序 | 来源 | 画质 | 触发条件 |
 |------|------|------|----------|
 | 1 | `TELEGRAM` | 原档 | 有压缩附件且不超过 20 MB |
-| 2 | `EH_TORRENT` | 原档，且免费 | gdata 报告有种子且已登记 qBittorrent |
-| 3 | `TELEGRAPH` | 1280px 重编码，约为原档 5%–10% | 消息带 `telegra.ph` / `graph.org` 预览页链接 |
+| 2 | `TELEGRAM_USER` | 原档，且免费 | 有压缩附件（不限大小）且已登录 Telegram 用户账户 |
+| 3 | `EH_TORRENT` | 原档，且免费 | gdata 报告有种子且已登记 qBittorrent |
+| 4 | `TELEGRAPH` | 1280px 重编码，约为原档 5%–10% | 消息带 `telegra.ph` / `graph.org` 预览页链接 |
 
-- **种子是超限本子的首选原档来源**：内容是上传者的原始压缩包，不消耗 GP，也不受 20 MB 限制。
+- **超限本子首选用户账户**：那是上传者发的同一个文件，不用等做种者、不消耗 GP，也不会因为无人做种而停滞。未登录时该位次自动跳过，选路退回种子。
+- **小文件仍走 Bot**：即使登录了用户账户也不接管 20 MB 以内的附件——Bot 本来就在收消息，不需要额外凭据。
+- **种子是没有用户账户时超限本子的原档来源**：内容是上传者的原始压缩包，不消耗 GP，也不受 20 MB 限制。
 - **ExHentai Archive Download 不参与自动选路**：它消耗 GP，属于操作者决策，只在审核详情页提供「用 Archive Download 取原档」按钮。四条来源都不可用时，审核会直接报「没有可用的下载来源」而不静默花 GP。
 - **预览页是兜底，不是默认**。页数完整（实测 22/22、15/15、78/78）且免 Cookie，但成品是统一缩到宽 1280 的重编码版本，只作阅读级替代。
 - 预览页链接通常是超链接，URL 只存在于消息的 `text_link` entity 里；只带预览链接的消息也会被纳入候选。
 - 抓到的张数与画廊 `filecount` 不一致时**不发布残本**：任务以 `TELEGRAPH_PAGE_COUNT_MISMATCH` 失败，候选退回「需要补充信息」并显示「预览页只有 N/M 页」，补齐链接后重试复用同一任务。设 `TELEGRAPH_REQUIRE_FILECOUNT_MATCH=false` 可关闭该门禁。
 - 预览页图片来自频道自建的第三方图床，因此抓取前后有独立门禁：仅 https、DNS 解析后拒绝回环与内网、重定向逐跳复检（上限 3 跳）、单图与单本字节和张数上限、图片魔数校验（拒绝 SVG 与 HTML），且使用不携带任何 Cookie 的独立 HTTP 客户端。防盗链 403 时会带 `Referer: https://telegra.ph/` 重试一次。
 - 来源等级写入 `ComicInfo.xml` 的 `<ScanInformation>`（形如 `TELEGRAPH_PREVIEW w1280 15p 7.5MiB`、`EH_TORRENT original 121.0MiB`）与任务详情，**不改文件名**，便于日后用原档替换而不破坏书库索引。
+
+## Telegram 用户账户（大文件下载）
+
+Bot API 的 20 MB 下载上限在协议里，换 Token 或加代理都没用；同一个文件用普通用户账户走 MTProto 就没有这个限制（上限 2 GB，Telegram Premium 4 GB）。**Bot 仍然是收消息的那一端**，用户账户只负责把超限附件取回来，两者并存。
+
+在「设置 → 外部连接 → Telegram 用户账户」登录：
+
+1. 在 [my.telegram.org](https://my.telegram.org) 的 *API development tools* 创建应用，拿到 **API ID** 与 **API Hash**（属于你自己的账户，本项目不内置共享的一对）。
+2. 填入 API ID、API Hash 与带国际区号的手机号，提交后 Telegram 会向该账户发送验证码。
+3. 输入验证码。若账户开启了两步验证，页面会接着要求输入两步验证密码——此时验证码不需要重新获取。
+
+- **凭据存储**：API 对与会话串分开保存在 `data/private/`（`telegram_user_api`、`telegram_user_session`），页面与 JSON 都不回显，日志也不记录。会话串等同于账户完整凭据，请与 `data/private/` 一并按机密备份。
+- **断开**：会同时删除会话串与 API 对；超限附件随即回退到种子或预览页来源，已下载的文件不受影响。
+- **失效**：在 Telegram 客户端的设备列表里注销该会话后，本页显示「连接异常」并说明需要重新登录；受影响的任务以 `TELEGRAM_USER_UNAUTHORIZED` 失败，重新登录后点重试即可复用同一任务行。
+- **按消息定位而非 `file_id`**：MTProto 的文件引用是按账户的，Bot 给出的 `file_id` 在用户账户下无法解析，所以下载任务记录的是 `(chat_id, message_id)`，运行时重新读取那条消息。因此**上传者删除原消息后无法再用此来源**（报 `TELEGRAM_USER_MESSAGE_GONE`，不重试）；同理，登录的账户必须在该频道里。
+- 升级前入库的旧候选也可用：附件里没有内联的消息坐标时，会从 `source_messages` 回查，无需重新收一遍消息。
+- **手动取原档**：作品详情页的来源栏新增「Telegram 大文件」按钮（`POST /candidates/{id}/telegram-user`）。未登录时该按钮显示为不可用并说明原因，而不是隐藏。
 
 ## EH 种子与 qBittorrent
 

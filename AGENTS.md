@@ -65,11 +65,12 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 820 passed / 12 skipped / 0 failed.** Ending below this is a
-regression. The 12 skips are expected and pre-existing — the real-7-Zip tests
-need a toolchain this dev machine cannot host. (Baseline moves per phase:
+**Baseline: 866 passed / 0 failed.** Ending below this is a
+regression. The twelve `test_seven_zip_real.py` skips are gone because this
+machine now has a real toolchain in `data/tools/7zip/`; on a host without one
+they skip again and the count is 854 passed / 12 skipped. (Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820. There is no R7 — the library domain was deleted from the plan. An older
+R9 820 -> Telegram user account 866. There is no R7 — the library domain was deleted from the plan. An older
 note claiming "0 skipped" was wrong.)
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
@@ -124,6 +125,18 @@ density or contrast regression shows up first. It is behind the session and is
 deliberately absent from `NAV_ITEMS` (a developer tool does not belong in
 operator navigation).
 
+- **The Bot API's 20 MB ceiling is a protocol limit, and the MTProto path is
+  the answer to it.** `app/connections/telegram_user.py` logs a user account in
+  and downloads by `(chat_id, message_id)` — never by `file_id`, because MTProto
+  file references are per-account and an id the bot minted cannot be resolved
+  there. `PROVIDER_TELEGRAM_USER` is its own provider rather than a mode on
+  `TELEGRAM`: the credential, the ceiling, the failure vocabulary and what an
+  operator can do about a failure all differ, and one provider with a hidden mode
+  would report「Telegram 原档」for a job whose real problem is an expired session.
+  A file under 20 MB still goes to the bot — it is already receiving the message
+  and needs no second credential. The session string is a full account
+  credential: `data/private/telegram_user_session` only, never in a page, a
+  payload or a log, and a test asserts it.
 - **State vocabulary lives only in `app/api/status.py`**; DTO-to-JSON conversion
   only in `app/api/serializers.py`. Payloads carry resolved `label`/`tone`/`live`
   beside the raw `code` so the browser never translates an enum. A label written

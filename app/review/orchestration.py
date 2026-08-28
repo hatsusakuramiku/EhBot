@@ -23,6 +23,7 @@ from app.downloads.models import (
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError
@@ -70,11 +71,18 @@ class ReviewOrchestrator:
         *,
         torrent_available: Callable[[], bool],
         telegraph_available: Callable[[], bool],
+        telegram_user_available: Callable[[], bool] | None = None,
     ) -> None:
         self._database = database
         self._download_service = download_service
         self._torrent_available = torrent_available
         self._telegraph_available = telegraph_available
+        # Defaulted so every existing construction of this class keeps working
+        # and reads as「no user account」, which is what a deployment that never
+        # configures one has.
+        self._telegram_user_available = (
+            telegram_user_available if telegram_user_available else lambda: False
+        )
 
     def _review_service(self) -> ReviewService:
         return ReviewService(self._database)
@@ -82,26 +90,38 @@ class ReviewOrchestrator:
     def route_source(self, candidate) -> RoutedSource:
         """Pick the best available source for a candidate.
 
-        1. `TELEGRAM` -- the uploader's own archive: original quality and free,
-           but only when it fits under the Bot API file ceiling.
-        2. `EH_TORRENT` -- original quality and free, whenever gdata reported a
-           torrent and a client is configured. This is the route an oversized
-           book normally takes.
-        3. `TELEGRAPH` -- the preview page: complete, but re-encoded to 1280 px
+        1. `TELEGRAM` -- the uploader's own archive over the Bot API: original
+           quality, free, and no extra credential, but only up to 20 MB.
+        2. `TELEGRAM_USER` -- the *same* archive over MTProto, when a user
+           account is logged in. Preferred over the torrent for an oversized
+           book: it is the identical file the uploader posted, needs no swarm,
+           and cannot stall on peers.
+        3. `EH_TORRENT` -- original quality and free, whenever gdata reported a
+           torrent and a client is configured.
+        4. `TELEGRAPH` -- the preview page: complete, but re-encoded to 1280 px
            and therefore a fraction of the original bytes. Last resort.
         """
+        archives = [
+            item
+            for message in candidate.messages
+            for item in message.attachments
+            if item.get("type") == "archive"
+        ]
         attachment = next(
             (
                 item
-                for message in candidate.messages
-                for item in message.attachments
-                if item.get("type") == "archive"
-                and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
+                for item in archives
+                if int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
             ),
             None,
         )
         if attachment is not None:
             return RoutedSource(PROVIDER_TELEGRAM, attachment)
+        # Above the Bot API ceiling the bytes are still right there in the
+        # channel; only the protocol was the problem. An oversized attachment
+        # therefore stops being the reason to fall back to a re-encode.
+        if archives and self._telegram_user_available():
+            return RoutedSource(PROVIDER_TELEGRAM_USER, archives[0])
         if candidate.torrent_hash and self._torrent_available():
             return RoutedSource(PROVIDER_EH_TORRENT)
         if candidate.preview_url and self._telegraph_available():
@@ -160,6 +180,10 @@ class ReviewOrchestrator:
         service = self._download_service()
         if routed.provider == PROVIDER_TELEGRAM:
             result = await service.enqueue_telegram_download(
+                candidate_id, routed.attachment or {}
+            )
+        elif routed.provider == PROVIDER_TELEGRAM_USER:
+            result = await service.enqueue_telegram_user_download(
                 candidate_id, routed.attachment or {}
             )
         elif routed.provider == PROVIDER_EH_TORRENT:

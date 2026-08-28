@@ -54,10 +54,17 @@ CONNECTION_STATES: tuple[str, ...] = (
     "connecting",
     "error",
     "not_configured",
+    # The MTProto login is a multi-step exchange, so the user account has two
+    # states a token-based connection cannot be in. They are in the gallery for
+    # the same reason as the rest: a test asserts every label in `status.py`
+    # renders here, which is what keeps a template from writing its own.
+    "awaiting_code",
+    "awaiting_password",
 )
 
 PROVIDERS: tuple[str, ...] = (
     "TELEGRAM",
+    "TELEGRAM_USER",
     "EH_TORRENT",
     "EXHENTAI",
     "TELEGRAPH",

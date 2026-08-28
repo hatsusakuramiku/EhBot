@@ -51,6 +51,98 @@
   <div class="ui-settings-col">
     <section class="ui-panel">
       <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">Telegram 用户账户</h2>
+        <div class="ui-record-badges">{{ ui.badge(connections.telegram_user.state) }}</div>
+      </div>
+      <p class="ui-hint">
+        {{ connections.telegram_user.identity
+           or "用于下载超过 20 MB 的附件（Bot API 的协议上限）" }}
+      </p>
+      {% if connections.telegram_user.error %}
+        {{ ui.callout(connections.telegram_user.error, tone="danger", role="alert") }}
+      {% endif %}
+      {% if connections.telegram_user.awaiting_code
+            or connections.telegram_user.awaiting_password %}
+        {#
+          A login in progress replaces the whole form rather than appearing
+          beside it: the api fields are already stored and re-submitting them is
+          not a step, so showing them here would invite an operator to start over
+          and invalidate the code that was just sent.
+        #}
+        <form class="ui-form" method="post"
+              action="{{ url_for('verify_telegram_user_login') }}"
+              style="margin-top: var(--s-4)">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {% if connections.telegram_user.awaiting_password %}
+            <div class="ui-field">
+              <label for="tg-user-password">两步验证密码</label>
+              <input class="ui-input" id="tg-user-password" name="password"
+                     type="password" autocomplete="off" required>
+              <small>该账户开启了两步验证。密码只用于本次登录，不会保存。</small>
+            </div>
+          {% else %}
+            <div class="ui-field">
+              <label for="tg-user-code">验证码</label>
+              <input class="ui-input" id="tg-user-code" name="code" type="text"
+                     inputmode="numeric" autocomplete="one-time-code"
+                     spellcheck="false" required>
+              <small>
+                已发送到 {{ connections.telegram_user.phone or "登录手机号" }}，
+                请在 Telegram 客户端查收。
+              </small>
+            </div>
+          {% endif %}
+          <div class="ui-form-actions">
+            <button class="ui-btn" data-variant="primary" type="submit">完成登录</button>
+            {{ ui.confirm("取消登录", "取消 Telegram 用户账户登录",
+                          "已发送的验证码将失效，可稍后重新登录。",
+                          confirm_label="取消登录", key="tg-user-abort",
+                          action=url_for('disconnect_telegram_user'),
+                          csrf_token=csrf_token) }}
+          </div>
+        </form>
+      {% else %}
+        <form class="ui-form" method="post"
+              action="{{ url_for('start_telegram_user_login') }}"
+              style="margin-top: var(--s-4)">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="ui-field">
+            <label for="tg-api-id">API ID</label>
+            <input class="ui-input" id="tg-api-id" name="api_id" type="text"
+                   inputmode="numeric" autocomplete="off" spellcheck="false"
+                   placeholder="1234567" required>
+          </div>
+          <div class="ui-field">
+            <label for="tg-api-hash">API Hash</label>
+            <input class="ui-input" id="tg-api-hash" name="api_hash"
+                   type="password" autocomplete="off" spellcheck="false" required>
+            <small>在 my.telegram.org 的 API development tools 中创建，属于你自己的账户。</small>
+          </div>
+          <div class="ui-field">
+            <label for="tg-phone">手机号</label>
+            <input class="ui-input" id="tg-phone" name="phone" type="text"
+                   autocomplete="off" spellcheck="false"
+                   placeholder="+8613800138000" required>
+            <small>需带国际区号。提交后 Telegram 会向该账户发送验证码。</small>
+          </div>
+          <div class="ui-form-actions">
+            <button class="ui-btn" data-variant="primary" type="submit">
+              {{ "重新登录" if connections.telegram_user.configured else "发送验证码" }}
+            </button>
+            {% if connections.telegram_user.configured %}
+              {{ ui.confirm("断开账户", "断开 Telegram 用户账户",
+                            "断开后超过 20 MB 的附件将回退到种子或预览页来源，已下载的文件不受影响。",
+                            confirm_label="断开", key="tg-user",
+                            action=url_for('disconnect_telegram_user'),
+                            csrf_token=csrf_token) }}
+            {% endif %}
+          </div>
+        </form>
+      {% endif %}
+    </section>
+
+    <section class="ui-panel">
+      <div class="ui-record-head">
         <h2 class="ui-section-title" style="margin: 0">ExHentai</h2>
         <div class="ui-record-badges">{{ ui.badge(connections.exhentai.state) }}</div>
       </div>

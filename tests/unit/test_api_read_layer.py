@@ -197,12 +197,15 @@ class FakeMessage:
         self.attachments = attachments
 
 
-def make_orchestrator(*, torrent=True, telegraph=True) -> ReviewOrchestrator:
+def make_orchestrator(
+    *, torrent=True, telegraph=True, telegram_user=False
+) -> ReviewOrchestrator:
     return ReviewOrchestrator(
         database=None,
         download_service=lambda: None,
         torrent_available=lambda: torrent,
         telegraph_available=lambda: telegraph,
+        telegram_user_available=lambda: telegram_user,
     )
 
 
@@ -234,6 +237,51 @@ class TestSourceRouting:
         # getFile would refuse it permanently, so routing must not pick it.
         assert routed.provider == "EH_TORRENT"
 
+    def test_an_oversized_attachment_prefers_the_user_account_over_the_torrent(
+        self,
+    ) -> None:
+        candidate = FakeCandidate(
+            messages=(
+                FakeMessage(
+                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT + 1}]
+                ),
+            ),
+            torrent_hash="abc",
+            preview_url="http://x",
+        )
+        routed = make_orchestrator(telegram_user=True).route_source(candidate)
+
+        # The bytes were always in the channel; only the Bot API protocol could
+        # not carry them. Fetching them directly beats a swarm that may have no
+        # seeders and a preview page that is a 1280 px re-encode.
+        assert routed.provider == "TELEGRAM_USER"
+        assert routed.attachment is not None
+
+    def test_the_user_account_is_not_used_when_it_is_not_logged_in(self) -> None:
+        candidate = FakeCandidate(
+            messages=(
+                FakeMessage(
+                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT + 1}]
+                ),
+            ),
+            torrent_hash="abc",
+        )
+        routed = make_orchestrator(telegram_user=False).route_source(candidate)
+
+        # Availability is asked per routing decision, so this is the same
+        # deployment before the operator logs in.
+        assert routed.provider == "EH_TORRENT"
+
+    def test_a_fitting_attachment_still_uses_the_bot(self) -> None:
+        candidate = FakeCandidate(
+            messages=(FakeMessage([{"type": "archive", "size_bytes": 1024}]),)
+        )
+        routed = make_orchestrator(telegram_user=True).route_source(candidate)
+
+        # A logged-in user account must not take over the small-file path: the
+        # bot needs no extra credential and is already receiving the message.
+        assert routed.provider == "TELEGRAM"
+
     def test_a_file_exactly_at_the_limit_still_uses_telegram(self) -> None:
         candidate = FakeCandidate(
             messages=(
@@ -257,6 +305,14 @@ class TestSourceRouting:
 
         assert routed.provider is None
         assert not routed.is_downloadable
+
+    def test_the_user_account_needs_an_attachment_to_be_routed(self) -> None:
+        # A logged-in account cannot help a candidate that arrived as a bare
+        # gallery link: there is no message media to fetch.
+        candidate = FakeCandidate(torrent_hash="abc")
+        routed = make_orchestrator(telegram_user=True).route_source(candidate)
+
+        assert routed.provider == "EH_TORRENT"
 
     def test_exhentai_is_never_routed_automatically(self) -> None:
         # Archive Download spends GP, so it stays an explicit operator choice.

@@ -66,6 +66,81 @@ async def disconnect_telegram(request: Request, csrf_token: str = Form()):
     return settings_redirect(request, SETTINGS_CONNECTIONS)
 
 
+@router.post("/connections/telegram-user/login")
+async def start_telegram_user_login(
+    request: Request,
+    api_id: str = Form(),
+    api_hash: str = Form(),
+    phone: str = Form(),
+    csrf_token: str = Form(),
+):
+    """Step one: store the api pair and ask Telegram to send a code."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        await deps.connection_manager(request).start_telegram_user_login(
+            api_id, api_hash, phone
+        )
+    except ProviderConnectionError as exc:
+        return await render_settings(
+            request,
+            SETTINGS_CONNECTIONS,
+            error=exc.public_message,
+            status_code=400,
+        )
+    return settings_redirect(request, SETTINGS_CONNECTIONS)
+
+
+@router.post("/connections/telegram-user/verify")
+async def verify_telegram_user_login(
+    request: Request,
+    csrf_token: str = Form(),
+    code: str = Form(default=""),
+    password: str = Form(default=""),
+):
+    """Step two: the code, or the 2FA password when Telegram asked for one.
+
+    Both fields are optional at the HTTP level and the pair is validated here,
+    because which one is required depends on how far the login got -- a form that
+    marked either `required` would block the other step.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    if not code.strip() and not password:
+        return await render_settings(
+            request,
+            SETTINGS_CONNECTIONS,
+            error="请填写验证码，或两步验证密码",
+            status_code=400,
+        )
+    try:
+        await deps.connection_manager(request).complete_telegram_user_login(
+            code=code or None, password=password or None
+        )
+    except ProviderConnectionError as exc:
+        return await render_settings(
+            request,
+            SETTINGS_CONNECTIONS,
+            error=exc.public_message,
+            status_code=400,
+        )
+    return settings_redirect(request, SETTINGS_CONNECTIONS)
+
+
+@router.post("/connections/telegram-user/disconnect")
+async def disconnect_telegram_user(request: Request, csrf_token: str = Form()):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    await deps.connection_manager(request).disconnect_telegram_user()
+    return settings_redirect(request, SETTINGS_CONNECTIONS)
+
+
 @router.post("/connections/exhentai")
 async def configure_exhentai(
     request: Request,

@@ -18,6 +18,14 @@ class DownloadState(str, Enum):
 
 
 PROVIDER_TELEGRAM = "TELEGRAM"
+
+#: The same uploader archive, fetched over MTProto with the operator's own
+#: account instead of the bot. A separate provider rather than a flag on
+#: `TELEGRAM` because the two differ in every way a queue row has to show: the
+#: credential, the 20 MB ceiling, the failure vocabulary, and what an operator
+#: can do about a failure. One provider with a hidden mode would report「Telegram
+#: 原档」for a job whose real problem is that a user session expired.
+PROVIDER_TELEGRAM_USER = "TELEGRAM_USER"
 PROVIDER_EXHENTAI = "EXHENTAI"
 PROVIDER_TELEGRAPH = "TELEGRAPH"
 PROVIDER_EH_TORRENT = "EH_TORRENT"
@@ -34,6 +42,7 @@ PROVIDER_CONVERSION = "CONVERSION"
 #: added anywhere else would have its jobs silently left in PENDING forever.
 SUPPORTED_PROVIDERS: tuple[str, ...] = (
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAPH,
     PROVIDER_EH_TORRENT,
@@ -147,6 +156,12 @@ PERMANENT_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
         "TORRENT_CLIENT_AUTH",
         "TORRENT_NOT_AVAILABLE",
         "TORRENT_FILE_INVALID",
+        # A deleted source message cannot come back, so retrying the user-account
+        # route can only fail the same way. The session errors are deliberately
+        # *not* here: a re-login makes them work, and the retry button is how an
+        # operator resumes the job afterwards.
+        "TELEGRAM_USER_MESSAGE_GONE",
+        "TELEGRAM_USER_NO_ACCESS",
     }
 )
 

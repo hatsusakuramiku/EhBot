@@ -603,6 +603,53 @@ async def download_candidate(
     )
 
 
+@router.post("/candidates/{candidate_id}/telegram-user")
+async def download_candidate_with_user(
+    request: Request,
+    candidate_id: int,
+    csrf_token: str = Form(),
+):
+    """Fetch the uploader's archive with the MTProto user account.
+
+    A separate route from `/download` rather than a mode on it: the two use
+    different credentials and have different failure modes, and an operator whose
+    Bot API attempt failed on the 20 MB ceiling is choosing the other protocol
+    deliberately. Same shape as `/download` otherwise -- one attachment, one job,
+    refusals re-render the work page.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    candidate = await deps.database(request).get_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    archive_attachments = [
+        attachment
+        for message in candidate.messages
+        for attachment in message.attachments
+        if attachment.get("type") == "archive"
+    ]
+    if not archive_attachments:
+        return await render_review_error(
+            request,
+            candidate_id,
+            "该候选没有可下载的压缩附件",
+        )
+    try:
+        await deps.download_service(request).enqueue_telegram_user_download(
+            candidate_id, archive_attachments[0]
+        )
+    except DownloadError as exc:
+        return await render_review_error(
+            request, candidate_id, exc.public_message
+        )
+    return RedirectResponse(
+        request.url_for("work_detail", candidate_id=candidate_id).path,
+        status_code=303,
+    )
+
+
 @router.post("/candidates/{candidate_id}/exhentai-metadata")
 async def fetch_exhentai_metadata(
     request: Request,

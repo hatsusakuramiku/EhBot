@@ -1356,6 +1356,46 @@ class Database:
             torrent_hash=str(row[9]) if row[9] is not None else None,
         )
 
+    async def locate_candidate_message(
+        self, candidate_id: int, file_unique_id: str | None
+    ) -> tuple[int, int] | None:
+        """Where a candidate's attachment was posted: `(chat_id, message_id)`.
+
+        The MTProto download route needs this and a bot `file_id` cannot supply
+        it. New attachments carry both numbers inline, but rows ingested before
+        that field existed do not -- and those are exactly the oversized books an
+        operator wants to re-fetch with a user account. Reading them back off
+        `source_messages` means the feature works on an existing database instead
+        of only on messages received after the upgrade.
+
+        Matched on `file_unique_id` when there is one, because a candidate can
+        hold several messages and only one of them holds the archive; the newest
+        message is the fallback when the id is unknown.
+        """
+        return await asyncio.to_thread(
+            self._locate_candidate_message_sync, candidate_id, file_unique_id
+        )
+
+    def _locate_candidate_message_sync(
+        self, candidate_id: int, file_unique_id: str | None
+    ) -> tuple[int, int] | None:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT sm.chat_id, sm.message_id, sm.file_unique_id "
+                "FROM candidate_messages cm "
+                "JOIN source_messages sm ON sm.id = cm.source_message_id "
+                "WHERE cm.candidate_id = ? "
+                "ORDER BY sm.message_date DESC, sm.message_id DESC",
+                (candidate_id,),
+            ).fetchall()
+        if not rows:
+            return None
+        if file_unique_id:
+            for row in rows:
+                if str(row[2] or "") == file_unique_id:
+                    return int(row[0]), int(row[1])
+        return int(rows[0][0]), int(rows[0][1])
+
     async def create_manual_candidate(
         self,
         *,

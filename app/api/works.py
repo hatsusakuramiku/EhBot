@@ -49,6 +49,7 @@ from app.downloads.models import (
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
 )
 from app.review.models import REVIEWABLE_STATUSES, split_metadata_entries
@@ -73,6 +74,7 @@ _DOWNLOAD_STATUSES: frozenset[str] = frozenset(
 #: `SUPPORTED_PROVIDERS`: packaging is not a source an operator picks.
 _SOURCE_ROUTES: dict[str, str] = {
     PROVIDER_TELEGRAM: "download",
+    PROVIDER_TELEGRAM_USER: "telegram-user",
     PROVIDER_EXHENTAI: "exhentai-archive",
     PROVIDER_TELEGRAPH: "telegraph",
     PROVIDER_EH_TORRENT: "torrent",
@@ -147,6 +149,15 @@ def work_actions(candidate, jobs, sources: frozenset[str]) -> dict[str, Any]:
     }
 
 
+def _has_archive(candidate) -> bool:
+    """Whether any source message carried an archive attachment."""
+    return any(
+        attachment.get("type") == "archive"
+        for message in candidate.messages
+        for attachment in message.attachments
+    )
+
+
 def _source_actions(candidate, sources: frozenset[str]) -> list[dict[str, Any]]:
     """The routes an operator can take the original archive from.
 
@@ -176,12 +187,19 @@ def _source_actions(candidate, sources: frozenset[str]) -> list[dict[str, Any]]:
         ),
         (
             PROVIDER_TELEGRAM,
-            any(
-                attachment.get("type") == "archive"
-                for message in candidate.messages
-                for attachment in message.attachments
-            ),
+            _has_archive(candidate),
             None,
+        ),
+        (
+            # Offered whenever there is an attachment *and* an account, at any
+            # size: the operator reaching for this button is usually the one whose
+            # 20 MB attempt just failed, and hiding it under a size test would
+            # make the recovery path invisible on exactly those works.
+            PROVIDER_TELEGRAM_USER,
+            _has_archive(candidate) and PROVIDER_TELEGRAM_USER in sources,
+            None
+            if _has_archive(candidate)
+            else "来源消息没有压缩附件",
         ),
     ]
     return [
@@ -377,6 +395,9 @@ def configured_sources(request: Request) -> frozenset[str]:
     that button from a working one until it does.
     """
     found = {PROVIDER_TELEGRAM}
+    manager = deps.optional_service(request, "connection_manager")
+    if manager is not None and manager.user_download_available():
+        found.add(PROVIDER_TELEGRAM_USER)
     if deps.optional_service(request, "torrent_service") is not None:
         found.add(PROVIDER_EH_TORRENT)
     if deps.optional_service(request, "exhentai_service") is not None:

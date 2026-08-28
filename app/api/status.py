@@ -153,6 +153,7 @@ CONVERSION_STATUS: dict[str, StatusView] = {
 #: Download providers, so the interface stops showing raw `EH_TORRENT`.
 PROVIDER_STATUS: dict[str, StatusView] = {
     "TELEGRAM": _view("TELEGRAM", "Telegram 原档", TONE_SUCCESS),
+    "TELEGRAM_USER": _view("TELEGRAM_USER", "Telegram 大文件", TONE_SUCCESS),
     "EH_TORRENT": _view("EH_TORRENT", "EH 种子", TONE_SUCCESS),
     "EXHENTAI": _view("EXHENTAI", "EH 归档", TONE_ACTIVE),
     "TELEGRAPH": _view("TELEGRAPH", "预览页图源", TONE_WAITING),
@@ -167,6 +168,15 @@ CONNECTION_STATUS: dict[str, StatusView] = {
     "connecting": _view("connecting", "连接中", TONE_WAITING, live=True),
     "error": _view("error", "连接异常", TONE_DANGER),
     "not_configured": _view("not_configured", "尚未配置", TONE_MUTED),
+    # The MTProto account adds two states a token-based connection cannot be
+    # in: a login is a multi-step exchange, and an operator who requested a code
+    # must be able to tell「等待验证码」from「尚未配置」. Both are `waiting`, and
+    # neither is `live`: the next step is the operator's, not the server's, so
+    # polling for it would only spend requests.
+    "awaiting_code": _view("awaiting_code", "等待验证码", TONE_WAITING),
+    "awaiting_password": _view(
+        "awaiting_password", "等待两步验证密码", TONE_WAITING
+    ),
 }
 
 #: The four queue sections. Keyed by `DownloadJobSummary.queue_group`; the

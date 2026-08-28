@@ -91,7 +91,8 @@ class TelegramBotApi:
             # never succeed and the job must say so.
             return ProviderConnectionError(
                 "TELEGRAM_FILE_TOO_BIG",
-                "文件超过 Telegram Bot API 的 20 MB 下载上限，Bot 无法取回该文件；请改用 ExHentai 源下载，或由上传者分卷后重发",
+                "文件超过 Telegram Bot API 的 20 MB 下载上限，Bot 无法取回该文件；"
+                "可在「外部连接」登录 Telegram 用户账户后改用大文件来源，或改用 EH 种子 / ExHentai 源",
             )
         if description:
             # Preserve Telegram's own wording. The bare fallback used to hide

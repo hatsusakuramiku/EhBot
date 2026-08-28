@@ -30,6 +30,7 @@ from app.downloads.models import (
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
     SUPPORTED_PROVIDERS,
     TERMINAL_DOWNLOAD_STATES,
@@ -52,6 +53,7 @@ class DownloadService:
         database: Database,
         work_path: Path,
         telegram_client_factory=None,
+        telegram_user_client=None,
         exhentai_download=None,
         telegraph_download=None,
         torrent_push=None,
@@ -65,6 +67,11 @@ class DownloadService:
         self._database = database
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
+        # Resolved per delivery, like the bot token: the operator can log the
+        # user account in, or Telegram can revoke the session, between one job
+        # and the next. Returns None when no account is configured, which is the
+        # normal state for a deployment that only ever fetches small files.
+        self._telegram_user_client = telegram_user_client
         self._exhentai_download = exhentai_download
         self._telegraph_download = telegraph_download
         # Pushing hands the transfer to qBittorrent; abandoning takes it back
@@ -114,6 +121,47 @@ class DownloadService:
             candidate_id,
             PROVIDER_TELEGRAM,
             idempotency_key,
+            json.dumps(details, separators=(",", ":")),
+        )
+
+    async def enqueue_telegram_user_download(
+        self, candidate_id: int, attachment: dict
+    ) -> DownloadEnqueueResult:
+        """Queue the MTProto route for one attachment.
+
+        The idempotency key names the provider, so the same attachment can hold
+        one bot job and one user job: an operator whose 20 MB attempt failed asks
+        for the user route on the same candidate, and a shared key would make
+        that a no-op that looks like nothing happened.
+        """
+        file_unique_id = str(attachment.get("file_unique_id") or "")
+        chat_id = attachment.get("chat_id")
+        message_id = attachment.get("message_id")
+        if chat_id is None or message_id is None:
+            # Not fatal: `locate_candidate_message` recovers both numbers from
+            # `source_messages` for attachments ingested before they were stored
+            # inline. Resolved at enqueue time so a job that can never run is
+            # refused where the operator is looking, not hours later in a worker.
+            located = await self._database.locate_candidate_message(
+                candidate_id, file_unique_id or None
+            )
+            if located is None:
+                raise DownloadError(
+                    "ATTACHMENT_INVALID",
+                    "找不到该附件所在的源消息，无法用用户账户下载",
+                )
+            chat_id, message_id = located
+        details = {
+            "chat_id": int(chat_id),
+            "message_id": int(message_id),
+            "file_name": attachment.get("file_name"),
+            "file_unique_id": attachment.get("file_unique_id"),
+            "size_bytes": int(attachment.get("size_bytes") or 0),
+        }
+        return await self._enqueue(
+            candidate_id,
+            PROVIDER_TELEGRAM_USER,
+            f"telegram-user:{candidate_id}:{file_unique_id or message_id}",
             json.dumps(details, separators=(",", ":")),
         )
 
@@ -798,6 +846,9 @@ class DownloadService:
                 default_error="TELEGRAPH_PAGE_UNREACHABLE",
             )
             return
+        if job["provider"] == PROVIDER_TELEGRAM_USER:
+            await self._run_telegram_user_job(job)
+            return
         if job["provider"] != PROVIDER_TELEGRAM:
             await asyncio.to_thread(
                 self._mark_job_failed_sync,
@@ -847,6 +898,68 @@ class DownloadService:
                 exc.code,
                 exc.public_message,
             )
+
+    async def _run_telegram_user_job(self, job: dict) -> None:
+        """Fetch an attachment with the operator's own Telegram account.
+
+        The same shape as the bot branch -- resolve, download, record, complete --
+        differing only in what does the fetching and in the ceiling it is subject
+        to. It is kept as its own method rather than folded into the bot branch
+        because the two share no error vocabulary: a bot failure is about a token
+        and a 20 MB limit, a user failure is about a session and a message that
+        may have been deleted.
+        """
+        try:
+            details = json.loads(job["details_json"])
+            chat_id = int(details["chat_id"])
+            message_id = int(details["message_id"])
+            file_name = str(
+                details.get("file_name") or f"message-{message_id}.bin"
+            )
+        except (KeyError, TypeError, ValueError):
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                "ATTACHMENT_INVALID",
+                "任务缺少源消息位置，无法用用户账户下载",
+            )
+            return
+        client = None
+        if self._telegram_user_client is not None:
+            client = await self._telegram_user_client()
+        if client is None:
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                "TELEGRAM_USER_NOT_CONFIG",
+                "尚未登录 Telegram 用户账户，无法下载大文件",
+            )
+            return
+        work_path = await self._effective_work_path()
+        destination = (
+            work_path / "downloads" / f"job-{job['job_id']}-{Path(file_name).name}"
+        )
+        try:
+            size = await client.download_message_media(
+                chat_id, message_id, destination
+            )
+        except ProviderConnectionError as exc:
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job["job_id"],
+                exc.code,
+                exc.public_message,
+            )
+            return
+        await asyncio.to_thread(
+            self._record_artifact_sync,
+            job["job_id"],
+            destination,
+            size,
+            str(details.get("file_unique_id") or f"{chat_id}:{message_id}"),
+        )
+        await asyncio.to_thread(self._mark_job_completed_sync, job["job_id"])
+        await self._maybe_auto_pack(job["candidate_id"])
 
     async def _push_torrent_job(self, job: dict) -> None:
         """Hand the torrent to the client and park the job on peers.

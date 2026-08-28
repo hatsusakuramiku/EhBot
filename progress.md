@@ -1909,3 +1909,56 @@ These are business rules, not preferences. Several have tests locking them:
 - A destructive or GP-spending action takes two steps; a cheap one takes one. Adding a confirmation to every button is how the gate stops being read.
 - **This project's scope ends at the archive.** Download -> convert to the target archive format, plus a few operator-convenience management items. Detailed book/library management belongs to downstream tools; do not reintroduce it.
 - **One navigation source, one current-page marker, one state vocabulary, one authoritative stylesheet.** R3 established these; each is one careless template away from being two again.
+
+
+## Feature Session: Telegram User Account For Large Files (2026-08-28)
+
+### Scope
+Bot API 的 20 MB `getFile` 上限挡住了上传者原档。上限在**协议**里，换 Token、加代理、重试都无效，但同一个文件用普通用户账户走 MTProto 就没有这个限制。本次新增一条 MTProto 通道：Bot 仍然是收消息的那一端，用户账户只负责把超限附件取回来。
+
+`EHBot.md` §6.2 原有一条「不引入 MTProto/Telethon」，已按操作者要求删除，并在 §6.1 写明撤销原因——当时的替代方案是转种子或预览页，前者依赖有人做种，后者只有 1280px 重编码，都不等价于原档。留着那条会让规格和代码互相矛盾。
+
+### Implementation
+- `app/connections/telegram_user.py`（新增，430 行）——`TelegramUserCredentials`（api_id/api_hash 校验）、`TelegramUserClient`（发码 / 登录 / 校验 / 按消息下载）、`LoginChallenge`、`TelegramUserError`。
+- `app/connections/manager.py` —— 三步登录（`start_telegram_user_login` / `complete_telegram_user_login` / `disconnect_telegram_user`）、启动时复验会话、`user_download_available()`、`telegram_user_context()`。凭据名 `telegram_user_api` / `telegram_user_session`。
+- `PROVIDER_TELEGRAM_USER` 进 `SUPPORTED_PROVIDERS`；`app/downloads/service.py` 加 `enqueue_telegram_user_download` 与 `_run_telegram_user_job`。
+- `route_source` 在 `TELEGRAM` 之后、`EH_TORRENT` 之前插入新位次。
+- `/connections/telegram-user/{login,verify,disconnect}` 三个页面路由；`settings/_connections.html` 加第三块面板。
+- `/candidates/{id}/telegram-user` 手动取原档；`/works/{id}` 来源栏加「Telegram 大文件」。
+- `app/candidates/ingestor.py` 在压缩附件上记录 `chat_id` / `message_id`。
+
+### Decisions And Their Reasoning
+1. **按 `(chat_id, message_id)` 下载，不是按 `file_id`。** MTProto 的文件引用是按账户的，Bot 铸出的 `file_id` 在用户账户下根本解析不了。重读消息还顺带让「上传者删帖」变成 `TELEGRAM_USER_MESSAGE_GONE` 这个说得清的永久失败，而不是一个费解的下载错误。
+2. **旧候选从 `source_messages` 回查坐标。** 内联字段是这次才加的，而升级前入库的超限本子恰好就是操作员最想重取的那批。`locate_candidate_message` 在**入队时**解析，所以一个永远跑不起来的任务在操作员眼前被拒绝，而不是几小时后死在 worker 里。
+3. **独立 provider，不是 `TELEGRAM` 上的一个开关。** 两者在队列行要展示的每一点上都不同：凭据、20 MB 天花板、失败词表、失败后操作员能做什么。一个带隐藏模式的 provider 会在「用户会话过期」时报「Telegram 原档」。
+4. **小文件仍归 Bot。** 登录用户账户不接管 20 MB 以内的附件——Bot 本来就在收消息，不需要第二份凭据参与。
+5. **超限时用户账户优先于种子。** 那是上传者发的同一个文件，不用等做种者、不消耗 GP、不会因无人做种而停滞。
+6. **客户端按次开合，不常驻。** 一次下载最多几分钟，而挂一整夜的空闲会话是 Telegram 可能在下一个任务前悄悄掐掉的会话。按次重连既更简单，也是「存下来的会话能扛住重启」的原因。
+7. **会话串按完整账户凭据对待。** 只存 `data/private/`，页面和 JSON 都不回显，日志不记录；一个测试断言会话串与 api_hash 都不出现在页面和 `/api/connections/status` 里。
+8. **api 对与会话分开存。** 生命周期不同：会话可以在 Telegram 的设备列表里被注销而 api 对仍然有效，让操作员为此重敲 api 对是白干活。
+9. **登录挑战只在内存里。** 验证码几分钟就过期，一个活过进程重启的挑战是操作员根本完不成的挑战，持久化它只会让界面提供一个死表单。
+10. **两步验证是停靠而不是重来。** `SessionPasswordNeededError` 不是操作员的错误，所以登录停在 `awaiting_password` 并保留挑战，下一次只提交密码，验证码不用重新获取。
+11. **`awaiting_code` / `awaiting_password` 是词表，进 `status.py` 与 `/ui-kit`。** 一个连接只有四态，而一次登录是多步交换；界面必须能把「等验证码」和「尚未配置」区分开。两者都是 `waiting` 且都不 `live`——下一步在操作员手里，轮询它只是白花请求。
+12. **`FloodWaitError` 映射到 `retry_after`。** 队列已有的退避逻辑读这个字段，于是被限流的账户是被等过去而不是被继续锤。
+13. **会话类错误不进 `PERMANENT_DOWNLOAD_ERRORS`，删帖与无权限进。** 重新登录能让前者可用，重试按钮就是操作员恢复任务的方式；后两者重试只会以同样方式失败。
+
+### Error Log
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| `NameError: TELEGRAM_USER_API_SECRET` | 补丁的锚点注释文字与文件里的不完全一致，常量块没插进去，`assert old in src` 只保护了被替换的部分 | 改用 `_POLL_BACKOFF_SECONDS` 这一行做锚点，并断言常量尚不存在 |
+| 一个「消息已删除」测试没有抛错 | 替身用 `message=None` 表示「调用方没传」，而这个测试要表达的正是「消息不存在」 | 引入 `_UNSET` 哨兵，让 `None` 只表示后者 |
+| CSRF 测试拿到 422 而不是 403 | 只提交了 `csrf_token`，缺字段先被 FastAPI 拒了 | 每条路由都补齐它声明的字段，于是 403 只可能来自 token |
+| `/api/connections/status` 的 `state` 是裸字面量 | 该端点早于序列化器，返回的是原始 dataclass | 端点断言字面量，页面断言 `status.py` 解析出的 `label`，各按各自形状 |
+| `/ui-kit` 与 `work_detail` 三处断言失败 | 新 provider 与两个新连接态没登记进 `/ui-kit` 清单和两处期望集合 | 补齐清单与期望——这三处正是「新增词表必须现身」的门禁在起作用 |
+
+### Verification
+✅ **866 passed / 0 failed**（新增 34 个：`tests/unit/test_telegram_user.py` 20、`tests/integration/test_telegram_user_web.py` 10、路由策略 4）。集成测试跑完整链路：登录 → 入队 → worker 用替身取回 → 校验产物字节与 `size_bytes`。
+
+**基线变更（读这一段再对数）**：先前基线是 820 passed / **12 skipped**，那 12 个是 `test_seven_zip_real.py` 需要真实 7-Zip。本机 `data/tools/7zip/26.02/` 现在有了真实工具链，于是它们**跑起来并通过**——与本次改动无关的环境变化。新基线：**866 passed / 0 skipped**（832 → 866）。
+
+### Not Verified Here
+从未接触真实 Telegram：Telethon 被替身完全顶替。**需要一次真机验证**——真 api_id/api_hash、真手机号、一个 >20 MB 的频道附件走通全程。这是本功能唯一没有测试覆盖的部分，也是唯一能证明 Telethon 调用签名与错误类名与真实服务一致的方式。
+
+### Open Items For The Next Agent
+- 用户账户没有做上传者删帖之外的进度上报：`download_media` 的 `progress_callback` 已接上但没写进 `details_json`，所以大文件在队列里只显示「进行中」而没有百分比。种子有百分比，这里是不一致的。
+- MTProto 也可以摄取消息（不只是下载），那会让 Bot 完全可选。刻意没做：Bot 的长轮询、`getUpdates` 去重与整条摄取链路都已在生产用了几个月。
