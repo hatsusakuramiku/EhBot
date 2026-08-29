@@ -9,3 +9,7 @@ library
 work
 secrets
 tests
+AgentHelp
+docs
+*.md
+!README.md

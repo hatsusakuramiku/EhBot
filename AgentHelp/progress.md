@@ -2202,3 +2202,55 @@ shelves, import scan. A work's detail page is still only `/works/{id}`.
   在两个平台上行为一致，代价是 Linux 上会拒掉一些其实能用的长路径。
 - 前两轮遗留的两项仍未处理：重新下载+重新打包的顺序由 worker 决定；
   `app/db/database.py` 里 `filter_result`/`filter_reason` 为 NULL 时显示字面 `None`。
+
+---
+
+## Docs Reorg (2026-08-29, after v0.2.2)
+
+Operator instruction: move the agent-facing documents out of the repository root
+into `AgentHelp/`, and rewrite `README.md` as a short statement of what the
+project is for and how to deploy it, recommending Docker and calling out Windows
+in particular.
+
+### What moved
+All eleven agent documents are now in `AgentHelp/`, moved with `git mv` so the
+history follows: `AGENTS.md`, `EHBot.md`, `DEVELOPMENT_PLAN.md`, `progress.md`,
+`findings.md`, `task_plan.md`, `COMPETITIVE_ANALYSIS.md` and the four
+`*_PROPOSAL.md` files. They reference each other by bare filename, so moving them
+as one set left every cross-reference valid and none needed rewriting.
+
+### Decisions
+- **A pointer stub stays at the root `AGENTS.md`.** The agent convention reads
+  that path, and an `AgentHelp/AGENTS.md` whose rules nothing loads is worse than
+  no reorganisation at all. The stub carries no rules of its own -- only the
+  redirect and an index of what each document is -- because two files that both
+  claim to hold the environment constraints will drift, and the one that drifts
+  is the one nobody reads while editing.
+- **`README.md`'s 25 KB of feature detail moved to `docs/USAGE.md` rather than
+  being deleted.** It documents real behaviour an operator needs (source
+  routing, the user-account login flow, qBittorrent wiring, every environment
+  variable); a README that "briefly explains purpose and deployment" is a
+  different document, not a shorter version of that one. `docs/` rather than
+  `AgentHelp/` because it is operator-facing.
+- **The new README leads with a copy-pasteable `compose.yaml` using the published
+  image**, not with `git clone`. The deployment host needs neither the source
+  tree nor a toolchain, and the previous README opened with `uv sync` --
+  which on Windows leads to the one configuration that cannot pack RAR or 7z.
+- **Windows gets its own subsection saying to use Docker and why.** The hosted
+  7-Zip install is an official Linux static build, so a Windows host silently
+  lacks RAR/7z extraction -- previously a single line buried in the archive
+  section. It also says to keep the bind mounts inside the WSL filesystem: a
+  SQLite database in WAL mode over `/mnt/c` is the kind of thing that works until
+  it does not.
+- **`.dockerignore` now excludes `AgentHelp`, `docs` and `*.md` except
+  `README.md`.** The Dockerfile `COPY`s `README.md` (uv needs it to resolve the
+  project), so a blanket `*.md` would break the build -- verified by building the
+  image after the change.
+- While rewriting, `docs/USAGE.md`'s rename bullet was corrected to describe R11
+  behaviour: it still claimed illegal characters were silently cleaned, which is
+  now true only inside a packaging job and not for an operator-typed path.
+
+### Verification
+Full suite re-run after the move: **985 passed / 0 failed / 0 skipped** -- no
+test or module referenced a moved path. `docker build` succeeds with the new
+`.dockerignore`.
