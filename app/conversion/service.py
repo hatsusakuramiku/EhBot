@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
@@ -427,6 +428,16 @@ class ConversionService:
         job = await asyncio.to_thread(self._claim_pending_job_sync)
         if job is None:
             return False
+        # Paired claimed / finished records, at the same single point
+        # `_announce` uses. `provider` is not logged: this queue only ever holds
+        # `PROVIDER_CONVERSION`, and a constant field would be noise.
+        logger = logging.getLogger(__name__)
+        job_context = {
+            "job_id": job["job_id"],
+            "candidate_id": job["candidate_id"],
+        }
+        logger.info("conversion_job_claimed", extra=job_context)
+        started = time.monotonic()
         try:
             await self._handle_job(job)
         except asyncio.CancelledError:
@@ -434,6 +445,22 @@ class ConversionService:
         except Exception as exc:  # noqa: BLE001
             await asyncio.to_thread(
                 self._mark_failed_sync, job["job_id"], "WORKER_EXCEPTION", str(exc)
+            )
+            logger.exception(
+                "conversion_job_exception",
+                extra={
+                    **job_context,
+                    "error_code": "WORKER_EXCEPTION",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
+        else:
+            logger.info(
+                "conversion_job_finished",
+                extra={
+                    **job_context,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
             )
         # Announced once here rather than at each of the five terminal writes
         # inside `_handle_job`. Every exit -- packed, failed, waiting for a

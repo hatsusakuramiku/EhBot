@@ -80,12 +80,12 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 985 passed / 0 failed.** Ending below this is a
+**Baseline: 1018 passed / 0 failed.** Ending below this is a
 regression. The twelve `test_seven_zip_real.py` skips are gone because this
 machine now has a real toolchain in `data/tools/7zip/`; on a host without one
 they skip again and the count is 927 passed / 12 skipped. (Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820 -> Telegram user account 866 -> R10 939 -> R11 985. There is no R7 — that number was
+R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018. There is no R7 — that number was
 the library domain, deleted on 2026-08-26; its narrow replacement is R10. An older
 note claiming "0 skipped" was wrong.)
 
@@ -574,3 +574,36 @@ Several are locked by tests. Do not "simplify" them:
   cannot take the action under `skipped`, with its reason, and runs the rest.
 - A packaging job is not a download job: `PROVIDER_CONVERSION` stays out of
   `SUPPORTED_PROVIDERS`, and the two queues stay separate in view and API.
+
+
+**Logging invariants (added by R12):**
+
+- **Credentials never appear on any output path.** `redact_sensitive_values`
+  runs over the message, the exception text and the stack, because a URL
+  carrying a token is as likely to surface in a traceback as in a message.
+  Uvicorn's access logger must be collected into the same pipeline
+  (handlers cleared, `propagate = True`); otherwise redaction is silently
+  bypassed on the access log path.
+- **`logging.exception(...)` is the only form allowed for unexpected errors.**
+  An error without a traceback is a real-world debugging dead end -- every
+  defensive worker loop in `app/` uses it for that reason. Do not "simplify"
+  any of the four call sites to `.error("...")`.
+- **Retention is a preference, not a precondition.** A read-only `data/`
+  must not prevent startup; the file handler is dropped with a
+  `LOG_FILE_UNAVAILABLE` warning and the service continues with stdout only.
+- **Log level is deployment-level, not per-request.** It lives in the
+  environment (`LOG_LEVEL`), not in `system_settings` -- a deployment whose
+  log level lives in the database cannot raise it to debug the startup that
+  failed before the database opened.
+- **`configure_logging()` is idempotent.** A test session that builds
+  several applications must not reset the root handlers on every call;
+  the explicit setup from `app.server.main` runs once with `force=True`.
+- **`request_id_var` is a `contextvars.ContextVar`.** Every existing
+  `logging.getLogger(__name__)` site inside a request picks the id up
+  without being edited; tasks spawned with `asyncio.create_task` inherit
+  the context so an enqueued job keeps the id of the request that
+  enqueued it.
+- **An inbound `X-Request-ID` is honoured only when proxy headers are
+  trusted.** For the same reason `X-Forwarded-For` is: a value a client can
+  set is a value a client can use to forge or collide. Untrusted input is
+  replaced rather than rejected.

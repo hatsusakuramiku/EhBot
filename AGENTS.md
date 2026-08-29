@@ -17,7 +17,7 @@ there is one copy of it.
 | `AgentHelp/COMPETITIVE_ANALYSIS.md` | Research behind the UI refactor |
 | `AgentHelp/task_plan.md` | Phase ledger |
 | `AgentHelp/findings.md` | External research notes |
-| `AgentHelp/*_PROPOSAL.md` | Per-feature design records |
+| `AgentHelp/*_PROPOSAL.md` | Per-feature design records (`LOGGING_PROPOSAL.md` is open, not yet implemented) |
 
 Operator-facing documentation is `README.md`: what the service does, how to
 deploy it with Docker, and how to configure it.

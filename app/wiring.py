@@ -536,7 +536,11 @@ def build_lifespan(
                 await application.state.torrent_service.start()
         except (OSError, ValueError, sqlite3.Error) as exc:
             application.state.startup_errors.append(str(exc))
-            logging.getLogger(__name__).error(
+            # `exception` rather than `error`: the message on `app.state`
+            # reaches the dashboard, but only the traceback says which of the
+            # dozen startup steps raised, and this handler catches three
+            # different exception families.
+            logging.getLogger(__name__).exception(
                 "application_startup_failed", extra={"error_code": "STARTUP_FAILED"}
             )
         try:

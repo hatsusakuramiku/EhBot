@@ -748,6 +748,21 @@ class DownloadService:
         job = await asyncio.to_thread(self._claim_pending_job_sync)
         if job is None:
             return False
+        # One claimed / one finished record per job, logged here because this is
+        # the single point every delivery passes through -- the same reason
+        # `_announce` lives here. Without the pair, 「why is this book not
+        # downloaded」 had to be answered from the queue's current state alone,
+        # which says nothing about how long the attempt took or how many there
+        # have been.
+        logger = logging.getLogger(__name__)
+        job_context = {
+            "job_id": job["job_id"],
+            "candidate_id": job["candidate_id"],
+            "provider": job["provider"],
+            "attempt": job.get("attempt_count"),
+        }
+        logger.info("download_job_claimed", extra=job_context)
+        started = time.monotonic()
         try:
             await self._handle_job(job)
         except asyncio.CancelledError:
@@ -758,6 +773,25 @@ class DownloadService:
                 job["job_id"],
                 "DOWNLOAD_WORKER_EXCEPTION",
                 str(exc),
+            )
+            # `exception` rather than `error`: this is the branch that means a
+            # provider raised something nobody mapped to an error code, so the
+            # traceback is the only thing that identifies it.
+            logger.exception(
+                "download_job_exception",
+                extra={
+                    **job_context,
+                    "error_code": "DOWNLOAD_WORKER_EXCEPTION",
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
+        else:
+            logger.info(
+                "download_job_finished",
+                extra={
+                    **job_context,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
             )
         # Announced here rather than at each of the dozen places that write a
         # terminal state: every delivery leaves the worker through this point,

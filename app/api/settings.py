@@ -22,6 +22,7 @@ operator who has not configured seeding still needs to reach the archive tab.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Coroutine
 
 from fastapi import APIRouter, Request
@@ -29,6 +30,7 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError
 from app.api.serializers import (
+    log_entry_payload,
     archive_password,
     auto_approval_rule,
     connection_snapshot,
@@ -37,6 +39,7 @@ from app.api.serializers import (
     tool_profile,
 )
 from app.api.status import (
+    LOG_LEVELS,
     SETTINGS_ARCHIVE,
     SETTINGS_AUTO_APPROVAL,
     SETTINGS_CONNECTIONS,
@@ -45,6 +48,7 @@ from app.api.status import (
     SETTINGS_SECTIONS,
     SETTINGS_SOURCES,
     SETTINGS_SYSTEM,
+    log_level_view,
     dependency_view,
     settings_section_view,
 )
@@ -64,6 +68,7 @@ from app.conversion.naming import (
     PLACEHOLDER_LABELS,
     TEMPLATE_PLACEHOLDERS,
 )
+from app.logs.reader import MAX_LIMIT, clamp_limit, read_log_tail
 from app.review.models import field_label
 from app.settings.service import (
     MAX_POLL_INTERVAL_MS,
@@ -244,7 +249,77 @@ async def _system_section(request: Request) -> dict[str, Any]:
                 "maximum": MAX_SOURCE_CONCURRENCY,
             },
         },
+        **await _log_view(request),
     }
+
+
+async def _log_view(request: Request) -> dict[str, Any]:
+    """The log tail for the 系统 tab, read off disk on demand.
+
+    Read here rather than in the page route so the JSON endpoint and the render
+    cannot show different logs -- the same rule every other section follows. The
+    file read is pushed to a thread because this is an async handler and the tail
+    of a rotating file is real disk I/O.
+    """
+    settings = request.app.state.settings
+    level = (request.query_params.get("log_level") or "").strip().upper() or None
+    if level is not None and level not in LOG_LEVELS:
+        # An unknown level is dropped rather than refused: unlike a settings
+        # section this arrives from a filter link, and showing everything is a
+        # safe answer where a 404 on the whole tab is not.
+        level = None
+    limit = clamp_limit(request.query_params.get("log_limit"))
+    entries, present = await asyncio.to_thread(
+        read_log_tail, settings.log_dir, limit=limit, level=level
+    )
+    return {
+        "logs": {
+            "entries": [log_entry_payload(entry) for entry in entries],
+            "file_present": present,
+            "enabled": settings.log_to_file,
+            "level": level,
+            "levels": [log_level_view(name).to_payload() for name in LOG_LEVELS],
+            "filters": _log_filters(request, level),
+            "limit": limit,
+            "max_limit": MAX_LIMIT,
+            "configured_level": settings.log_level,
+            "access_log": settings.log_access,
+        }
+    }
+
+
+def _log_filters(request: Request, active: str | None) -> list[dict[str, Any]]:
+    """The level filter as links, merged into the current URL.
+
+    Built here rather than in the template because the page and the JSON body
+    read one builder, and because merging a parameter is the thing a template
+    doing it by hand gets wrong -- the first one to forget `log_limit` silently
+    resets the line count.
+    """
+    choices: list[dict[str, Any]] = [
+        {
+            "code": "",
+            "label": "全部",
+            "selected": active is None,
+            "href": _log_href(request, ""),
+        }
+    ]
+    for name in LOG_LEVELS:
+        view = log_level_view(name)
+        choices.append(
+            {
+                "code": view.code,
+                "label": view.label,
+                "selected": active == view.code,
+                "href": _log_href(request, view.code),
+            }
+        )
+    return choices
+
+
+def _log_href(request: Request, level: str) -> str:
+    url = request.url.include_query_params(log_level=level)
+    return f"{url.path}?{url.query}" if url.query else url.path
 
 
 _SECTION_BUILDERS: dict[

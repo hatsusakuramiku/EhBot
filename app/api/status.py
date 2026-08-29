@@ -572,6 +572,52 @@ def settings_section_view(section: str | None) -> StatusView:
     return SETTINGS_SECTION_STATUS[section or ""]
 
 
+#: Log severities, for the read-only viewer under 「设置 → 系统」. A level is
+#: state vocabulary like any other: the page must not pair `ERROR` with the word
+#: for a warning, and a JSON payload must not disagree with the page. Only the
+#: five stdlib levels are named; anything else a library emits resolves to
+#: `LOG_OTHER` rather than raising, because this describes text already written
+#: to a file and a log line must always be displayable.
+LOG_LEVEL_DEBUG = "DEBUG"
+LOG_LEVEL_INFO = "INFO"
+LOG_LEVEL_WARNING = "WARNING"
+LOG_LEVEL_ERROR = "ERROR"
+LOG_LEVEL_CRITICAL = "CRITICAL"
+LOG_LEVEL_OTHER = "LOG_OTHER"
+
+LOG_LEVEL_STATUS: dict[str, StatusView] = {
+    LOG_LEVEL_DEBUG: _view(LOG_LEVEL_DEBUG, "调试", TONE_MUTED),
+    LOG_LEVEL_INFO: _view(LOG_LEVEL_INFO, "信息", TONE_NEUTRAL),
+    LOG_LEVEL_WARNING: _view(LOG_LEVEL_WARNING, "警告", TONE_WAITING),
+    LOG_LEVEL_ERROR: _view(LOG_LEVEL_ERROR, "错误", TONE_DANGER),
+    LOG_LEVEL_CRITICAL: _view(LOG_LEVEL_CRITICAL, "严重", TONE_DANGER),
+    LOG_LEVEL_OTHER: _view(LOG_LEVEL_OTHER, "其他", TONE_MUTED),
+}
+
+#: Order for the level filter, coarsest-first so the default view is the one an
+#: operator wants: everything, then progressively only what is wrong.
+LOG_LEVELS: tuple[str, ...] = (
+    LOG_LEVEL_DEBUG,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARNING,
+    LOG_LEVEL_ERROR,
+    LOG_LEVEL_CRITICAL,
+)
+
+
+def log_level_view(level: str | None) -> StatusView:
+    """Resolve a log severity, falling back rather than raising.
+
+    A log file can contain a level this application never emits -- a dependency
+    with its own custom level, or a line from an older version. Refusing to
+    render it would make the viewer fail precisely when something unusual
+    happened, which is when it is needed.
+    """
+    return LOG_LEVEL_STATUS.get(
+        (level or "").strip().upper(), LOG_LEVEL_STATUS[LOG_LEVEL_OTHER]
+    )
+
+
 def toggle_view(enabled: bool | int | None) -> StatusView:
     """Resolve whether a stored row is switched on.
 

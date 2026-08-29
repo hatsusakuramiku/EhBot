@@ -18,6 +18,14 @@
   `zoneinfo` has no tz database on every host this runs on, so the zone is
   validated by shape rather than against a list. The datalist below is a
   convenience for the common cases, not the set of legal values.
+
+  The log panel at the bottom is read-only and deliberately so: it exists
+  because this is a single-operator service with a web interface, and needing
+  to reach the host to run `docker compose logs` for one traceback is a gap in
+  that shape. It offers no way to clear, download or configure anything -- the
+  level and retention are deployment settings in the environment, and a button
+  that deleted evidence would be the opposite of the point. Levels come from
+  `log_level_view`, so no Chinese severity name is written here.
 #}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
@@ -109,3 +117,70 @@
     </section>
   </div>
 </div>
+
+<section class="ui-panel" style="margin-top: var(--s-4)">
+  <h2 class="ui-section-title">运行日志</h2>
+  {% if not logs.enabled %}
+    <p class="ui-hint">
+      文件日志已关闭（<code>LOG_TO_FILE=false</code>）。
+      日志仍会输出到容器 stdout，可用 <code>docker compose logs</code> 查看。
+    </p>
+  {% elif not logs.file_present %}
+    <p class="ui-hint">
+      尚未生成日志文件。服务写入第一条记录后这里就会有内容；
+      若数据目录不可写，日志会降级为仅 stdout。
+    </p>
+  {% else %}
+    <p class="ui-hint">
+      只读，最新在前，最多 {{ logs.limit }} 条。
+      当前级别 <code>{{ logs.configured_level }}</code>，
+      访问日志{% if logs.access_log %}已开启{% else %}已关闭{% endif %}。
+      级别与保留在环境变量里设定（<code>LOG_LEVEL</code>、<code>LOG_FILE_MAX_BYTES</code>）。
+    </p>
+    {#- Not `ui.tabs`: that macro sets `aria-current="page"`, and a level filter
+        is not a different page -- claiming so would put two destinations on the
+        settings page and a screen reader would announce both. The hrefs are
+        built server-side in `settings_snapshot` so the page and the JSON
+        endpoint agree, and so no template re-lists the other parameters. -#}
+    <nav class="ui-log-levels" aria-label="日志级别">
+      {% for choice in logs.filters %}
+        <a class="ui-log-level" href="{{ choice.href }}"
+           aria-pressed="{{ 'true' if choice.selected else 'false' }}">{{ choice.label }}</a>
+      {% endfor %}
+    </nav>
+    {% if not logs.entries %}
+      {{ ui.empty_state("没有匹配的日志", "当前筛选下没有记录。换一个级别，或看「全部」。") }}
+    {% else %}
+      <ol class="ui-log-list">
+        {% for entry in logs.entries %}
+          <li class="ui-log-row">
+            <div class="ui-log-head">
+              {{ ui.badge(entry.level) }}
+              {% if entry.timestamp %}
+                <time datetime="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
+              {% endif %}
+              {% if entry.logger %}<code class="ui-log-logger">{{ entry.logger }}</code>{% endif %}
+            </div>
+            <p class="ui-log-event">{{ entry.raw if entry.raw else entry.event }}</p>
+            {% if entry.error_code or entry.job_id or entry.candidate_id or entry.request_id %}
+              <p class="ui-log-meta">
+                {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
+                {% if entry.job_id %}<span>任务 #{{ entry.job_id }}</span>{% endif %}
+                {% if entry.candidate_id %}
+                  <a href="{{ url_for('work_detail', work_id=entry.candidate_id) }}">作品 #{{ entry.candidate_id }}</a>
+                {% endif %}
+                {% if entry.request_id %}<code>{{ entry.request_id }}</code>{% endif %}
+              </p>
+            {% endif %}
+            {% if entry.exception %}
+              <details class="ui-log-trace">
+                <summary>堆栈</summary>
+                <pre>{{ entry.exception }}</pre>
+              </details>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+  {% endif %}
+</section>

@@ -25,6 +25,7 @@ from app.errors import AppError, app_error_handler
 from app.logging import configure_logging
 from app.session_secret import resolve_session_secret
 from app.web.rendering import STATIC_DIR, build_templates
+from app.web.request_id import RequestIdMiddleware
 from app.web.routes.activity import router as activity_router
 from app.web.routes.auth import router as auth_router
 from app.web.routes.auto_approval import router as auto_approval_router
@@ -53,8 +54,14 @@ def create_app(
     thumbnail_transport: httpx.AsyncBaseTransport | None = None,
     thumbnail_resolver=None,
 ) -> FastAPI:
-    configure_logging()
     app_settings = settings or Settings.from_env()
+    # Idempotent, so an application built in a test suite does not reconfigure
+    # the process's logging; `app.server` is what configures it for real, with
+    # file retention. Called here as well so that an application built directly
+    # -- by a test, or by `uvicorn app.main:app` -- still emits JSON.
+    configure_logging(
+        level=app_settings.log_level, access_log=app_settings.log_access
+    )
     database = Database(app_settings.data_path / "ehbot.db")
     password_hasher = PasswordHash.recommended()
     # Generated and persisted on first start when not configured, so a fresh
@@ -97,6 +104,13 @@ def create_app(
         secret_key=session_secret.key,
         https_only=app_settings.session_cookie_secure,
         same_site="lax",
+    )
+    # Added last so it wraps outermost: Starlette applies middleware in reverse
+    # order of registration, and the id has to be set before anything else can
+    # log. That includes the session middleware, whose failures are worth
+    # correlating too.
+    app.add_middleware(
+        RequestIdMiddleware, trust_inbound=app_settings.trust_proxy_headers
     )
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

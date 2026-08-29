@@ -63,6 +63,15 @@ class Settings:
     torrent_category: str = "ehbot"
     torrent_keep_seeding: bool = True
     thumbnails_enabled: bool = True
+    # Logging is a deployment-level concern, so it stays in the environment
+    # rather than joining the three preferences in `system_settings`: a
+    # deployment whose log level lives in the database cannot raise it to
+    # debug the startup that failed before the database opened.
+    log_level: str = "INFO"
+    log_access: bool = True
+    log_to_file: bool = True
+    log_file_max_bytes: int = 10 * 1024 * 1024
+    log_file_backups: int = 5
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -107,7 +116,24 @@ class Settings:
             ),
             torrent_keep_seeding=_read_bool("TORRENT_KEEP_SEEDING", True),
             thumbnails_enabled=_read_bool("THUMBNAILS_ENABLED", True),
+            log_level=(os.getenv("LOG_LEVEL", "").strip() or "INFO"),
+            log_access=_read_bool("LOG_ACCESS", True),
+            log_to_file=_read_bool("LOG_TO_FILE", True),
+            log_file_max_bytes=_read_int(
+                "LOG_FILE_MAX_BYTES", 10 * 1024 * 1024
+            ),
+            log_file_backups=_read_int("LOG_FILE_BACKUPS", 5),
         )
+
+    @property
+    def log_dir(self) -> Path:
+        """Where the rotating log file goes.
+
+        Under `data/` because that directory is already a bind mount the
+        documentation tells operators to keep, so retention survives a
+        container rebuild without asking them to mount anything new.
+        """
+        return self.data_path / "logs"
 
     def readiness_errors(self) -> list[str]:
         """Report only what an operator must fix; the session key is not one.

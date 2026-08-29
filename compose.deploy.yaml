@@ -49,6 +49,9 @@ services:
       TORRENT_CATEGORY: "ehbot"
       TORRENT_KEEP_SEEDING: "true"
       TZ: "Asia/Shanghai"
+      LOG_LEVEL: "INFO"
+      LOG_ACCESS: "true"
+      LOG_TO_FILE: "true"
     volumes:
       # Finished qBittorrent payloads are read from here. Enter this same host
       # path as the qBittorrent local save path on the archive settings page,
@@ -59,6 +62,13 @@ services:
       # Database, session key, encrypted password vault and the 7-Zip install.
       # Losing this directory means re-entering every credential, so keep it.
       - ./data:/app/data
+    # The default json-file driver retains everything, so an unattended
+    # deployment eventually fills its disk with access log lines.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
       interval: 30s

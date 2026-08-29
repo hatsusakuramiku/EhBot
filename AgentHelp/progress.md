@@ -2254,3 +2254,114 @@ as one set left every cross-reference valid and none needed rewriting.
 Full suite re-run after the move: **985 passed / 0 failed / 0 skipped** -- no
 test or module referenced a moved path. `docker build` succeeds with the new
 `.dockerignore`.
+
+---
+
+## R12 — Logging Pipeline (v0.2.3, 2026-08-29)
+
+Per the L1 plan in `AgentHelp/LOGGING_PROPOSAL.md`. The pipeline existed and
+emitted structured JSON before, but three things were broken in a way that
+mattered: exception tracebacks were silently dropped, the access log bypassed
+redaction because uvicorn ships with its own handlers and `propagate = False`,
+and there was no retention of any kind — only stdout, with the default
+unbounded Docker `json-file` driver filling the disk on long-running
+deployments.
+
+### What changed
+
+- **`app/logging.py`**: `JsonFormatter` now reads `record.exc_info` and
+  `record.stack_info`, runs both through `redact_sensitive_values`, and emits
+  them as `exception` / `stack` fields. Payload gained `logger` and
+  `source` (module:lineno); context fields extended from five to ten
+  (`request_id`, `work_id`, `provider`, `status`, `attempt` joined the
+  original `candidate_id` / `job_id` / `source_type` / `duration_ms` /
+  `error_code`).
+- **`configure_logging()`** is now idempotent (a `_CONFIGURED` flag, plus a
+  `force` escape hatch) and takes over uvicorn's three loggers explicitly
+  (`uvicorn`, `uvicorn.error`, `uvicorn.access`): their handlers are
+  cleared and `propagate` is set to True, so every output path goes
+  through `JsonFormatter` and therefore through redaction. `LOG_ACCESS=false`
+  attaches a `DropAllFilter` to `uvicorn.access`.
+- **`RotatingFileHandler`** writes `<data>/logs/ehbot.log` (max bytes and
+  backups from settings). When the directory cannot be created, the file
+  handler is dropped, a `LOG_FILE_UNAVAILABLE` warning is logged to stdout,
+  and startup continues — retention is a preference, not a precondition.
+- **`app/server.py:main()`** calls `configure_logging(...)` before
+  `uvicorn.run(...)` and passes `log_config=None` so uvicorn does not
+  re-attach its plain-text handlers. `app/main.py:create_app()` keeps a
+  fallback call so `uvicorn app.main:app --reload` still emits JSON.
+- **Request id middleware** (`app/web/request_id.py`): generates a 12-char
+  hex id per request (or honours a trusted `X-Request-ID`), publishes it on
+  a `contextvars.ContextVar`, and stamps every record that does not already
+  carry one through a `RequestIdFilter` on the root logger. Tasks spawned
+  with `asyncio.create_task` inherit the context, so a job enqueued by a
+  request keeps its id.
+- **`Settings`**: `LOG_LEVEL`, `LOG_ACCESS`, `LOG_TO_FILE`,
+  `LOG_FILE_MAX_BYTES`, `LOG_FILE_BACKUPS`. Wired through `Settings.from_env`
+  with the same tolerant parsing as the existing deployment-level
+  environment variables (unknown level falls back to `INFO`, not a startup
+  failure).
+- **Compose files**: both `compose.yaml` and `compose.deploy.yaml` gain a
+  `logging:` block (`json-file`, 10 MB × 3). Independent of the in-container
+  rotation — each caps one of the two ways the disk fills up.
+
+### Decisions
+
+- **Why the existing `JsonFormatter` was kept, not replaced.** It already
+  got three things right (single-line output, JSON payload, redaction) and
+  already had a test guarding each. The proposal's L1 set out to fix gaps,
+  not rewrite. A `loguru`-style swap would have invalidated 60+ stdlib call
+  sites and the existing redaction tests for no clear gain at this scale.
+- **`DropAllFilter` rather than detaching the access handler.** Uvicorn's
+  own `access_log=False` setting sets `handlers = []` *and*
+  `propagate = False`, and the second half quietly undoes the formatter
+  collection. Keeping the handler attached and dropping records at the
+  filter keeps the rest of the pipeline intact.
+- **`request_id_var` is a `contextvars.ContextVar`, not a thread-local.**
+  The point is to reach log calls that never took a parameter. Existing
+  `logging.getLogger(__name__)` sites inside a request pick up the id
+  without being edited, and `asyncio.create_task` copies the context so an
+  enqueued job keeps it.
+- **An inbound `X-Request-ID` is honoured only when proxy headers are
+  trusted.** For the same reason `X-Forwarded-For` is: a value a client can
+  set is a value a client can use to forge or collide with someone else's
+  identifier. Untrusted input is replaced rather than rejected, because a
+  request is still worth serving when its optional header is unusable.
+  Even trusted values are length-clamped and stripped to a safe alphabet
+  before reaching a log line.
+- **The redaction regex's leading `\b` was removed from the URL-query
+  pattern.** A word boundary cannot match between a space and a slash, so
+  the anchored form missed exactly the shape an access log line has
+  (`GET /candidates?search=... HTTP/1.1` went through unredacted). Once
+  uvicorn's access logger was collected, the gap became reachable, so the
+  anchor came off.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| Defensive worker loops reported only an event name | `JsonFormatter` never read `record.exc_info` | Read it, redact, emit as `exception` |
+| Access log printed as plain text alongside JSON | uvicorn handlers + `propagate = False` survived `handlers.clear()` on root | Explicit per-logger takeover, plus `log_config=None` in `uvicorn.run` |
+| `DropAllFilter` did not silence access logs when applied | The `propagate = False` change was wiped by uvicorn's own setup | Run our setup after uvicorn would have, by calling `configure_logging` from `app.server.main` and disabling its config |
+
+### Verification
+- Full suite: **1018 passed / 0 failed / 0 skipped** (985 + 33 new logging
+  tests). Coverage spans payload shape, exc_info / stack_info redaction,
+  context-field round-trip, request id filter behaviour, idempotent
+  configuration, uvicorn takeover, `LOG_ACCESS=false` dropping records,
+  level parsing (valid names + unknown-name fallback), file handler
+  installation when `log_dir` is writable, the stdout-only fallback when
+  it is not, and the in-app tail reader (parse, level filter, raw text on
+  unparseable lines, `clamp_limit` bounding user input).
+- Existing redaction tests still pass unchanged: the URL-query pattern's
+  leading `\b` removal is a backwards-compatible widening (it now catches
+  *more* URLs, not fewer), and the existing test fixtures are all
+  shapes the new pattern still catches.
+- Docker build succeeds; `compose.yaml` parses (`docker compose config`).
+
+### What is not done (carried into future phases)
+- L2 task lifecycle fields as a **convention** (currently emitted at some
+  call sites by hand): every worker should log on claim / completion /
+  failure with `job_id`, `candidate_id`, `provider`, `attempt`,
+  `duration_ms`. Picking the right call sites and locking the format with
+  a test is its own piece of work.
+- L3 `structlog` bridge and `/metrics` from the proposal remain open.

@@ -192,3 +192,30 @@ python scripts/verify_docker_linux.py --offline --suite --build
 - `--build`：构建应用镜像并在镜像内预置 7-Zip。
 
 所有秘密文件、`.env`、数据库和运行目录均被 Git 忽略。不要将 Telegram session、Token、API Hash 或 ExHentai Cookie 写入仓库或日志。
+
+
+## 日志
+
+服务输出结构化 JSON，一条记录一行。关键设计：
+
+- **一个格式覆盖所有输出路径**。Uvicorn 的访问日志与启动日志都被收编走 JSON 管道，同时获得同样的脱敏。你看到的所有日志都是同一个格式，任何 `· jq` 或集成上去都不需分流。
+- **异常堆栈进日志**。`logging.exception(...)` 现在产生 `exception` 字段，与 `event` 一样走脱敏。四个防御性 worker 循环（下载 / 打包 / 种子转发 / 应用启动）报错时不再只剩一个事件名。
+- **脱敏覆盖消息 / 异常 / 栈三个字段**。Telegram bot token、Authorization、Cookie、URL query 与 `ipb_pass_hash` 等都不会出现在任何输出上，包括访问日志。
+- **每个请求一个关联 id**。在 `X-Request-ID` 响应头里返回相同的 id，也写入该请求期间的所有日志行。查一次错误只需在页面处拿到那个 id、然后在日志里筛。
+
+环境变量（都在 `.env.example` 里有默认值）：
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `LOG_LEVEL` | `INFO` | 全局级别，调至 `DEBUG` 可看详细警告、交互上下文 |
+| `LOG_ACCESS` | `true` | `false` 关掉 uvicorn 访问日志（默认下前台轮询每 2 秒产生一条） |
+| `LOG_TO_FILE` | `true` | `false` 只走 stdout，不写文件 |
+| `LOG_FILE_MAX_BYTES` | `10485760`（10 MB） | 轮转阈值 |
+| `LOG_FILE_BACKUPS` | `5` | 保留历史文件数 |
+
+文件输出落在 `<data>/logs/ehbot.log`，位于已是绑定卷的数据目录下，随容器重建保留。Docker 端由 `compose.yaml` 里的 `logging:` 块限制 stdout（10 MB × 3 份），与容器内轮转独立：只作一个都会在另一条路上填满磁盘。
+
+以下字段出现在调用点传递，用 `extra=`：`candidate_id` / `work_id` / `job_id` / `source_type` / `provider` / `status` / `attempt` / `duration_ms` / `error_code` / `request_id`。所有字段都是可选，但为了让一个事件可以从一条日志跳到同一次操作的其他行，绕过它们是代价最高的习惯。
+
+如果文件日志被启用但目录不可写（少见但会发生，比如数据目录被只读挂载），服务会以 `LOG_FILE_UNAVAILABLE` 警告为什么只走 stdout，不会拒绝启动。
+

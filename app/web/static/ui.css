@@ -1287,7 +1287,76 @@
 .ui-auth-brand img { width: 36px; height: 36px; }
 
 /* --------------------------------------------------------------------------
-   16. Demo page only
+   16. Log viewer (R12)
+   -------------------------------------------------------------------------- */
+
+/* Every rule here is class-scoped, like the rest of the file: a bare `pre` or
+   `time` rule would reach /ui-kit and every fragment HTMX swaps in. */
+
+.ui-log-levels { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: var(--s-4) 0; }
+
+.ui-log-level {
+  padding: 2px var(--s-3);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-full);
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+  text-decoration: none;
+}
+
+.ui-log-level:hover { color: var(--t-ink); }
+
+/* The selected filter is carried by border and weight rather than a fill, so it
+   reads the same in both themes without a second colour token. */
+.ui-log-level[aria-pressed="true"] {
+  border-color: var(--t-accent);
+  color: var(--t-accent);
+  font-weight: 600;
+}
+
+.ui-log-list { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+
+.ui-log-row {
+  display: grid;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-md);
+  background: var(--t-surface);
+}
+
+.ui-log-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.ui-log-head time { color: var(--t-ink-muted); font-size: var(--font-small); font-variant-numeric: tabular-nums; }
+.ui-log-logger { color: var(--t-ink-muted); font-size: var(--font-small); }
+
+/* `pre-wrap` and `break-word`: an event line carries paths and URLs with no
+   spaces, which would otherwise force the whole panel to scroll sideways. */
+.ui-log-event {
+  margin: 0;
+  color: var(--t-ink);
+  font-size: var(--font-body);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.ui-log-meta { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin: 0; color: var(--t-ink-muted); font-size: var(--font-small); }
+
+.ui-log-trace summary { color: var(--t-ink-muted); font-size: var(--font-small); cursor: pointer; }
+
+/* The traceback is the one place a horizontal scrollbar is right: wrapping a
+   stack frame makes the indentation meaningless. */
+.ui-log-trace pre {
+  margin: var(--s-2) 0 0;
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--t-surface-sunken);
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+  overflow-x: auto;
+}
+
+/* --------------------------------------------------------------------------
+   17. Demo page only
    -------------------------------------------------------------------------- */
 
 .ui-demo-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }

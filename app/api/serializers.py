@@ -28,6 +28,7 @@ from app.api.status import (
     row_note_view,
     status_view,
     toggle_view,
+    log_level_view,
 )
 from app.review.models import (
     REVIEW_AUTO_APPROVE,
@@ -570,3 +571,27 @@ __all__ = [
     "telegram_user_connection",
     "tool_profile",
 ]
+
+
+def log_entry_payload(entry: Any) -> dict[str, Any]:
+    """One log line for the viewer.
+
+    The level travels as a resolved `StatusView` like every other bit of state
+    vocabulary, so the page cannot pair 「错误」 with a warning's colour and the
+    JSON body cannot disagree with what the tab renders. `raw` is present only
+    for a line that did not parse, and the template shows it verbatim -- a
+    viewer that hides what it cannot read is useless in exactly the incident
+    that produced the unreadable line.
+    """
+    return {
+        "level": log_level_view(entry.level).to_payload(),
+        "timestamp": entry.timestamp,
+        "logger": entry.logger,
+        "event": entry.event,
+        "request_id": entry.request_id,
+        "job_id": entry.job_id,
+        "candidate_id": entry.candidate_id,
+        "error_code": entry.error_code,
+        "exception": entry.exception,
+        "raw": entry.raw,
+    }
