@@ -19,13 +19,18 @@ from app.downloads.models import (
     CONVERSION_STATE_PENDING,
     CONVERSION_STATE_RUNNING,
     CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
 )
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
 
 #: Packing states that are waiting on the operator rather than broken.
 _PACK_ATTENTION_STATES: frozenset[str] = frozenset(
-    {CONVERSION_STATE_WAITING_PASSWORD, CONVERSION_STATE_WAITING_VOLUMES}
+    {
+        CONVERSION_STATE_WAITING_PASSWORD,
+        CONVERSION_STATE_WAITING_VOLUMES,
+        CONVERSION_STATE_WAITING_PATH,
+    }
 )
 
 
@@ -160,6 +165,11 @@ CONVERSION_STATUS: dict[str, StatusView] = {
     "CONVERSION_WAITING_PASSWORD": _view(
         "CONVERSION_WAITING_PASSWORD", "待补密码", TONE_WAITING
     ),
+    # Also recoverable, and for the same reason it reads as an ask: the archive
+    # is intact and untouched, and the remedy is an edit plus a requeue.
+    "CONVERSION_WAITING_PATH": _view(
+        "CONVERSION_WAITING_PATH", "待定归档路径", TONE_WAITING
+    ),
 }
 
 #: Download providers, so the interface stops showing raw `EH_TORRENT`.
@@ -210,6 +220,7 @@ QUEUE_GROUP_STATUS: dict[str, StatusView] = {
 ATTENTION_STATUS: dict[str, StatusView] = {
     "MISSING_VOLUMES": _view("MISSING_VOLUMES", "缺少分卷", TONE_WAITING),
     "MISSING_PASSWORD": _view("MISSING_PASSWORD", "缺少解压密码", TONE_WAITING),
+    "INVALID_PATH": _view("INVALID_PATH", "归档路径不可用", TONE_WAITING),
     "MISSING_PAGES": _view("MISSING_PAGES", "预览页缺页", TONE_WAITING),
     "STALLED_TORRENT": _view("STALLED_TORRENT", "种子无做种者", TONE_WAITING),
     "FAILED": _view("FAILED", "任务失败", TONE_DANGER),

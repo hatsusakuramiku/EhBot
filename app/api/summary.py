@@ -46,7 +46,11 @@ async def get_summary(request: Request) -> dict:
         if job.error_code
         or job.is_waiting_for_peers
         or job.state
-        in {"CONVERSION_WAITING_PASSWORD", "CONVERSION_WAITING_VOLUMES"}
+        in {
+            "CONVERSION_WAITING_PASSWORD",
+            "CONVERSION_WAITING_VOLUMES",
+            "CONVERSION_WAITING_PATH",
+        }
     ]
 
     manager = deps.optional_service(request, "connection_manager")

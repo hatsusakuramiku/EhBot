@@ -55,8 +55,20 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         thumbnail_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(thumbnails)")
         }
+        archive_path_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(work_archive_paths)"
+            )
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
 
-    assert migration_count == 14
+    assert migration_count == 15
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -96,6 +108,20 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     # own completeness.
     assert "library_relative_path" in artifact_columns
     assert "removed_works" in tables
+    # Migration 015: explicit archive paths. A table keyed by candidate rather
+    # than the 014 column, because an operator sets where a book belongs *before*
+    # the first pack as readily as after it -- and an artifact row only exists
+    # once a pack has produced one. The unique index is the guard behind
+    # 「名称已存在」: two books pinned to one path would race at pack time and
+    # the loser would be overwritten with no trace.
+    assert "work_archive_paths" in tables
+    assert "idx_work_archive_paths_relative" in indexes
+    assert {
+        "candidate_id",
+        "relative_path",
+        "is_manual",
+        "operator_name",
+    } <= archive_path_columns
     assert {
         "hash",
         "kind",

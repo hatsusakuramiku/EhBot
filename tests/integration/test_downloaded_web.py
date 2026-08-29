@@ -760,3 +760,147 @@ def test_every_action_needs_a_session_and_a_token(tmp_path: Path) -> None:
 
     assert forged.status_code == 403
     assert library.removals() == []
+
+
+# --------------------------------------------------------- archive path form
+
+
+def test_the_work_detail_page_offers_the_archive_path_form(
+    tmp_path: Path,
+) -> None:
+    """Before the first pack as readily as after it.
+
+    「先设路径，再打包」 is the workflow, so the form appears on an unpacked
+    work too -- the pin is a fact about the book, not about a CBZ that does not
+    exist yet.
+    """
+    settings, _library, ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        packed = client.get(f"/works/{ids['packed']}")
+        unpacked = client.get(f"/works/{ids['unpacked']}")
+    finally:
+        client.__exit__(None, None, None)
+
+    for page, candidate_id in (
+        (packed, ids["packed"]),
+        (unpacked, ids["unpacked"]),
+    ):
+        assert page.status_code == 200
+        assert f'action="/works/{candidate_id}/archive-path"' in page.text
+        assert 'name="directory"' in page.text
+        assert 'name="filename"' in page.text
+    # The packed work's fields are prefilled from where its book actually is, so
+    # the operator edits rather than retypes.
+    assert packed.context["work"]["archive_path"]["filename"] == "已打包作品"
+    assert packed.context["work"]["archive_path"]["directory"] == "作者"
+
+
+def test_setting_an_archive_path_moves_the_book_and_pins_it(
+    tmp_path: Path,
+) -> None:
+    settings, library, ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        page = client.get(f"/works/{ids['packed']}")
+        response = client.post(
+            f"/works/{ids['packed']}/archive-path",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "directory": "新分类/新作者",
+                "filename": "新书名",
+            },
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 303
+    # Back to the detail page the form was on, not to a list.
+    assert response.headers["location"].startswith(f"/works/{ids['packed']}")
+    moved = settings.library_path / "新分类" / "新作者" / "新书名.cbz"
+    assert moved.exists()
+    assert library.cbz_path(ids["packed"]) == str(moved)
+    pin = asyncio.run(library.database.archive_path_pin(ids["packed"]))
+    assert pin["relative_path"] == "新分类/新作者/新书名.cbz"
+    assert pin["is_manual"] is True
+
+
+def test_an_occupied_name_re_renders_the_form_with_the_reason(
+    tmp_path: Path,
+) -> None:
+    """A refusal keeps the operator on the form, because they have to fix a value.
+
+    A redirect carrying `?error=` is right for a list action -- there is no form
+    to come back to -- and wrong here: the page they are working in is the page
+    that shows which value was rejected.
+    """
+    settings, library, ids = seeded(tmp_path)
+    original = Path(library.cbz_path(ids["packed"]))
+    squatter = settings.library_path / "目标" / "已存在.cbz"
+    squatter.parent.mkdir(parents=True)
+    squatter.write_bytes(b"another book")
+    client = logged_in(settings)
+    try:
+        page = client.get(f"/works/{ids['packed']}")
+        response = client.post(
+            f"/works/{ids['packed']}/archive-path",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "directory": "目标",
+                "filename": "已存在",
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 400
+    assert response.context["error"]
+    # Nothing moved, and the book that was already there is untouched.
+    assert original.exists()
+    assert squatter.read_bytes() == b"another book"
+
+
+def test_an_illegal_filename_is_refused_rather_than_cleaned(
+    tmp_path: Path,
+) -> None:
+    settings, library, ids = seeded(tmp_path)
+    original = Path(library.cbz_path(ids["packed"]))
+    client = logged_in(settings)
+    try:
+        page = client.get(f"/works/{ids['packed']}")
+        response = client.post(
+            f"/works/{ids['packed']}/archive-path",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "filename": "非法?名字",
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 400
+    assert original.exists()
+    # And no book was published under a cleaned-up name nobody asked for.
+    assert not list(settings.library_path.glob("**/非法 名字.cbz"))
+
+
+def test_the_archive_path_form_is_not_nested_in_another_form(
+    tmp_path: Path,
+) -> None:
+    """HTML does not nest forms, and nothing warns you.
+
+    The detail page has no batch form today, but it has one-button action forms,
+    and a form written inside one of those would have its `action` silently
+    dropped -- which is exactly how every per-row action on `/activity` shipped
+    broken once.
+    """
+    settings, _library, ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        page = client.get(f"/works/{ids['packed']}")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert nested_form_lines(page.text) == []
+

@@ -24,6 +24,7 @@ Three things are computed here rather than left to whoever renders it:
 
 from __future__ import annotations
 
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -45,6 +46,7 @@ from app.api.status import (
     work_stage_view,
 )
 from app.downloads.models import (
+    CONVERSION_STATE_RUNNING,
     PROVIDER_CONVERSION,
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
@@ -145,6 +147,13 @@ def work_actions(candidate, jobs, sources: frozenset[str]) -> dict[str, Any]:
         "fetch_metadata": bool(candidate.ex_gid) and PROVIDER_EXHENTAI in sources,
         "convert": archive_ready and packaged is None,
         "reconvert": packaged is not None or archive_ready,
+        # Offered wherever there is something to pack, including *before* the
+        # first pack: setting the path is how an operator decides where a book
+        # will land, and making them pack first only to move it afterwards is the
+        # workflow this replaces. Withheld while the packer holds the row, since
+        # it is about to write the file the form would move.
+        "edit_archive_path": (archive_ready or packaged is not None)
+        and not any(job.state == CONVERSION_STATE_RUNNING for job in jobs),
         "sources": _source_actions(candidate, sources),
     }
 
@@ -285,12 +294,76 @@ def _attachment_payload(attachment: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
+    """The archive path this work will pack to, split for the form that edits it.
+
+    The directory and the filename are separated here rather than in the template
+    because the form has two fields and the split is a decision: the last segment
+    is the filename, everything before it is the directory, and the `.cbz` suffix
+    is not shown because the operator does not choose it. A template doing this
+    with `rsplit` would be the second place that decision lived.
+
+    The value comes from `DownloadedWork.archive_relative_path`, which is the pin
+    if there is one and what the last pack recorded otherwise. Reading the pin
+    first is what lets a path set before the first pack prefill the form;
+    falling back is what makes the form prefill at all for a book packed before
+    anyone pinned anything -- and an operator who edits only the filename against
+    an empty 目录 field would otherwise move the book to the library root.
+
+    `pending` is the comparison made once, server-side: a work whose pin no
+    longer matches its published file has a move queued behind the next pack, and
+    the page says so rather than leaving the operator to compare two paths by eye.
+    """
+    relative = work.archive_relative_path if work is not None else None
+    published = getattr(packaged, "artifact_cbz_path", None) if packaged else None
+    if not relative and published and library_path is not None:
+        # A book packed before `library_relative_path` was recorded on every pack
+        # has no stored answer, and every existing installation is in that state.
+        # Deriving it from the published path is what keeps the 目录 field
+        # prefilled for those books -- submitting the form against an empty one
+        # would move the book to the library root, which is a data move the
+        # operator did not ask for.
+        try:
+            relative = (
+                Path(published)
+                .resolve()
+                .relative_to(Path(library_path).resolve())
+                .as_posix()
+            )
+        except (OSError, ValueError):
+            relative = None
+    if not relative:
+        return {
+            "relative_path": None,
+            "directory": "",
+            "filename": "",
+            "is_manual": False,
+            "published_path": published,
+            "pending": False,
+        }
+    parts = PurePosixPath(relative).parts
+    return {
+        "relative_path": relative,
+        "directory": "/".join(parts[:-1]),
+        "filename": PurePosixPath(relative).stem,
+        "is_manual": bool(getattr(work, "pinned_is_manual", False)),
+        "published_path": published,
+        # True when the file on disk is not where the path says it belongs, which
+        # is exactly the state a repack resolves.
+        "pending": bool(
+            published
+            and not str(published).replace("\\", "/").endswith(relative)
+        ),
+    }
+
+
 async def work_snapshot(
     database,
     candidate_id: int,
     *,
     download=None,
     sources: frozenset[str] = frozenset(),
+    library_path=None,
 ) -> dict[str, Any] | None:
     """Everything one work's detail page needs, in one read.
 
@@ -315,6 +388,11 @@ async def work_snapshot(
     )
     stage = work_stage(candidate.status, jobs)
     packaged = _packaged_job(jobs)
+    # The work row rather than the pin alone: it carries the pin *and* what the
+    # last pack recorded, resolved in one property, so the form prefills for a
+    # book nobody has pinned yet. `None` for a candidate that never downloaded,
+    # which is exactly when there is no path to show.
+    downloaded = await database.downloaded_work(candidate_id)
 
     return {
         "candidate_id": candidate.candidate_id,
@@ -360,12 +438,35 @@ async def work_snapshot(
             else None
         ),
         "actions": work_actions(candidate, jobs, sources),
+        # Where the next pack will put this book, and the current values for the
+        # form that changes it. Present at every stage a work has an archive to
+        # pack, because 「先设路径，再打包」 has to be possible -- a path is a
+        # decision about the book, not about the CBZ that does not exist yet.
+        "archive_path": archive_path_view(downloaded, packaged, library_path),
         # Whether anything here still moves on its own. Read from the job states
         # for the same reason the queue does: the candidate's own status lags a
         # task by one transition.
         "live": is_live(candidate.status)
         or any(is_live(job.state) for job in jobs),
     }
+
+
+async def effective_library_path(request: Request):
+    """The library root as configured right now, or None if unknowable.
+
+    Read through the archive settings service for the reason the packer reads it
+    per job: a stored override wins over the environment default, and an operator
+    who corrects the directory expects the next page load to use it. `None` when
+    the service is absent -- a snapshot must still render on a half-wired app,
+    and the only cost is one unprefilled form field.
+    """
+    service = deps.optional_service(request, "archive_settings_service")
+    if service is None:
+        return None
+    try:
+        return await service.library_path()
+    except Exception:  # noqa: BLE001 - a settings read must not break the page
+        return None
 
 
 @router.get("/works/{candidate_id}")
@@ -377,6 +478,7 @@ async def get_work(request: Request, candidate_id: int) -> dict:
         candidate_id,
         download=deps.optional_service(request, "download_service"),
         sources=configured_sources(request),
+        library_path=await effective_library_path(request),
     )
     if snapshot is None:
         raise ApiError(

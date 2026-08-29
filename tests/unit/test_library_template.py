@@ -20,8 +20,12 @@ import pytest
 from app.archive.service import ArchiveSettingsService
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
+    MAX_RELATIVE_PATH_LENGTH,
     MAX_SEGMENT_LENGTH,
+    LibraryPathError,
     LibraryTemplateError,
+    check_library_segment,
+    plan_library_path,
     render_library_path,
     unique_library_target,
     validate_library_template,
@@ -300,3 +304,123 @@ class TestTheTemplateReachesThePacker:
         )
 
         assert target.name == "示例标题 Vol. 1.cbz"
+
+
+class TestStrictPlanning:
+    """`plan_library_path`: the same render, but reporting instead of repairing.
+
+    Why two functions over one template. `render_library_path` runs inside a
+    packing job for a book that is already downloaded, so it sanitises and never
+    refuses -- failing a job over a punctuation mark would leave the book
+    unpublished for a reason nobody asked about. `plan_library_path` runs while
+    the operator is waiting for an answer, on a path they have not agreed to yet,
+    so it refuses and names the reason. A batch that silently sanitised fifty
+    titles would move fifty books to names nobody chose.
+    """
+
+    def test_a_clean_book_plans_the_same_path_the_packer_would_use(self) -> None:
+        relative = plan_library_path(
+            "{category}/{artist}/{title}",
+            {"category": "同人志", "artist": "作者", "title": "标题"},
+            title_fallback="candidate-1",
+        )
+
+        assert relative.as_posix() == "同人志/作者/标题.cbz"
+        # Same tree the sanitising renderer produces for input needing no repair,
+        # which is what makes the strict one safe to plan with.
+        assert render(
+            "{category}/{artist}/{title}",
+            category="同人志",
+            artist="作者",
+            title="标题",
+        ) == "同人志/作者/标题"
+
+    def test_a_character_the_renderer_would_replace_is_refused_here(self) -> None:
+        """The divergence, stated once: repair there, refusal here."""
+        assert render("{title}", title="标题?带问号") == "标题 带问号"
+
+        with pytest.raises(LibraryPathError) as raised:
+            plan_library_path(
+                "{title}", {"title": "标题?带问号"}, title_fallback="candidate-1"
+            )
+
+        assert raised.value.code == "SEGMENT_UNSAFE_CHARACTER"
+        # The message names the character, because the operator has to find it.
+        assert "?" in raised.value.public_message
+
+    def test_a_title_over_the_segment_ceiling_is_refused(self) -> None:
+        with pytest.raises(LibraryPathError) as raised:
+            plan_library_path(
+                "{title}",
+                {"title": "長" * (MAX_SEGMENT_LENGTH + 1)},
+                title_fallback="candidate-1",
+            )
+
+        assert raised.value.code == "SEGMENT_TOO_LONG"
+
+    def test_the_whole_path_has_a_ceiling_of_its_own(self) -> None:
+        """Every segment can be legal while the join is not.
+
+        Windows stops at 260 characters for the *absolute* path, so a relative
+        path near that is unusable the moment the library sits anywhere but a
+        drive root -- and the failure would land inside a packing job rather than
+        on the form.
+        """
+        segment = "長" * (MAX_SEGMENT_LENGTH - 1)
+        assert check_library_segment(segment) is None
+
+        with pytest.raises(LibraryPathError) as raised:
+            plan_library_path(
+                "{category}/{artist}/{title}",
+                {"category": segment, "artist": segment, "title": segment},
+                title_fallback="candidate-1",
+            )
+
+        assert raised.value.code == "PATH_TOO_LONG"
+        assert str(MAX_RELATIVE_PATH_LENGTH) in raised.value.public_message
+
+    def test_the_extension_is_appended_here_too(self) -> None:
+        """The `Vol. 1` trap, which both renderers have to avoid identically."""
+        relative = plan_library_path(
+            "{title}", {"title": "标题 Vol. 1"}, title_fallback="candidate-1"
+        )
+
+        assert relative.name == "标题 Vol. 1.cbz"
+
+    @pytest.mark.parametrize(
+        ("value", "code"),
+        [
+            ("", "SEGMENT_EMPTY"),
+            ("   ", "SEGMENT_EMPTY"),
+            (" 前后有空格 ", "SEGMENT_PADDED"),
+            ("..", "SEGMENT_TRAVERSAL"),
+            ("以点结尾.", "SEGMENT_TRAILING_DOT"),
+            ("以空格结尾 ", "SEGMENT_PADDED"),
+            ("nul", "SEGMENT_RESERVED"),
+            ("COM1", "SEGMENT_RESERVED"),
+            ("带/斜杠", "SEGMENT_UNSAFE_CHARACTER"),
+            ("带\\反斜杠", "SEGMENT_UNSAFE_CHARACTER"),
+            ("带\x00控制符", "SEGMENT_UNSAFE_CHARACTER"),
+        ],
+    )
+    def test_every_refusal_names_its_reason(self, value: str, code: str) -> None:
+        """A code per reason, because the page shows the message to the operator.
+
+        One generic 「名称非法」 would leave them guessing which of the four rules
+        they broke.
+        """
+        refusal = check_library_segment(value)
+
+        assert refusal is not None
+        assert refusal[0] == code
+
+    def test_a_control_character_is_described_not_echoed(self) -> None:
+        """It has no printable form, so echoing it produces an empty complaint."""
+        refusal = check_library_segment("标题\x01")
+
+        assert refusal is not None
+        assert "控制字符" in refusal[1]
+
+    def test_a_legal_name_is_returned_unchanged(self) -> None:
+        assert check_library_segment("正常的书名 (2026)") is None
+

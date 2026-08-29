@@ -26,18 +26,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from app.conversion.naming import (
+    MAX_RELATIVE_PATH_LENGTH,
+    LibraryPathError,
     LibraryTemplateError,
     safe_library_name,
+    strict_library_segment,
     unique_library_target,
 )
 from app.db.database import Database
 from app.downloads.models import (
     CONVERSION_STATE_RUNNING,
+    CONVERSION_STATE_WAITING_PATH,
     DOWNLOAD_STATE_PENDING,
     OPEN_DOWNLOAD_STATES,
+    PROVIDER_CONVERSION,
     DownloadedWork,
 )
 
@@ -233,6 +238,14 @@ class ArchivedWorkService:
             bool(delete_files) and not failed,
             operator_name,
         )
+        if delete_files and not failed:
+            # The pin named a file that no longer exists, so keeping it would
+            # make a later re-download publish to a path chosen for a book that
+            # was deleted -- and hold that name against every other work in the
+            # meantime. A records-only removal keeps the pin on purpose: the file
+            # is still there, and the operator's decision about where it lives
+            # has not changed.
+            await self._database.clear_archive_path_pin(candidate_id)
         if self._notify is not None:
             self._notify(candidate_id)
         return {
@@ -362,6 +375,7 @@ class ArchivedWorkService:
         *,
         filename: str | None = None,
         directory: str | None = None,
+        operator_name: str = "admin",
     ) -> dict:
         """Move or rename this work's published CBZ inside the library.
 
@@ -456,6 +470,16 @@ class ArchivedWorkService:
             str(resolved),
             relative.as_posix(),
         )
+        # Also pinned in `work_archive_paths`, so a rename made from the list
+        # survives the artifact row and is the same fact the detail page's form
+        # reads and writes. Without this the two surfaces would disagree about
+        # where the book belongs the moment one of them was used.
+        await self._database.set_archive_path_pin(
+            candidate_id,
+            relative.as_posix(),
+            is_manual=True,
+            operator_name=operator_name,
+        )
         if self._notify is not None:
             self._notify(candidate_id)
         return {
@@ -464,6 +488,275 @@ class ArchivedWorkService:
             "relative_path": relative.as_posix(),
             "moved": True,
         }
+
+    async def has_manual_path_pin(self, candidate_id: int) -> bool:
+        """Whether this work's archive path was typed by an operator.
+
+        The guard the batch re-file asks before recomputing anything, and the
+        reason it is a named question rather than the batch reading a column: the
+        policy is 「模板不得覆盖人工决定」, and a caller that fetched the row
+        itself would be free to forget it. Absent pin counts as False -- there is
+        no decision to protect.
+        """
+        pin = await self._database.archive_path_pin(candidate_id)
+        return bool(pin and pin["is_manual"])
+
+    async def pin_computed_path(
+        self,
+        candidate_id: int,
+        relative_path: str,
+        *,
+        operator_name: str = "admin",
+    ) -> None:
+        """Record a path the layout template computed, never overwriting a typed one.
+
+        `is_manual=False` is the whole content of this method: the upsert keeps
+        whichever flag is higher, so a template-computed path cannot demote or
+        replace one the operator set by hand.
+        """
+        await self._database.set_archive_path_pin(
+            candidate_id,
+            relative_path,
+            is_manual=False,
+            operator_name=operator_name,
+        )
+
+    async def park_for_invalid_path(
+        self, candidate_id: int, code: str, message: str
+    ) -> None:
+        """File a work under 需干预 because its archive path is unusable.
+
+        The packing row is created if it does not exist and then parked in
+        `CONVERSION_WAITING_PATH` with the reason on it. The row is the point: a
+        batch reports skips in a flash message that is gone on the next
+        navigation, and 「这本书为什么没打包」 has to still be answerable
+        afterwards. Parked rather than failed because nothing was attempted and
+        the archive is intact -- the remedy is an edit plus a requeue, which is
+        exactly what 待补分卷 and 待补密码 mean.
+
+        A RUNNING row is left alone: the worker holds it and would overwrite
+        whatever we wrote.
+        """
+        await asyncio.to_thread(
+            self._park_for_invalid_path_sync, candidate_id, code, message
+        )
+
+    def _park_for_invalid_path_sync(
+        self, candidate_id: int, code: str, message: str
+    ) -> None:
+        key = f"convert:{candidate_id}"
+        with self._database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "INSERT INTO download_jobs "
+                "(candidate_id, idempotency_key, provider, state, "
+                " error_code, error_message, details_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, '{}') "
+                "ON CONFLICT(idempotency_key) DO UPDATE SET "
+                "  state = excluded.state, "
+                "  error_code = excluded.error_code, "
+                "  error_message = excluded.error_message, "
+                "  updated_at = CURRENT_TIMESTAMP "
+                "WHERE download_jobs.state <> ?",
+                (
+                    candidate_id,
+                    key,
+                    PROVIDER_CONVERSION,
+                    CONVERSION_STATE_WAITING_PATH,
+                    code,
+                    message,
+                    CONVERSION_STATE_RUNNING,
+                ),
+            )
+
+    # ------------------------------------------------------- explicit path
+
+    async def set_archive_path(
+        self,
+        candidate_id: int,
+        *,
+        directory: str = "",
+        filename: str = "",
+        operator_name: str = "admin",
+    ) -> dict:
+        """Set where this work's CBZ belongs, moving the file if there is one.
+
+        The difference from `rename_work`, which this supersedes for the detail
+        page, is what it refuses. `rename_work` sanitises the operator's input
+        and lets `unique_library_target` grow a ` (2)` suffix when the name is
+        taken, both of which are right for a convenience rename off a list. This
+        one is the operator stating where a book must live, so:
+
+        * every segment is validated and **nothing is silently repaired** -- a
+          name containing `?` is refused with the character named, because a
+          path they did not type is not the path they asked for;
+        * an occupied name is **refused, not suffixed**. A ` (2)` beside the
+          book already there is how two books end up with names neither operator
+          chose, and the requirements are explicit: 「需要检查名称是否已存在，已
+          存在不允许进行调整」;
+        * the directory is **created** when it does not exist, which is the other
+          half of that instruction, and is done only after every check passes so
+          a refused submission leaves no empty directories behind.
+
+        Works before the first pack as readily as after it: the pin is a fact
+        about the book, so it is recorded whether or not there is a file to move
+        yet. That is what makes 「先设路径，再打包」 work, which is the whole point
+        of asking for it on the detail page.
+        """
+        work = await self._require_work(candidate_id)
+        if work.pack_state == CONVERSION_STATE_RUNNING:
+            raise ArchivedWorkError(
+                "WORK_PACK_RUNNING",
+                "该作品正在打包，请等待打包结束再修改归档路径",
+            )
+        library_root, _ = await self._roots()
+
+        relative = self._plan_explicit_path(work, directory, filename)
+        current = work.archive_relative_path
+        if current == relative.as_posix() and work.cbz_path:
+            # The submitted path is the one it already has. Not an error:
+            # refusing would read as the form being broken.
+            return {
+                "candidate_id": candidate_id,
+                "relative_path": relative.as_posix(),
+                "moved": False,
+                "created_directory": False,
+            }
+
+        await self._require_path_free(candidate_id, relative, library_root, work)
+
+        target = _resolve_inside(library_root, library_root / relative)
+        created_directory = not target.parent.exists()
+        # Created only now, after every refusal has had its chance: a rejected
+        # submission must not leave a directory tree behind it.
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+
+        moved = False
+        if work.cbz_path:
+            source = _resolve_inside(library_root, Path(work.cbz_path))
+            if source != target and source.exists():
+                try:
+                    await asyncio.to_thread(source.replace, target)
+                except OSError as exc:
+                    raise ArchivedWorkError(
+                        "FILE_MOVE_FAILED", f"移动文件失败：{exc}"
+                    ) from exc
+                await asyncio.to_thread(
+                    _prune_empty_parents, source, library_root
+                )
+                moved = True
+                await asyncio.to_thread(
+                    self._record_path_sync,
+                    work.pack_job_id,
+                    str(target),
+                    relative.as_posix(),
+                )
+
+        await self._database.set_archive_path_pin(
+            candidate_id,
+            relative.as_posix(),
+            is_manual=True,
+            operator_name=operator_name,
+        )
+        if self._notify is not None:
+            self._notify(candidate_id)
+        return {
+            "candidate_id": candidate_id,
+            "relative_path": relative.as_posix(),
+            "moved": moved,
+            "created_directory": created_directory,
+        }
+
+    @staticmethod
+    def _plan_explicit_path(
+        work: DownloadedWork, directory: str, filename: str
+    ) -> PurePosixPath:
+        """Validate the operator's directory and filename into one path.
+
+        Every refusal here names what is wrong with which segment, because the
+        operator is looking at the form and can fix it. `strict_library_segment`
+        is what makes it a refusal rather than a repair.
+        """
+        stem = (filename or "").strip()
+        if stem.lower().endswith(".cbz"):
+            stem = stem[:-4]
+        if not stem:
+            # Falling back to the current name keeps 「只改目录」 a one-field
+            # edit instead of making the operator retype the filename.
+            # Normalised before parsing: `cbz_path` is an absolute path in the
+            # host's own flavour, and on Windows `PurePosixPath` reads the whole
+            # thing as one segment -- so the fallback stem arrived carrying
+            # backslashes and was then refused as an illegal character. The pin
+            # is already posix-relative; only the artifact path needs this.
+            current = work.archive_relative_path or work.cbz_path
+            stem = (
+                PurePosixPath(str(current).replace("\\", "/")).stem
+                if current
+                else ""
+            )
+        if not stem:
+            raise ArchivedWorkError(
+                "FILENAME_REQUIRED", "请填写归档文件名"
+            )
+
+        segments: list[str] = []
+        try:
+            for raw in str(directory or "").replace("\\", "/").split("/"):
+                token = raw.strip()
+                if not token or token == ".":
+                    continue
+                segments.append(strict_library_segment(token))
+            segments.append(strict_library_segment(stem))
+        except LibraryPathError as exc:
+            raise ArchivedWorkError(exc.code, exc.public_message) from exc
+
+        relative = PurePosixPath(*segments[:-1], f"{segments[-1]}.cbz")
+        if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+            raise ArchivedWorkError(
+                "PATH_TOO_LONG",
+                f"归档路径长度 {len(str(relative))} 超过上限 "
+                f"{MAX_RELATIVE_PATH_LENGTH}，请缩短目录或文件名",
+            )
+        return relative
+
+    async def _require_path_free(
+        self,
+        candidate_id: int,
+        relative: PurePosixPath,
+        library_root: Path,
+        work: DownloadedWork,
+    ) -> None:
+        """Refuse a path another book owns, or a file already sitting there.
+
+        Two checks because there are two ways a name can be taken and they fail
+        differently. Another work's *pin* is a claim on a path whose file may not
+        exist yet -- letting a second book pin it would mean the two race at pack
+        time and the loser is overwritten with no trace. An existing *file* with
+        no pin is a book packed before anyone pinned anything; there is no row to
+        find it by, so the filesystem is the only witness.
+        """
+        owner = await self._database.candidate_at_archive_path(
+            relative.as_posix()
+        )
+        if owner is not None and owner != candidate_id:
+            raise ArchivedWorkError(
+                "PATH_TAKEN_BY_WORK",
+                f"该路径已被作品 #{owner} 占用，请换一个名称",
+            )
+        target = _resolve_inside(library_root, library_root / relative)
+        if not await asyncio.to_thread(target.exists):
+            return
+        # The book's own file is not a conflict: this is the path it already
+        # occupies, and a repack has to land on the file it replaces.
+        if work.cbz_path:
+            try:
+                if _resolve_inside(library_root, Path(work.cbz_path)) == target:
+                    return
+            except ArchivedWorkError:
+                pass
+        raise ArchivedWorkError(
+            "PATH_TAKEN_ON_DISK",
+            f"目标位置已有同名文件：{relative.as_posix()}，请换一个名称",
+        )
 
     def _record_path_sync(
         self, pack_job_id: int | None, path: str, relative: str

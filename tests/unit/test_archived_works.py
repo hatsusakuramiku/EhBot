@@ -399,6 +399,347 @@ class TestRedownload:
         assert (works, total) == ([], 0)
 
 
+class TestExplicitArchivePath:
+    """`set_archive_path`: the operator stating where one book must live.
+
+    The distinction from `rename_work` is what it refuses, so most of these are
+    refusals. A convenience rename may repair input and may suffix a taken name;
+    an operator typing a path is telling the service something, and answering
+    with a different path than they typed is worse than answering no.
+    """
+
+    def test_a_path_can_be_set_before_the_first_pack(
+        self, fixture: Fixture
+    ) -> None:
+        """The whole reason the pin is keyed by candidate rather than artifact.
+
+        「先设路径，再打包」 has to work: an operator who knows where a book
+        belongs should not have to pack it to the template's guess first and move
+        it afterwards. There is no CBZ here at all, so nothing moves and the pin
+        is the entire effect.
+        """
+        candidate_id = fixture.candidate()
+        job_id = fixture.job(candidate_id)
+        fixture.artifact(
+            job_id, kind="ARCHIVE", path=fixture.work / "source.zip"
+        )
+
+        result = asyncio.run(
+            fixture.service.set_archive_path(
+                candidate_id, directory="分类/作者", filename="书名"
+            )
+        )
+
+        assert result["moved"] is False
+        assert result["relative_path"] == "分类/作者/书名.cbz"
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "分类/作者/书名.cbz"
+        assert pin["is_manual"] is True
+
+    def test_setting_a_path_creates_the_directory_and_moves_the_file(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, _, cbz = fixture.packaged()
+
+        result = asyncio.run(
+            fixture.service.set_archive_path(
+                candidate_id, directory="新分类/新作者", filename="新书名"
+            )
+        )
+
+        assert result["moved"] is True
+        assert result["created_directory"] is True
+        moved = fixture.library / "新分类" / "新作者" / "新书名.cbz"
+        assert moved.exists()
+        assert not cbz.exists()
+        # The artifact row follows the file, or the next repack would look for it
+        # where it no longer is.
+        work = asyncio.run(fixture.database.downloaded_work(candidate_id))
+        assert work.cbz_path == str(moved)
+        assert work.archive_relative_path == "新分类/新作者/新书名.cbz"
+
+    def test_only_the_directory_can_change(self, fixture: Fixture) -> None:
+        """An empty filename keeps the current one, so moving is a one-field edit."""
+        candidate_id, _, _ = fixture.packaged(cbz_relative="作者/保留名.cbz")
+
+        result = asyncio.run(
+            fixture.service.set_archive_path(candidate_id, directory="别的目录")
+        )
+
+        assert result["relative_path"] == "别的目录/保留名.cbz"
+
+    def test_an_unchanged_path_is_not_an_error(self, fixture: Fixture) -> None:
+        """Refusing would read as the form being broken."""
+        candidate_id, _, _ = fixture.packaged(cbz_relative="作者/示例作品.cbz")
+
+        result = asyncio.run(
+            fixture.service.set_archive_path(
+                candidate_id, directory="作者", filename="示例作品"
+            )
+        )
+
+        assert result["moved"] is False
+
+    def test_a_name_another_work_pinned_is_refused_not_suffixed(
+        self, fixture: Fixture
+    ) -> None:
+        """The requirement, stated exactly: 「已存在不允许进行调整」.
+
+        `unique_library_target` would grow a ` (2)`, which is right when a
+        *template* renders two books onto one name -- nobody chose either name, so
+        the suffix is the least-bad answer. Here the operator chose, and a book
+        landing at `书名 (2).cbz` is a name they did not ask for sitting beside
+        one they did.
+        """
+        first, _, _ = fixture.packaged(cbz_relative="a/占用中.cbz")
+        asyncio.run(
+            fixture.service.set_archive_path(first, directory="a", filename="占用中")
+        )
+        second, _, _ = fixture.packaged(cbz_relative="b/其他.cbz")
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    second, directory="a", filename="占用中"
+                )
+            )
+
+        assert raised.value.code == "PATH_TAKEN_BY_WORK"
+        assert str(first) in raised.value.public_message
+        # Nothing moved, so the second book is still where it was.
+        assert (fixture.library / "b" / "其他.cbz").exists()
+
+    def test_a_file_nobody_pinned_still_blocks_the_name(
+        self, fixture: Fixture
+    ) -> None:
+        """A book packed before anyone pinned anything has no row to find it by.
+
+        So the filesystem is the only witness that the name is taken, and
+        skipping this check would have the move overwrite a book silently.
+        """
+        candidate_id, _, _ = fixture.packaged(cbz_relative="作者/本书.cbz")
+        squatter = fixture.library / "目标" / "已存在.cbz"
+        squatter.parent.mkdir(parents=True)
+        squatter.write_bytes(b"another book")
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id, directory="目标", filename="已存在"
+                )
+            )
+
+        assert raised.value.code == "PATH_TAKEN_ON_DISK"
+        assert squatter.read_bytes() == b"another book"
+
+    @pytest.mark.parametrize(
+        ("filename", "code"),
+        [
+            ("带有?非法字符", "SEGMENT_UNSAFE_CHARACTER"),
+            ("以点结尾.", "SEGMENT_TRAILING_DOT"),
+            ("con", "SEGMENT_RESERVED"),
+            ("長" * 200, "SEGMENT_TOO_LONG"),
+        ],
+    )
+    def test_an_illegal_name_is_refused_rather_than_cleaned(
+        self, fixture: Fixture, filename: str, code: str
+    ) -> None:
+        """A repaired name is not the name the operator asked for.
+
+        `safe_library_name` would turn each of these into something usable, which
+        is correct inside a packing job -- the book is downloaded and has to land
+        somewhere. It is wrong here: the operator is looking at the form, and a
+        silent repair means the path they get differs from the one they typed with
+        nothing on screen saying so.
+        """
+        candidate_id, _, cbz = fixture.packaged()
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id, filename=filename
+                )
+            )
+
+        assert raised.value.code == code
+        assert cbz.exists()
+
+    def test_a_directory_cannot_walk_out_of_the_library(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, _, _ = fixture.packaged()
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id, directory="../../etc", filename="passwd"
+                )
+            )
+
+        assert raised.value.code == "SEGMENT_TRAVERSAL"
+
+    def test_a_refused_submission_leaves_no_directories_behind(
+        self, fixture: Fixture
+    ) -> None:
+        """`mkdir` runs after every check, and this is what that ordering buys.
+
+        A form the operator is iterating on would otherwise litter the library
+        with empty directories from each rejected attempt.
+        """
+        candidate_id, _, _ = fixture.packaged()
+        # An occupied name under a directory that does not exist yet. The
+        # conflict is what refuses the submission, and it is checked *before*
+        # anything is created -- so the new directory must not be there
+        # afterwards.
+        squatter = fixture.library / "目录" / "已存在.cbz"
+        squatter.parent.mkdir(parents=True)
+        squatter.write_bytes(b"x")
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id, directory="目录", filename="已存在"
+                )
+            )
+
+        assert raised.value.code == "PATH_TAKEN_ON_DISK"
+        # And an illegal name never reaches `mkdir` either, which is the case a
+        # form being iterated on hits repeatedly.
+        with pytest.raises(ArchivedWorkError):
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id,
+                    directory="全新目录",
+                    filename="非法?名字",
+                )
+            )
+        assert not (fixture.library / "全新目录").exists()
+
+    def test_a_pack_in_flight_refuses_the_edit(self, fixture: Fixture) -> None:
+        candidate_id, _, _ = fixture.packaged(
+            pack_state=CONVERSION_STATE_RUNNING
+        )
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(
+                fixture.service.set_archive_path(
+                    candidate_id, filename="新名"
+                )
+            )
+
+        assert raised.value.code == "WORK_PACK_RUNNING"
+
+    def test_a_computed_pin_never_overwrites_one_the_operator_typed(
+        self, fixture: Fixture
+    ) -> None:
+        """The `is_manual` guard, which is what protects a rename from a batch.
+
+        A batch repack recomputes every selected work's path from the current
+        template. Without this, the first batch after a rename would quietly undo
+        it -- the operator's name replaced by the template's, fifty at a time.
+        """
+        candidate_id, _, _ = fixture.packaged()
+        asyncio.run(
+            fixture.service.set_archive_path(
+                candidate_id, directory="手写", filename="手写名"
+            )
+        )
+
+        asyncio.run(
+            fixture.service.pin_computed_path(candidate_id, "模板/模板名.cbz")
+        )
+
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "手写/手写名.cbz"
+        assert pin["is_manual"] is True
+
+    def test_a_computed_pin_is_recorded_when_nothing_was_typed(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, _, _ = fixture.packaged()
+
+        asyncio.run(
+            fixture.service.pin_computed_path(candidate_id, "模板/模板名.cbz")
+        )
+
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "模板/模板名.cbz"
+        assert pin["is_manual"] is False
+
+    def test_parking_files_the_work_under_attention_with_the_reason(
+        self, fixture: Fixture
+    ) -> None:
+        """A skip in a flash message is gone on the next navigation.
+
+        「这本书为什么没打包」 has to still be answerable afterwards, which is
+        why the batch parks a row instead of only reporting. It is a *waiting*
+        state, not a failure: nothing was attempted and the archive is intact.
+        """
+        candidate_id, _, _ = fixture.packaged(pack_state=CONVERSION_STATE_FAILED)
+
+        asyncio.run(
+            fixture.service.park_for_invalid_path(
+                candidate_id, "SEGMENT_TOO_LONG", "文件名过长"
+            )
+        )
+
+        work = asyncio.run(fixture.database.downloaded_work(candidate_id))
+        assert work.pack_state == "CONVERSION_WAITING_PATH"
+        assert work.pack_error_message == "文件名过长"
+        # And it is in the 需干预 partition, which is where the operator looks.
+        works, total = asyncio.run(
+            fixture.database.list_downloaded_works(pack_filter="attention")
+        )
+        assert total == 1
+        assert works[0].candidate_id == candidate_id
+
+    def test_parking_leaves_a_running_pack_alone(self, fixture: Fixture) -> None:
+        """The worker holds that row and would overwrite whatever we wrote."""
+        candidate_id, _, _ = fixture.packaged(
+            pack_state=CONVERSION_STATE_RUNNING
+        )
+
+        asyncio.run(
+            fixture.service.park_for_invalid_path(
+                candidate_id, "SEGMENT_TOO_LONG", "文件名过长"
+            )
+        )
+
+        work = asyncio.run(fixture.database.downloaded_work(candidate_id))
+        assert work.pack_state == CONVERSION_STATE_RUNNING
+
+    def test_deleting_the_files_drops_the_pin(self, fixture: Fixture) -> None:
+        """A pin naming a deleted file would hold that name against every work.
+
+        And a later re-download would publish to a path chosen for a book that no
+        longer exists. A records-only removal keeps the pin on purpose -- the file
+        is still there and the decision still applies.
+        """
+        candidate_id, _, _ = fixture.packaged()
+        asyncio.run(
+            fixture.service.set_archive_path(candidate_id, filename="固定名")
+        )
+
+        asyncio.run(
+            fixture.service.remove_work(candidate_id, delete_files=True)
+        )
+
+        assert asyncio.run(fixture.database.archive_path_pin(candidate_id)) is None
+
+    def test_a_records_only_removal_keeps_the_pin(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, _, _ = fixture.packaged()
+        asyncio.run(
+            fixture.service.set_archive_path(candidate_id, filename="固定名")
+        )
+
+        asyncio.run(fixture.service.remove_work(candidate_id))
+
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "固定名.cbz"
+
+
 class TestRename:
     def test_a_rename_moves_the_file_and_pins_where_a_repack_lands(
         self, fixture: Fixture

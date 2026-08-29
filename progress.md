@@ -2075,3 +2075,130 @@ shelves, import scan. A work's detail page is still only `/works/{id}`.
 - **重新下载不会自动重新打包**，即使勾了「下载后重新打包」：`redownload_work` 只是把打包任务一并排进队列，真正的先后由 worker 决定——打包任务读 ARCHIVE 产物，而下载完成时会重写那一行。若要严格保证顺序，得让下载完成回调去触发打包，而不是提前排队。
 - **`downloaded.js` 只 patch 打包徽章与错误行**，不建行；发现未知作品时显示变更通知。作品**消失**（被别处移除）时同样只提示，不删行。
 - **`app/db/database.py:1348` 用 `str(row[3])` 无条件转换**，`filter_result`/`filter_reason` 为 NULL 时 `/works/{id}` 会显示字面 `None`。与本次改动无关，已向操作者提过，未获指示，未动。
+
+---
+
+## R11 — 归档路径可控：作品详情页设定路径，批量打包按最新模板重算
+
+**2026-08-29 · 操作者指令**：①作品详情页可修改归档路径与名称，目标目录不存在自动
+创建，名称已存在则拒绝调整，修改后自动重命名与移动归档文件；②详情页打包按该页设
+定的路径，批量打包优先用最新路径配置为每个作品重算归档路径与文件名后逐个打包；自
+动生成的路径/文件名不合法（过长、特殊字符）则**不改变该作品**，纳入需干预分组并说
+明原因。
+
+### 这次的核心分歧：修复 vs 拒绝
+
+`safe_library_name` 把 `?` 换成空格、截断超长段、给保留名加后缀——**在打包任务里这
+是对的**：书已经下载完，为一个标点符号让任务失败，代价比一个古怪的文件名大得多。
+但同一套逻辑放到操作员正在填的表单上就是错的：静默修复意味着他拿到的路径不是他填
+的路径，而屏幕上没有任何东西说明这件事。
+
+所以新增的是**平行的严格分支**，不是替换：
+
+| 时机 | 函数 | 行为 |
+|------|------|------|
+| 打包任务内解析目标 | `render_library_path` / `safe_library_name` | 修复，永不拒绝 |
+| 操作员填表单 | `strict_library_segment` / `check_library_segment` | 拒绝，并说明是哪一段的哪个字符 |
+| 批量按模板重算 | `plan_library_path` | 拒绝，理由逐件上报 |
+
+`check_library_segment` 返回 `(code, message)` 而非抛异常，因为批量要为每件作品收集
+一条理由，逐段 try/except 会把调用点写烂。
+
+### 新增的第三个「等待」状态
+
+`CONVERSION_WAITING_PATH`（待定归档路径），与 `WAITING_VOLUMES`/`WAITING_PASSWORD`
+并列进 `RECOVERABLE_CONVERSION_STATES`。
+
+**为什么不是 FAILED。** 档案完好、什么都没尝试、补救办法是操作员改标题或在详情页钉
+一个路径然后重排——这正是「待补分卷」「待补密码」的形状。标成 FAILED 会把一本根本没
+被碰过的书，摆到真正打包炸了的书旁边，还会给出「重试」这个按钮，而重试只会重新渲染
+出同一个不可能的路径。
+
+**为什么批量要落一行任务，而不只是 skip。** skip 是 flash message 里的一句话，下一
+次导航就没了；「这本书为什么没打包」必须明天还答得上来。落行才有 `error_code` /
+`error_message`，需干预分区才能逐本显示原因。
+
+### 为什么是新表而不是 014 那一列
+
+`artifacts.library_relative_path` 只能在 CBZ 存在之后存在——artifact 行是打包*产生*
+的。这让它答不出详情页现在要问的问题：「下次打包时把这本书放到哪」，而操作员想在
+**第一次打包之前**设这个值，跟打包之后一样自然。更糟的是钉住信息会随 artifact 一起
+死：移除作品的记录会连带丢掉「这本书该放哪」的决定，于是重新下载又按模板推导，把没
+人取消过的改名给撤了。
+
+`work_archive_paths` 以 candidate 为键——两次下载三次重打包是同一本书，路径是关于书
+的事实。014 那一列留在原地并继续有效：`ConversionService` 先读新表、回落旧列，所以
+升级不需要猜着做数据迁移。
+
+`is_manual` 是这张表的关键，语义与 `metadata_values.is_manual` 完全一致：**模板是默
+认值，默认值绝不能覆盖决定**。手工改过名的书，在之后的批量打包里保住那个名字。
+
+### 变更清单
+
+**新增**
+- `app/db/migrations/015_work_archive_paths.sql`
+
+**修改**
+- `app/conversion/naming.py` — `LibraryPathError`、`check_library_segment`、
+  `strict_library_segment`、`plan_library_path`、`MAX_RELATIVE_PATH_LENGTH`。
+- `app/conversion/service.py` — 钉住路径先读新表；钉住路径**复读校验**（库根是设置项，
+  换个更深的库能把当初合法的路径顶过上限）；不可用则 `_mark_waiting_sync` 泊车；
+  `planned_library_path` / `metadata_for` / `title_of` 供批量调用；
+  `_record_cbz_artifact_sync` 现在**每次打包**都写 `library_relative_path`。
+- `app/downloads/archived.py` — `set_archive_path`、`has_manual_path_pin`、
+  `pin_computed_path`、`park_for_invalid_path`；`rename_work` 同时写新表；
+  删文件的移除清掉钉住路径。
+- `app/downloads/models.py` — `CONVERSION_STATE_WAITING_PATH`、
+  `ATTENTION_INVALID_PATH`、`DownloadedWork.pinned_path` / `pinned_is_manual` /
+  `archive_relative_path`。
+- `app/db/database.py` — 四个 pin 访问器；`_DOWNLOADED_SELECT` 左连新表。
+- `app/api/downloaded.py` — `_refile_for_repack`：批量打包前逐件重算并钉住。
+- `app/api/works.py` — `archive_path_view`、`effective_library_path`、
+  `work_actions.edit_archive_path`。
+- `app/api/status.py` / `app/api/summary.py` / `app/api/serializers.py` — 新词条与新载荷。
+- `app/web/routes/works.py` — `POST /works/{id}/archive-path`（该页第一个写路由）。
+- `app/web/templates/work_detail.html` — 归档面板变成可编辑表单。
+
+### 决策与理由
+1. **名称已存在就拒绝，不加 ` (2)`。** `unique_library_target` 加后缀在*模板*把两本
+   书渲染到同名时是对的——两个名字都不是谁选的，后缀是最不坏的答案。这里是操作员选
+   的，让书落在 `书名 (2).cbz` 等于在他要的名字旁边摆一个他没要的。
+2. **两道占用检查，因为占用有两种。** 别的作品*钉住*了这个路径（文件可能还不存在，
+   放行就会让两本书在打包时互相覆盖）；或者路径上*有文件*但没人钉（打包早于本功能的
+   书，没有行能找到它，文件系统是唯一证人）。
+3. **`mkdir` 放在所有检查之后。** 操作员在表单上反复试，否则每次被拒都会在书库里留
+   下一个空目录。
+4. **拒绝时重渲染详情页（400），不是 303 带 `?error=`。** 列表动作没有表单可回，重定
+   向是对的；这里他正开着表单，需要看到是哪个值被拒了。
+5. **批量重算不移动文件。** 打包才是发布动作，它读钉住路径就会落到新位置。先移动的
+   话，一旦打包随后失败，书就停在一个没有 artifact 行指向的路径上。
+6. **每次打包都记 `library_relative_path`。** 014 只为改名场景加了这列，于是刚打包好
+   的书答不出「相对书库我在哪」——详情页表单的「目录」字段就没东西可预填，操作员只
+   改文件名提交，会带着空目录把书搬到书库根。这是数据移动，不是显示瑕疵。
+
+### 顺手修掉的既有 Bug
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| 计算出的路径会覆盖操作员手填的路径，但仍报告为「手工设定」 | upsert 里 `is_manual = MAX(...)` 保住了*标签*，`relative_path = excluded.relative_path` 却把*决定本身*扔了 | 守卫移到整条 UPDATE 上：`WHERE NOT (stored.is_manual = 1 AND excluded.is_manual = 0)`，计算写入对手填作品是彻底的 no-op |
+| 只改目录、留空文件名时被拒，理由是「含有不能用于路径的字符：\」 | 回落取当前名时用 `PurePosixPath(cbz_path).stem`，而 `cbz_path` 是 Windows 绝对路径——`PurePosixPath` 把整串当一段，反斜杠于是流进段校验 | 先 `replace("\\", "/")` 再解析 |
+
+### Error Log
+| 症状 | 原因 | 处理 |
+|------|------|------|
+| `AttributeError: 'FakeArchived' object has no attribute 'database'` | 批量里写了 `archived_service.database.downloaded_work(...)`，为读一个字段把整个 database 暴露出去 | 换成具名问题 `has_manual_path_pin(candidate_id)`：策略是「模板不得覆盖人工决定」，自己去取行的调用方随时可能忘掉它 |
+| 详情页「目录」字段预填为空 | 见上「每次打包都记相对路径」；且升级前打包的书本来就没有这个值 | 打包时写入 + `archive_path_view` 在缺值时用发布路径相对库根推导（需要 `effective_library_path`） |
+| `test_ui_kit_renders_every_state_label_from_python` 失败 | 新状态词条没进 ui-kit 的 `JOB_STATES` 画廊 | 补上；该测试正是为此存在 |
+
+### Verification
+✅ **985 passed / 0 failed / 0 skipped**（旧基线 939，+46）。
+新增 `TestExplicitArchivePath` 17、`TestBatchRefile` 4、`TestStrictPlanning` 9、
+详情页表单集成测试 5，其余为参数化展开。
+
+### Open Items For The Next Agent
+- **批量重算只在 `repack` 动作里跑**，`remove`/`redownload` 不重算——只有打包会发布文
+  件。若以后让「重新下载后自动打包」也走重算，注意它排队的时点在下载完成之前。
+- **`MAX_RELATIVE_PATH_LENGTH = 240` 是个保守常数**，没有按实际文件系统探测。Linux
+  单段上限 255 字节、整路径几乎无限；Windows 绝对路径 260。取 240 是为了让同一个库
+  在两个平台上行为一致，代价是 Linux 上会拒掉一些其实能用的长路径。
+- 前两轮遗留的两项仍未处理：重新下载+重新打包的顺序由 worker 决定；
+  `app/db/database.py` 里 `filter_result`/`filter_reason` 为 NULL 时显示字面 `None`。

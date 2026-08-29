@@ -29,6 +29,7 @@ from app.api.contracts import ApiError, PageParams
 from app.api.events import EVENT_DOWNLOAD
 from app.api.serializers import downloaded_work as serialize_work
 from app.api.status import DOWNLOADED_TAB_STATUS, downloaded_tab_view
+from app.conversion.naming import LibraryPathError
 from app.db.database import DOWNLOADED_PACK_FILTERS
 
 
@@ -156,6 +157,59 @@ def _translate(exc: Exception) -> Exception:
     return exc
 
 
+async def _refile_for_repack(
+    archived_service,
+    conversion_service,
+    candidate_id: int,
+    *,
+    operator_name: str,
+) -> None:
+    """Point one work at the path the current layout template gives it.
+
+    Why a batch repack recomputes at all. The layout template is a setting an
+    operator changes, and the books already in the library were filed under
+    whatever it said at the time. 「批量打包时优先使用最新路径配置为每个
+    作品生成最新的归档路径与文件名」 is the instruction; without it a repack
+    reads the pin the *last* pack wrote and the new template never reaches the
+    books that predate it.
+
+    Three things it deliberately does not do:
+
+    * **It does not touch a path the operator typed.** `is_manual` on the pin is
+      the same guard `is_manual` is over metadata: a template is a default, and a
+      default must never overwrite a decision. An operator who named one book by
+      hand and then batch-packs fifty keeps that name.
+    * **It does not refuse the batch when one path is unusable.** The work is
+      left exactly as it was -- old pin, old file, nothing moved -- and the
+      packing job is parked in `CONVERSION_WAITING_PATH` carrying the reason, so
+      it lands in 需干预 with 「为什么」 attached rather than vanishing from a
+      flash message. That is what makes the outcome answerable tomorrow.
+    * **It does not move the file itself.** The pack is what publishes to the new
+      path, and it lands there because it reads the pin. Moving first would leave
+      a book at a path no artifact row names if the pack then failed.
+    """
+    if await archived_service.has_manual_path_pin(candidate_id):
+        return
+    metadata = await conversion_service.metadata_for(candidate_id)
+    title = conversion_service.title_of(metadata, candidate_id)
+    try:
+        relative = await conversion_service.planned_library_path(
+            candidate_id, title, metadata
+        )
+    except LibraryPathError as exc:
+        # Park the packing task with the reason instead of moving anything. The
+        # job has to exist for the reason to be visible, so it is enqueued first
+        # and then parked -- `enqueue_for_candidate` is idempotent, and the
+        # caller's own enqueue afterwards finds the row already parked.
+        await archived_service.park_for_invalid_path(
+            candidate_id, exc.code, exc.public_message
+        )
+        raise
+    await archived_service.pin_computed_path(
+        candidate_id, relative.as_posix(), operator_name=operator_name
+    )
+
+
 async def apply_downloaded_batch(
     archived_service,
     conversion_service,
@@ -190,7 +244,20 @@ async def apply_downloaded_batch(
         # Packaging is the conversion service's own entry point, and it is the
         # same one the work detail page's 重新打包 posts to -- there is no second
         # path that could disagree about what re-packing means.
+        #
+        # Before enqueueing, each work's archive path is recomputed from the
+        # *current* layout template and pinned, so a batch started after a
+        # template change re-files every selected book instead of leaving the
+        # ones packed under the old template where they were. A work whose
+        # recomputed path is unusable is left completely alone -- see
+        # `_refile_for_repack`.
         async def run(candidate_id: int):
+            await _refile_for_repack(
+                archived_service,
+                conversion_service,
+                candidate_id,
+                operator_name=operator_name,
+            )
             return await conversion_service.enqueue_for_candidate(candidate_id)
 
     elif action == "remove":

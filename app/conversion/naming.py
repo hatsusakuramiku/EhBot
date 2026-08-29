@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 # Reserved on Windows and unsafe in path segments everywhere else.
@@ -154,6 +154,140 @@ def render_library_path(
     return Path(*rendered)
 
 
+#: Ceiling on the whole library-relative path, not just one segment. Every
+#: segment can be inside `MAX_SEGMENT_LENGTH` while the join is still longer than
+#: a filesystem accepts -- Windows stops at 260 characters for the *absolute*
+#: path, so a relative path near that is unusable the moment the library sits
+#: anywhere but a drive root. Refusing at 240 leaves room for the root and fails
+#: while the operator is still looking at the form.
+MAX_RELATIVE_PATH_LENGTH = 240
+
+
+class LibraryPathError(ValueError):
+    """A rendered path this deployment will not publish a book to.
+
+    Separate from `LibraryTemplateError` because the two are refused at
+    different moments and mean different things to the operator. A template
+    error is a setting they can fix; this is one *book* whose metadata renders
+    into a name the filesystem cannot take, and the remedy is to edit that
+    book's title or give it an explicit path. Sharing one exception would make
+    「路径模板无效」the message for a book whose only problem is a 300-character
+    title.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.public_message = message
+
+
+def check_library_segment(value: str) -> tuple[str, str] | None:
+    """Why this path segment is unusable verbatim, or None if it is fine.
+
+    The counterpart to `safe_library_name`, and deliberately not a variant of
+    it: that function *repairs* a segment because a book already downloaded has
+    to land somewhere, while this one *reports*. Both exist because the two
+    moments differ. When the packer is resolving where a finished book goes,
+    silently replacing `?` with a space is better than failing the job. When an
+    operator is typing a path, or asking for a batch to be re-filed under the
+    current template, a silent repair means the path they get is not the path
+    they asked for and nothing on screen says so -- so there the answer is a
+    refusal naming the reason.
+
+    Returns `(code, message)` rather than raising so a batch can collect one
+    reason per work without exception handling per segment.
+    """
+    normalized = unicodedata.normalize("NFC", value or "")
+    if not normalized.strip():
+        return ("SEGMENT_EMPTY", "名称不能为空")
+    if normalized != normalized.strip():
+        return (
+            "SEGMENT_PADDED",
+            f"「{normalized.strip()}」前后有空格，请去掉",
+        )
+    if normalized in {".", ".."}:
+        return ("SEGMENT_TRAVERSAL", "名称不能是 . 或 ..")
+    found = _UNSAFE_CHARACTERS.findall(normalized)
+    if found:
+        # Control characters have no printable form, so they are named as a
+        # class rather than echoed into the message.
+        printable = sorted({char for char in found if char.isprintable()})
+        shown = " ".join(printable) if printable else "控制字符"
+        return (
+            "SEGMENT_UNSAFE_CHARACTER",
+            f"「{normalized}」含有不能用于路径的字符：{shown}",
+        )
+    if len(normalized) > MAX_SEGMENT_LENGTH:
+        return (
+            "SEGMENT_TOO_LONG",
+            f"「{normalized[:20]}…」长度 {len(normalized)} 超过上限 "
+            f"{MAX_SEGMENT_LENGTH}，请缩短",
+        )
+    # A trailing dot or space is accepted by the API and then silently dropped
+    # by Windows, which produces a file the database can no longer find.
+    if normalized.endswith((".", " ")):
+        return (
+            "SEGMENT_TRAILING_DOT",
+            f"「{normalized}」不能以点或空格结尾",
+        )
+    if normalized.lower() in _WINDOWS_RESERVED:
+        return (
+            "SEGMENT_RESERVED",
+            f"「{normalized}」是系统保留名，请换一个",
+        )
+    return None
+
+
+def strict_library_segment(value: str) -> str:
+    """One path segment, unchanged, or a refusal explaining why not."""
+    refusal = check_library_segment(value)
+    if refusal is not None:
+        raise LibraryPathError(*refusal)
+    return unicodedata.normalize("NFC", value)
+
+
+def plan_library_path(
+    template: str,
+    values: dict[str, str | None],
+    *,
+    title_fallback: str,
+) -> PurePosixPath:
+    """The relative CBZ path the current template gives this book, or a refusal.
+
+    The strict sibling of `render_library_path`, for the two callers that are
+    acting on the operator's behalf right now rather than finishing a job: the
+    archive-path form on the work detail page, and the batch re-file that
+    recomputes every selected work's path from the current template. Both must
+    be able to say「这本书没有动，因为……」, which a function that sanitises can
+    never say.
+
+    The `.cbz` suffix is appended, not `with_suffix`'d: 「Vol. 1」 would
+    otherwise be read as a stem of `Vol` with a `. 1` extension and the book
+    would be published as `Vol.cbz`.
+    """
+    rendered: list[str] = []
+    for segment in validate_library_template(template).split("/"):
+
+        def substitute(match: re.Match[str]) -> str:
+            name = match.group(1)
+            value = (values.get(name) or "").strip()
+            if value:
+                return value
+            if name == "title":
+                return title_fallback
+            return PLACEHOLDER_FALLBACKS.get(name, "")
+
+        rendered.append(strict_library_segment(_PLACEHOLDER_PATTERN.sub(substitute, segment)))
+    relative = PurePosixPath(*rendered[:-1], f"{rendered[-1]}.cbz")
+    if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+        raise LibraryPathError(
+            "PATH_TOO_LONG",
+            f"归档路径长度 {len(str(relative))} 超过上限 "
+            f"{MAX_RELATIVE_PATH_LENGTH}，请缩短标题或改用更短的路径模板",
+        )
+    return relative
+
+
 def unique_library_target(
     target: Path, *, reserved: frozenset[str] = frozenset()
 ) -> Path:
@@ -187,13 +321,18 @@ def unique_library_target(
 
 __all__ = [
     "DEFAULT_LIBRARY_TEMPLATE",
+    "MAX_RELATIVE_PATH_LENGTH",
     "MAX_SEGMENT_LENGTH",
     "PLACEHOLDER_FALLBACKS",
     "PLACEHOLDER_LABELS",
     "TEMPLATE_PLACEHOLDERS",
+    "LibraryPathError",
     "LibraryTemplateError",
+    "check_library_segment",
+    "plan_library_path",
     "render_library_path",
     "safe_library_name",
+    "strict_library_segment",
     "unique_library_target",
     "validate_library_template",
 ]

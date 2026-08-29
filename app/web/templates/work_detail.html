@@ -198,15 +198,58 @@
   </div>
 
   <aside class="ui-detail-side">
-    {% if work.archive %}
+    {% if work.archive or work.actions.edit_archive_path %}
     <section class="ui-panel">
       <h2 class="ui-section-title">归档</h2>
       {#- The path is shown because it is what the operator needs to find the
           file, and this page is behind the session like every other. -#}
+      {% if work.archive %}
       {{ ui.kv([
         {"label": "文件", "value": work.archive.path},
         {"label": "完成时间", "value": work.archive.completed_at},
       ]) }}
+      {% endif %}
+
+      {% if work.actions.edit_archive_path %}
+      {#- Editing the archive path. Two fields because they are refused
+          differently and the operator fixes them separately: a directory is
+          created if missing, a filename that is taken is refused outright.
+
+          `pending` is computed server-side -- it means the pin no longer matches
+          the published file, so a repack has a move queued. Saying so here is
+          what stops an operator from reading the 「文件」 line above as the
+          current truth after they have changed the path. -#}
+      {% if work.archive_path.pending %}
+      {{ ui.callout("归档路径已更改，尚未生效", tone="waiting",
+                    detail="下次打包时会把书移到 " ~ work.archive_path.relative_path) }}
+      {% endif %}
+      <form class="ui-form" method="post"
+            action="/works/{{ work.candidate_id }}/archive-path">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="archive-directory">目录</label>
+          <input class="ui-input" id="archive-directory" name="directory"
+                 value="{{ work.archive_path.directory }}"
+                 placeholder="不填则放在书库根目录">
+          <small>书库目录下的相对路径，用 / 分隔。目录不存在会自动创建。</small>
+        </div>
+        <div class="ui-field">
+          <label for="archive-filename">文件名</label>
+          <input class="ui-input" id="archive-filename" name="filename"
+                 value="{{ work.archive_path.filename }}"
+                 placeholder="不填则保留当前文件名">
+          <small>不用写 .cbz 后缀。名称被其他作品占用时会拒绝保存，不会自动加 (2)。</small>
+        </div>
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="repack" type="checkbox">
+          <span>保存后立即打包到新路径</span>
+        </label>
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" data-size="sm"
+                  type="submit">保存归档路径</button>
+        </div>
+      </form>
+      {% endif %}
     </section>
     {% endif %}
 

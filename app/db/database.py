@@ -21,6 +21,7 @@ from app.candidates.rules import evaluate_metadata_rules
 from app.downloads.models import (
     CONVERSION_STATE_FAILED,
     CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
     DOWNLOAD_STATE_COMPLETED,
     PROVIDER_CONVERSION,
@@ -102,6 +103,7 @@ DOWNLOADED_PACK_FILTERS: tuple[str, ...] = (
 _DOWNLOADED_ATTENTION_STATES: tuple[str, ...] = (
     CONVERSION_STATE_WAITING_PASSWORD,
     CONVERSION_STATE_WAITING_VOLUMES,
+    CONVERSION_STATE_WAITING_PATH,
 )
 
 #: Whitelisted sorts, for the reason `_CANDIDATE_SORTS` is: nothing outside this
@@ -143,7 +145,8 @@ _DOWNLOADED_SELECT = (
     "(SELECT mv.field_value FROM metadata_values mv "
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-    "c.thumb_url, dj.updated_at "
+    "c.thumb_url, dj.updated_at, "
+    "pin.relative_path AS pinned_path, pin.is_manual AS pinned_is_manual "
     "FROM download_jobs dj "
     "JOIN candidates c ON c.id = dj.candidate_id "
     "LEFT JOIN artifacts arch "
@@ -151,7 +154,8 @@ _DOWNLOADED_SELECT = (
     "LEFT JOIN download_jobs pack "
     "  ON pack.idempotency_key = 'convert:' || c.id "
     "LEFT JOIN artifacts cbz "
-    "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ'"
+    "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ' "
+    "LEFT JOIN work_archive_paths pin ON pin.candidate_id = c.id"
 )
 
 
@@ -187,6 +191,8 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
         language=text(17),
         thumb_url=text(18),
         updated_at=str(row[19]) if row[19] is not None else "",
+        pinned_path=text(20),
+        pinned_is_manual=bool(row[21]) if row[21] is not None else False,
     )
 
 
@@ -1442,6 +1448,116 @@ class Database:
                 (*params, limit, offset),
             ).fetchall()
         return [_downloaded_work(row) for row in rows], total
+
+    async def archive_path_pin(self, candidate_id: int) -> dict | None:
+        """The explicit archive path set for one work, if there is one."""
+        return await asyncio.to_thread(self._archive_path_pin_sync, candidate_id)
+
+    def _archive_path_pin_sync(self, candidate_id: int) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT relative_path, is_manual, operator_name, updated_at "
+                "FROM work_archive_paths WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "relative_path": str(row[0]),
+            "is_manual": bool(row[1]),
+            "operator_name": str(row[2]),
+            "updated_at": str(row[3]) if row[3] is not None else "",
+        }
+
+    async def candidate_at_archive_path(self, relative_path: str) -> int | None:
+        """Which work is pinned to this path, or None if it is free.
+
+        The read behind「名称已存在」. It answers about the *pin* only; the caller
+        also has to look at the filesystem, because a book packed before anyone
+        pinned anything occupies a name without a row here.
+        """
+        return await asyncio.to_thread(
+            self._candidate_at_archive_path_sync, relative_path
+        )
+
+    def _candidate_at_archive_path_sync(self, relative_path: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT candidate_id FROM work_archive_paths "
+                "WHERE relative_path = ?",
+                (relative_path,),
+            ).fetchone()
+        return int(row[0]) if row is not None else None
+
+    async def set_archive_path_pin(
+        self,
+        candidate_id: int,
+        relative_path: str,
+        *,
+        is_manual: bool = True,
+        operator_name: str = "admin",
+    ) -> None:
+        """Record where this work's CBZ must land from now on.
+
+        A computed write against a work whose path the operator typed is a no-op
+        -- not a partial update that keeps the flag and replaces the path. That is
+        the whole content of the guard: a batch re-file recomputes paths from the
+        layout template, and a template is a default, so it must not overwrite a
+        decision. An operator who named one book by hand and then batch-packs
+        fifty keeps that name.
+        """
+        await asyncio.to_thread(
+            self._set_archive_path_pin_sync,
+            candidate_id,
+            relative_path,
+            is_manual,
+            operator_name,
+        )
+
+    def _set_archive_path_pin_sync(
+        self,
+        candidate_id: int,
+        relative_path: str,
+        is_manual: bool,
+        operator_name: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO work_archive_paths "
+                "(candidate_id, relative_path, is_manual, operator_name) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(candidate_id) DO UPDATE SET "
+                "  relative_path = excluded.relative_path, "
+                "  is_manual = excluded.is_manual, "
+                "  operator_name = excluded.operator_name, "
+                "  updated_at = CURRENT_TIMESTAMP "
+                # The guard, and it has to sit on the whole UPDATE rather than on
+                # `is_manual` alone. Keeping the flag while still assigning
+                # `relative_path = excluded.relative_path` preserved the *label*
+                # on the operator's decision and threw away the decision itself,
+                # which is the failure this protects against: a batch repack
+                # would report the path as operator-set while having replaced it
+                # with the template's.
+                "WHERE NOT (work_archive_paths.is_manual = 1 "
+                "           AND excluded.is_manual = 0)",
+                (
+                    candidate_id,
+                    relative_path,
+                    1 if is_manual else 0,
+                    operator_name,
+                ),
+            )
+
+    async def clear_archive_path_pin(self, candidate_id: int) -> None:
+        """Drop the pin, so the layout template decides again."""
+        await asyncio.to_thread(self._clear_archive_path_pin_sync, candidate_id)
+
+    def _clear_archive_path_pin_sync(self, candidate_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM work_archive_paths WHERE candidate_id = ?",
+                (candidate_id,),
+            )
 
     async def downloaded_work_counts(self) -> dict[str, int]:
         """One count per pack filter, for the tab strip.

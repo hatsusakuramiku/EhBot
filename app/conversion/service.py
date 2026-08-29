@@ -20,7 +20,11 @@ from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
+    MAX_RELATIVE_PATH_LENGTH,
+    LibraryPathError,
     LibraryTemplateError,
+    check_library_segment,
+    plan_library_path,
     render_library_path,
     safe_library_name,
     unique_library_target,
@@ -32,6 +36,7 @@ from app.downloads.models import (
     CONVERSION_STATE_PENDING,
     CONVERSION_STATE_RUNNING,
     CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
     DOWNLOAD_STATE_COMPLETED,
     DOWNLOAD_STATE_FAILED,
@@ -145,6 +150,28 @@ class ConversionService:
             self._pinned_library_path_sync, candidate_id
         )
         if pinned is not None:
+            # Re-checked here rather than trusted from the write. The write did
+            # validate, but the ceiling is on the *whole* path and the library
+            # root is a setting: moving the library deeper can push a path that
+            # was legal when it was pinned past what the filesystem takes. The
+            # refusal parks the job with the reason on it, which is the only way
+            # the operator finds out at all.
+            refusal = next(
+                (
+                    check_library_segment(segment)
+                    for segment in (*pinned.parent.parts, pinned.stem)
+                    if check_library_segment(segment) is not None
+                ),
+                None,
+            )
+            if refusal is not None:
+                raise LibraryPathError(*refusal)
+            if len(str(pinned)) > MAX_RELATIVE_PATH_LENGTH:
+                raise LibraryPathError(
+                    "PATH_TOO_LONG",
+                    f"归档路径长度 {len(str(pinned))} 超过上限 "
+                    f"{MAX_RELATIVE_PATH_LENGTH}，请在作品详情页改短归档路径",
+                )
             return await asyncio.to_thread(
                 unique_library_target, library_path / pinned, reserved=reserved
             )
@@ -173,28 +200,82 @@ class ConversionService:
             unique_library_target, target, reserved=reserved
         )
 
+    async def planned_library_path(
+        self, candidate_id: int, title: str, metadata
+    ) -> PurePosixPath:
+        """What the current template gives this book, refusing if unusable.
+
+        The strict counterpart of `_library_target`, and the split is deliberate.
+        `_library_target` runs inside a job for a book that is already
+        downloaded, so it repairs what it can and never refuses -- failing a job
+        over a punctuation mark would leave the book unpublished for a reason the
+        operator did not ask about. This runs while the operator is waiting for
+        an answer, on a path they have not agreed to yet, so it reports instead:
+        a batch re-file that silently sanitised fifty titles would move fifty
+        books to names nobody chose.
+
+        Raises `LibraryPathError`, which the batch turns into a per-work reason.
+        """
+        template = await self._settings.library_template()
+        return plan_library_path(
+            template,
+            {
+                "category": _metadata_lookup(metadata, "Category"),
+                "artist": _metadata_lookup(metadata, "Artist"),
+                "title": title,
+            },
+            title_fallback=f"candidate-{candidate_id}",
+        )
+
+    async def metadata_for(self, candidate_id: int):
+        """This work's metadata rows, for a caller planning its path.
+
+        Exposed because `planned_library_path` needs them and the batch has no
+        business reaching into `_fetch_metadata_sync`.
+        """
+        return await asyncio.to_thread(self._fetch_metadata_sync, candidate_id)
+
+    @staticmethod
+    def title_of(metadata, candidate_id: int) -> str:
+        """The title the packer would use, resolved the one way it resolves it."""
+        return (
+            _metadata_lookup(metadata, "Title") or f"Candidate {candidate_id}"
+        )
+
     def _pinned_library_path_sync(self, candidate_id: int) -> PurePosixPath | None:
-        """The library-relative path the operator set, if they set one.
+        """The library-relative path this book is pinned to, if any.
+
+        Two sources, newest first. `work_archive_paths` is where an explicit path
+        is recorded now: it is keyed by candidate, so it exists before the first
+        pack and survives a work's jobs being removed. `artifacts
+        .library_relative_path` is what renames written before migration 015
+        recorded, and reading it as a fallback is what keeps those working
+        without a data migration that would have to guess.
 
         Read as a relative path and re-joined onto the *current* library root
         rather than stored absolute, so moving the library directory carries a
-        renamed book with it. Validated before use: the column was written by
-        `ArchivedWorkService.rename_work`, which sanitises every segment, but a
-        path read back out of the database and joined onto a root is exactly the
-        shape that must not be trusted twice -- an absolute value or a `..`
-        would escape the library, so it is ignored and the template renders the
-        path instead.
+        renamed book with it. Validated before use even though this process
+        wrote it: a path read back out of the database and joined onto a root is
+        exactly the shape that must not be trusted twice -- an absolute value or
+        a `..` would escape the library, so it is ignored and the template
+        renders the path instead.
         """
         with self._database._connect() as connection:  # noqa: SLF001
             row = connection.execute(
-                "SELECT artifacts.library_relative_path FROM artifacts "
-                "JOIN download_jobs ON download_jobs.id = artifacts.job_id "
-                "WHERE download_jobs.candidate_id = ? "
-                "AND artifacts.artifact_type = 'CBZ' "
-                "AND artifacts.library_relative_path IS NOT NULL "
-                "ORDER BY artifacts.id DESC LIMIT 1",
+                "SELECT relative_path FROM work_archive_paths "
+                "WHERE candidate_id = ?",
                 (candidate_id,),
             ).fetchone()
+            if row is None or not row[0]:
+                row = connection.execute(
+                    "SELECT artifacts.library_relative_path FROM artifacts "
+                    "JOIN download_jobs ON download_jobs.id = artifacts.job_id "
+                    "WHERE download_jobs.candidate_id = ? "
+                    "AND artifacts.artifact_type = 'CBZ' "
+                    "AND artifacts.library_relative_path IS NOT NULL "
+                    "ORDER BY artifacts.id DESC LIMIT 1",
+                    (candidate_id,),
+                ).fetchone()
         if row is None or not row[0]:
             return None
         relative = PurePosixPath(str(row[0]).replace("\\", "/"))
@@ -276,8 +357,8 @@ class ConversionService:
                 # state except RUNNING is requeueable, and each for its own
                 # reason:
                 #
-                # * WAITING_VOLUMES / WAITING_PASSWORD -- the operator has
-                #   supplied what was missing.
+                # * WAITING_VOLUMES / WAITING_PASSWORD / WAITING_PATH -- the
+                #   operator has supplied what was missing, or fixed the path.
                 # * FAILED -- a retry after fixing the cause.
                 # * COMPLETED -- 重新打包. This one is the whole point of the
                 #   action and was missing until 2026-08-28: `DO NOTHING` above
@@ -294,12 +375,13 @@ class ConversionService:
                 connection.execute(
                     "UPDATE download_jobs SET state = ?, error_code = NULL, "
                     "error_message = NULL, updated_at = CURRENT_TIMESTAMP "
-                    "WHERE idempotency_key = ? AND state IN (?, ?, ?, ?)",
+                    "WHERE idempotency_key = ? AND state IN (?, ?, ?, ?, ?)",
                     (
                         CONVERSION_STATE_PENDING,
                         f"convert:{candidate_id}",
                         CONVERSION_STATE_WAITING_VOLUMES,
                         CONVERSION_STATE_WAITING_PASSWORD,
+                        CONVERSION_STATE_WAITING_PATH,
                         CONVERSION_STATE_FAILED,
                         CONVERSION_STATE_COMPLETED,
                     ),
@@ -433,9 +515,25 @@ class ConversionService:
             or f"Candidate {job['candidate_id']}"
         )
         library_path, work_path = await self._effective_paths()
-        library_target = await self._library_target(
-            job["candidate_id"], library_path, metadata, title
-        )
+        try:
+            library_target = await self._library_target(
+                job["candidate_id"], library_path, metadata, title
+            )
+        except LibraryPathError as exc:
+            # Only a *pinned* path can raise here -- the template branch
+            # sanitises. So this is a path an operator or a batch recorded that
+            # this filesystem will not take, and the book is parked rather than
+            # failed: nothing was attempted, the archive is intact, and the
+            # remedy is an edit on the work detail page followed by a requeue.
+            await asyncio.to_thread(
+                self._mark_waiting_sync,
+                job["job_id"],
+                CONVERSION_STATE_WAITING_PATH,
+                exc.code,
+                exc.public_message,
+                {},
+            )
+            return
         image_quality = await self._settings.image_quality()
         processor = await self._build_processor(image_quality)
         try:
@@ -484,6 +582,7 @@ class ConversionService:
             job["job_id"],
             result.cbz_path,
             result.page_count,
+            library_path,
         )
         await asyncio.to_thread(
             self._mark_completed_sync,
@@ -585,6 +684,7 @@ class ConversionService:
         job_id: int,
         destination: Path,
         page_count: int,
+        library_path: Path | None = None,
     ) -> None:
         """Record the packed CBZ the way the download path records an archive.
 
@@ -602,22 +702,42 @@ class ConversionService:
                 if not chunk:
                     break
                 sha256.update(chunk)
+        # Recorded on *every* pack, not only after a rename. The column arrived
+        # in 014 for the rename case alone, which left a freshly packed book with
+        # no answer to 「相对于书库它在哪里」 -- so the archive-path form on the
+        # detail page had nothing to prefill its 目录 field with, and an operator
+        # editing only the filename would have submitted an empty directory and
+        # moved the book to the library root. Deriving it here is also the only
+        # place that can: `library_path` is the effective root for this job.
+        relative: str | None = None
+        if library_path is not None:
+            try:
+                relative = destination.resolve().relative_to(
+                    library_path.resolve()
+                ).as_posix()
+            except (OSError, ValueError):
+                # A destination outside the library is already impossible by the
+                # time we get here, but a root that cannot be resolved must not
+                # fail a pack that has otherwise succeeded.
+                relative = None
         with self._database._connect() as connection:
             connection.execute(
                 "INSERT INTO artifacts "
                 "(job_id, artifact_type, path, sha256, size_bytes, "
-                "page_count) "
-                "VALUES (?, 'CBZ', ?, ?, ?, ?) "
+                "page_count, library_relative_path) "
+                "VALUES (?, 'CBZ', ?, ?, ?, ?, ?) "
                 "ON CONFLICT(job_id, artifact_type) DO UPDATE SET "
                 "path = excluded.path, sha256 = excluded.sha256, "
                 "size_bytes = excluded.size_bytes, "
-                "page_count = excluded.page_count",
+                "page_count = excluded.page_count, "
+                "library_relative_path = excluded.library_relative_path",
                 (
                     job_id,
                     str(destination),
                     sha256.hexdigest(),
                     destination.stat().st_size,
                     int(page_count),
+                    relative,
                 ),
             )
 
@@ -677,6 +797,7 @@ __all__ = [
     "CONVERSION_STATE_COMPLETED",
     "CONVERSION_STATE_FAILED",
     "CONVERSION_STATE_WAITING_PASSWORD",
+    "CONVERSION_STATE_WAITING_PATH",
     "CONVERSION_STATE_WAITING_VOLUMES",
     "RECOVERABLE_CONVERSION_STATES",
 ]

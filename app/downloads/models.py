@@ -97,10 +97,29 @@ CONVERSION_STATE_FAILED = "CONVERSION_FAILED"
 CONVERSION_STATE_WAITING_VOLUMES = "CONVERSION_WAITING_VOLUMES"
 CONVERSION_STATE_WAITING_PASSWORD = "CONVERSION_WAITING_PASSWORD"
 
+#: The layout template renders a path this filesystem will not take for *this*
+#: book -- a title long enough to blow the path ceiling, or one carrying
+#: characters a path segment cannot hold.
+#:
+#: A waiting state rather than a failure, and the difference is the point. The
+#: archive is intact, nothing was attempted, and the remedy is an edit the
+#: operator makes (shorten the title, or pin an explicit path on the work detail
+#: page) followed by a requeue -- which is precisely the shape of 待补分卷 and
+#: 待补密码. Marking it FAILED would file a book that was never touched under
+#: 打包失败 beside books whose packing genuinely broke, and would offer 重试 as
+#: the remedy when retrying re-renders the same impossible path.
+#:
+#: Why the packer parks a row at all instead of the batch just skipping the work:
+#: a skip is a sentence in a flash message that is gone on the next navigation,
+#: and 「这本书为什么没打包」 has to still be answerable tomorrow. The row carries
+#: `error_code`/`error_message`, so the 需干预 tab shows the reason per book.
+CONVERSION_STATE_WAITING_PATH = "CONVERSION_WAITING_PATH"
+
 RECOVERABLE_CONVERSION_STATES: frozenset[str] = frozenset(
     {
         CONVERSION_STATE_WAITING_VOLUMES,
         CONVERSION_STATE_WAITING_PASSWORD,
+        CONVERSION_STATE_WAITING_PATH,
     }
 )
 
@@ -134,6 +153,9 @@ QUEUE_GROUPS: tuple[str, ...] = (
 #: an ask, and a stalled torrent is a decision (wait, or switch source).
 ATTENTION_MISSING_VOLUMES = "MISSING_VOLUMES"
 ATTENTION_MISSING_PASSWORD = "MISSING_PASSWORD"
+#: The rendered archive path is unusable for this book. An ask, not a failure:
+#: the operator shortens the title or pins a path, then requeues.
+ATTENTION_INVALID_PATH = "INVALID_PATH"
 ATTENTION_MISSING_PAGES = "MISSING_PAGES"
 ATTENTION_STALLED_TORRENT = "STALLED_TORRENT"
 ATTENTION_FAILED = "FAILED"
@@ -199,13 +221,35 @@ class DownloadedWork:
     cbz_size: int | None = None
     page_count: int | None = None
     #: Set once the operator has renamed or relocated the book, and the reason a
-    #: later repack lands on their path instead of re-deriving it.
+    #: later repack lands on their path instead of re-deriving it. Written by the
+    #: packer onto the artifact row, so it exists only after a successful pack;
+    #: `pinned_path` is the newer, authoritative answer and survives without one.
     library_relative_path: str | None = None
+    #: The explicit archive path from `work_archive_paths`, when one is set. This
+    #: is where the *next* pack will put the book, which is a different question
+    #: from `cbz_path` -- where the last one put it -- and the page shows both so
+    #: an operator can see a pending move before it happens.
+    pinned_path: str | None = None
+    #: Whether that path was typed by an operator rather than computed from the
+    #: layout template. A computed path may be recomputed; a typed one may not.
+    pinned_is_manual: bool = False
     artist: str | None = None
     category: str | None = None
     language: str | None = None
     thumb_url: str | None = None
     updated_at: str = ""
+
+    @property
+    def archive_relative_path(self) -> str | None:
+        """Where this book's CBZ belongs, newest answer first.
+
+        The pin is the operator's or the batch's decision about the *next* pack;
+        `library_relative_path` is what the last pack recorded. Reading the pin
+        first is what makes a path set before the first pack take effect, and
+        falling back is what keeps every rename made before migration 015
+        working without a data migration.
+        """
+        return self.pinned_path or self.library_relative_path
 
     @property
     def is_packaged(self) -> bool:
@@ -370,6 +414,8 @@ class DownloadJobSummary:
             return ATTENTION_MISSING_VOLUMES
         if self.state == CONVERSION_STATE_WAITING_PASSWORD:
             return ATTENTION_MISSING_PASSWORD
+        if self.state == CONVERSION_STATE_WAITING_PATH:
+            return ATTENTION_INVALID_PATH
         if self.state in {
             DownloadState.FAILED.value,
             CONVERSION_STATE_FAILED,

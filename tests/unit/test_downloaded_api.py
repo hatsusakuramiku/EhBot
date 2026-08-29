@@ -16,10 +16,12 @@ Two things are under test here and neither needs a database or a browser:
 from __future__ import annotations
 
 import asyncio
+from pathlib import PurePosixPath
 
 import pytest
 
 from app.api.contracts import ApiError
+from app.conversion.naming import LibraryPathError
 from app.api.downloaded import (
     MAX_DOWNLOADED_BATCH,
     apply_downloaded_batch,
@@ -247,9 +249,25 @@ class TestSnapshot:
 class FakeArchived:
     """Refuses what it has already removed, the way the real service does."""
 
-    def __init__(self) -> None:
+    def __init__(self, manual_pins: frozenset[int] = frozenset()) -> None:
         self.removed: list[tuple[int, bool]] = []
         self.redownloaded: list[tuple[int, bool]] = []
+        # The re-file guard reads this; a work in here has a path the operator
+        # typed and must come out of a batch repack untouched.
+        self.manual_pins = set(manual_pins)
+        self.pinned: list[tuple[int, str]] = []
+        self.parked: list[tuple[int, str]] = []
+
+    async def has_manual_path_pin(self, candidate_id: int) -> bool:
+        return candidate_id in self.manual_pins
+
+    async def pin_computed_path(
+        self, candidate_id, relative_path, *, operator_name="admin"
+    ) -> None:
+        self.pinned.append((candidate_id, relative_path))
+
+    async def park_for_invalid_path(self, candidate_id, code, message) -> None:
+        self.parked.append((candidate_id, code))
 
     async def remove_work(self, candidate_id, *, delete_files=False,
                           operator_name="admin"):
@@ -266,12 +284,32 @@ class FakeArchived:
 
 
 class FakeConversion:
-    def __init__(self) -> None:
+    def __init__(self, unusable: frozenset[int] = frozenset()) -> None:
         self.enqueued: list[int] = []
+        self.planned: list[int] = []
+        # Candidates whose rendered path this filesystem will not take. The real
+        # cause is a long title or a bad character; the batch only sees the
+        # refusal.
+        self.unusable = set(unusable)
 
     async def enqueue_for_candidate(self, candidate_id: int) -> int:
         self.enqueued.append(candidate_id)
         return candidate_id * 100
+
+    async def metadata_for(self, candidate_id: int):
+        return ()
+
+    @staticmethod
+    def title_of(metadata, candidate_id: int) -> str:
+        return f"Candidate {candidate_id}"
+
+    async def planned_library_path(self, candidate_id, title, metadata):
+        self.planned.append(candidate_id)
+        if candidate_id in self.unusable:
+            raise LibraryPathError(
+                "SEGMENT_TOO_LONG", f"作品 #{candidate_id} 的文件名过长"
+            )
+        return PurePosixPath(f"{title}.cbz")
 
 
 def run_batch(archived, conversion, action, ids, **kwargs) -> dict:
@@ -443,3 +481,82 @@ class TestSelectionValidation:
         with pytest.raises(ApiError) as raised:
             _work_ids(["abc"])
         assert raised.value.code == "WORK_ID_INVALID"
+
+
+class TestBatchRefile:
+    """A batch repack re-files each work under the *current* layout template.
+
+    「批量打包时优先使用最新路径配置为每个作品生成最新的归档路径与文件名后逐个进
+    行打包处理」. The template is a setting operators change, and the books already
+    in the library were filed under whatever it said at the time -- so without
+    this a repack reads the pin the last pack wrote and the new template never
+    reaches the books that predate it.
+    """
+
+    def test_each_work_is_repinned_before_it_is_enqueued(self) -> None:
+        archived, conversion = FakeArchived(), FakeConversion()
+
+        result = run_batch(archived, conversion, "repack", [1, 2])
+
+        assert [entry[0] for entry in archived.pinned] == [1, 2]
+        assert conversion.enqueued == [1, 2]
+        assert len(result["applied"]) == 2
+
+    def test_a_path_the_operator_typed_is_left_alone(self) -> None:
+        """`is_manual` is the guard, and this is the case it exists for.
+
+        A template is a default and must never overwrite a decision. The work is
+        still packed -- it just packs to the path the operator chose.
+        """
+        archived = FakeArchived(manual_pins=frozenset({2}))
+        conversion = FakeConversion()
+
+        run_batch(archived, conversion, "repack", [1, 2])
+
+        assert [entry[0] for entry in archived.pinned] == [1]
+        # Still packed, and to its own path.
+        assert conversion.enqueued == [1, 2]
+        # Its path was never even computed, so a template that cannot render it
+        # cannot park it either.
+        assert conversion.planned == [1]
+
+    def test_an_unusable_path_leaves_that_work_alone_and_files_it_for_attention(
+        self,
+    ) -> None:
+        """The requirement's failure branch, and it is three separate promises.
+
+        「若不合法就不改变这个作品，将其纳入需干预分组，并说明为什么需干预」: the
+        work is not moved and not repinned, it lands in 需干预, and the reason
+        travels with it. The batch keeps going, because refusing forty-nine books
+        over one long title is the outcome partial-run behaviour exists to avoid.
+        """
+        archived = FakeArchived()
+        conversion = FakeConversion(unusable=frozenset({2}))
+
+        result = run_batch(archived, conversion, "repack", [1, 2, 3])
+
+        # Unchanged: no pin written for the refused work.
+        assert [entry[0] for entry in archived.pinned] == [1, 3]
+        # Filed under 需干预 with the reason, so it is answerable after the flash
+        # message is gone.
+        assert archived.parked == [(2, "SEGMENT_TOO_LONG")]
+        # And never queued, because packing it would publish to the bad path.
+        assert conversion.enqueued == [1, 3]
+        # Reported as a skip carrying the reason rather than as a success.
+        assert [entry["candidate_id"] for entry in result["skipped"]] == [2]
+        assert result["skipped"][0]["code"] == "SEGMENT_TOO_LONG"
+        assert len(result["applied"]) == 2
+
+    def test_remove_and_redownload_do_not_recompute_paths(self) -> None:
+        """Only packing publishes a file, so only packing needs a path.
+
+        Recomputing on a removal would pin a path for a book being deleted.
+        """
+        archived, conversion = FakeArchived(), FakeConversion()
+
+        run_batch(archived, conversion, "remove", [1])
+        run_batch(archived, conversion, "redownload", [2])
+
+        assert archived.pinned == []
+        assert conversion.planned == []
+

@@ -366,6 +366,20 @@ def downloaded_work(work: Any) -> dict[str, Any]:
         # Present only once the operator has moved the book, and the reason a
         # later repack lands on their path rather than a re-derived one.
         "library_relative_path": work.library_relative_path,
+        # Where the *next* pack will put this book, which is a different question
+        # from `cbz_path` -- where the last one put it. Both are sent so a client
+        # can show a pending move before it happens.
+        "archive_path_pin": (
+            {
+                "relative_path": work.pinned_path,
+                # Whether an operator typed it. A computed path may be
+                # recomputed by the next batch; a typed one may not, and an
+                # interface offering 「恢复模板计算」 has to know which it is.
+                "is_manual": work.pinned_is_manual,
+            }
+            if work.pinned_path
+            else None
+        ),
         "cover": _cover(getattr(work, "thumb_url", None)),
         "updated_at": work.updated_at,
         "actions": {

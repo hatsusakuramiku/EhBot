@@ -73,12 +73,12 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 939 passed / 0 failed.** Ending below this is a
+**Baseline: 985 passed / 0 failed.** Ending below this is a
 regression. The twelve `test_seven_zip_real.py` skips are gone because this
 machine now has a real toolchain in `data/tools/7zip/`; on a host without one
 they skip again and the count is 927 passed / 12 skipped. (Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820 -> Telegram user account 866 -> R10 939. There is no R7 — that number was
+R9 820 -> Telegram user account 866 -> R10 939 -> R11 985. There is no R7 — that number was
 the library domain, deleted on 2026-08-26; its narrow replacement is R10. An older
 note claiming "0 skipped" was wrong.)
 
@@ -161,7 +161,7 @@ operator navigation).
 - **The event bus drops rather than blocks**, and events carry ids only. A
   browser that stops reading must never stall the download worker; the client
   re-reads authoritative state over REST.
-- **Migrations are append-only.** The existing twelve are frozen; add `013_*`
+- **Migrations are append-only.** The existing fifteen are frozen; add `016_*`
   onward.
 - **`GET /api/v1/thumbnails/{hash}` accepts a hash and nothing else.** A URL
   parameter would make it an open proxy for anyone holding a session. The only
@@ -354,6 +354,73 @@ operator navigation).
   browser does not cache a tab layout that can still change. `settings_redirect`
   is the shared helper for saves and hardcodes 303, which is why the retirements
   build their 307 inline.
+- **Repairing a path and refusing one are two functions, and which you want
+  depends on who is waiting.** `safe_library_name` / `render_library_path` run
+  inside a packing job for a book that is already downloaded, so they sanitise and
+  never refuse — failing a job over a punctuation mark leaves the book unpublished
+  for a reason nobody asked about. `strict_library_segment` /
+  `check_library_segment` / `plan_library_path` run while an operator is looking at
+  a form, or while a batch is about to re-file fifty books, so they refuse and name
+  the offending segment and character. Do not "simplify" the strict branch into a
+  call to the sanitising one: the path an operator gets would stop being the path
+  they typed, with nothing on screen saying so. `check_library_segment` returns
+  `(code, message)` rather than raising because a batch collects one reason per
+  work.
+- **An explicit archive path is refused when taken, never suffixed.**
+  `unique_library_target`'s ` (2)` is right when a *template* renders two books
+  onto one name — neither name was chosen, so the suffix is the least-bad answer.
+  It is wrong for a path an operator typed: the book lands at a name they did not
+  ask for beside one they did. `set_archive_path` checks two things, because a name
+  can be taken two ways — another work's *pin* (whose file may not exist yet, so
+  letting a second book pin it means the two race at pack time) and an existing
+  *file* with no pin (a book packed before anything was pinned, which no row can
+  find). `mkdir` runs only after every check passes, or a form being iterated on
+  litters the library with empty directories.
+- **`work_archive_paths.is_manual` is the same guard `metadata_values.is_manual`
+  is: a template is a default, and a default must never overwrite a decision.** A
+  batch repack recomputes every selected work's path from the current layout
+  template, and without this the first batch after a rename would quietly undo it
+  fifty books at a time. The guard sits on the *whole* upsert
+  (`WHERE NOT (stored.is_manual = 1 AND excluded.is_manual = 0)`), not on the flag:
+  keeping the flag while still assigning `relative_path` preserved the label on the
+  operator's decision and threw the decision itself away.
+- **The pin lives in `work_archive_paths`, keyed by candidate; the 014 column is
+  the fallback.** `artifacts.library_relative_path` can only exist once a CBZ does,
+  because an artifact row is created *by* a pack — so it cannot answer 「下次打包放
+  哪」 before the first pack, and it died with the artifact, which lost the
+  operator's decision on every removal. `ConversionService` reads the table first
+  and falls back to the column, which is what keeps pre-015 renames working with no
+  data migration. The column is still written on *every* pack, not only after a
+  rename: without it a freshly packed book cannot prefill the detail page's 目录
+  field, and an operator editing only the filename submits an empty directory and
+  moves the book to the library root.
+- **A pinned path is re-validated on read, not trusted from the write.** The write
+  did validate, but the ceiling is on the whole path and the library root is a
+  setting — moving the library deeper can push a path that was legal when pinned
+  past what the filesystem takes. The refusal parks the job with the reason on it,
+  which is the only way the operator finds out at all.
+- **`CONVERSION_WAITING_PATH` is a waiting state, not a failure.** The archive is
+  intact, nothing was attempted, and the remedy is an edit (shorten the title, or
+  pin a path on the work detail page) followed by a requeue — exactly the shape of
+  待补分卷 and 待补密码. Marking it FAILED would file an untouched book beside books
+  whose packing genuinely broke, and would offer 重试 when retrying re-renders the
+  same impossible path. The batch **parks a row** rather than only reporting a
+  skip, because a skip is a sentence in a flash message that is gone on the next
+  navigation and 「这本书为什么没打包」 has to still be answerable tomorrow. A
+  RUNNING row is left alone — the worker holds it.
+- **A batch re-file changes nothing about a work whose path it cannot render.**
+  Old pin, old file, nothing moved; the work goes to 需干预 with the reason and the
+  batch carries on. Refusing forty-nine books over one long title is what per-work
+  batching exists to avoid. It also does not move the file itself — the pack
+  publishes to the new path because it reads the pin, and moving first would leave
+  a book at a path no artifact row names if the pack then failed.
+- **`POST /works/{id}/archive-path` is the one write route on the work detail
+  page, and a refusal re-renders the page rather than redirecting.** Unlike
+  approve, which already had a home under `/candidates/{id}`, no existing endpoint
+  sets an archive path, so routing it through one would have invented a second
+  meaning for a candidate action. The 400-with-the-page is because the operator has
+  a form open and needs to see which value was rejected; a redirect carrying
+  `?error=` is right for a list action, which has no form to come back to.
 - **The archive layout template is validated as a path, because it is one.**
   `validate_library_template` refuses an absolute template, a `..` anywhere, an
   unknown placeholder and a template with no `{title}`; `render_library_path`
