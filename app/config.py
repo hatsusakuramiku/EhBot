@@ -4,6 +4,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+#: The three log levels an operator can set via `LOG_LEVEL`. Defined here
+#: (foundational layer) so the runtime config and the UI dropdown can both
+#: import it without the API layer depending on configuration.
+LOG_LEVEL_CHOICES: frozenset[str] = frozenset({"ERROR", "WARNING", "INFO"})
+
 
 def _read_secret(name: str) -> str | None:
     direct_value = os.getenv(name)
@@ -20,6 +25,22 @@ def _read_bool(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes"}
+
+
+def _read_log_level(name: str, default: str, allowed: frozenset[str]) -> str:
+    """Read a runtime log level, refusing anything outside the choice set.
+
+    The choices are narrowed to `ERROR` / `WARNING` / `INFO` because those
+    three are what an operator toggles in the UI; `DEBUG` is too noisy for a
+    long-running service and `CRITICAL` is a programming convention rather
+    than something to set. A typo in `LOG_LEVEL` falls back to the default
+    rather than aborting startup, for the same reason the other deployment
+    settings do.
+    """
+    value = os.getenv(name, "").strip().upper() or default
+    if value not in allowed:
+        return default
+    return value
 
 
 def _read_int(name: str, default: int) -> int:
@@ -116,7 +137,7 @@ class Settings:
             ),
             torrent_keep_seeding=_read_bool("TORRENT_KEEP_SEEDING", True),
             thumbnails_enabled=_read_bool("THUMBNAILS_ENABLED", True),
-            log_level=(os.getenv("LOG_LEVEL", "").strip() or "INFO"),
+            log_level=_read_log_level("LOG_LEVEL", "INFO", LOG_LEVEL_CHOICES),
             log_access=_read_bool("LOG_ACCESS", True),
             log_to_file=_read_bool("LOG_TO_FILE", True),
             log_file_max_bytes=_read_int(

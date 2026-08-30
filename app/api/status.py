@@ -24,6 +24,8 @@ from app.downloads.models import (
 )
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
 
+from app.config import LOG_LEVEL_CHOICES
+
 #: Packing states that are waiting on the operator rather than broken.
 _PACK_ATTENTION_STATES: frozenset[str] = frozenset(
     {
@@ -594,15 +596,14 @@ LOG_LEVEL_STATUS: dict[str, StatusView] = {
     LOG_LEVEL_OTHER: _view(LOG_LEVEL_OTHER, "其他", TONE_MUTED),
 }
 
-#: Order for the level filter, coarsest-first so the default view is the one an
-#: operator wants: everything, then progressively only what is wrong.
-LOG_LEVELS: tuple[str, ...] = (
-    LOG_LEVEL_DEBUG,
-    LOG_LEVEL_INFO,
-    LOG_LEVEL_WARNING,
-    LOG_LEVEL_ERROR,
-    LOG_LEVEL_CRITICAL,
-)
+#: Order for the level filter shown in the UI: only the three levels an
+#: operator sets the runtime to. `DEBUG` and `CRITICAL` are still in
+#: `LOG_LEVEL_STATUS` because log files already on disk may contain them
+#: (old releases, dependencies that emit their own custom levels) and the
+#: tail reader renders whatever the file holds. The set is taken from
+#: `app.config.LOG_LEVEL_CHOICES` so the runtime validation and the UI stay
+#: in lock-step.
+LOG_LEVELS: tuple[str, ...] = (LOG_LEVEL_INFO, LOG_LEVEL_WARNING, LOG_LEVEL_ERROR)
 
 
 def log_level_view(level: str | None) -> StatusView:

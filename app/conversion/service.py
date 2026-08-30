@@ -455,13 +455,38 @@ class ConversionService:
                 },
             )
         else:
-            logger.info(
-                "conversion_job_finished",
-                extra={
-                    **job_context,
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                },
+            # `_handle_job` returns normally whether it packed the book, parked
+            # it for a missing volume / password / path, or marked it failed;
+            # only the row itself tells the difference. Read the final state
+            # and log accordingly so a packaging failure is not recorded as
+            # `conversion_job_finished` -- the bug that hid the original
+            # complaint behind a misleading "finished" line.
+            final_state, error_code, error_message = await asyncio.to_thread(
+                self._read_final_state_sync, job["job_id"]
             )
+            duration_ms = int((time.monotonic() - started) * 1000)
+            base = {**job_context, "duration_ms": duration_ms}
+            if final_state == CONVERSION_STATE_COMPLETED:
+                logger.info("conversion_job_completed", extra=base)
+            elif final_state in RECOVERABLE_CONVERSION_STATES:
+                logger.info(
+                    "conversion_job_parked",
+                    extra={
+                        **base,
+                        "status": final_state,
+                        "error_code": error_code,
+                    },
+                )
+            else:
+                logger.warning(
+                    "conversion_job_failed",
+                    extra={
+                        **base,
+                        "status": final_state,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                    },
+                )
         # Announced once here rather than at each of the five terminal writes
         # inside `_handle_job`. Every exit -- packed, failed, waiting for a
         # volume, waiting for a password, worker crash -- has already committed
@@ -513,6 +538,14 @@ class ConversionService:
             }
 
     async def _handle_job(self, job: dict) -> None:
+        # Same shape the worker logs at claim time, so the catch-site log
+        # lines below carry the same correlation fields. Duplicated rather
+        # than threaded through because `_handle_job` is called from exactly
+        # one place and the duplication is shorter than a parameter.
+        job_context = {
+            "job_id": job["job_id"],
+            "candidate_id": job["candidate_id"],
+        }
         source_artifact = await asyncio.to_thread(
             self._fetch_source_artifact_sync, job["candidate_id"]
         )
@@ -552,6 +585,14 @@ class ConversionService:
             # this filesystem will not take, and the book is parked rather than
             # failed: nothing was attempted, the archive is intact, and the
             # remedy is an edit on the work detail page followed by a requeue.
+            logging.getLogger(__name__).exception(
+                "conversion_pinned_path_rejected",
+                extra={
+                    **job_context,
+                    "status": CONVERSION_STATE_WAITING_PATH,
+                    "error_code": exc.code,
+                },
+            )
             await asyncio.to_thread(
                 self._mark_waiting_sync,
                 job["job_id"],
@@ -575,6 +616,14 @@ class ConversionService:
                 library_path=library_path,
             )
         except ArchiveVolumesMissing as exc:
+            logging.getLogger(__name__).exception(
+                "conversion_volumes_missing",
+                extra={
+                    **job_context,
+                    "status": CONVERSION_STATE_WAITING_VOLUMES,
+                    "error_code": exc.code,
+                },
+            )
             await asyncio.to_thread(
                 self._mark_waiting_sync,
                 job["job_id"],
@@ -585,6 +634,14 @@ class ConversionService:
             )
             return
         except ArchivePasswordRequired as exc:
+            logging.getLogger(__name__).exception(
+                "conversion_password_required",
+                extra={
+                    **job_context,
+                    "status": CONVERSION_STATE_WAITING_PASSWORD,
+                    "error_code": exc.code,
+                },
+            )
             await asyncio.to_thread(
                 self._mark_waiting_sync,
                 job["job_id"],
@@ -595,6 +652,19 @@ class ConversionService:
             )
             return
         except (ArchiveError, ConversionError) as exc:
+            # The original traceback is the part an operator needs; the
+            # `_handle_job` row only carries the public message. Log the
+            # exception here so the archive's full stack reaches the JSON
+            # payload, then mark the row failed with the same code.
+            logging.getLogger(__name__).exception(
+                "conversion_archive_failed",
+                extra={
+                    **job_context,
+                    "status": CONVERSION_STATE_FAILED,
+                    "error_code": exc.code,
+                    "error_message": exc.public_message,
+                },
+            )
             await asyncio.to_thread(
                 self._mark_failed_sync,
                 job["job_id"],
@@ -814,6 +884,26 @@ class ConversionService:
                 "WHERE id = ?",
                 (CONVERSION_STATE_FAILED, code, message, job_id),
             )
+
+    def _read_final_state_sync(
+        self, job_id: int
+    ) -> tuple[str, str | None, str | None]:
+        """Read the row back so the worker loop can log the real outcome.
+
+        `_handle_job` returns normally whether the job packed, parked or
+        failed; the only signal in-band is the row itself. Reading it here
+        keeps the terminal log line in lock-step with what the page is about
+        to render.
+        """
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state, error_code, error_message "
+                "FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return CONVERSION_STATE_FAILED, None, "job row vanished"
+        return str(row[0]), row[1], row[2]
 
 
 __all__ = [

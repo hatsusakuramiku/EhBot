@@ -786,13 +786,38 @@ class DownloadService:
                 },
             )
         else:
-            logger.info(
-                "download_job_finished",
-                extra={
-                    **job_context,
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                },
+            # Same shape as the conversion worker: `_handle_job` returns
+            # normally whether it completed, parked (WAITING_TORRENT), was
+            # cancelled, or failed, and only the row tells the difference.
+            # Read it back so a download failure is not reported as
+            # `download_job_finished`.
+            final_state, error_code, error_message = await asyncio.to_thread(
+                self._read_final_state_sync, job["job_id"]
             )
+            duration_ms = int((time.monotonic() - started) * 1000)
+            base = {**job_context, "duration_ms": duration_ms}
+            if final_state == DOWNLOAD_STATE_COMPLETED:
+                logger.info("download_job_completed", extra=base)
+            elif final_state == DOWNLOAD_STATE_WAITING_TORRENT:
+                logger.info(
+                    "download_job_waiting_torrent",
+                    extra={**base, "status": final_state},
+                )
+            elif final_state == DOWNLOAD_STATE_CANCELLED:
+                logger.info(
+                    "download_job_cancelled",
+                    extra={**base, "status": final_state},
+                )
+            else:
+                logger.warning(
+                    "download_job_failed",
+                    extra={
+                        **base,
+                        "status": final_state,
+                        "error_code": error_code,
+                        "error_message": error_message,
+                    },
+                )
         # Announced here rather than at each of the dozen places that write a
         # terminal state: every delivery leaves the worker through this point,
         # so one call cannot miss a transition the way a per-branch hook would.
@@ -1206,6 +1231,26 @@ class DownloadService:
                 "WHERE id = ?)",
                 (candidate_status, message, job_id),
             )
+
+    def _read_final_state_sync(
+        self, job_id: int
+    ) -> tuple[str, str | None, str | None]:
+        """Read the row back so the worker loop can log the real outcome.
+
+        `_handle_job` returns normally whether the job downloaded, was
+        parked in WAITING_TORRENT, was cancelled, or failed; only the row
+        tells the difference. Reading it here keeps the terminal log line
+        in lock-step with what the page is about to render.
+        """
+        with self._database._connect() as connection:
+            row = connection.execute(
+                "SELECT state, error_code, error_message "
+                "FROM download_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return DOWNLOAD_STATE_FAILED, None, "job row vanished"
+        return str(row[0]), row[1], row[2]
 
 
 __all__ = [

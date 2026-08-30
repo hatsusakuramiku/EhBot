@@ -294,10 +294,26 @@ class TorrentService:
             logging.getLogger(__name__).info(
                 "torrent_poll_started jobs=%d", len(jobs)
             )
+        logger = logging.getLogger(__name__)
         for job in jobs:
+            job_context = {
+                "job_id": job["job_id"],
+                "candidate_id": job.get("candidate_id"),
+            }
             try:
                 await self._advance_job(job)
             except TorrentError as exc:
+                # A mapped provider error: the original message and code are
+                # what an operator needs, but the traceback is not interesting
+                # (it is one raise in `_advance_job`) and would only add noise.
+                logger.warning(
+                    "torrent_job_failed",
+                    extra={
+                        **job_context,
+                        "error_code": exc.code,
+                        "error_message": exc.public_message,
+                    },
+                )
                 await asyncio.to_thread(
                     self._mark_failed_sync,
                     job["job_id"],
@@ -305,6 +321,18 @@ class TorrentService:
                     exc.public_message,
                 )
             except Exception as exc:  # noqa: BLE001 - provider boundary
+                # The catch-all: the traceback is the only signal that says
+                # which client call failed and why. `.exception(...)` keeps it
+                # in the JSON payload as the `exception` field.
+                logger.exception(
+                    "torrent_job_exception",
+                    extra={
+                        **job_context,
+                        "error_code": str(
+                            getattr(exc, "code", "TORRENT_POLL_FAILED")
+                        ),
+                    },
+                )
                 await asyncio.to_thread(
                     self._mark_failed_sync,
                     job["job_id"],

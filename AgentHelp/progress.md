@@ -2365,3 +2365,103 @@ deployments.
   `duration_ms`. Picking the right call sites and locking the format with
   a test is its own piece of work.
 - L3 `structlog` bridge and `/metrics` from the proposal remain open.
+
+---
+
+## R13 — Packaging failure logging + three-level log settings (v0.2.4, 2026-08-29)
+
+Two related defects found in real use after v0.2.3:
+
+1. **A packaging failure was invisible in the log.** `ConversionService._process_one`
+   logged `conversion_job_finished` on every normal return from `_handle_job`.
+   But `_handle_job` returns normally whether it packed the book, parked it
+   for a missing volume / password / path, *or* marked it failed -- the
+   state column is the only signal, and a `FAILED` row was indistinguishable
+   in the log from a `COMPLETED` one. The four defensive catch sites inside
+   `_handle_job` also did not log at all: a `LibraryPathError`, an
+   `ArchiveVolumesMissing`, an `ArchivePasswordRequired`, or an
+   `ArchiveError` was translated into a state change and the original
+   traceback was thrown away. The operator had to read `download_jobs`
+   directly to find the cause.
+
+2. **The runtime log level was five-valued when only three matter.** The
+   `LOG_LEVEL` env var accepted any stdlib name, and the in-app dropdown
+   showed all five (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
+   `DEBUG` is too noisy for a long-running service and `CRITICAL` is a
+   programming convention rather than an operator setting. A typo like
+   `LOG_LEVEL=WARMING` would silently fall through `getLevelNamesMapping`
+   and become `INFO`, hiding the typo.
+
+### What changed
+
+- **`_process_one` reads the final row state and logs accordingly.**
+  `conversion_job_completed` (info), `conversion_job_parked` (info, with
+  `status` and `error_code`), or `conversion_job_failed` (warning, with
+  `status`, `error_code`, `error_message`). All three include
+  `job_id`, `candidate_id`, and `duration_ms`. The misleading
+  `conversion_job_finished` line is gone.
+- **Each catch site in `_handle_job` now logs `logger.exception(...)`.**
+  The original traceback reaches the JSON payload as the `exception`
+  field, alongside the public `error_code` and `error_message` that get
+  written to the row. A failed pack is therefore visible in the in-app
+  log tail with the full archive's stack, not just a one-line summary.
+- **`LOG_LEVEL` accepts only `ERROR`, `WARNING`, `INFO`.** Defined as
+  `app.config.LOG_LEVEL_CHOICES` (foundational layer) and imported by
+  `app.api.status.LOG_LEVELS` so the runtime validator and the UI
+  dropdown cannot drift. A typo falls back to `INFO` with no startup
+  failure, matching the tolerant parsing of the other deployment-level
+  environment variables.
+- **The in-app log dropdown drops `DEBUG` and `CRITICAL`.** They stay in
+  `LOG_LEVEL_STATUS` and `log_level_view` because old log files and
+  dependency lines may carry them and the tail reader renders whatever
+  the file holds.
+
+### Decisions
+
+- **Two log lines per failure is fine.** The catch site logs the original
+  traceback (the part an operator needs to debug); the end-of-process
+  line logs the terminal state (the part that drives the row's appearance
+  on the page). They serve different questions and a future branch that
+  ends in a new state only has to add a state case at one place.
+- **`_read_final_state_sync` is a fresh helper.** Reading the row back is
+  one statement; the alternative -- having `_handle_job` return a result
+  -- would change every early-return into a value, and the early returns
+  are what keep the four failure paths readable. The helper is also a
+  clean place to add a column later (e.g. `attempt_count`) without
+  touching `_handle_job`.
+- **`provider` is still not in the conversion-job log payload.** R12
+  added the field to the formatter's whitelist but the conversion queue
+  only ever holds `PROVIDER_CONVERSION`; logging a constant is noise. The
+  download queue does carry it.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| Packaging failure logged as `conversion_job_finished` with no error_code | `_process_one`'s `else:` branch ran on every normal return from `_handle_job`, including the four `return`-after-mark paths | Read the final row state and dispatch by state |
+| Catch sites inside `_handle_job` did not log at all | The four `except` blocks only wrote to the database; the original exception was never passed to a logger | Each catch now calls `logger.exception(...)` with the relevant context before the mark |
+| `LOG_LEVEL=WARMING` silently fell through to `INFO` | `getLevelNamesMapping()` returned `None` for an unknown name and `configure_logging` silently substituted `INFO` | Validate against `LOG_LEVEL_CHOICES` at config-load time |
+
+### Verification
+- Full suite: **1023 passed / 0 failed / 0 skipped** (1018 + 5 new logging
+  tests). The five new tests exercise `_process_one`'s three terminal
+  states (completed / parked / failed) and `_handle_job`'s two
+  catch-site paths (ArchiveError, LibraryPathError), each asserting the
+  log level, event name, and presence of `exc_info`.
+- Existing `tests/integration/test_archive_workflow.py` cases still pass
+  -- they exercise the real catch paths and now silently benefit from the
+  new logging.
+
+### Follow-up shipped in the same v0.2.4 push (no version bump)
+- **Download worker** (`app/downloads/service.py`) gained the same state
+  dispatch as the conversion worker: `_process_one` reads the row back
+  and logs `download_job_completed`, `download_job_waiting_torrent`,
+  `download_job_cancelled`, or `download_job_failed` (with `error_code`
+  and `error_message`). `download_job_finished` is gone.
+- **Torrent poller** (`app/torrent/service.py`) gained per-job failure
+  logging at both catches in `poll_once`. The `TorrentError` catch logs
+  `torrent_job_failed` (warning) with the mapped `error_code`; the
+  catch-all logs `torrent_job_exception` with `.exception(...)` so the
+  original traceback reaches the JSON payload. The job still gets marked
+  FAILED on the database side.
+- Six new tests cover these paths: 4 in `tests/unit/test_download_logging.py`
+  and 2 in `tests/unit/test_torrent_logging.py`. Full suite 1029 / 0 / 0.

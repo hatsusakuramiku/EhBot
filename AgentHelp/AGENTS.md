@@ -80,12 +80,12 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1018 passed / 0 failed.** Ending below this is a
+**Baseline: 1029 passed / 0 failed.** Ending below this is a
 regression. The twelve `test_seven_zip_real.py` skips are gone because this
 machine now has a real toolchain in `data/tools/7zip/`; on a host without one
 they skip again and the count is 927 passed / 12 skipped. (Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018. There is no R7 — that number was
+R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029. There is no R7 — that number was
 the library domain, deleted on 2026-08-26; its narrow replacement is R10. An older
 note claiming "0 skipped" was wrong.)
 
