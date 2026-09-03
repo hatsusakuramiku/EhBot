@@ -225,13 +225,14 @@ class ArchiveProcessor:
                 rewritten += 1
             result.append((page_name, outcome.path))
         if rewritten:
+            # In the message rather than through `extra=`: the formatter
+            # serialises a fixed field list and these three are not on it, so
+            # the line used to reach the log with none of its numbers.
             LOGGER.info(
-                "archive_pages_reencoded",
-                extra={
-                    "quality": profile.level,
-                    "rewritten_pages": rewritten,
-                    "page_count": len(staged),
-                },
+                "archive_pages_reencoded quality=%s rewritten=%d of %d pages",
+                profile.level,
+                rewritten,
+                len(staged),
             )
         return tuple(result), rewritten
 

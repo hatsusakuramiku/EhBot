@@ -190,3 +190,59 @@ async def test_telegram_updates_are_persisted_idempotently(tmp_path: Path) -> No
     assert first_insert == 1
     assert duplicate_insert == 0
     assert await database.latest_telegram_update_id() == 100
+
+
+@pytest.mark.asyncio
+async def test_connection_helper_closes_and_commits(tmp_path: Path) -> None:
+    """`with sqlite3.connect(...)` ends the transaction; it does not close.
+
+    Every query in the service layer used the bare connection, so each one left
+    a handle for the garbage collector to find. On a WAL database an open
+    handle holds its read snapshot, which is what keeps `-wal` from being
+    checkpointed away.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+
+    with database.connection() as connection:
+        connection.execute(
+            "INSERT INTO admin_users (username, password_hash, password_changed) "
+            "VALUES ('probe', 'hash', 0)"
+        )
+
+    # Closed on the way out: using it again is an error, not a silent success.
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+    # And the write inside the block was committed.
+    with database.connection() as verify:
+        stored = verify.execute(
+            "SELECT COUNT(*) FROM admin_users WHERE username = 'probe'"
+        ).fetchone()[0]
+    assert stored == 1
+
+
+@pytest.mark.asyncio
+async def test_connection_helper_rolls_back_and_still_closes(
+    tmp_path: Path,
+) -> None:
+    """A raising block must not commit, and must not leak the handle either."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+
+    with pytest.raises(RuntimeError):
+        with database.connection() as connection:
+            connection.execute(
+                "INSERT INTO admin_users (username, password_hash, password_changed) "
+                "VALUES ('rolled-back', 'hash', 0)"
+            )
+            raise RuntimeError("boom")
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
+
+    with database.connection() as verify:
+        stored = verify.execute(
+            "SELECT COUNT(*) FROM admin_users WHERE username = 'rolled-back'"
+        ).fetchone()[0]
+    assert stored == 0

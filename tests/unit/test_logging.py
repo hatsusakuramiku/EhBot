@@ -168,6 +168,51 @@ def test_json_formatter_round_trips_context_fields():
     assert payload["error_code"] == "OK"
 
 
+def test_json_formatter_serialises_error_message():
+    """The half of a failure `error_code` does not carry.
+
+    Every failing worker attaches it (R13), and the whitelist used to omit it,
+    so the in-app tail showed a bare code for every failed pack: the operator
+    could see *that* `ARCHIVE_CORRUPT` happened and never what the archiver
+    said about it.
+    """
+    record = _make_record(
+        "app.conversion.service", logging.WARNING, "conversion_job_failed",
+        extra={
+            "job_id": 4,
+            "error_code": "ARCHIVE_CORRUPT",
+            "error_message": "header is not a valid zip",
+        },
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["error_code"] == "ARCHIVE_CORRUPT"
+    assert payload["error_message"] == "header is not a valid zip"
+
+
+def test_json_formatter_redacts_context_field_strings():
+    """A field is no safer than the message it was split out of.
+
+    A provider's refusal routinely quotes the URL it tried, and that URL may
+    carry a token; redaction has to run on the structured fields for the same
+    reason it runs on the message and the traceback.
+    """
+    record = _make_record(
+        "app.torrent.service", logging.WARNING, "torrent_job_failed",
+        extra={
+            "job_id": 9,
+            "error_code": "TORRENT_CLIENT_UNREACHABLE",
+            "error_message": (
+                "GET https://client.test/api/v2/torrents/info?sid=SECRET failed"
+            ),
+        },
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert "SECRET" not in payload["error_message"]
+    assert "?<redacted>" in payload["error_message"]
+    # Non-string context fields are untouched by redaction.
+    assert payload["job_id"] == 9
+
+
 def test_json_formatter_omits_unset_context_fields():
     payload = json.loads(JsonFormatter().format(
         _make_record("app.x", logging.INFO, "ok")
@@ -175,6 +220,7 @@ def test_json_formatter_omits_unset_context_fields():
     for field in (
         "request_id", "candidate_id", "work_id", "job_id", "source_type",
         "provider", "status", "attempt", "duration_ms", "error_code",
+        "error_message",
     ):
         assert field not in payload
 
@@ -338,6 +384,7 @@ def test_parse_line_parses_json_record():
         "job_id": 7,
         "candidate_id": 42,
         "error_code": "OK",
+        "error_message": "header is not a valid zip",
         "exception": "Traceback (most recent call last):\n  ...",
     })
     entry = _parse_line(line)
@@ -348,6 +395,7 @@ def test_parse_line_parses_json_record():
     assert entry.job_id == 7
     assert entry.candidate_id == 42
     assert entry.error_code == "OK"
+    assert entry.error_message == "header is not a valid zip"
     assert entry.exception and "Traceback" in entry.exception
     assert entry.raw is None
 

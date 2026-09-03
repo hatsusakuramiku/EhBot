@@ -261,7 +261,7 @@ class ConversionService:
         a `..` would escape the library, so it is ignored and the template
         renders the path instead.
         """
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT relative_path FROM work_archive_paths "
                 "WHERE candidate_id = ?",
@@ -295,7 +295,7 @@ class ConversionService:
         suffix would treat the previous CBZ as somebody else's book and every
         重新打包 would leave `book.cbz`, `book (2).cbz`, `book (3).cbz` behind.
         """
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             rows = connection.execute(
                 "SELECT artifacts.path FROM artifacts "
                 "JOIN download_jobs ON download_jobs.id = artifacts.job_id "
@@ -311,7 +311,7 @@ class ConversionService:
         )
 
     def _enqueue_sync(self, candidate_id: int) -> int:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -513,7 +513,7 @@ class ConversionService:
             )
 
     def _claim_pending_job_sync(self) -> dict | None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT id, candidate_id FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
@@ -753,7 +753,7 @@ class ConversionService:
     def _fetch_source_artifact_sync(
         self, candidate_id: int
     ) -> dict | None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT a.path FROM download_jobs dj "
                 "JOIN artifacts a ON a.job_id = dj.id "
@@ -765,7 +765,7 @@ class ConversionService:
             return {"path": str(row[0])} if row else None
 
     def _fetch_metadata_sync(self, candidate_id: int) -> list:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             rows = connection.execute(
                 "SELECT field_name, field_value FROM metadata_values "
                 "WHERE candidate_id = ?",
@@ -817,7 +817,7 @@ class ConversionService:
                 # time we get here, but a root that cannot be resolved must not
                 # fail a pack that has otherwise succeeded.
                 relative = None
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO artifacts "
                 "(job_id, artifact_type, path, sha256, size_bytes, "
@@ -839,7 +839,7 @@ class ConversionService:
             )
 
     def _mark_completed_sync(self, job_id: int, details: dict) -> None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
                 "error_message = NULL, details_json = ?, "
@@ -860,7 +860,7 @@ class ConversionService:
         details: dict,
     ) -> None:
         """Park a task in a recoverable state without losing its snapshot."""
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
                 "error_message = ?, details_json = ?, "
@@ -877,7 +877,7 @@ class ConversionService:
     def _mark_failed_sync(
         self, job_id: int, code: str, message: str
     ) -> None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
                 "error_message = ?, updated_at = CURRENT_TIMESTAMP "
@@ -895,7 +895,7 @@ class ConversionService:
         keeps the terminal log line in lock-step with what the page is about
         to render.
         """
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state, error_code, error_message "
                 "FROM download_jobs WHERE id = ?",

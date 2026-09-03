@@ -592,6 +592,7 @@ def log_entry_payload(entry: Any) -> dict[str, Any]:
         "job_id": entry.job_id,
         "candidate_id": entry.candidate_id,
         "error_code": entry.error_code,
+        "error_message": entry.error_message,
         "exception": entry.exception,
         "raw": entry.raw,
     }

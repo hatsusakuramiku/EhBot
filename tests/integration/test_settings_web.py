@@ -272,6 +272,85 @@ class TestSystemTab:
         assert 'name="display-timezone" content="Asia/Shanghai"' in after.text
 
 
+class TestLogTail:
+    """The in-app log viewer, from the file on disk to the rendered tab.
+
+    Covered end to end rather than at `read_log_tail` alone because the defect
+    this guards against lived between the layers: the formatter dropped
+    `error_message`, so a failed pack reached the page with a bare error code
+    and no cause. Every layer had a passing test and the operator still could
+    not read the failure.
+    """
+
+    @staticmethod
+    def _write_log(settings: Settings, payloads: list[dict]) -> None:
+        import json
+
+        settings.log_dir.mkdir(parents=True, exist_ok=True)
+        (settings.log_dir / "ehbot.log").write_text(
+            "\n".join(json.dumps(item, ensure_ascii=False) for item in payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_a_failure_shows_its_message_and_not_only_its_code(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        self._write_log(
+            settings,
+            [
+                {
+                    "timestamp": "2026-09-03T01:00:00+00:00",
+                    "level": "WARNING",
+                    "logger": "app.conversion.service",
+                    "event": "conversion_job_failed",
+                    "job_id": 7,
+                    "candidate_id": 42,
+                    "error_code": "ARCHIVE_CORRUPT",
+                    "error_message": "分卷 2 缺失，压缩包无法解开",
+                }
+            ],
+        )
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/system")
+            payload = client.get("/api/v1/settings/system").json()
+
+        entry = page.context["logs"]["entries"][0]
+        assert entry["error_code"] == "ARCHIVE_CORRUPT"
+        assert entry["error_message"] == "分卷 2 缺失，压缩包无法解开"
+        # The page renders it, so an operator does not have to open the JSON.
+        assert "分卷 2 缺失" in page.text
+        # And the JSON body cannot disagree with the page -- the rule every
+        # other section follows.
+        assert payload["logs"]["entries"][0] == entry
+
+    def test_a_line_without_a_message_renders_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """Most lines have no `error_message`; they must not gain empty markup."""
+        settings = _settings(tmp_path)
+        self._write_log(
+            settings,
+            [
+                {
+                    "timestamp": "2026-09-03T01:00:00+00:00",
+                    "level": "INFO",
+                    "logger": "app.downloads.service",
+                    "event": "download_job_completed",
+                    "job_id": 3,
+                }
+            ],
+        )
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/system")
+
+        assert page.context["logs"]["entries"][0]["error_message"] is None
+        assert "ui-log-message" not in page.text
+
+
 # ---------------------------------------------------------------------------
 #  Paths tab — template preview
 # ---------------------------------------------------------------------------

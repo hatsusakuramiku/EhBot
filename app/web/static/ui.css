@@ -1339,6 +1339,17 @@
   overflow-wrap: break-word;
 }
 
+/* The upstream's own failure text, under the event name. Muted because the
+   event line is what the eye lands on first; wrapped because a provider
+   message is a sentence and not an identifier. */
+.ui-log-message {
+  margin: var(--s-1) 0 0;
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 .ui-log-meta { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin: 0; color: var(--t-ink-muted); font-size: var(--font-small); }
 
 .ui-log-trace summary { color: var(--t-ink-muted); font-size: var(--font-small); cursor: pointer; }

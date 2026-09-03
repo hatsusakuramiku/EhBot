@@ -2465,3 +2465,149 @@ Two related defects found in real use after v0.2.3:
   FAILED on the database side.
 - Six new tests cover these paths: 4 in `tests/unit/test_download_logging.py`
   and 2 in `tests/unit/test_torrent_logging.py`. Full suite 1029 / 0 / 0.
+
+---
+
+## R14 — Review pass: log payload, security headers, connection lifetime (v0.2.5, 2026-09-03)
+
+A read-only review of the whole tree, run on Linux rather than the Windows box
+the notes above assume. Nothing was refactored; five defects were found and
+fixed, each of which had a passing test beside it that did not cover the
+failing path.
+
+### 1. `error_message` never reached the log (the R13 feature was half-built)
+
+R13 made every failing worker attach `error_message` next to `error_code`, and
+`_CONTEXT_FIELDS` -- the formatter's whitelist -- did not list it. The
+formatter serialises that list and drops everything else, so the field was
+discarded on the way to the file. The operator-facing result is the exact thing
+R13 set out to fix: the in-app tail showed `ARCHIVE_CORRUPT` and nothing about
+what the archiver actually said.
+
+It passed review because `tests/unit/test_conversion_logging.py` asserts on
+`LogRecord` attributes through `caplog`, which is upstream of the formatter.
+The record carried the field; the log line did not.
+
+- `error_message` added to `_CONTEXT_FIELDS`, and threaded through
+  `LogEntry`, `_parse_line`, `log_entry_payload` and the 系统 tab so it is
+  visible where the failure is read.
+- **Context fields are now redacted.** They were not, which was a real hole
+  rather than a tidy-up: a provider refusal quotes the URL it tried, and that
+  URL may carry a token. Strings go through `redact_sensitive_values`; ints
+  pass untouched.
+- Four other call sites were attaching fields the whitelist never had --
+  `url`/`code`/`error`/`path` in the thumbnail service and renderer,
+  `quality`/`rewritten_pages`/`page_count` in the archive processor. All were
+  vanishing silently. They now travel in the message, which is the path
+  redaction runs on. The two thumbnail catch-alls also became
+  `logger.exception(...)`, per the R12 invariant they were violating.
+
+### 2. The log tab returned 500 for most real failures
+
+`_system.html` called `url_for('work_detail', work_id=...)` and the route's
+parameter is `candidate_id`, so `NoMatchFound` took down the whole tab as soon
+as one line carried a candidate id -- which is most failures worth reading. No
+test rendered the tab with a populated log file. There is one now, and it goes
+file -> reader -> page -> JSON in a single assertion chain.
+
+### 3. No security response headers at all
+
+No CSP, `X-Content-Type-Options`, `X-Frame-Options` or `Referrer-Policy` on any
+response. Added as `app/web/security_headers.py`, registered between the
+session and request-id middleware.
+
+The policy is honest about what it cannot do: Alpine needs `'unsafe-eval'` for
+`x-data` expressions and the pre-paint theme bootstrap is inline, so
+`script-src` allows both and a nonce would be theatre. The enforced part is
+everything else -- `default-src`, `connect-src`, `img-src`, `form-action`,
+`base-uri`, `object-src` and `frame-ancestors 'none'` -- which is exactly
+right for a service whose thumbnails, vendored scripts and SSE stream are all
+same-origin by design.
+
+### 4. The login-attempt table grew without bound, and lockouts were silent
+
+`app.state.login_attempts` shed an entry only on a successful login or when the
+same address returned after its lock expired. An address that failed once and
+never came back stayed for the life of the process. Now pruned on every write
+with a `MAX_TRACKED_CLIENTS` ceiling, and the lockout logs
+`login_locked_out` / `LOGIN_LOCKED_OUT` -- previously the only trace was a 429
+in the access log, which says a request was refused and not why.
+
+The magic numbers became `MAX_FAILED_ATTEMPTS` / `LOCKOUT_SECONDS`.
+
+**Not changed, deliberately:** behind an untrusted reverse proxy every caller
+shares one bucket, because `request.client` is only rewritten from the
+forwarded header when `TRUST_PROXY_HEADERS` is set. Honouring an unverified
+header would let an attacker bypass the throttle by varying it; for a
+single-administrator service one shared bucket is the safer failure. The
+module docstring says so.
+
+### 5. sqlite connections were never closed
+
+112 call sites used `with self._connect() as connection:`, and that context
+manager **ends the transaction without closing the connection** -- the handle
+was left to the garbage collector. On a WAL database an open handle holds its
+read snapshot, which keeps `-wal` growing and makes a checkpoint a no-op.
+
+`Database.connection()` is a new `@contextmanager` that commits or rolls back
+and then closes. Every call site moved to it, which also retired all 27
+`noqa: SLF001` suppressions: the services were reaching into a private method
+because there was no public one, and now there is.
+
+### Decisions
+
+- **The whitelist stays a whitelist.** The fix is to add `error_message` to it,
+  not to serialise every record attribute: `LogRecord` carries two dozen of its
+  own and the payload would become unreadable. A field being on the list is
+  still a deliberate act.
+- **Redaction moved into the field loop rather than each call site.** A call
+  site that has to remember to redact is a call site that will forget; the
+  formatter is the one place every record passes through.
+- **`connection()` is public, `_connect()` stays private.** The raw one is
+  still what the context manager and `_initialize_sync`'s PRAGMA work need.
+  Naming the wrapper does not fix the layering -- eight service modules still
+  write their own SQL -- but it stops a lint suppression from being the only
+  documentation of that fact.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| Failed pack logged with a bare `error_code` | `error_message` missing from `_CONTEXT_FIELDS`; the formatter drops unlisted fields | Added to the whitelist and threaded to the reader, payload and page |
+| A token in a provider message would reach the log | Redaction ran on the message and traceback but not on context fields | String fields go through `redact_sensitive_values` |
+| Thumbnail and archive log lines lost all their detail | `url`, `code`, `error`, `path`, `quality`, `rewritten_pages`, `page_count` are not whitelisted fields | Moved into the message text; two catches became `.exception(...)` |
+| 系统 tab 500s once the log holds a candidate id | `url_for('work_detail', work_id=…)`; the route parameter is `candidate_id` | Corrected, and covered by a test that renders the tab from a real file |
+| No CSP or related headers on any response | Never added | `SecurityHeadersMiddleware` |
+| `login_attempts` grew for the life of the process | Entries removed only on success or on a returning locked address | `_prune_expired` on write, plus a hard ceiling |
+| A lockout left no record | The throttle logged nothing | `login_locked_out` warning with a stable code |
+| sqlite handles left to the GC | `with sqlite3.connect(...)` ends the transaction but does not close | `Database.connection()` closes in a `finally` |
+
+### Verification
+- Full suite: **1039 collected / 1027 passed / 12 skipped / 0 failed**
+  (1029 + 10 new), 934 s. The 12 skips are `test_seven_zip_real.py`; this host
+  has no 7-Zip toolchain.
+- New tests: 2 formatter (`error_message` round-trip, context-field redaction),
+  2 log-tail integration (message rendered on the tab and in the JSON; a line
+  without one gains no empty markup), 4 authentication (lockout logged, table
+  bounded, headers on page/JSON/redirect, policy confines the origin), 2
+  database (`connection()` commits and closes; rolls back and still closes),
+  plus 2 existing tests widened.
+
+### Not Done (worth a session of its own)
+- **The suite takes ~19 minutes**, and the cause is argon2: `PasswordHash`
+  costs ~0.7 s per hash and ~0.85 s per verify, and 179 `create_app(` sites
+  each log in. Swapping the hasher for a cheap one in a session fixture cut
+  `test_settings_web.py` from 116 s to 89 s in a trial; the real parameters
+  belong in `test_authentication.py` alone. Not done here because it touches
+  every integration module's fixture.
+- **`noqa` codes reference ruff, which is not configured.** 61 suppressions
+  (`BLE001`, `S603`, `S101`) name rules no tool in this repo checks. Either add
+  a ruff configuration or drop the codes; right now they are decoration.
+- **Seven files carry a UTF-8 BOM** (`app/downloads/models.py`,
+  `app/review/service.py`, `app/exhentai/enrich.py`, `app/exhentai/tagdb_sync.py`,
+  `app/conversion/comicinfo.py`, `app/downloads/__init__.py`,
+  `tests/unit/test_tagdb.py`). Harmless to Python, but `ast.parse` on the raw
+  text fails, which breaks any tooling that reads sources itself.
+- **The baseline note in `AGENTS.md` was off for a host without 7-Zip.** It
+  said 927 passed / 12 skipped; the real figure was 1017 passed / 12 skipped
+  before this session. Corrected there to count `collected` rather than
+  `passed`, which is the only figure that does not move with the host.

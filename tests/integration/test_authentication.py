@@ -1,9 +1,17 @@
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.web.routes.auth import (
+    LOCKOUT_SECONDS,
+    MAX_FAILED_ATTEMPTS,
+    MAX_TRACKED_CLIENTS,
+    _prune_expired,
+)
+from app.web.security_headers import SECURITY_HEADERS
 
 
 def make_settings(root: Path) -> Settings:
@@ -172,6 +180,86 @@ def test_repeated_login_failures_are_temporarily_blocked(tmp_path: Path) -> None
         429,
     ]
     assert responses[-1].json() == {"detail": "Too many login attempts"}
+
+
+def test_a_lockout_is_recorded_in_the_log(tmp_path: Path, caplog) -> None:
+    """A locked-out operator must be able to find out why from the log.
+
+    The throttle used to fire silently: the only trace was a 429 in the access
+    log, which says a request was refused and not that this address had spent
+    its attempts.
+    """
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        login_page = client.get("/login")
+        form = {
+            "password": "wrong-password",
+            "csrf_token": login_page.context["csrf_token"],
+        }
+        with caplog.at_level(logging.WARNING, logger="app.web.routes.auth"):
+            for _ in range(MAX_FAILED_ATTEMPTS):
+                client.post("/login", data=form)
+
+    locked = [r for r in caplog.records if r.message.startswith("login_locked_out")]
+    assert len(locked) == 1
+    assert getattr(locked[0], "error_code", None) == "LOGIN_LOCKED_OUT"
+
+
+def test_the_attempt_table_does_not_grow_without_bound() -> None:
+    """One entry per address, kept only as long as it means something.
+
+    Entries were removed on a successful login or when the same address came
+    back after its lock expired, so an address that failed once and never
+    returned stayed for the life of the process.
+    """
+    now = 1000.0
+    attempts = {
+        "expired": (MAX_FAILED_ATTEMPTS, now - 1),
+        "still-locked": (MAX_FAILED_ATTEMPTS, now + LOCKOUT_SECONDS),
+        "counting": (1, 0.0),
+    }
+    _prune_expired(attempts, now)
+    assert set(attempts) == {"still-locked", "counting"}
+
+    # A spray from more addresses than the ceiling sheds the oldest rather
+    # than growing without limit.
+    flood = {f"host-{index}": (1, 0.0) for index in range(MAX_TRACKED_CLIENTS + 50)}
+    _prune_expired(flood, now)
+    assert len(flood) == MAX_TRACKED_CLIENTS
+
+
+def test_every_response_carries_the_security_headers(tmp_path: Path) -> None:
+    """Set once in middleware, so no route can be the one that forgot.
+
+    Checked on a page, on a JSON endpoint and on a redirect, because those are
+    three different response objects and only the middleware sees all three.
+    """
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        page = client.get("/login")
+        api = client.get("/api/v1/summary")
+        redirect = client.get("/", follow_redirects=False)
+
+    for response in (page, api, redirect):
+        for name, value in SECURITY_HEADERS.items():
+            assert response.headers[name] == value
+
+
+def test_the_policy_confines_the_page_to_this_origin(tmp_path: Path) -> None:
+    """The part of the CSP that is actually enforced.
+
+    `script-src` has to allow inline and eval (the pre-paint theme bootstrap
+    and Alpine's expression evaluation), so the value of the policy is in the
+    other directives: nothing may be loaded from, or sent to, another origin,
+    and the page may not be framed.
+    """
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        policy = client.get("/login").headers["Content-Security-Policy"]
+
+    assert "default-src 'self'" in policy
+    assert "connect-src 'self'" in policy
+    assert "form-action 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
+    assert "object-src 'none'" in policy
 
 
 def test_bootstrap_password_is_printed_to_the_console(

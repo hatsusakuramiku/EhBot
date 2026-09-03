@@ -80,14 +80,21 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1029 passed / 0 failed.** Ending below this is a
-regression. The twelve `test_seven_zip_real.py` skips are gone because this
-machine now has a real toolchain in `data/tools/7zip/`; on a host without one
-they skip again and the count is 927 passed / 12 skipped. (Baseline moves per phase:
+**Baseline: 1039 collected, 0 failed.** Ending below this is a regression.
+**Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
+cases skip or run depending on whether the host has a real toolchain in
+`data/tools/7zip/`, so `passed` is 1039 on a machine that has one and 1027 with
+twelve skips on a machine that does not. (An older note gave 927 for the second
+case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
-R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029. There is no R7 — that number was
-the library domain, deleted on 2026-08-26; its narrow replacement is R10. An older
-note claiming "0 skipped" was wrong.)
+R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
+-> R14 1039. There is no R7 — that number was the library domain, deleted on
+2026-08-26; its narrow replacement is R10.)
+
+**The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
+all of it is argon2: `PasswordHash.recommended()` costs ~0.7 s per hash and
+~0.85 s per verify, and every one of the 179 `create_app(` sites logs in. Run a
+single file while iterating; the full suite is a once-per-session cost.
 
 **Do not seed a `PENDING` job in a test that then asserts on it.** `create_app`'s
 lifespan always starts the download worker and there is no toggle, so the worker
@@ -607,3 +614,39 @@ Several are locked by tests. Do not "simplify" them:
   trusted.** For the same reason `X-Forwarded-For` is: a value a client can
   set is a value a client can use to forge or collide. Untrusted input is
   replaced rather than rejected.
+
+
+**Added by R14 (review pass):**
+
+- **`_CONTEXT_FIELDS` is the log contract, and the formatter drops anything
+  not on it.** A field attached through `extra=` that is not listed is
+  discarded silently -- which is how `error_message` went missing for two
+  releases while every unit test passed, because `caplog` sees the
+  `LogRecord` and not the formatted line. **Assert on
+  `JsonFormatter().format(...)`, not on record attributes**, whenever the
+  point of a test is that a field reaches the log.
+- **Context fields are redacted like the message.** A provider's
+  `error_message` routinely quotes the URL it tried, and that URL may carry
+  a token. String fields go through `redact_sensitive_values` in the
+  formatter's field loop; do not move redaction back to the call sites.
+- **Never pass a value through `extra=` for a field that is not
+  whitelisted.** Put it in the message text -- that is the path redaction
+  runs on -- or add the field deliberately.
+- **Security headers come from one middleware.** `app/web/security_headers.py`
+  sets CSP, `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`
+  on every response. `script-src` must keep `'unsafe-inline'` and
+  `'unsafe-eval'`: Alpine evaluates `x-data` with `new Function`, and the
+  pre-paint theme bootstrap in `base.html` / `login.html` is inline. The
+  enforced part is the rest -- do not loosen `connect-src`, `form-action`,
+  `object-src` or `frame-ancestors`.
+- **Use `Database.connection()`, never `Database._connect()`.**
+  `with sqlite3.connect(...)` ends the transaction but does **not** close the
+  connection; the wrapper closes in a `finally`. An unclosed handle on a WAL
+  database holds its read snapshot, which stops `-wal` from being
+  checkpointed.
+- **The login throttle prunes on write.** `app.state.login_attempts` is
+  bounded by `MAX_TRACKED_CLIENTS`, and a lockout logs `login_locked_out`.
+  Behind an untrusted proxy every caller shares one bucket, and that is the
+  deliberate choice: `request.client` is only trustworthy when
+  `TRUST_PROXY_HEADERS` is set, and a forgeable key is worse than a coarse
+  one.

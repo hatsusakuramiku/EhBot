@@ -162,12 +162,21 @@
               {% if entry.logger %}<code class="ui-log-logger">{{ entry.logger }}</code>{% endif %}
             </div>
             <p class="ui-log-event">{{ entry.raw if entry.raw else entry.event }}</p>
+            {% if entry.error_message %}
+              {#- The upstream's own words. Kept out of the meta line below
+                  because that line is identifiers and this is a sentence. -#}
+              <p class="ui-log-message">{{ entry.error_message }}</p>
+            {% endif %}
             {% if entry.error_code or entry.job_id or entry.candidate_id or entry.request_id %}
               <p class="ui-log-meta">
                 {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
                 {% if entry.job_id %}<span>任务 #{{ entry.job_id }}</span>{% endif %}
                 {% if entry.candidate_id %}
-                  <a href="{{ url_for('work_detail', work_id=entry.candidate_id) }}">作品 #{{ entry.candidate_id }}</a>
+                  {#- The route's parameter is `candidate_id`; naming it
+                      `work_id` here raised `NoMatchFound` and returned 500 for
+                      the whole tab as soon as any line carried a candidate --
+                      which is most failures. -#}
+                  <a href="{{ url_for('work_detail', candidate_id=entry.candidate_id) }}">作品 #{{ entry.candidate_id }}</a>
                 {% endif %}
                 {% if entry.request_id %}<code>{{ entry.request_id }}</code>{% endif %}
               </p>

@@ -138,7 +138,7 @@ class ExHentaiService:
         if not refs:
             return []
         placeholders = ",".join("?" for _ in refs)
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT candidate_id FROM metadata_values "
                 "WHERE value_source = 'EXHENTAI' AND candidate_id IN ("
@@ -240,7 +240,7 @@ class ExHentaiService:
     def _candidate_gid_token_sync(
         self, candidate_id: int
     ) -> tuple[int, str]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT ex_gid, ex_gallery_token FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -263,7 +263,7 @@ class ExHentaiService:
         ExHentai value they judged correct and want held against the next
         scrape, which would otherwise be free to replace it.
         """
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             for field_name, value in metadata.items():
                 if value is None or value == "":
                     continue
@@ -293,7 +293,7 @@ class ExHentaiService:
         until gdata answers, so 「未查询」 and 「确认无种」 stay distinguishable.
         """
         best = gallery.best_torrent
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -323,7 +323,7 @@ class ExHentaiService:
         if not thumb_url:
             return
         digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE candidates SET thumb_url = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -356,7 +356,7 @@ class ExHentaiService:
                 if not chunk:
                     break
                 sha256.update(chunk)
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "

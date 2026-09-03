@@ -487,7 +487,7 @@ class TorrentService:
         self, candidate_id: int
     ) -> tuple[str, str] | None:
         """Return (magnet_url, btih) when the candidate was added by magnet."""
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT magnet_url, torrent_hash FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -510,7 +510,7 @@ class TorrentService:
     def _candidate_torrent_sync(
         self, candidate_id: int
     ) -> tuple[int, str, str]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT ex_gid, ex_gallery_token, torrent_count, "
                 "torrent_hash FROM candidates WHERE id = ?",
@@ -537,7 +537,7 @@ class TorrentService:
         return int(row[0]), str(row[1]), str(row[3])
 
     def _job_candidate_details_sync(self, job_id: int) -> tuple[int, dict]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT candidate_id, details_json FROM download_jobs "
                 "WHERE id = ?",
@@ -552,7 +552,7 @@ class TorrentService:
         return int(row[0]), details if isinstance(details, dict) else {}
 
     def _job_details_sync(self, job_id: int) -> dict:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT details_json FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -566,7 +566,7 @@ class TorrentService:
         return details if isinstance(details, dict) else {}
 
     def _waiting_jobs_sync(self) -> tuple[dict, ...]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             rows = connection.execute(
                 "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = 'WAITING_TORRENT' AND provider = ? "
@@ -589,7 +589,7 @@ class TorrentService:
         return tuple(jobs)
 
     def _update_details_sync(self, job_id: int, details: dict) -> None:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET details_json = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -623,7 +623,7 @@ class TorrentService:
                     break
                 sha256.update(chunk)
         details["sha256"] = sha256.hexdigest()
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = 'COMPLETED', "
                 "details_json = ?, error_code = NULL, error_message = NULL, "
@@ -675,7 +675,7 @@ class TorrentService:
     def _mark_failed_sync(
         self, job_id: int, code: str, message: str
     ) -> None:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = 'FAILED', error_code = ?, "
                 "error_message = ?, lease_owner = NULL, "

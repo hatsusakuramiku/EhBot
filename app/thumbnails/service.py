@@ -168,7 +168,7 @@ class ThumbnailService:
         )
 
     def _row_by_hash_sync(self, hash_str: str) -> ThumbnailRow | None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 _SELECT_ROW, (hash_str,)
             ).fetchone()
@@ -184,7 +184,7 @@ class ThumbnailService:
     def _create_pending_sync(
         self, hash_str: str, kind: str, variant: str, source_url: str
     ) -> ThumbnailRow:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO thumbnails "
                 "(hash, kind, variant, source_url, state) "
@@ -222,7 +222,7 @@ class ThumbnailService:
         width: int,
         height: int,
     ) -> None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE thumbnails SET state = 'READY', "
                 "content_type = ?, byte_size = ?, width = ?, height = ?, "
@@ -243,7 +243,7 @@ class ThumbnailService:
     def _mark_failed_sync(
         self, hash_str: str, error_code: str
     ) -> None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE thumbnails SET state = 'FAILED', "
                 "error_code = ?, attempt_count = attempt_count + 1, "
@@ -258,7 +258,7 @@ class ThumbnailService:
         )
 
     def _mark_pending_sync(self, hash_str: str) -> ThumbnailRow:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE thumbnails SET state = 'PENDING', "
                 "updated_at = CURRENT_TIMESTAMP "
@@ -322,9 +322,14 @@ class ThumbnailService:
                 self._image_url_checker(row.source_url)
             except Exception as exc:
                 code = getattr(exc, "code", "URL_BLOCKED")
+                # `error_code` and the message, not `code` and `url`: the
+                # formatter serialises a fixed field list, so anything else
+                # attached through `extra=` is dropped without a trace. The URL
+                # travels in the message, which is the path redaction runs on.
                 logger.warning(
-                    "thumbnail_url_blocked",
-                    extra={"url": row.source_url, "code": code},
+                    "thumbnail_url_blocked url=%s",
+                    row.source_url,
+                    extra={"error_code": code},
                 )
                 await self._mark_failed(row.hash, code)
                 return
@@ -335,10 +340,14 @@ class ThumbnailService:
             except ThumbnailError as exc:
                 await self._mark_failed(row.hash, exc.code)
                 return
-            except Exception as exc:
-                logger.warning(
+            except Exception:  # noqa: BLE001 - provider boundary
+                # `.exception` rather than `.warning(str(exc))`: this branch is
+                #「something nobody mapped raised」, and the traceback is the
+                # only thing that identifies it. The message text alone was a
+                # debugging dead end.
+                logger.exception(
                     "thumbnail_fetch_exception",
-                    extra={"error": str(exc)},
+                    extra={"error_code": "FETCH_FAILED"},
                 )
                 await self._mark_failed(row.hash, "FETCH_FAILED")
                 return
@@ -352,10 +361,11 @@ class ThumbnailService:
         path = disk_path(self._thumbnail_dir, row.hash, mkdir=True)
         try:
             path.write_bytes(webp_bytes)
-        except OSError as exc:
-            logger.error(
-                "thumbnail_write_failed",
-                extra={"path": str(path), "error": str(exc)},
+        except OSError:
+            logger.exception(
+                "thumbnail_write_failed path=%s",
+                path,
+                extra={"error_code": "DISK_WRITE_FAILED"},
             )
             await self._mark_failed(row.hash, "DISK_WRITE_FAILED")
             return

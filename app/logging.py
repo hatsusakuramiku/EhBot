@@ -67,6 +67,12 @@ request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 #: everything on the record, because `LogRecord` carries two dozen attributes of
 #: its own and a payload that grew them all would be unreadable. Adding a field
 #: here is the deliberate act of admitting it to the log contract.
+#:
+#: `error_message` is on the list because R13 made every failing worker attach
+#: it, and a whitelist that omits it drops exactly the half of a failure an
+#: operator reads: `error_code` says which branch failed, the message says what
+#: the archive or the provider actually reported. It was silently discarded
+#: until now, so the in-app tail showed a bare code for every failed pack.
 _CONTEXT_FIELDS: tuple[str, ...] = (
     "request_id",
     "candidate_id",
@@ -78,6 +84,7 @@ _CONTEXT_FIELDS: tuple[str, ...] = (
     "attempt",
     "duration_ms",
     "error_code",
+    "error_message",
 )
 
 _UVICORN_LOGGERS: tuple[str, ...] = ("uvicorn", "uvicorn.error", "uvicorn.access")
@@ -147,8 +154,17 @@ class JsonFormatter(logging.Formatter):
         payload["source"] = f"{record.module}:{record.lineno}"
         for field in _CONTEXT_FIELDS:
             value = getattr(record, field, None)
-            if value is not None:
-                payload[field] = value
+            if value is None:
+                continue
+            # Redacted like the message. `error_message` is provider text --
+            # a qBittorrent refusal carries the URL it tried, and that URL may
+            # carry a token -- so a field is no safer than the message it was
+            # split out of. The numeric ids pass through untouched.
+            payload[field] = (
+                redact_sensitive_values(value)
+                if isinstance(value, str)
+                else value
+            )
         if record.exc_info:
             # Redacted like everything else: an exception's message routinely
             # carries the URL that failed, and that URL may carry a token.

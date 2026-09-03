@@ -273,7 +273,7 @@ class ArchivedWorkService:
         if work.pack_job_id is not None:
             job_ids.append(work.pack_job_id)
         placeholders = ", ".join("?" for _ in job_ids)
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 f"DELETE FROM artifacts WHERE job_id IN ({placeholders})",
                 tuple(job_ids),
@@ -355,7 +355,7 @@ class ArchivedWorkService:
         }
 
     def _reset_job_sync(self, job_id: int) -> None:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             cursor = connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
                 "error_message = NULL, lease_owner = NULL, "
@@ -545,7 +545,7 @@ class ArchivedWorkService:
         self, candidate_id: int, code: str, message: str
     ) -> None:
         key = f"convert:{candidate_id}"
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
@@ -763,7 +763,7 @@ class ArchivedWorkService:
     ) -> None:
         if pack_job_id is None:
             return
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE artifacts SET path = ?, library_relative_path = ? "
                 "WHERE job_id = ? AND artifact_type = 'CBZ'",

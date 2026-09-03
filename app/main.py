@@ -26,6 +26,7 @@ from app.logging import configure_logging
 from app.session_secret import resolve_session_secret
 from app.web.rendering import STATIC_DIR, build_templates
 from app.web.request_id import RequestIdMiddleware
+from app.web.security_headers import SecurityHeadersMiddleware
 from app.web.routes.activity import router as activity_router
 from app.web.routes.auth import router as auth_router
 from app.web.routes.auto_approval import router as auto_approval_router
@@ -105,6 +106,10 @@ def create_app(
         https_only=app_settings.session_cookie_secure,
         same_site="lax",
     )
+    # Above the session middleware and below the request id: the headers must
+    # reach a response the session layer produced on its own, and every one of
+    # them is a constant, so nothing here needs the correlation id.
+    app.add_middleware(SecurityHeadersMiddleware)
     # Added last so it wraps outermost: Starlette applies middleware in reverse
     # order of registration, and the id has to be set before anything else can
     # log. That includes the session middleware, whose failures are worth

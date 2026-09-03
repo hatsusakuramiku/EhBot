@@ -174,7 +174,7 @@ class TelegraphService:
     def _candidate_preview_sync(
         self, candidate_id: int
     ) -> tuple[str, int | None]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT preview_url FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -237,7 +237,7 @@ class TelegraphService:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
@@ -271,7 +271,7 @@ class TelegraphService:
         The name is left alone on purpose: replacing a preview-grade book with
         the original later must not break the library index.
         """
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO metadata_values "
                 "(candidate_id, field_name, field_value, value_source, "

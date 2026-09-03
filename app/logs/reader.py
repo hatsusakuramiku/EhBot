@@ -58,6 +58,7 @@ class LogEntry:
     job_id: int | None = None
     candidate_id: int | None = None
     error_code: str | None = None
+    error_message: str | None = None
     exception: str | None = None
     raw: str | None = None
 
@@ -95,6 +96,14 @@ def _parse_line(line: str) -> LogEntry:
         error_code=(
             str(payload["error_code"])
             if payload.get("error_code") is not None
+            else None
+        ),
+        # The half of a failure the code does not carry: 「哪个环节失败」 is the
+        # code, 「失败时上游说了什么」 is this. Read alongside it so the tail
+        # answers both without the operator opening a traceback.
+        error_message=(
+            str(payload["error_message"])
+            if payload.get("error_message") is not None
             else None
         ),
         exception=(

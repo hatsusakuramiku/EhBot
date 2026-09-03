@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -313,6 +314,31 @@ class Database:
         connection.execute("PRAGMA busy_timeout = 5000")
         return connection
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """One connection, committed or rolled back, and always closed.
+
+        `with sqlite3.connect(...) as connection` does **not** close anything --
+        it only ends the transaction -- so every one of the call sites that used
+        the bare connection was leaving the handle to the garbage collector.
+        On CPython that mostly works and on a WAL database it mostly does not
+        show, but "mostly" is doing real work in that sentence: an open handle
+        holds its read snapshot, which is what keeps `-wal` growing and what
+        turns a checkpoint into a no-op.
+
+        This is also the public entry point the services use. They reached into
+        `Database._connect` before -- 27 call sites, each carrying its own
+        `noqa: SLF001` -- which is a private method serving as an API. Naming it
+        does not fix the layering, but it does stop the linter suppression from
+        being the thing that documents it.
+        """
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     @staticmethod
     def _ensure_bot_account(connection: sqlite3.Connection) -> int:
         connection.execute(
@@ -505,7 +531,7 @@ class Database:
             "min_rating": min_rating,
         }
         rules_json = json.dumps(rules_payload, separators=(",", ":"))
-        with self._connect() as connection:
+        with self.connection() as connection:
             account_id = self._ensure_bot_account(connection)
             connection.execute(
                 "INSERT INTO telegram_sources "
@@ -528,7 +554,7 @@ class Database:
         return await asyncio.to_thread(self._list_telegram_sources_sync)
 
     def _list_telegram_sources_sync(self) -> list[TelegramSourceConfig]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
                 "ts.enabled, ts.rules_json FROM telegram_sources ts "
@@ -546,7 +572,7 @@ class Database:
     def _discover_telegram_source_sync(
         self, message: ParsedSourceMessage
     ) -> TelegramSourceConfig:
-        with self._connect() as connection:
+        with self.connection() as connection:
             account_id = self._ensure_bot_account(connection)
             connection.execute(
                 "INSERT INTO telegram_sources "
@@ -570,7 +596,7 @@ class Database:
     def _initialize_sync(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         migrations_path = Path(__file__).with_name("migrations")
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute(
@@ -601,7 +627,7 @@ class Database:
 
     def _check_writable_sync(self) -> bool:
         try:
-            with self._connect() as connection:
+            with self.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.rollback()
             return True
@@ -612,7 +638,7 @@ class Database:
         return await asyncio.to_thread(self._get_admin_auth_sync, username)
 
     def _get_admin_auth_sync(self, username: str) -> tuple[str, bool] | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT password_hash, password_changed "
                 "FROM admin_users WHERE username = ?",
@@ -628,7 +654,7 @@ class Database:
         )
 
     def _set_bootstrap_admin_sync(self, username: str, password_hash: str) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO admin_users (username, password_hash, password_changed) "
                 "VALUES (?, ?, 0) "
@@ -647,7 +673,7 @@ class Database:
         )
 
     def _change_admin_password_sync(self, username: str, password_hash: str) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "UPDATE admin_users SET password_hash = ?, password_changed = 1, "
                 "updated_at = CURRENT_TIMESTAMP WHERE username = ?",
@@ -660,7 +686,7 @@ class Database:
         return await asyncio.to_thread(self._save_telegram_updates_sync, updates)
 
     def _save_telegram_updates_sync(self, updates: list[dict]) -> int:
-        with self._connect() as connection:
+        with self.connection() as connection:
             changes_before = connection.total_changes
             connection.executemany(
                 "INSERT OR IGNORE INTO telegram_bot_updates "
@@ -679,7 +705,7 @@ class Database:
         return await asyncio.to_thread(self._latest_telegram_update_id_sync)
 
     def _latest_telegram_update_id_sync(self) -> int | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             value = connection.execute(
                 "SELECT MAX(update_id) FROM telegram_bot_updates"
             ).fetchone()[0]
@@ -691,7 +717,7 @@ class Database:
         return await asyncio.to_thread(self._pending_telegram_updates_sync, limit)
 
     def _pending_telegram_updates_sync(self, limit: int) -> list[tuple[int, dict]]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT update_id, payload_json FROM telegram_bot_updates "
                 "WHERE processed_at IS NULL ORDER BY update_id LIMIT ?",
@@ -712,7 +738,7 @@ class Database:
     def _mark_telegram_update_result_sync(
         self, update_id: int, result: str, reason: str
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE telegram_bot_updates SET processed_at = CURRENT_TIMESTAMP, "
                 "processing_result = ?, processing_reason = ? "
@@ -728,7 +754,7 @@ class Database:
     def _deactivate_candidate_message_sync(
         self, chat_id: int, message_id: int
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT sm.id FROM source_messages sm "
                 "JOIN telegram_accounts ta ON ta.id = sm.account_id "
@@ -883,7 +909,7 @@ class Database:
     def _save_candidate_message_sync(
         self, update_id: int, message: ParsedSourceMessage
     ) -> bool:
-        with self._connect() as connection:
+        with self.connection() as connection:
             account_id = self._ensure_bot_account(connection)
             connection.execute(
                 "INSERT INTO telegram_sources "
@@ -1312,7 +1338,7 @@ class Database:
         # because a bookmarked link with a stale sort should still render.
         order = _CANDIDATE_SORTS.get(sort, _CANDIDATE_SORTS["newest"])
 
-        with self._connect() as connection:
+        with self.connection() as connection:
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM candidates c {clause}",
@@ -1329,7 +1355,7 @@ class Database:
     def _list_candidates_sync(
         self, status: str, limit: int
     ) -> list[CandidateListItem]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 f"{_CANDIDATE_LIST_SELECT} WHERE c.status = ? "
                 "GROUP BY c.id ORDER BY c.id DESC LIMIT ?",
@@ -1347,7 +1373,7 @@ class Database:
         # correct if a future status is added without updating the map.
         counts = {key: 0 for key in CANDIDATE_COUNT_KEYS.values()}
         counts["total"] = 0
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT status, COUNT(*) FROM candidates GROUP BY status"
             ).fetchall()
@@ -1435,7 +1461,7 @@ class Database:
 
         clause = " AND ".join(where)
         order = _DOWNLOADED_SORTS.get(sort, _DOWNLOADED_SORTS["newest"])
-        with self._connect() as connection:
+        with self.connection() as connection:
             total = int(
                 connection.execute(
                     f"SELECT COUNT(*) FROM ({_DOWNLOADED_SELECT} WHERE {clause})",
@@ -1454,7 +1480,7 @@ class Database:
         return await asyncio.to_thread(self._archive_path_pin_sync, candidate_id)
 
     def _archive_path_pin_sync(self, candidate_id: int) -> dict | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT relative_path, is_manual, operator_name, updated_at "
                 "FROM work_archive_paths WHERE candidate_id = ?",
@@ -1481,7 +1507,7 @@ class Database:
         )
 
     def _candidate_at_archive_path_sync(self, relative_path: str) -> int | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT candidate_id FROM work_archive_paths "
                 "WHERE relative_path = ?",
@@ -1521,7 +1547,7 @@ class Database:
         is_manual: bool,
         operator_name: str,
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO work_archive_paths "
                 "(candidate_id, relative_path, is_manual, operator_name) "
@@ -1553,7 +1579,7 @@ class Database:
         await asyncio.to_thread(self._clear_archive_path_pin_sync, candidate_id)
 
     def _clear_archive_path_pin_sync(self, candidate_id: int) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "DELETE FROM work_archive_paths WHERE candidate_id = ?",
                 (candidate_id,),
@@ -1569,7 +1595,7 @@ class Database:
 
     def _downloaded_work_counts_sync(self) -> dict[str, int]:
         attention = ", ".join("?" for _ in _DOWNLOADED_ATTENTION_STATES)
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT COUNT(*), "
                 "SUM(CASE WHEN cbz_path IS NOT NULL THEN 1 ELSE 0 END), "
@@ -1613,7 +1639,7 @@ class Database:
         )
 
     def _downloaded_work_sync(self, candidate_id: int) -> DownloadedWork | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 f"{_DOWNLOADED_SELECT} WHERE dj.provider <> ? "
                 "  AND arch.path IS NOT NULL "
@@ -1648,7 +1674,7 @@ class Database:
             status_clause = f" AND c.status IN ({placeholders})"
             status_params = statuses
         options: dict[str, tuple[tuple[str, int], ...]] = {}
-        with self._connect() as connection:
+        with self.connection() as connection:
             for name, facet in CANDIDATE_FACETS.items():
                 fields = ", ".join("?" for _ in facet.fields)
                 rows = connection.execute(
@@ -1692,7 +1718,7 @@ class Database:
         return await asyncio.to_thread(self._get_candidate_sync, candidate_id)
 
     def _get_candidate_sync(self, candidate_id: int) -> CandidateDetail | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT c.id, c.status, c.filter_result, c.filter_reason, "
                 "(SELECT mv.field_value FROM metadata_values mv "
@@ -1762,7 +1788,7 @@ class Database:
     def _locate_candidate_message_sync(
         self, candidate_id: int, file_unique_id: str | None
     ) -> tuple[int, int] | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT sm.chat_id, sm.message_id, sm.file_unique_id "
                 "FROM candidate_messages cm "
@@ -1816,7 +1842,7 @@ class Database:
         torrent_hash: str | None,
         title: str | None,
     ) -> int:
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "INSERT INTO candidates "
                 "(status, ex_gid, ex_gallery_token, filter_result, "
@@ -1867,7 +1893,7 @@ class Database:
         source: str,
         confidence: float | None,
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO metadata_values "
                 "(candidate_id, field_name, field_value, value_source, "
@@ -1914,7 +1940,7 @@ class Database:
         if note:
             details["note"] = note
         details_json = json.dumps(details, separators=(",", ":"))
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -1963,7 +1989,7 @@ class Database:
         field_name: str,
         field_value: str,
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT 1 FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -2024,7 +2050,7 @@ class Database:
         adding a higher-confidence value must not slip past the lock by
         landing on a row that was never locked.
         """
-        with self._connect() as connection:
+        with self.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT 1 FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -2060,7 +2086,7 @@ class Database:
         )
 
     def _effective_metadata_sync(self, candidate_id: int) -> dict[str, str]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT field_name, field_value FROM metadata_values "
                 "WHERE candidate_id = ? ORDER BY is_manual DESC, "
@@ -2078,7 +2104,7 @@ class Database:
         return await asyncio.to_thread(self._pending_candidate_ids_sync, limit)
 
     def _pending_candidate_ids_sync(self, limit: int) -> tuple[int, ...]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id FROM candidates WHERE status = 'PENDING_REVIEW' "
                 "ORDER BY id DESC LIMIT ?",
@@ -2114,7 +2140,7 @@ class Database:
         self, enabled_only: bool
     ) -> tuple[AutoApprovalRule, ...]:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
                 "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
@@ -2131,7 +2157,7 @@ class Database:
     def _get_auto_approval_rule_sync(
         self, rule_id: int
     ) -> AutoApprovalRule | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
                 "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
@@ -2169,7 +2195,7 @@ class Database:
         condition: dict,
         dsl_snapshot: str,
     ) -> AutoApprovalRule:
-        with self._connect() as connection:
+        with self.connection() as connection:
             if rule_id is None:
                 cursor = connection.execute(
                     "INSERT INTO auto_approval_rules "
@@ -2216,7 +2242,7 @@ class Database:
     def _set_auto_approval_rule_enabled_sync(
         self, rule_id: int, enabled: bool
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "UPDATE auto_approval_rules SET enabled = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -2239,7 +2265,7 @@ class Database:
     def _record_review_action_sync(
         self, candidate_id: int, action: str, operator_name: str, details: dict
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "INSERT INTO review_actions "
                 "(candidate_id, action, operator_name, details_json) "
@@ -2273,7 +2299,7 @@ class Database:
     def _re_evaluate_candidate_metadata_rules_sync(
         self, candidate_id: int
     ) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             source_row = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
                 "ts.enabled, ts.rules_json FROM telegram_sources ts "
@@ -2356,7 +2382,7 @@ class Database:
 
 
     def _list_metadata_sync(self, candidate_id: int) -> tuple[MetadataEntry, ...]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT field_name, field_value, value_source, confidence, "
                 "is_manual, created_at, is_locked FROM metadata_values "
@@ -2394,7 +2420,7 @@ class Database:
     def _list_review_actions_sync(
         self, candidate_id: int
     ) -> tuple[ReviewActionEntry, ...]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT action, operator_name, details_json, created_at "
                 "FROM review_actions WHERE candidate_id = ? "
@@ -2424,7 +2450,7 @@ class Database:
         self, enabled_only: bool
     ) -> tuple[ToolProfile, ...]:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, backend, kind, executable_path, "
                 "supported_formats, timeout_seconds, capabilities, enabled "
@@ -2453,7 +2479,7 @@ class Database:
 
 
     def _get_archive_tool_profile_sync(self, name: str) -> ToolProfile | None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, backend, kind, executable_path, "
                 "supported_formats, timeout_seconds, capabilities, enabled "
@@ -2504,7 +2530,7 @@ class Database:
             return
         assignments.append("updated_at = CURRENT_TIMESTAMP")
         params.append(name)
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "UPDATE archive_tool_profiles SET "
                 + ", ".join(assignments)
@@ -2527,7 +2553,7 @@ class Database:
         self, enabled_only: bool
     ) -> tuple[ArchivePasswordEntry, ...]:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, priority, enabled, last_success_at, created_at "
                 "FROM archive_passwords "
@@ -2554,7 +2580,7 @@ class Database:
 
 
     def _list_archive_password_secrets_sync(self) -> tuple[tuple[int, str], ...]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, secret_json FROM archive_passwords "
                 "WHERE enabled = 1 "
@@ -2575,7 +2601,7 @@ class Database:
     def _save_archive_password_sync(
         self, name: str, secret_json: str, priority: int, enabled: bool
     ) -> int:
-        with self._connect() as connection:
+        with self.connection() as connection:
             cursor = connection.execute(
                 "INSERT INTO archive_passwords "
                 "(name, secret_json, priority, enabled) VALUES (?, ?, ?, ?) "
@@ -2598,7 +2624,7 @@ class Database:
 
 
     def _delete_archive_password_sync(self, password_id: int) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "DELETE FROM archive_passwords WHERE id = ?", (password_id,)
             )
@@ -2611,7 +2637,7 @@ class Database:
 
 
     def _mark_archive_password_success_sync(self, password_id: int) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             connection.execute(
                 "UPDATE archive_passwords SET last_success_at = CURRENT_TIMESTAMP, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -2624,7 +2650,7 @@ class Database:
 
 
     def _archive_settings_sync(self) -> dict[str, str]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT key, value FROM archive_settings"
             ).fetchall()
@@ -2636,7 +2662,7 @@ class Database:
 
 
     def _save_archive_settings_sync(self, values: dict[str, str]) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             for key, value in values.items():
                 connection.execute(
                     "INSERT INTO archive_settings (key, value) VALUES (?, ?) "
@@ -2651,7 +2677,7 @@ class Database:
 
 
     def _system_settings_sync(self) -> dict[str, str]:
-        with self._connect() as connection:
+        with self.connection() as connection:
             rows = connection.execute(
                 "SELECT key, value FROM system_settings"
             ).fetchall()
@@ -2663,7 +2689,7 @@ class Database:
 
 
     def _save_system_settings_sync(self, values: dict[str, str]) -> None:
-        with self._connect() as connection:
+        with self.connection() as connection:
             for key, value in values.items():
                 connection.execute(
                     "INSERT INTO system_settings (key, value) VALUES (?, ?) "

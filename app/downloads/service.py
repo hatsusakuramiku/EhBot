@@ -227,7 +227,7 @@ class DownloadService:
         idempotency_key: str,
         details_json: str,
     ) -> DownloadEnqueueResult:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -375,7 +375,7 @@ class DownloadService:
         return await asyncio.to_thread(self._retry_job_sync, job_id)
 
     def _retry_job_sync(self, job_id: int) -> str:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state, error_code, candidate_id FROM download_jobs "
                 "WHERE id = ?",
@@ -422,7 +422,7 @@ class DownloadService:
         return await asyncio.to_thread(self._pause_job_sync, job_id)
 
     def _pause_job_sync(self, job_id: int) -> str:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -450,7 +450,7 @@ class DownloadService:
         return await asyncio.to_thread(self._resume_job_sync, job_id)
 
     def _resume_job_sync(self, job_id: int) -> str:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -493,7 +493,7 @@ class DownloadService:
                 f"优先级需在 {MIN_JOB_PRIORITY} 到 {MAX_JOB_PRIORITY} 之间"
                 "，数值越小越靠前",
             )
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -544,7 +544,7 @@ class DownloadService:
 
     def _clear_seeding_flag_sync(self, job_id: int) -> None:
         """Drop the seeding marker so the job leaves the dashboard."""
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT details_json FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -586,7 +586,7 @@ class DownloadService:
     def _job_provider_state_sync(
         self, job_id: int
     ) -> tuple[str | None, str | None]:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT provider, state FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -621,7 +621,7 @@ class DownloadService:
         return result.job_id
 
     def _job_candidate_sync(self, job_id: int) -> int:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT candidate_id FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -633,7 +633,7 @@ class DownloadService:
         return int(row[0])
 
     def _reapprove_candidate_sync(self, candidate_id: int) -> None:
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE candidates SET status = 'APPROVED', "
                 "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
@@ -643,7 +643,7 @@ class DownloadService:
             )
 
     def _cancel_job_sync(self, job_id: int) -> str:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state, candidate_id FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -669,7 +669,7 @@ class DownloadService:
         return DOWNLOAD_STATE_CANCELLED
 
     def _fetch_jobs(self, where_sql: str, params) -> tuple[DownloadJobSummary, ...]:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             rows = connection.execute(
                 "SELECT id, candidate_id, provider, state, attempt_count, "
                 "error_code, error_message, "
@@ -849,7 +849,7 @@ class DownloadService:
         and nothing else. The default is 100, which leaves room to promote
         (lower) and demote (higher) without renumbering the queue.
         """
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
@@ -1057,7 +1057,7 @@ class DownloadService:
         whatever the previous attempt learned, and the infohash is what the
         poller re-attaches by after a restart.
         """
-        with self._database._connect() as connection:  # noqa: SLF001
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT details_json FROM download_jobs WHERE id = ?",
                 (job_id,),
@@ -1156,7 +1156,7 @@ class DownloadService:
         return TelegramBotApi(token, client)
 
     def _mark_job_completed_sync(self, job_id: int) -> None:
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
                 "error_message = NULL, lease_owner = NULL, "
@@ -1186,7 +1186,7 @@ class DownloadService:
                 if not chunk:
                     break
                 sha256.update(chunk)
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "INSERT INTO artifacts "
                 "(job_id, artifact_type, path, sha256, size_bytes) "
@@ -1216,7 +1216,7 @@ class DownloadService:
         candidate_status = (
             "NEEDS_INFO" if code in NEEDS_INFO_DOWNLOAD_ERRORS else "FAILED"
         )
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
                 "error_message = ?, lease_owner = NULL, "
@@ -1242,7 +1242,7 @@ class DownloadService:
         tells the difference. Reading it here keeps the terminal log line
         in lock-step with what the page is about to render.
         """
-        with self._database._connect() as connection:
+        with self._database.connection() as connection:
             row = connection.execute(
                 "SELECT state, error_code, error_message "
                 "FROM download_jobs WHERE id = ?",

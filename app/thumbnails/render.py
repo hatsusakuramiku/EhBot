@@ -63,7 +63,13 @@ def render_card(data: bytes) -> Tuple[bytes, str, int, int]:
         img = Image.open(io.BytesIO(data))
         img.load()
     except Exception as exc:
-        logger.warning("thumbnail_decode_failed", extra={"error": str(exc)})
+        # The decoder's own words go in the message: `error` is not a field
+        # the JSON formatter serialises, so attaching it there lost it.
+        logger.warning(
+            "thumbnail_decode_failed reason=%s",
+            exc,
+            extra={"error_code": "IMAGE_DECODE_FAILED"},
+        )
         raise ThumbnailError(
             "IMAGE_DECODE_FAILED",
             "无法解码上游图片",
