@@ -2611,3 +2611,195 @@ because there was no public one, and now there is.
   said 927 passed / 12 skipped; the real figure was 1017 passed / 12 skipped
   before this session. Corrected there to count `collected` rather than
   `passed`, which is the only figure that does not move with the host.
+
+## R15 — Four operator-reported defects, plus the accessibility findings from the R15 review (v0.2.6, 2026-09-04)
+
+The review that opened this session was read-only and produced sixteen interface
+findings. The operator then reported four functional defects of their own, and
+those turned out to share a shape worth naming: **each was a state the interface
+could reach but not leave.** A failed download with no button that moved it, a
+rule that only fired while somebody watched, a saved rule that could only be
+switched off, and a path template whose only title was the one that is usually
+an illegal filename.
+
+### 1. A failed download was a dead end
+
+`retry_job` restores the candidate to `APPROVED` where the status is one of
+`FAILED` / `PROCESSING` / `NEEDS_INFO`, which is right. What was wrong sat one
+layer up: `work_actions` computed `approve` / `reject` / `needs_revision` from
+`REVIEWABLE_STATUSES` (`PENDING_REVIEW`, `NEEDS_INFO`, `NEEDS_REVISION`,
+`REJECTED`) and `requeue` from a hardcoded `{REJECTED, NEEDS_REVISION}`. A
+`FAILED` candidate is in neither set, so the work page offered it **nothing** --
+which is exactly the report: 「点重试时可能会出现需要进行审核，但是又没有审核按
+钮」.
+
+Two sets now, because the question is per-action: `REVIEWABLE_STATUSES` for the
+three review verbs and `REQUEUEABLE_STATUSES` (those two plus `FAILED`) for
+requeue. A failed candidate can be sent back to the queue but still cannot be
+approved outright -- approving it would skip the look the requeue exists to
+force. `statuses_allowing(action)` is the one function the page, the JSON layer
+and the database guard all read, and adding it let the private
+`Database._REVIEWABLE_STATUSES` -- a second copy of the same frozenset, which had
+been sitting three modules away from the first -- be deleted.
+
+The second half was quieter and worse. `_enqueue` inserted with `ON CONFLICT
+DO NOTHING`, and `idempotency_key` is UNIQUE per source, so re-approving a
+requeued candidate reported success while its dead job row stayed `FAILED`. The
+book never downloaded and the page kept showing the failure the operator had just
+acted on. The conflict branch now revives a `FAILED` or `CANCELLED` row -- state
+back to `PENDING`, error columns cleared, lease released. `COMPLETED` and the
+open states are deliberately untouched: re-fetching a finished book is
+`redownload_work`'s explicit decision (it bumps `attempt_count`), and re-pending
+a job the worker holds would hand the same transfer out twice.
+
+### 2. Automatic approval was a side effect of rendering a page
+
+`apply_automatic_approval` had exactly one caller: `_render_candidates`, inside
+the `if tab == "pending"` branch, looping over the rows it was about to draw. So
+a rule fired only while an operator had 待审核 open, only for the page they were
+looking at, and the sweep's cost -- N metadata reads plus a possible
+approve-and-enqueue -- landed inside a request they were waiting on. A deployment
+nobody was watching approved nothing, which is the opposite of what a rule is
+for.
+
+`AutoApprovalSweeper` (new, `app/auto_approval/sweeper.py`) owns the schedule
+now: one task started and stopped by the lifespan, modelled on the download
+worker's loop because a second scheduling mechanism would be a second thing to
+reason about when a sweep stops happening. The interval is a new 系统 setting,
+default 30 minutes, and it is re-read **every pass** rather than captured at
+construction -- a value captured at startup would mean a saved interval did
+nothing until the container was restarted. `0` means 「不要自动跑」 and is
+honoured by sleeping a minute and re-checking, so turning it back on also needs
+no restart.
+
+Ingestion triggers it too, via a new `on_candidates_ingested` callback on
+`ConnectionManager`: a book that arrives is decided as it arrives rather than up
+to half an hour later. The page render keeps its call as a latency optimisation
+only.
+
+### 3. A saved rule could only be switched on and off
+
+There were no update or delete routes, and `save_auto_approval_rule` passed
+`rule_id=None` unconditionally -- so every save was an insert, and the only way
+to fix a wrong rule was to add a second one beside it. The database layer already
+branched on `rule_id is None`; the page simply never gave it anything else.
+
+`editor_rows` is the new inverse of `_parse_rule_condition`, and it lives in
+`app/auto_approval/rules.py` beside `render_rule_dsl` because both answer 「this
+AST, written for a human」. It **returns None for a group nested inside a
+group**: the flat editor emits one level, so a nested rule can only have been
+written straight into the database, and flattening it would change what it
+matches while keeping its name. The tab still renders that rule, says it cannot
+be edited here, and leaves 删除 as the way out.
+
+### 4. `{title}` was always the English title
+
+`TEMPLATE_PLACEHOLDERS` was `("category", "artist", "title")` and `title`
+resolved unconditionally to the `Title` field. An ExHentai English title
+routinely carries `:` and `/` -- both illegal in a filename -- so the reported
+「经常出现名称不合法」 was the default behaviour, not an edge case.
+`JapaneseTitle` was already in `METADATA_FIELDS` and already populated from
+`title_jpn`, and simply unreachable from a template.
+
+`{title}` now follows a new 标题来源 preference, defaulting to Japanese, and
+`{japanese_title}` / `{english_title}` name one language each for a template that
+wants to be explicit. `{title}` falls back across languages before the untitled
+fallback -- a gallery with only a `title_jpn` must still render under an English
+preference, or the setting becomes a way to lose a name. The two explicit
+placeholders deliberately do **not**: a template that asks for one language
+should get that language or the candidate-id fallback, never a silent
+substitution the operator cannot see. The preview shares the template's form, so
+what was previewed is what gets saved, and its sample English title carries a
+colon and a slash on purpose.
+
+### The accessibility findings
+
+- **`--t-line-strong` was a border nobody could see.** 1.65:1 against white and
+  1.56:1 against the dark panel, where WCAG 1.4.11 asks 3:1 of a boundary that is
+  the only thing saying where a control is -- an input was findable because of
+  its own background, not its edge. Now `#7f8a90` light (3.54 / 3.32 / 3.11
+  against surface, page and sunken) and `#808c93` dark (4.13 / 4.93 / 3.22).
+  `--t-line` stays light on purpose: it separates two panels that each have their
+  own background, which is decoration rather than boundary.
+- **Three ARIA states were on elements that cannot have them.** `aria-pressed`
+  is defined on a button and `aria-selected` on `tab` / `option` / `row` /
+  `gridcell`, so on the tab strip, the two view switches and the log-level
+  filters they were states no assistive technology had to report. All are
+  `aria-current` now. Earning `aria-selected` by adding `role="tab"` was the
+  alternative and would have promised a `tabpanel` that switches in place, which
+  is exactly what those links do not do.
+- **`aria-sort` sat on the button inside the header cell.** It is defined on a
+  header cell and nowhere else, so a screen reader announcing the column's order
+  never read it. The `<th>` carries the state; the button keeps the label and the
+  arrow.
+- **Both overlays focused something at page load.** `x-init="$nextTick(() =>
+  $el.focus())"` runs when Alpine initialises the teleported markup, so every
+  page carrying a confirmation dialog stole focus on arrival and none of them
+  moved it when the dialog actually opened. Both now watch `open` on the wrapper
+  -- the panel is inside `x-show`, and a watcher declared there does not exist to
+  see the close it should react to -- and both return focus to the trigger, since
+  they are teleported to the end of `<body>` and a keyboard user who closes one
+  otherwise lands at the bottom of the document. The dialog opens on 取消: it
+  exists because the action cannot be undone, and opening with the destructive
+  button focused means a stray Enter does the thing the second step was added to
+  prevent.
+- **`scroll-padding-top` was a bare `52px` and on the wrong element.** It only
+  works on the scrolling element, which is the document, so `<html>` gained
+  `class="ui-root"` (every rule in `ui.css` stays class-scoped) and the value
+  reads `--topbar-height`, the same token the bar's own `min-height` now uses.
+
+### Decisions
+
+- **Two status sets rather than one widened set.** Adding `FAILED` to
+  `REVIEWABLE_STATUSES` would have been one line and would have made a failed
+  download approvable without a second look. The distinction between 「can be
+  sent back」 and 「can be decided」 is real, so it is two names.
+- **`statuses_allowing` is a function, not two exported constants.** The database
+  guard needs to answer the question for an action it is handed, and giving it a
+  function is what let the duplicated frozenset go away. A state the page offers
+  and the write refuses is a button that can only produce an error.
+- **The sweeper re-reads its interval every pass.** The alternative -- reading it
+  once and restarting the task on save -- means the settings form knows about the
+  scheduler. Re-reading costs one indexed row per pass.
+- **`created` is computed from a pre-flight SELECT.** The upsert changes a row
+  when it revives one, so the row count no longer answers 「这是一条新任务吗」,
+  which is what the caller's flash message needs.
+- **`editor_rows` refuses rather than flattens.** An operator pressing 保存 on a
+  rule that had been silently rewritten would get a different rule with the same
+  name and no indication of it.
+- **Both new settings went into the existing key/value tables.** No migration:
+  the fifteen are frozen, and `system_settings` and `archive_settings` are
+  exactly where an operator preference belongs.
+
+### Verification
+- Full suite: **1068 collected / 1056 passed / 12 skipped / 0 failed**
+  (1039 + 29 new), 1174 s. The 12 skips are `test_seven_zip_real.py`; this host
+  has no 7-Zip toolchain.
+- New tests: 6 for defect 1 (a failed candidate is requeueable and not
+  approvable, at the model, JSON and page layers; the upsert revives a `FAILED`
+  row and leaves a `COMPLETED` one alone), 3 for defect 2 (the sweeper approves
+  with nobody on the page, approves nothing without a matching rule, and one
+  unapprovable candidate does not stop the batch -- all driving `sweep_once()`,
+  so nothing sleeps), 6 for defect 3 (edit in place, delete, and a nested rule
+  refused, at both the route and `editor_rows` level), 9 for defect 4 (Japanese
+  default, English preference, fallback when the preferred language is missing,
+  the two explicit placeholders, the preview and the save path, plus two
+  validation cases), and 5 for the accessibility findings (focus on open and
+  return on close, the dialog opening on 取消, no link carrying a button-only
+  state, `aria-sort` on the `<th>`, the document scrolling clear of the top bar).
+- Version bumped to `0.2.6` in `pyproject.toml` **and** `uv.lock`; the Dockerfile
+  runs `uv sync --frozen`, so a lockfile that disagrees fails the image build.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| A failed download offered neither a review button nor a requeue | `FAILED` is in no reviewable set, and `requeue` was gated on a hardcoded `{REJECTED, NEEDS_REVISION}` | `REQUEUEABLE_STATUSES` + `statuses_allowing(action)`, read by the page, the JSON layer and the database guard |
+| Two copies of the reviewable-status set, three modules apart | `Database._REVIEWABLE_STATUSES` duplicated `app/review/models.py` | The private copy deleted; the guard calls `statuses_allowing` |
+| Re-approving a requeued candidate downloaded nothing, silently | `_enqueue` used `ON CONFLICT DO NOTHING`, so the dead job row stayed `FAILED` while the call reported success | The conflict branch revives a `FAILED` / `CANCELLED` row; `COMPLETED` and open states untouched |
+| Rules fired only while 待审核 was open, and only for the visible page | `apply_automatic_approval`'s only caller was `_render_candidates` | `AutoApprovalSweeper` on a timer, plus an on-ingest callback; the render call is now an optimisation |
+| A saved rule could only be enabled or disabled | No update/delete routes; the save route hardcoded `rule_id=None` | Hidden `rule_id`, `GET …/edit`, `POST …/delete`, and `editor_rows` to fill the form |
+| `{title}` produced illegal filenames on most galleries | It resolved to the English `Title`, which carries `:` and `/` | 标题来源 setting (Japanese by default) plus `{japanese_title}` / `{english_title}` |
+| `--t-line-strong` failed 1.4.11 at 1.65:1 light / 1.56:1 dark | Chosen against a panel edge, not a control boundary | `#7f8a90` / `#808c93`, all pairings ≥ 3:1 |
+| `aria-pressed` on links, `aria-selected` on links, `aria-sort` on a button | States asserted on elements they are not defined for | `aria-current` on the links, `aria-sort` on the `<th>` |
+| Both overlays stole focus at page load and never moved it on open | `x-init` runs at initialisation, and the teleported markup initialises with the page | `$watch('open', …)` on the wrapper, focus returned to the trigger, dialog opens on 取消 |
+| An in-page jump landed under the sticky top bar | `scroll-padding-top` on a non-scrolling element, with a hardcoded 52px | `.ui-root { scroll-padding-top: var(--topbar-height) }` |

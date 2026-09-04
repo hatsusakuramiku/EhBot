@@ -290,6 +290,118 @@ def test_gallery_overlays_are_dismissable_by_keyboard(tmp_path: Path) -> None:
     assert 'aria-label="关闭"' in body
 
 
+def test_overlays_move_focus_on_open_and_return_it_on_close(
+    tmp_path: Path,
+) -> None:
+    """Focus is watched, not initialised.
+
+    Both overlays used to focus something with `x-init="$nextTick(...)"`, which
+    runs when Alpine initialises the teleported markup -- at page load, not when
+    the overlay opens. So every page carrying a confirmation dialog stole focus
+    on arrival and none of them moved it when the dialog actually appeared.
+
+    Returning focus to the trigger is the other half: both are teleported to the
+    end of `<body>`, so a keyboard user who closes one lands at the bottom of the
+    document unless it is put back.
+    """
+    client, _ = _client(tmp_path)
+    try:
+        body = client.get("/ui-kit").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert "$nextTick(() => $el.focus())" not in body
+    # One watcher per overlay: the drawer and the confirm dialog.
+    assert body.count("$watch('open'") >= 2
+    assert body.count("trigger.focus()") >= 2
+
+
+def test_a_confirmation_opens_on_cancel_not_on_the_destructive_button(
+    tmp_path: Path,
+) -> None:
+    """The dialog exists because the action cannot be undone.
+
+    Opening it with the destructive button focused means a stray Enter performs
+    exactly what the second step was added to prevent, so focus lands on 取消.
+    """
+    client, _ = _client(tmp_path)
+    try:
+        body = client.get("/ui-kit").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert 'x-ref="dismiss"' in body
+    assert "$refs.dismiss" in body
+
+
+def test_no_link_carries_a_state_only_a_button_can_have(tmp_path: Path) -> None:
+    """`aria-pressed` on an `<a>` announces nothing.
+
+    It is defined on `button`, and `aria-selected` on `tab`/`option`/`row`/
+    `gridcell` -- so a link carrying either has a state no assistive technology
+    is required to report. The tab strip, the two view switches and the log-level
+    filters all had one; they say `aria-current` now, which is the attribute a
+    link has for this.
+    """
+    client, _ = _client(tmp_path)
+    try:
+        pages = [
+            client.get(path).text
+            for path in (
+                "/",
+                "/candidates",
+                "/downloaded",
+                "/activity",
+                "/settings/system",
+                "/ui-kit",
+            )
+        ]
+    finally:
+        client.__exit__(None, None, None)
+
+    for body in pages:
+        assert not re.search(r"<a\b[^>]*aria-pressed", body, re.S)
+        assert not re.search(r"<a\b[^>]*aria-selected", body, re.S)
+
+
+def test_aria_sort_sits_on_the_header_cell(tmp_path: Path) -> None:
+    """`aria-sort` is defined on a header cell and nowhere else.
+
+    It used to sit on the button inside the cell, where a screen reader
+    announcing the column's sort order never reads it.
+    """
+    client, _ = _client(tmp_path)
+    try:
+        body = client.get("/ui-kit").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert re.search(r"<th\b[^>]*aria-sort=", body, re.S)
+    assert not re.search(r"<button\b[^>]*aria-sort=", body, re.S)
+
+
+def test_the_document_scrolls_clear_of_the_sticky_top_bar(tmp_path: Path) -> None:
+    """An in-page jump must not land under the bar it scrolled past.
+
+    `scroll-padding-top` only works on the scrolling element, which is the
+    document -- hence the class on `<html>`, since every rule in `ui.css` stays
+    class-scoped. Read from the same token the bar's height uses so the two
+    cannot drift.
+    """
+    client, settings = _client(tmp_path)
+    try:
+        body = client.get("/").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert 'class="ui-root"' in body
+    css = (Path(__file__).resolve().parents[2] / "app" / "web" / "static" / "ui.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".ui-root { scroll-padding-top: var(--topbar-height); }" in css
+    assert "min-height: var(--topbar-height);" in css
+
+
 def test_gallery_cover_urls_stay_on_the_local_proxy(tmp_path: Path) -> None:
     client, _ = _client(tmp_path)
     try:

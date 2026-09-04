@@ -33,28 +33,50 @@ def safe_library_name(value: str, *, fallback: str) -> str:
     return cleaned or fallback
 
 
-#: Placeholders the layout template understands. Deliberately three, and
-#: deliberately metadata every book has a value or a fallback for: a template is
-#: only useful if it renders for every book that reaches the library, and a
-#: placeholder that is empty half the time produces half a tree of 「未分类」.
-TEMPLATE_PLACEHOLDERS: tuple[str, ...] = ("category", "artist", "title")
+#: Placeholders the layout template understands. Each is metadata every book has
+#: a value or a fallback for: a template is only useful if it renders for every
+#: book that reaches the library, and a placeholder that is empty half the time
+#: produces half a tree of 「未分类」.
+#:
+#: `japanese_title` and `english_title` name one language each, for a template
+#: that wants to be explicit. `title` is the one that follows the 标题来源
+#: setting, and it is what a template should normally use -- the setting exists
+#: so an operator changes their mind once rather than editing the template.
+TEMPLATE_PLACEHOLDERS: tuple[str, ...] = (
+    "category",
+    "artist",
+    "title",
+    "japanese_title",
+    "english_title",
+)
 
 #: Words for the fields, so the settings page can explain the placeholders
 #: without a second copy of the list in the template.
 PLACEHOLDER_LABELS: dict[str, str] = {
     "category": "分类",
     "artist": "作者",
-    "title": "标题",
+    "title": "标题（按设置）",
+    "japanese_title": "日文标题",
+    "english_title": "英文标题",
 }
 
-#: What a placeholder renders as when the metadata has no value for it. `title`
-#: is absent on purpose: the caller always supplies a title fallback derived
-#: from the candidate id, because a file named 「未命名」 for every untitled book
-#: would collide with itself.
+#: What a placeholder renders as when the metadata has no value for it. The three
+#: title placeholders are absent on purpose: the caller always supplies a title
+#: fallback derived from the candidate id, because a file named 「未命名」 for
+#: every untitled book would collide with itself.
 PLACEHOLDER_FALLBACKS: dict[str, str] = {
     "category": "未分类",
     "artist": "未知作者",
 }
+
+#: The placeholders that mean 「this book's name」. They share the caller's
+#: `title_fallback` rather than a constant for the reason above, and they are
+#: named as a set because both `render_library_path` and `plan_library_path`
+#: have to treat all three alike -- a list written twice is how
+#: `{english_title}` would fall back to an empty string in one of them.
+TITLE_PLACEHOLDERS: frozenset[str] = frozenset(
+    {"title", "japanese_title", "english_title"}
+)
 
 _PLACEHOLDER_PATTERN = re.compile(r"\{([a-z_]*)\}")
 
@@ -83,8 +105,11 @@ def validate_library_template(raw: str) -> str:
       name, which reads as a bug in the output rather than in the template;
     * an absolute template escapes the library root, and `..` walks out of it,
       so both are path traversal expressed as a setting;
-    * a template with no `{title}` gives every book in a group the same name,
-      which the conflict suffix then papers over one `(2)` at a time.
+    * a template with no title placeholder at all gives every book in a group the
+      same name, which the conflict suffix then papers over one `(2)` at a time.
+      Any of the three counts: `{japanese_title}` names the book just as well as
+      `{title}` does, and requiring the literal `{title}` would refuse a template
+      that is more specific than the one being demanded.
 
     The returned value is normalized to forward slashes so one stored template
     means the same tree on both platforms.
@@ -108,9 +133,12 @@ def validate_library_template(raw: str) -> str:
             "TEMPLATE_UNKNOWN_FIELD",
             f"路径模板里的 {{{unknown[0]}}} 不是可用字段",
         )
-    if "{title}" not in template:
+    if not (
+        set(_PLACEHOLDER_PATTERN.findall(template)) & TITLE_PLACEHOLDERS
+    ):
         raise LibraryTemplateError(
-            "TEMPLATE_NO_TITLE", "路径模板必须包含 {title}"
+            "TEMPLATE_NO_TITLE",
+            "路径模板必须包含 {title}、{japanese_title} 或 {english_title}",
         )
     segments = [segment for segment in template.split("/") if segment]
     if not segments:
@@ -145,7 +173,7 @@ def render_library_path(
             value = (values.get(name) or "").strip()
             if value:
                 return value
-            if name == "title":
+            if name in TITLE_PLACEHOLDERS:
                 return title_fallback
             return PLACEHOLDER_FALLBACKS.get(name, "")
 
@@ -273,7 +301,7 @@ def plan_library_path(
             value = (values.get(name) or "").strip()
             if value:
                 return value
-            if name == "title":
+            if name in TITLE_PLACEHOLDERS:
                 return title_fallback
             return PLACEHOLDER_FALLBACKS.get(name, "")
 
@@ -326,6 +354,7 @@ __all__ = [
     "PLACEHOLDER_FALLBACKS",
     "PLACEHOLDER_LABELS",
     "TEMPLATE_PLACEHOLDERS",
+    "TITLE_PLACEHOLDERS",
     "LibraryPathError",
     "LibraryTemplateError",
     "check_library_segment",

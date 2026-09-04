@@ -41,6 +41,7 @@ from app.bootstrap import (
     remove_bootstrap_password,
     write_bootstrap_password,
 )
+from app.auto_approval.sweeper import AutoApprovalSweeper
 from app.candidates.ingestor import CandidateIngestor
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
@@ -172,6 +173,7 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.torrent_service = None
     app.state.thumbnail_service = None
     app.state.tag_translator = None
+    app.state.auto_approval_sweeper = None
     # Fan-out for state transitions. Created eagerly so a worker can publish
     # before any browser has connected (publishing with no subscriber is a no-op,
     # which is what makes it cheap to call from the download loop).
@@ -195,6 +197,19 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
             and app.state.connection_manager.user_download_available()
         ),
     )
+
+
+async def _sweep_new_candidates(app) -> None:
+    """Apply automatic-approval rules to a freshly ingested batch.
+
+    Separate from the sweeper so `ConnectionManager` takes a plain callable and
+    stays unaware of review policy, and so the 「not built yet」 case is expressed
+    once rather than inside a lambda.
+    """
+    sweeper = getattr(app.state, "auto_approval_sweeper", None)
+    if sweeper is None:
+        return
+    await sweeper.sweep_once()
 
 
 def build_lifespan(
@@ -288,6 +303,13 @@ def build_lifespan(
                 exhentai_client=exhentai_client,
                 candidate_ingestor=CandidateIngestor(database),
                 user_client_factory=telegram_user_client_factory,
+                # Read off `app.state` at call time, not captured: the sweeper is
+                # built further down this same startup (it needs the download
+                # worker to exist first), so a reference taken here would be
+                # None forever. The guard is what makes the ordering safe rather
+                # than merely lucky -- an update that arrives before the sweeper
+                # exists is left to the first timed sweep.
+                on_candidates_ingested=lambda: _sweep_new_candidates(application),
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -529,6 +551,15 @@ def build_lifespan(
                     image_url_checker=checker,
                 )
             await download_service.start()
+            # Started after the download service because an approval enqueues a
+            # job, and a sweep that fired before the worker existed would leave
+            # the queue holding rows nothing was claiming yet.
+            application.state.auto_approval_sweeper = AutoApprovalSweeper(
+                database,
+                application.state.review_orchestrator,
+                application.state.system_settings_service,
+            )
+            await application.state.auto_approval_sweeper.start()
             if application.state.torrent_service is not None:
                 # Parked jobs are read from the database each pass, so this
                 # also re-attaches to whatever the client kept working on
@@ -554,6 +585,9 @@ def build_lifespan(
             conversion_service = application.state.conversion_service
             if conversion_service is not None:
                 await conversion_service.stop()
+            sweeper = application.state.auto_approval_sweeper
+            if sweeper is not None:
+                await sweeper.stop()
             torrent_service_instance = application.state.torrent_service
             if torrent_service_instance is not None:
                 await torrent_service_instance.stop()

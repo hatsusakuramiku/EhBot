@@ -54,7 +54,11 @@ from app.downloads.models import (
     PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
 )
-from app.review.models import REVIEWABLE_STATUSES, split_metadata_entries
+from app.review.models import (
+    REQUEUEABLE_STATUSES,
+    REVIEWABLE_STATUSES,
+    split_metadata_entries,
+)
 
 
 router = APIRouter(tags=["works"])
@@ -137,9 +141,12 @@ def work_actions(candidate, jobs, sources: frozenset[str]) -> dict[str, Any]:
         "reject": reviewable,
         "needs_revision": reviewable,
         # Requeueing is what un-parks a work the operator or a rule set aside.
-        # Offered only where it changes something: a PENDING_REVIEW candidate is
-        # already in the queue it would move to.
-        "requeue": candidate.status in {"REJECTED", "NEEDS_REVISION"},
+        # Offered only where it changes something -- a PENDING_REVIEW candidate
+        # is already in the queue it would move to -- and read from
+        # `REQUEUEABLE_STATUSES` so the page and the write agree. `FAILED` is in
+        # that set and in no reviewable one, which is why it needs this button:
+        # a work whose retry is refused has no other way back to a human.
+        "requeue": candidate.status in REQUEUEABLE_STATUSES,
         # Metadata is editable at every stage on purpose: a wrong title found
         # after packaging is exactly when an operator wants to fix it, and the
         # fix is what the next re-package will read.

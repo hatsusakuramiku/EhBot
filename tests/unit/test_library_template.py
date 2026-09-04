@@ -81,6 +81,8 @@ class TestValidation:
             ("./{title}", "TEMPLATE_TRAVERSAL"),
             ("{publisher}/{title}", "TEMPLATE_UNKNOWN_FIELD"),
             ("{category}/{artist}", "TEMPLATE_NO_TITLE"),
+            ("{english_title}/{artist}", None),
+            ("{japanese_title}", None),
         ],
     )
     def test_a_template_that_cannot_be_stored_says_which_rule_it_broke(
@@ -93,6 +95,12 @@ class TestValidation:
         from the operator's -- and 「路径模板不能为空」 has to be a different
         message from 「不是可用字段」 or the form teaches nothing.
         """
+        if code is None:
+            # A language-specific placeholder names the book just as well as
+            # `{title}`, so demanding the literal `{title}` would refuse a
+            # template that is *more* specific than the rule asks for.
+            assert validate_library_template(template)
+            return
         with pytest.raises(LibraryTemplateError) as raised:
             validate_library_template(template)
 
@@ -227,6 +235,7 @@ class TestTheTemplateReachesThePacker:
         template: str,
         metadata: tuple[MetadataEntry, ...],
         title: str = "示例标题",
+        title_source: str | None = None,
     ) -> Path:
         database = Database(tmp_path / "ehbot.db")
         await database.initialize()
@@ -238,6 +247,8 @@ class TestTheTemplateReachesThePacker:
             default_work_path=tmp_path / "work",
         )
         await database.save_archive_settings({"library_template": template})
+        if title_source is not None:
+            await settings.save_title_source(title_source)
         service = ConversionService(
             database,
             tmp_path / "work",
@@ -304,6 +315,108 @@ class TestTheTemplateReachesThePacker:
         )
 
         assert target.name == "示例标题 Vol. 1.cbz"
+
+
+class TestTitleSource:
+    """Which of the gallery's two titles `{title}` resolves to.
+
+    The reason this setting exists: an ExHentai English title routinely carries
+    `:` and `/`, both of which a filesystem refuses, so a template built on it
+    produced 「名称不合法」 again and again. The Japanese title is the default
+    because it is the one that is usually a legal filename, and the English one
+    stays available for a library that is read in English.
+    """
+
+    @staticmethod
+    def _metadata(**fields: str) -> tuple[MetadataEntry, ...]:
+        return TestTheTemplateReachesThePacker._metadata(**fields)
+
+    def test_the_default_names_a_book_in_japanese(self, tmp_path: Path) -> None:
+        target = asyncio.run(
+            TestTheTemplateReachesThePacker._target(
+                tmp_path,
+                "{title}",
+                self._metadata(
+                    Title="Sample Work", JapaneseTitle="サンプル作品"
+                ),
+            )
+        )
+
+        assert target == tmp_path / "library" / "サンプル作品.cbz"
+
+    def test_the_english_preference_is_honoured(self, tmp_path: Path) -> None:
+        target = asyncio.run(
+            TestTheTemplateReachesThePacker._target(
+                tmp_path,
+                "{title}",
+                self._metadata(
+                    Title="Sample Work", JapaneseTitle="サンプル作品"
+                ),
+                title_source="english",
+            )
+        )
+
+        assert target == tmp_path / "library" / "Sample Work.cbz"
+
+    def test_the_preferred_language_falls_back_to_the_other_one(
+        self, tmp_path: Path
+    ) -> None:
+        """A gallery with only one title still gets a name.
+
+        Without the cross-language fallback the setting would become a way to
+        lose a book's name: a gallery that never published a `title_jpn` would
+        pack as `candidate-1` under the default preference.
+        """
+        target = asyncio.run(
+            TestTheTemplateReachesThePacker._target(
+                tmp_path, "{title}", self._metadata(Title="English Only")
+            )
+        )
+
+        assert target == tmp_path / "library" / "English Only.cbz"
+
+    def test_a_template_may_ask_for_one_language_explicitly(
+        self, tmp_path: Path
+    ) -> None:
+        """`{japanese_title}` and `{english_title}` ignore the setting.
+
+        A template that names a language is more specific than the preference,
+        so honouring the preference there would make the two placeholders
+        indistinguishable from `{title}`.
+        """
+        target = asyncio.run(
+            TestTheTemplateReachesThePacker._target(
+                tmp_path,
+                "{japanese_title}/{english_title}",
+                self._metadata(
+                    Title="Sample Work", JapaneseTitle="サンプル作品"
+                ),
+                title_source="english",
+            )
+        )
+
+        assert target == (
+            tmp_path / "library" / "サンプル作品" / "Sample Work.cbz"
+        )
+
+    def test_an_explicit_language_that_is_missing_uses_the_id_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        """No silent substitution: the book packs under its candidate id.
+
+        Falling back to the other language here would publish a book in a tree
+        the operator did not ask for, and they would have no way to tell which
+        rows were substituted.
+        """
+        target = asyncio.run(
+            TestTheTemplateReachesThePacker._target(
+                tmp_path,
+                "{japanese_title}",
+                self._metadata(Title="English Only"),
+            )
+        )
+
+        assert target == tmp_path / "library" / "candidate-1.cbz"
 
 
 class TestStrictPlanning:

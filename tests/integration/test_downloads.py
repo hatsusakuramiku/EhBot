@@ -105,6 +105,71 @@ async def test_enqueue_after_approval_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_enqueueing_again_revives_a_failed_job_row(tmp_path: Path) -> None:
+    """The other half of the 「重试后无法审核」 dead end.
+
+    `idempotency_key` is UNIQUE per source, so a re-approval after a requeue
+    cannot insert a second row. It used to `DO NOTHING`, which made the whole
+    recovery silent: the candidate went back to APPROVED, the enqueue reported
+    success, and the job row stayed FAILED, so nothing ever downloaded. The row
+    is reused -- one book, one attempt history -- and put back to PENDING.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    candidate_id, job_id = await approved_job(database, service)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = ?, error_code = ?, "
+            "error_message = ? WHERE id = ?",
+            (DOWNLOAD_STATE_FAILED, "TELEGRAM_DOWNLOAD_FAILED", "连接超时", job_id),
+        )
+
+    again = await service.enqueue_telegram_download(
+        candidate_id,
+        {"file_id": "x", "file_name": "x.cbz"},
+    )
+    assert again.job_id == job_id
+    # Not a new task: the caller's flash message must not claim one was created.
+    assert again.created is False
+    assert job_state(database, job_id) == DOWNLOAD_STATE_PENDING
+    with database._connect() as connection:  # noqa: SLF001
+        row = connection.execute(
+            "SELECT error_code, error_message, COUNT(*) FROM download_jobs "
+            "WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+    assert row[0] is None
+    assert row[1] is None
+    assert row[2] == 1
+
+
+@pytest.mark.asyncio
+async def test_enqueueing_again_leaves_a_completed_job_alone(
+    tmp_path: Path,
+) -> None:
+    """Re-fetching a finished book is `redownload_work`'s decision, not a side
+    effect of an enqueue: that path bumps `attempt_count` and is what the
+    operator pressed. Re-pending it here would silently re-download every
+    already-published work whose candidate is enqueued a second time.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    candidate_id, job_id = await approved_job(database, service)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = ? WHERE id = ?",
+            (DOWNLOAD_STATE_COMPLETED, job_id),
+        )
+
+    again = await service.enqueue_telegram_download(
+        candidate_id,
+        {"file_id": "x", "file_name": "x.cbz"},
+    )
+    assert again.job_id == job_id
+    assert job_state(database, job_id) == DOWNLOAD_STATE_COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_worker_failure_updates_candidate_status(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_archive(database, file_name="comic.cbz")

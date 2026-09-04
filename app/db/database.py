@@ -29,7 +29,11 @@ from app.downloads.models import (
     DownloadedWork,
 )
 
-from app.review.models import MetadataEntry, ReviewActionEntry
+from app.review.models import (
+    MetadataEntry,
+    ReviewActionEntry,
+    statuses_allowing,
+)
 
 
 #: Status -> counter key. This is the single place a candidate state is mapped
@@ -1905,11 +1909,6 @@ class Database:
             )
 
 
-    _REVIEWABLE_STATUSES = frozenset(
-        {"PENDING_REVIEW", "NEEDS_INFO", "NEEDS_REVISION", "REJECTED"}
-    )
-
-
     async def transition_candidate_status(
         self,
         candidate_id: int,
@@ -1949,7 +1948,11 @@ class Database:
             if row is None:
                 raise LookupError(f"Candidate {candidate_id} does not exist")
             current_status = str(row[0])
-            if current_status not in self._REVIEWABLE_STATUSES:
+            # `statuses_allowing` rather than a set of literals kept here: the
+            # copy that used to live in this class drifted from the one the page
+            # reads, and a state the page offers but the write refuses is a
+            # button that can only produce an error.
+            if current_status not in statuses_allowing(action):
                 raise PermissionError(
                     f"Candidate in state {current_status} cannot be reviewed"
                 )
@@ -2250,6 +2253,33 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise LookupError(f"Automatic approval rule {rule_id} does not exist")
+
+    async def delete_auto_approval_rule(self, rule_id: int) -> None:
+        await asyncio.to_thread(self._delete_auto_approval_rule_sync, rule_id)
+
+    def _delete_auto_approval_rule_sync(self, rule_id: int) -> None:
+        """Remove a rule outright.
+
+        A hard delete rather than a disabled flag: `enabled` already expresses
+        「暂时不要跑这条」, so a second, permanent kind of
+        disabled would leave the list showing rules an operator believes they
+        removed. What the rule *did* survives regardless -- `record_review_action`
+        stores the whole rule snapshot on every automatic approval, so a
+        deleted rule's past decisions remain auditable without the row.
+
+        `LookupError` rather than a silent no-op, for the reason
+        `_save_auto_approval_rule_sync` raises it: a delete that hits nothing is
+        a stale page acting on a rule someone else already removed, and the
+        caller has to be able to say so.
+        """
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM auto_approval_rules WHERE id = ?", (rule_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(
+                    f"Automatic approval rule {rule_id} does not exist"
+                )
 
     async def record_review_action(
         self, candidate_id: int, action: str, operator_name: str, details: dict

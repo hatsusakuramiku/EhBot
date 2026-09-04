@@ -194,16 +194,32 @@ def test_review_actions_are_offered_only_while_the_work_is_reviewable() -> None:
 
 
 def test_requeue_is_offered_only_where_it_changes_something() -> None:
-    """A PENDING_REVIEW candidate is already in the queue requeue moves it to."""
+    """A PENDING_REVIEW candidate is already in the queue requeue moves it to.
+
+    `FAILED` is here and in no reviewable state, which is the whole reason
+    `REQUEUEABLE_STATUSES` is a separate set: a failed download must not be
+    approvable without a second look, but it has to have *some* way back, or the
+    work is a dead end with no button that can move it.
+    """
     for status, expected in (
         ("REJECTED", True),
         ("NEEDS_REVISION", True),
+        ("FAILED", True),
         ("PENDING_REVIEW", False),
         ("NEEDS_INFO", False),
         ("APPROVED", False),
     ):
         actions = work_actions(make_candidate(status=status), (), ALL_SOURCES)
         assert actions["requeue"] is expected, status
+
+
+def test_a_failed_candidate_is_requeueable_but_not_reviewable() -> None:
+    """The two sets are deliberately different, and the page reads both."""
+    actions = work_actions(make_candidate(status="FAILED"), (), ALL_SOURCES)
+    assert actions["requeue"] is True
+    assert actions["approve"] is False
+    assert actions["reject"] is False
+    assert actions["needs_revision"] is False
 
 
 def test_metadata_stays_editable_at_every_stage() -> None:

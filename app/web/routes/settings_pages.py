@@ -22,6 +22,8 @@ from app.api.status import (
 )
 from app.archive.service import (
     LIMIT_KEYS as ARCHIVE_LIMIT_KEYS,
+    TITLE_SOURCE_JAPANESE,
+    TITLE_SOURCES,
     ArchiveSettingsError,
 )
 from app.conversion.naming import (
@@ -224,18 +226,27 @@ async def save_archive_paths(request: Request, csrf_token: str = Form()):
 #: The book a layout template is previewed against. Fixed rather than taken
 #: from the queue, for two reasons: a preview has to be reproducible, and the
 #: interesting half of the answer is what happens to characters a filesystem
-#: will not take. So the sample title carries a colon and a slash on purpose
-#: -- an operator who sees those come back replaced has learned the thing the
-#: preview exists to teach.
+#: will not take. So the English sample title carries a colon and a slash on
+#: purpose -- those are the characters that make a real upload's English title
+#: unusable as a filename, and an operator who sees them come back replaced has
+#: learned both the sanitising and why 日文标题 is the default.
 LIBRARY_TEMPLATE_SAMPLE: dict[str, str] = {
     "category": "同人志",
     "artist": "示例作者",
-    "title": "示例标题: 上/下卷",
+    "japanese_title": "サンプル作品",
+    "english_title": "Sample Work: Vol.1/2",
 }
 
 
-def _render_template_preview(template: str) -> dict[str, object]:
+def _render_template_preview(
+    template: str, title_source: str
+) -> dict[str, object]:
     """Render the sample book's path, exactly as the packer would.
+
+    `title_source` is threaded in rather than defaulted because the preview's
+    whole job is to be the packer's answer: `{title}` resolves through the same
+    preference at pack time, and a preview that assumed one language would show
+    a path the packer does not produce as soon as the operator picks the other.
 
     The suffix is appended rather than substituted for the same reason the
     packer appends it: `with_suffix` would read 「Vol. 1」 as a name with a
@@ -243,9 +254,15 @@ def _render_template_preview(template: str) -> dict[str, object]:
     packer's own two lines here keeps the preview from being a second,
     prettier answer.
     """
+    values = dict(LIBRARY_TEMPLATE_SAMPLE)
+    preferred = (
+        values["japanese_title"]
+        if title_source == TITLE_SOURCE_JAPANESE
+        else values["english_title"]
+    )
     relative = render_library_path(
         template,
-        dict(LIBRARY_TEMPLATE_SAMPLE),
+        {**values, "title": preferred},
         title_fallback="candidate-1",
     )
     rendered = (relative.parent / f"{relative.name}.cbz").as_posix()
@@ -262,8 +279,14 @@ def _render_template_preview(template: str) -> dict[str, object]:
                 "value": LIBRARY_TEMPLATE_SAMPLE["artist"],
             },
             {
+                "label": field_label("JapaneseTitle"),
+                "value": LIBRARY_TEMPLATE_SAMPLE["japanese_title"],
+                "note": "当前 {title}" if title_source == TITLE_SOURCE_JAPANESE else None,
+            },
+            {
                 "label": field_label("Title"),
-                "value": LIBRARY_TEMPLATE_SAMPLE["title"],
+                "value": LIBRARY_TEMPLATE_SAMPLE["english_title"],
+                "note": None if title_source == TITLE_SOURCE_JAPANESE else "当前 {title}",
             },
         ],
     }
@@ -294,21 +317,42 @@ async def preview_library_template(request: Request, csrf_token: str = Form()):
             error=exc.public_message,
             status_code=400,
         )
+    # The radio as submitted, falling back to what is stored, so previewing a
+    # preference change shows its effect before it is saved.
+    submitted = str(form.get("title_source") or "").strip().lower()
+    title_source = (
+        submitted
+        if submitted in TITLE_SOURCES
+        else await deps.archive_settings_service(request).title_source()
+    )
     return await render_settings(
         request,
         SETTINGS_PATHS,
-        template_preview=_render_template_preview(template),
+        template_preview=_render_template_preview(template, title_source),
     )
 
 
 @router.post("/archive-settings/paths/template")
 async def save_library_template(request: Request, csrf_token: str = Form()):
+    """Store the layout template and the title preference together.
+
+    One endpoint because they are one form: the template says where a book goes
+    and the preference says what `{title}` resolves to, and previewing one
+    without the other would show a path the packer would not produce. The
+    preference is written first so a template refusal does not silently discard
+    it -- both are validated independently, and neither can be stored in a state
+    the other contradicts.
+    """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
     try:
+        if "title_source" in form:
+            await deps.archive_settings_service(request).save_title_source(
+                str(form.get("title_source") or "")
+            )
         await deps.archive_settings_service(request).save_library_template(
             str(form.get("library_template") or "")
         )
@@ -326,13 +370,15 @@ async def save_library_template(request: Request, csrf_token: str = Form()):
 #: is named for where it lives rather than for a retired form.
 @router.post("/settings/system")
 async def save_system_settings(request: Request, csrf_token: str = Form()):
-    """Store the three system preferences and make them current.
+    """Store the system preferences and make them current.
 
     `refresh_display_timezone` is the whole reason this is not just a write:
     the timezone is read by `shell_context`, which is synchronous and runs
     for every page, so it lives on `app.state` and has to be re-read here.
-    The other two values are read per job through a provider callable and
-    need nothing -- which is why only one of the three is refreshed.
+    The others need nothing -- the cadences are read per job or per sweep
+    through the settings service, which is why only the timezone is refreshed.
+    The automatic-approval interval is re-read by the sweeper on every pass for
+    exactly that reason: a saved interval must not wait for a restart.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
@@ -347,6 +393,7 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
                     "source_concurrency",
                     "poll_interval_ms",
                     "timezone",
+                    "auto_approval_interval_minutes",
                 )
                 if key in form
             }

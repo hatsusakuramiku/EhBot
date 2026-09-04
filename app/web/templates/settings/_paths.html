@@ -14,9 +14,15 @@
   reads: it validates and renders, and writes nothing.
 
   `validate_library_template` refuses an absolute template, `..`, an unknown
-  placeholder and a template with no `{title}`. The first two are path traversal
-  expressed as a setting, so the preview button is a convenience and never the
-  gate -- saving validates again regardless of what was previewed.
+  placeholder and a template with no title placeholder. The first two are path
+  traversal expressed as a setting, so the preview button is a convenience and
+  never the gate -- saving validates again regardless of what was previewed.
+
+  标题来源 lives in the same form as the template because the two answer one
+  question together: the template says where a book goes, and the preference
+  says which of the gallery's two titles `{title}` resolves to. An operator who
+  previewed one without the other would be shown a path the packer does not
+  produce.
 #}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
@@ -63,8 +69,19 @@
           <input class="ui-input" id="library-template" name="library_template"
                  value="{{ library_template }}" placeholder="{{ template.default }}"
                  spellcheck="false" data-template-input required>
-          <small>必须包含 <code>{title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。每层最多 {{ template.max_segment_length }} 个字符。</small>
+          <small>必须包含 <code>{title}</code>、<code>{japanese_title}</code> 或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。每层最多 {{ template.max_segment_length }} 个字符。</small>
         </div>
+        <fieldset class="ui-fieldset">
+          <legend>{{ '{title}' }} 使用的标题</legend>
+          {% for option in title_sources %}
+            <label class="ui-checkline" data-layout="stack">
+              <input class="ui-radio" type="radio" name="title_source" value="{{ option.code }}"
+                     {% if option.code == title_source %}checked{% endif %}>
+              <span>{{ option.label }}<small>{{ option.hint }}</small></span>
+            </label>
+          {% endfor %}
+          <p class="ui-hint">画廊的英文标题常含 <code>:</code> <code>/</code> 等文件系统不接受的字符，所以默认使用日文标题。需要指定某一种时，模板里直接写 <code>{japanese_title}</code> 或 <code>{english_title}</code>。</p>
+        </fieldset>
         <fieldset class="ui-fieldset">
           <legend>可用字段</legend>
           <div class="ui-token-list">

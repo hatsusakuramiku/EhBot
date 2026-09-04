@@ -136,10 +136,13 @@
         共 {{ total }} 条{% if active_filters %}，已启用 {{ active_filters }} 个筛选条件{% endif %}
       </span>
       {#- Grid or list, as two links rather than a toggle script: the choice is
-          part of the URL, so it survives a reload and a shared link. -#}
+          part of the URL, so it survives a reload and a shared link. `aria-current`
+          rather than `aria-pressed`: these are links, and `aria-pressed` is only
+          defined on a button -- a screen reader is not required to report it here,
+          so the state was announced to nobody. -#}
       <div class="ui-segmented" role="group" aria-label="视图">
-        <a href="{{ grid_href }}" aria-pressed="{{ 'true' if view == 'grid' else 'false' }}">封面</a>
-        <a href="{{ list_href }}" aria-pressed="{{ 'true' if view == 'list' else 'false' }}">列表</a>
+        <a href="{{ grid_href }}" {% if view == 'grid' %}aria-current="true"{% endif %}>封面</a>
+        <a href="{{ list_href }}" {% if view == 'list' %}aria-current="true"{% endif %}>列表</a>
       </div>
       {% if batch_enabled and candidates %}
       {#- Unhidden by `candidates.js`. Select-all across a page of 50 is the one

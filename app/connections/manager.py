@@ -55,12 +55,19 @@ class ConnectionManager:
         exhentai_client: httpx.AsyncClient | None = None,
         candidate_ingestor: CandidateIngestor | None = None,
         user_client_factory=None,
+        on_candidates_ingested=None,
     ) -> None:
         self._secret_store = secret_store
         self._database = database
         self._telegram_client = telegram_client
         self._exhentai_client = exhentai_client
         self._candidate_ingestor = candidate_ingestor
+        # Called after an ingest that created candidates, so an automatic
+        # approval rule fires as the book arrives rather than at the next sweep.
+        # A callable rather than the sweeper itself because this class polls
+        # Telegram and knows nothing about review policy -- and because the
+        # sweeper is built during the lifespan, after this is constructed.
+        self._on_candidates_ingested = on_candidates_ingested
         self._telegram_task: asyncio.Task[None] | None = None
         self._telegram_status = ProviderStatus(
             state="not_configured", configured=False
@@ -98,9 +105,37 @@ class ConnectionManager:
         """
         return self._telegram_user.state == "connected"
 
+    async def _ingest_pending(self) -> None:
+        """Drain the update backlog, then let a rule act on what it produced.
+
+        The two callers -- startup and the poll loop -- both need the pair, and
+        having it in one place is what stops a new candidate from being swept on
+        one path and not the other.
+
+        The callback's failure is contained here: ingestion has already been
+        committed by this point, so an approval that raises must not roll the
+        poll loop back or stop it polling. The candidate simply stays pending
+        until the timed sweep reaches it, which is the same outcome as having no
+        rule.
+        """
+        if self._candidate_ingestor is None:
+            return
+        summary = await self._candidate_ingestor.process_pending_updates()
+        if (
+            not summary.created_candidates
+            or self._on_candidates_ingested is None
+        ):
+            return
+        try:
+            await self._on_candidates_ingested()
+        except Exception:  # noqa: BLE001 - ingestion must not fail on review policy
+            logging.getLogger(__name__).exception(
+                "auto_approval_after_ingest_failed",
+                extra={"error_code": "AUTO_APPROVAL_AFTER_INGEST_FAILED"},
+            )
+
     async def start(self) -> None:
-        if self._candidate_ingestor is not None:
-            await self._candidate_ingestor.process_pending_updates()
+        await self._ingest_pending()
         token = await asyncio.to_thread(
             self._secret_store.read, "telegram_bot_token"
         )
@@ -391,8 +426,7 @@ class ConnectionManager:
                 updates = await api.get_updates(offset)
                 if updates:
                     await self._database.save_telegram_updates(updates)
-                    if self._candidate_ingestor is not None:
-                        await self._candidate_ingestor.process_pending_updates()
+                    await self._ingest_pending()
                     offset = max(int(update["update_id"]) for update in updates) + 1
                 else:
                     await asyncio.sleep(0.05)

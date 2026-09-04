@@ -370,7 +370,72 @@ class TestPathsTab:
             )
         assert page.status_code == 200
         assert page.context["template_preview"]["rendered"] == (
-            "同人志/示例作者/示例标题 上 下卷.cbz"
+            "同人志/示例作者/サンプル作品.cbz"
+        )
+
+    def test_template_preview_follows_the_submitted_title_source(
+        self, tmp_path: Path
+    ) -> None:
+        """The radio is honoured before it is saved.
+
+        Previewing exists to answer 「这个模板会产生什么路径」, and the answer
+        depends on which title `{title}` resolves to. Reading the stored value
+        here would show the path of the preference the operator is abandoning.
+        """
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/template/preview",
+                data={
+                    "csrf_token": csrf,
+                    "library_template": "{category}/{artist}/{title}",
+                    "title_source": "english",
+                },
+            )
+        assert page.status_code == 200
+        # The colon and the slash are why 日文标题 is the default.
+        assert page.context["template_preview"]["rendered"] == (
+            "同人志/示例作者/Sample Work Vol.1 2.cbz"
+        )
+
+    def test_the_title_source_saves_with_the_template(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            saved = client.post(
+                "/archive-settings/paths/template",
+                data={
+                    "csrf_token": csrf,
+                    "library_template": "{artist}/{title}",
+                    "title_source": "english",
+                },
+                follow_redirects=False,
+            )
+            assert saved.status_code == 303
+            page = client.get("/settings/paths")
+        assert page.context["title_source"] == "english"
+
+    def test_a_template_may_name_one_language_directly(self, tmp_path: Path) -> None:
+        """`{japanese_title}` satisfies the title requirement on its own.
+
+        An operator who wants both languages in the path needs the template to
+        accept a language-specific placeholder without also carrying the
+        preference-following `{title}`.
+        """
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/template/preview",
+                data={
+                    "csrf_token": csrf,
+                    "library_template": "{japanese_title} [{english_title}]",
+                },
+            )
+        assert page.status_code == 200
+        assert page.context["template_preview"]["rendered"] == (
+            "サンプル作品 [Sample Work Vol.1 2].cbz"
         )
 
     def test_an_invalid_template_shows_an_error(self, tmp_path: Path) -> None:
@@ -622,6 +687,156 @@ class TestRuleSaving:
         assert saved.status_code == 303
         assert saved.headers["location"] == "/settings/auto-approval"
         assert "Only Doujinshi" in page.text
+
+    def test_a_rule_can_be_edited_in_place(self, tmp_path: Path) -> None:
+        """编辑 loads the stored rule and 保存 overwrites it.
+
+        The reported problem was that a saved rule could only be enabled or
+        disabled: the editor always posted `rule_id=None`, so every save was an
+        insert and the only way to fix a wrong rule was to add a second one
+        beside it.
+        """
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Only Doujinshi",
+                    "priority": "50",
+                    "enabled": "on",
+                    "condition_kind": ["condition"],
+                    "condition_field": ["Category"],
+                    "condition_operator": ["="],
+                    "condition_value": ["同人志"],
+                },
+                follow_redirects=False,
+            )
+            rules = asyncio.run(database.list_auto_approval_rules())
+            rule_id = rules[0].rule_id
+
+            editing = client.get(f"/auto-approval-rules/{rule_id}/edit")
+            assert editing.status_code == 200
+            assert editing.context["edit_rule"]["name"] == "Only Doujinshi"
+            assert editing.context["edit_rule"]["rows"][0]["value"] == "同人志"
+
+            saved = client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": editing.context["csrf_token"],
+                    "rule_id": str(rule_id),
+                    "name": "Only Manga",
+                    "priority": "10",
+                    "enabled": "on",
+                    "condition_kind": ["condition"],
+                    "condition_field": ["Category"],
+                    "condition_operator": ["="],
+                    "condition_value": ["漫画"],
+                },
+                follow_redirects=False,
+            )
+            assert saved.status_code == 303
+
+        rules = asyncio.run(database.list_auto_approval_rules())
+        # Overwritten, not duplicated: that is the whole difference from before.
+        assert len(rules) == 1
+        assert rules[0].rule_id == rule_id
+        assert rules[0].name == "Only Manga"
+        assert rules[0].priority == 10
+        # One row stores as that row's node rather than a group of one, which is
+        # what `_parse_rule_condition` does on a create too.
+        assert rules[0].condition["value"] == "漫画"
+
+    def test_a_rule_can_be_deleted(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Doomed",
+                    "priority": "50",
+                    "condition_kind": ["condition"],
+                    "condition_field": ["Category"],
+                    "condition_operator": ["="],
+                    "condition_value": ["同人志"],
+                },
+                follow_redirects=False,
+            )
+            rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+            deleted = client.post(
+                f"/auto-approval-rules/{rule_id}/delete",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert deleted.status_code == 303
+            missing = client.post(
+                f"/auto-approval-rules/{rule_id}/delete",
+                data={"csrf_token": csrf},
+            )
+            # Deleting a rule that is already gone is a 404, not a silent 303:
+            # a stale tab must not report success for a rule it cannot see.
+            assert missing.status_code == 404
+
+        assert asyncio.run(database.list_auto_approval_rules()) == ()
+
+    def test_editing_a_nested_rule_says_so_instead_of_flattening_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A rule written straight into the database can nest groups.
+
+        The flat editor cannot express that, and flattening it would change what
+        the rule matches while keeping its name -- so the tab renders, says this
+        one cannot be edited, and leaves 删除 as the way out.
+        """
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        nested = {
+            "kind": "group",
+            "operator": "AND",
+            "children": [
+                {
+                    "kind": "group",
+                    "operator": "OR",
+                    "children": [
+                        {
+                            "kind": "condition",
+                            "field": "Category",
+                            "operator": "=",
+                            "value": "同人志",
+                        }
+                    ],
+                }
+            ],
+        }
+        asyncio.run(
+            database.save_auto_approval_rule(
+                rule_id=None,
+                name="Nested",
+                enabled=True,
+                priority=50,
+                condition=nested,
+                dsl_snapshot="(Category = 同人志)",
+            )
+        )
+        rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get(f"/auto-approval-rules/{rule_id}/edit")
+
+        assert page.status_code == 200
+        assert page.context["edit_unsupported"] is True
+        assert "edit_rule" not in page.context
 
     def test_an_invalid_regex_is_refused_at_save(self, tmp_path: Path) -> None:
         """The acceptance criterion: 规则非法正则在保存时拒绝, and nothing is stored.

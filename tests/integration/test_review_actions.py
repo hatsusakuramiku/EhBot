@@ -354,6 +354,74 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
     assert detail.status == "PENDING_REVIEW"
 
 
+def test_a_failed_candidate_can_be_requeued_but_not_approved(
+    tmp_path: Path,
+) -> None:
+    """The dead end 历史下载记录 could put a work into.
+
+    A download that fails leaves the candidate `FAILED`, which is in no
+    reviewable state. Before `REQUEUEABLE_STATUSES` existed it also had no
+    requeue, so a work whose retry was refused had no button on its page that
+    could move it anywhere. Requeue is allowed and approve is still refused:
+    the decision has to be taken again by a human looking at it.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_candidate(database, update_id=940))
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'FAILED' WHERE id = ?",
+            (candidate_id,),
+        )
+
+    service = ReviewService(database)
+    raised = False
+    try:
+        asyncio.run(service.approve_candidate(candidate_id, "admin"))
+    except ReviewError:
+        raised = True
+    assert raised
+
+    asyncio.run(service.requeue_candidate(candidate_id, "admin"))
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "PENDING_REVIEW"
+
+
+def test_the_work_page_offers_requeue_on_a_failed_candidate(
+    tmp_path: Path,
+) -> None:
+    """The button has to be *on the page*, not merely allowed by the service.
+
+    The report that produced this test was 「点重试后需要审核，但没有审核按钮」,
+    and both halves matter: the page reads `work.actions`, so a permission the
+    action list does not expose is one the operator cannot reach.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_candidate(database, update_id=941))
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'FAILED' WHERE id = ?",
+            (candidate_id,),
+        )
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        detail = client.get(f"/works/{candidate_id}")
+        assert detail.status_code == 200
+        assert detail.context["work"]["actions"]["requeue"] is True
+        assert "重新排队" in detail.text
+        response = client.post(
+            f"/candidates/{candidate_id}/requeue",
+            data={"csrf_token": detail.context["csrf_token"]},
+        )
+        assert response.status_code == 303
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "PENDING_REVIEW"
+
+
 def test_review_service_rejects_invalid_status_transition(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     asyncio.run(database.initialize())

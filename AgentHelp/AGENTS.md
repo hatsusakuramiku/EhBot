@@ -80,16 +80,16 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1039 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1068 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1039 on a machine that has one and 1027 with
+`data/tools/7zip/`, so `passed` is 1068 on a machine that has one and 1056 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039. There is no R7 — that number was the library domain, deleted on
-2026-08-26; its narrow replacement is R10.)
+-> R14 1039 -> R15 1068. There is no R7 — that number was the library domain,
+deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
 all of it is argon2: `PasswordHash.recommended()` costs ~0.7 s per hash and
@@ -167,6 +167,34 @@ operator navigation).
 - **`ReviewOrchestrator` (`app/review/orchestration.py`) is the only path that
   may approve a candidate.** Reach it via `deps.review_orchestrator(request)`.
   Never re-implement approve-then-enqueue.
+- **`AutoApprovalSweeper` owns the automatic-approval schedule, not a page.**
+  Rules used to fire only from `_render_candidates`, which made approval a side
+  effect of somebody opening 待审核: an unattended deployment approved nothing,
+  and only the visible page was swept. The sweeper (a lifespan task, plus an
+  on-ingest callback on `ConnectionManager`) is the unattended path; the page's
+  call is a latency optimisation and must stay optional. It re-reads its interval
+  every pass, so 「保存即生效」 holds without a restart — do not capture the
+  setting at construction.
+- **Which statuses an action may act on comes from `statuses_allowing(action)`
+  (`app/review/models.py`).** `REVIEWABLE_STATUSES` covers approve / reject /
+  needs-revision; `REQUEUEABLE_STATUSES` adds `FAILED`, because a failed download
+  has to have a way back to a human without being approvable outright. There was
+  a second copy of the reviewable set inside `Database`, and the two states it
+  disagreed about were a dead end on the work page — one function, read by the
+  page, the JSON layer and the database guard, is what prevents that. A state the
+  page offers and the write refuses is a button that can only fail.
+- **`_enqueue` revives a `FAILED` / `CANCELLED` job row; it must never touch a
+  `COMPLETED` one.** `idempotency_key` is UNIQUE per source, so one book keeps
+  one attempt history rather than splitting across rows. Re-fetching a finished
+  book is `redownload_work`'s explicit decision (it bumps `attempt_count`), and
+  re-pending a row the worker holds would hand the same transfer out twice.
+- **A path template resolves `{title}` through the 标题来源 setting, and
+  `{japanese_title}` / `{english_title}` never fall back across languages.** An
+  ExHentai English title routinely carries `:` and `/`, which is why Japanese is
+  the default. `{title}` does fall back, or the setting would become a way to
+  lose a book's name; the two explicit placeholders must not, or a template that
+  named a language would publish under one it did not ask for with nothing on
+  screen saying so.
 - **JSON routes return 401, never a redirect** — `fetch` follows a redirect
   silently and hands back a login page as 200. JSON CSRF is header-only
   (`X-CSRF-Token`).
@@ -219,6 +247,20 @@ operator navigation).
   The sidebar, the phone tab bar and its drawer all render from it. Three
   renderings of one list is not three lists — the previous hand-written pair had
   already drifted by one link. A test compares the rendered destination sets.
+- **An ARIA state goes only on an element it is defined for.**
+  `aria-pressed` is a `button` state and `aria-selected` belongs to `tab` /
+  `option` / `row` / `gridcell`, so both announce nothing on an `<a>` — the tab
+  strip, the two view switches and the log-level filters each carried one and
+  said it to no one. A link that is the one in effect says `aria-current`.
+  `aria-sort` goes on the `<th>`, never on the button inside it. A test scans the
+  rendered pages for both mistakes.
+- **An overlay watches `open`; it does not focus from `x-init`.** `x-init` runs
+  when Alpine initialises the teleported markup — page load — so the old
+  `x-init="$nextTick(() => $el.focus())"` stole focus on arrival and moved
+  nothing when the dialog opened. Watch `open` on the **wrapper** (the panel is
+  inside `x-show` and a watcher declared there does not exist to see the close),
+  return focus to the trigger, and open a confirmation on 取消 rather than on the
+  destructive button.
 - **Only a leaf claims `aria-current="page"` — ask `is_current()`, not
   `matches()`.** A parent's prefix is by construction a prefix of its children's
   paths, so `matches()` is true for both and two elements would announce

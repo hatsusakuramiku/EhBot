@@ -147,9 +147,12 @@
   <div>
     <div class="ui-table-toolbar">
       <span class="ui-hint" style="margin: 0">共 {{ total }} 件作品</span>
+      {#- `aria-current`, not `aria-pressed`: the same two links as on
+          `/candidates`, and `aria-pressed` on an anchor is a state nothing has to
+          announce. -#}
       <div class="ui-segmented" role="group" aria-label="视图">
-        <a href="{{ grid_href }}" aria-pressed="{{ 'true' if view == 'grid' else 'false' }}">封面</a>
-        <a href="{{ list_href }}" aria-pressed="{{ 'true' if view == 'list' else 'false' }}">列表</a>
+        <a href="{{ grid_href }}" {% if view == 'grid' %}aria-current="true"{% endif %}>封面</a>
+        <a href="{{ list_href }}" {% if view == 'list' %}aria-current="true"{% endif %}>列表</a>
       </div>
       {% if works %}
       <div class="ui-row-actions" data-select-tools hidden>

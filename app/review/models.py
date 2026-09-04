@@ -52,6 +52,36 @@ REVIEWABLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+#: Statuses 重新排队 may act on. A superset of the reviewable ones by exactly
+#: `FAILED`, and that difference is the whole reason this set exists: a failed
+#: download is not something to approve or reject -- the decision was already
+#: taken -- but it must be possible to put it back in front of the operator.
+#: Before this existed a `FAILED` candidate was in no reviewable state *and* had
+#: no requeue, so a work whose retry was refused (a permanent error, or a source
+#: that no longer has the file) was a dead end with no button on the page that
+#: could move it anywhere.
+REQUEUEABLE_STATUSES: frozenset[str] = frozenset(
+    {
+        STATUS_REJECTED,
+        STATUS_NEEDS_REVISION,
+        STATUS_FAILED,
+    }
+)
+
+
+def statuses_allowing(action: str) -> frozenset[str]:
+    """Which current statuses `action` may be applied to.
+
+    The guard is per-action rather than one set for all of them because
+    `REQUEUE` and the three review verbs answer different questions: a `FAILED`
+    candidate can be sent back to the queue but must not be approvable, since
+    approving it would skip the look the requeue exists to force. Every caller
+    -- the page's action list, the JSON layer and the database guard -- reads
+    this one function, so a state can never be offered by the page and refused
+    by the write.
+    """
+    return REQUEUEABLE_STATUSES if action == REVIEW_REQUEUE else REVIEWABLE_STATUSES
+
 METADATA_FIELDS: tuple[str, ...] = (
     "Title",
     "JapaneseTitle",

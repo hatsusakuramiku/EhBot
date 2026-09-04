@@ -2,11 +2,12 @@
 
 What belongs here and what does not
 -----------------------------------
-Three preferences are stored: how often the interface polls, how many preview
-images are fetched at once, and which timezone timestamps are read in. Theme and
-density are deliberately absent -- they live in `localStorage`, per browser,
-because they answer 「这块屏幕看起来怎样」 rather than 「这个部署怎么运行」, and a
-server-stored theme would follow an operator onto a screen where it is wrong.
+Four preferences are stored: how often the interface polls, how many preview
+images are fetched at once, which timezone timestamps are read in, and how often
+the automatic-approval sweep runs. Theme and density are deliberately absent --
+they live in `localStorage`, per browser, because they answer 「这块屏幕看起来怎
+样」 rather than 「这个部署怎么运行」, and a server-stored theme would follow an
+operator onto a screen where it is wrong.
 
 Every value has a default in this module, so a missing row means "the default"
 rather than "unset": there is no state in which the interface has no polling
@@ -26,6 +27,7 @@ from app.db.database import Database
 SETTING_POLL_INTERVAL_MS = "poll_interval_ms"
 SETTING_SOURCE_CONCURRENCY = "source_concurrency"
 SETTING_TIMEZONE = "timezone"
+SETTING_AUTO_APPROVAL_INTERVAL_MINUTES = "auto_approval_interval_minutes"
 
 #: Visible-tab polling cadence. 2s matches what `/api/v1/meta` served as a
 #: constant before this was editable, so an operator who never opens the
@@ -51,6 +53,21 @@ DEFAULT_IDLE_POLL_INTERVAL_MS = 15_000
 #: actually bounds rather than pretending to be a global limit.
 MIN_SOURCE_CONCURRENCY = 1
 MAX_SOURCE_CONCURRENCY = 16
+
+#: How often the automatic-approval sweep re-reads the pending queue, in
+#: minutes. It exists because a rule used to fire only while somebody had the
+#: 待审核 page open: approval was a side effect of rendering, so a deployment
+#: nobody was watching approved nothing. The sweep is the unattended path and
+#: the page render is now only an optimisation on top of it.
+DEFAULT_AUTO_APPROVAL_INTERVAL_MINUTES = 30
+
+#: Zero is a real value and means 「不要自动跑」 -- an operator who wants rules to
+#: fire only when they are looking has to be able to say so, and deleting every
+#: rule is not the same statement. The ceiling is a day because an interval
+#: measured in weeks is indistinguishable from off, and 「off」 already has a
+#: value.
+MIN_AUTO_APPROVAL_INTERVAL_MINUTES = 0
+MAX_AUTO_APPROVAL_INTERVAL_MINUTES = 1440
 
 DEFAULT_TIMEZONE = "UTC"
 
@@ -123,6 +140,17 @@ class SystemSettingsService:
         timezone = stored.get(SETTING_TIMEZONE, "").strip() or DEFAULT_TIMEZONE
         if not _TIMEZONE_PATTERN.match(timezone):
             timezone = DEFAULT_TIMEZONE
+        auto_approval_interval_minutes = min(
+            max(
+                _read_int(
+                    stored,
+                    SETTING_AUTO_APPROVAL_INTERVAL_MINUTES,
+                    DEFAULT_AUTO_APPROVAL_INTERVAL_MINUTES,
+                ),
+                MIN_AUTO_APPROVAL_INTERVAL_MINUTES,
+            ),
+            MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
+        )
         return {
             "poll_interval_ms": poll_interval_ms,
             # A background tab must never poll faster than a foreground one, so
@@ -132,6 +160,7 @@ class SystemSettingsService:
             ),
             "source_concurrency": concurrency,
             "timezone": timezone,
+            "auto_approval_interval_minutes": auto_approval_interval_minutes,
             # Whether the operator has moved this off the default. A row holding
             # an empty string is not an override -- that is how a cleared field is
             # stored, and `_read_int` reads it back as the default.
@@ -143,6 +172,9 @@ class SystemSettingsService:
             ),
             "timezone_overridden": bool(
                 stored.get(SETTING_TIMEZONE, "").strip()
+            ),
+            "auto_approval_interval_overridden": bool(
+                stored.get(SETTING_AUTO_APPROVAL_INTERVAL_MINUTES, "").strip()
             ),
         }
 
@@ -157,6 +189,9 @@ class SystemSettingsService:
 
     async def timezone(self) -> str:
         return str((await self.snapshot())["timezone"])
+
+    async def auto_approval_interval_minutes(self) -> int:
+        return int((await self.snapshot())["auto_approval_interval_minutes"])
 
     async def save(self, values: dict[str, str]) -> dict[str, object]:
         """Validate and store whichever preferences the form submitted.
@@ -183,6 +218,17 @@ class SystemSettingsService:
                 code="CONCURRENCY_INVALID",
                 label="并发上限",
                 unit="",
+            )
+        if SETTING_AUTO_APPROVAL_INTERVAL_MINUTES in values:
+            cleaned[SETTING_AUTO_APPROVAL_INTERVAL_MINUTES] = (
+                _validate_bounded_int(
+                    values[SETTING_AUTO_APPROVAL_INTERVAL_MINUTES],
+                    minimum=MIN_AUTO_APPROVAL_INTERVAL_MINUTES,
+                    maximum=MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
+                    code="AUTO_APPROVAL_INTERVAL_INVALID",
+                    label="自动审批间隔",
+                    unit="分钟",
+                )
             )
         if SETTING_TIMEZONE in values:
             raw = str(values[SETTING_TIMEZONE] or "").strip()
@@ -227,13 +273,17 @@ def _validate_bounded_int(
 
 
 __all__ = [
+    "DEFAULT_AUTO_APPROVAL_INTERVAL_MINUTES",
     "DEFAULT_IDLE_POLL_INTERVAL_MS",
     "DEFAULT_POLL_INTERVAL_MS",
     "DEFAULT_TIMEZONE",
+    "MAX_AUTO_APPROVAL_INTERVAL_MINUTES",
     "MAX_POLL_INTERVAL_MS",
     "MAX_SOURCE_CONCURRENCY",
+    "MIN_AUTO_APPROVAL_INTERVAL_MINUTES",
     "MIN_POLL_INTERVAL_MS",
     "MIN_SOURCE_CONCURRENCY",
+    "SETTING_AUTO_APPROVAL_INTERVAL_MINUTES",
     "SETTING_POLL_INTERVAL_MS",
     "SETTING_SOURCE_CONCURRENCY",
     "SETTING_TIMEZONE",

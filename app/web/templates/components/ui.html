@@ -79,13 +79,20 @@
 
 {# ------------------------------------------------------------ data table #}
 
+{%- macro sort_state(key, sort=None, direction="asc") -%}
+  {#- `aria-sort` is defined on a header cell and nowhere else, so the value is
+      computed here and written by `table` onto the `<th>`. It used to sit on the
+      button inside the cell, where it says nothing: a screen reader announcing a
+      column's sort reads the header, not whatever happens to be inside it. -#}
+  {{- ("ascending" if direction == "asc" else "descending") if sort == key else "none" -}}
+{%- endmacro %}
+
 {% macro sort_button(label, key, sort=None, direction="asc", numeric=false) -%}
   {#- The control is a button inside the header cell, not a handler on the cell
-      itself: a keyboard user needs a real focusable target, and `aria-sort`
-      has to sit on something that announces its state. -#}
+      itself: a keyboard user needs a real focusable target. The cell carries the
+      state, the button carries the label and the arrow. -#}
   {%- set is_sorted = (sort == key) -%}
-  {%- set state = ("ascending" if direction == "asc" else "descending") if is_sorted else "none" -%}
-  <button class="ui-sort" type="button" aria-sort="{{ state }}" data-sort-key="{{ key }}">
+  <button class="ui-sort" type="button" data-sort-key="{{ key }}">
     <span>{{ label }}</span>
     <span class="ui-sort-arrow" aria-hidden="true">{% if is_sorted %}{{ "▲" if direction == "asc" else "▼" }}{% else %}⇅{% endif %}</span>
   </button>
@@ -102,7 +109,8 @@
       <thead>
         <tr>
           {% for column in columns %}
-            <th scope="col" {% if column.numeric %}data-numeric="true"{% endif %}>
+            <th scope="col" {% if column.numeric %}data-numeric="true"{% endif %}
+                {% if column.sortable %}aria-sort="{{ sort_state(column.key, sort, direction) }}"{% endif %}>
               {% if column.sortable %}{{ sort_button(column.label, column.key, sort, direction, column.numeric) }}
               {% else %}{{ column.label }}{% endif %}
             </th>
@@ -167,17 +175,34 @@
 {# --------------------------------------------------------------- drawer #}
 
 {% macro drawer(id, title, side="right") -%}
-  {#- Alpine owns the open state. `x-trap` is not vendored, so focus is moved
-      manually on open and `@keydown.escape.window` closes it: an overlay a
-      keyboard user cannot dismiss is worse than no overlay. -#}
-  <div x-data="{ open: false }" x-id="['{{ id }}']">
-    <button class="ui-btn" type="button" @click="open = true"
+  {#- Alpine owns the open state. `x-trap` is not vendored, so focus is managed
+      by hand: `$watch('open')` moves it in when the drawer appears and back to
+      the trigger when it closes, and `@keydown.escape.window` closes it.
+
+      Returning focus is the half that is easy to forget and impossible to work
+      around: the drawer is teleported to the end of `<body>`, so a keyboard user
+      who closes it lands at the bottom of the document, having lost the row they
+      were working on. `open` is watched on the wrapper -- the panel itself is
+      inside `x-show`, and a watcher declared there does not exist to see the
+      close it is meant to react to. -#}
+  <div x-data="{ open: false, trigger: null }" x-id="['{{ id }}']"
+       x-init="$watch('open', function (value) {
+                 if (value) {
+                   $nextTick(function () {
+                     $refs.panel && $refs.panel.querySelector('[autofocus], button, a, input, select, textarea')?.focus();
+                   });
+                 } else if (trigger) {
+                   trigger.focus();
+                 }
+               })">
+    <button class="ui-btn" type="button" x-ref="trigger"
+            @click="trigger = $el; open = true"
             :aria-expanded="open" aria-haspopup="dialog">{{ title }}</button>
     <template x-teleport="body">
       <div x-show="open" x-cloak @keydown.escape.window="open = false">
         <div class="ui-scrim" @click="open = false"></div>
         <aside class="ui-drawer" data-side="{{ side }}" role="dialog" aria-modal="true"
-               aria-label="{{ title }}" x-init="$watch('open', v => v && $nextTick(() => $el.querySelector('[autofocus], button, a, input')?.focus()))">
+               aria-label="{{ title }}" x-ref="panel">
           <header class="ui-drawer-head">
             <h2 class="ui-drawer-title">{{ title }}</h2>
             <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
@@ -215,11 +240,30 @@
       action is not necessarily a red one. The confirm button inside always has a
       variant, because it is the one thing in the dialog that acts. -#}
   {%- set confirm_variant = variant or "primary" -%}
-  <div x-data="{ open: false }">
+  {#- Focus is managed on the wrapper, for the same two reasons as the drawer's.
+      It used to be `x-init="$nextTick(() => $el.focus())"` on the confirm button,
+      which runs when Alpine initialises the teleported markup -- that is page
+      load, not open -- so every page carrying one of these stole focus on arrival
+      and none of them moved it when the dialog actually appeared.
+
+      Focus lands on 取消, not on the action. This dialog exists because the
+      action behind it cannot be undone, and opening it with the destructive
+      button focused means a stray Enter performs exactly what the second step
+      was added to prevent. Closing returns focus to the trigger: the dialog is
+      teleported to the end of `<body>`, so without this a keyboard user who
+      cancels is left at the bottom of the document. -#}
+  <div x-data="{ open: false, trigger: null }"
+       x-init="$watch('open', function (value) {
+                 if (value) {
+                   $nextTick(function () { $refs.dismiss && $refs.dismiss.focus(); });
+                 } else if (trigger) {
+                   trigger.focus();
+                 }
+               })">
     <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
             {% if size %}data-size="{{ size }}"{% endif %}
             {% if hint %}title="{{ hint }}"{% endif %}
-            type="button" @click="open = true">{{ label }}</button>
+            type="button" @click="trigger = $el; open = true">{{ label }}</button>
     <template x-teleport="body">
       <div x-show="open" x-cloak @keydown.escape.window="open = false">
         <div class="ui-scrim" @click="open = false"></div>
@@ -228,20 +272,19 @@
             <h2 class="ui-dialog-title" id="{{ dialog_id }}">{{ title }}</h2>
             <p class="ui-dialog-body">{{ body }}</p>
             <div class="ui-dialog-foot">
-              <button class="ui-btn" type="button" @click="open = false">取消</button>
+              <button class="ui-btn" type="button" x-ref="dismiss" @click="open = false">取消</button>
               {% if action %}
                 <form method="{{ method }}" action="{{ action }}">
                   {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
                   {% for hidden_name, hidden_value in (hidden or {}).items() %}
                   <input type="hidden" name="{{ hidden_name }}" value="{{ hidden_value }}">
                   {% endfor %}
-                  <button class="ui-btn" data-variant="{{ confirm_variant }}" type="submit" x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
+                  <button class="ui-btn" data-variant="{{ confirm_variant }}" type="submit">{{ confirm_label }}</button>
                 </form>
               {% elif form %}
                 <button class="ui-btn" data-variant="{{ confirm_variant }}" type="submit" form="{{ form }}"
                         {% if field %}name="{{ field }}" value="{{ value }}"{% endif %}
-                        {% if formaction %}formaction="{{ formaction }}"{% endif %}
-                        x-init="$nextTick(() => $el.focus())">{{ confirm_label }}</button>
+                        {% if formaction %}formaction="{{ formaction }}"{% endif %}>{{ confirm_label }}</button>
               {% else %}
                 <button class="ui-btn" data-variant="{{ variant }}" type="button" @click="open = false">{{ confirm_label }}</button>
               {% endif %}
@@ -403,11 +446,16 @@
 {% macro tabs(items, current=None, label="分区") -%}
   {#- `items` is a list of {key, label, href, count?}. Six candidate states and
       seven settings sections both render through this, which is what makes
-      each a single domain rather than eleven pages. -#}
+      each a single domain rather than eleven pages.
+
+      `aria-current="page"` and nothing else. These are links to other URLs, not
+      ARIA tabs: `aria-selected` is only defined on `tab`, `option`, `row` and
+      `gridcell`, so on an anchor it is a state no assistive technology is
+      required to report -- and adding `role="tab"` to earn it would promise a
+      `tabpanel` that switches in place, which is exactly what these do not do. -#}
   <nav class="ui-tabs" aria-label="{{ label }}">
     {% for item in items %}
       <a class="ui-tabs-item" href="{{ item.href }}"
-         aria-selected="{{ 'true' if item.key == current else 'false' }}"
          {% if item.key == current %}aria-current="page"{% endif %}>
         <span>{{ item.label }}</span>
         {% if item.get('count') is not none %}<span class="ui-tabs-count">{{ item.count }}</span>{% endif %}

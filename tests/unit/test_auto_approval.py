@@ -2,6 +2,7 @@ import pytest
 
 from app.auto_approval.rules import (
     RuleValidationError,
+    editor_rows,
     evaluate_rule,
     render_rule_dsl,
     validate_rule_ast,
@@ -144,3 +145,102 @@ def test_rule_rejects_unknown_fields_and_invalid_operator_types() -> None:
                 "value": "not-a-list",
             }
         )
+
+
+def test_editor_rows_round_trips_a_flat_rule() -> None:
+    """A saved rule reads back as the form rows that produced it.
+
+    This is what makes 编辑 possible at all: without the inverse, a stored rule
+    could only be enabled, disabled or replaced.
+    """
+    ast = validate_rule_ast(
+        {
+            "kind": "group",
+            "operator": "OR",
+            "children": [
+                {
+                    "kind": "condition",
+                    "field": "Category",
+                    "operator": "=",
+                    "value": "同人志",
+                },
+                {
+                    "kind": "condition",
+                    "field": "TAG",
+                    "operator": "HAS_ANY",
+                    "value": ["巨乳", "汉语"],
+                },
+                {"kind": "regex", "field": "Title", "pattern": "^\\[.+\\]"},
+            ],
+        }
+    )
+
+    decomposed = editor_rows(ast)
+    assert decomposed is not None
+    operator, rows = decomposed
+    assert operator == "OR"
+    assert rows[0] == {
+        "kind": "condition",
+        "field": "Category",
+        "operator": "=",
+        "value": "同人志",
+    }
+    # 「, 」 is what the parser splits a list row on, so a list rule survives an
+    # edit that does not touch it.
+    assert rows[1]["value"] == "巨乳, 汉语"
+    assert rows[2] == {
+        "kind": "regex",
+        "field": "Title",
+        "operator": "",
+        "value": "^\\[.+\\]",
+    }
+
+
+def test_editor_rows_reads_a_single_node_rule_as_one_row() -> None:
+    """One row saves as its own node, so it has to read back as one row."""
+    ast = validate_rule_ast(
+        {
+            "kind": "condition",
+            "field": "Rating",
+            "operator": ">",
+            "value": 4.5,
+        }
+    )
+
+    decomposed = editor_rows(ast)
+    assert decomposed is not None
+    operator, rows = decomposed
+    assert operator == "AND"
+    assert len(rows) == 1
+    assert rows[0]["value"] == "4.5"
+
+
+def test_editor_rows_refuses_a_nested_group() -> None:
+    """Refusing beats flattening.
+
+    The flat editor emits one level, so a nested rule can only have been written
+    into the database by hand. Flattening it would change what it matches while
+    keeping its name, and the operator pressing 保存 would have no way to know.
+    """
+    ast = validate_rule_ast(
+        {
+            "kind": "group",
+            "operator": "AND",
+            "children": [
+                {
+                    "kind": "group",
+                    "operator": "OR",
+                    "children": [
+                        {
+                            "kind": "condition",
+                            "field": "Category",
+                            "operator": "=",
+                            "value": "同人志",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert editor_rows(ast) is None

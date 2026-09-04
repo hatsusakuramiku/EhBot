@@ -54,7 +54,14 @@
   --t-surface-raised: #ffffff;
   --t-surface-sunken: var(--c-gray-100);
   --t-line: var(--c-gray-200);
-  --t-line-strong: var(--c-gray-300);
+  /* The border of a control -- an input, a button, an empty state. WCAG 1.4.11
+     asks 3:1 of a boundary that is the only thing saying where the control is,
+     and `--c-gray-300` gave 1.65:1 against white: the field was visible because
+     of its own background, not its edge. This value clears 3:1 against all three
+     light surfaces (3.54 on #fff, 3.32 on the page, 3.11 on the sunken one).
+     `--t-line` stays lighter on purpose: it separates two panels that each have
+     their own background, which is decoration rather than boundary. */
+  --t-line-strong: #7f8a90;
   --t-ink: #20272d;
   --t-ink-muted: var(--c-gray-600);
   --t-ink-inverted: #ffffff;
@@ -134,6 +141,7 @@
   --nav-width: 224px;
   --nav-width-collapsed: 64px;
   --tabbar-height: 56px;
+  --topbar-height: 52px;
 }
 
 /* Dark theme. Applied when the operator has chosen it explicitly... */
@@ -144,7 +152,11 @@
   --t-surface-raised: var(--c-gray-700);
   --t-surface-sunken: #12171a;
   --t-line: #2f3a40;
-  --t-line-strong: #3d4a51;
+  /* Same requirement as the light theme's, measured against the dark surfaces:
+     4.13 on the panel, 3.22 on the raised one, 4.93 on the page. `#3d4a51` was
+     1.56:1, which is a border only somebody who already knew where the field
+     was could find. */
+  --t-line-strong: #808c93;
   --t-ink: #e6ecee;
   --t-ink-muted: #a9b4b9;
   --t-accent: var(--c-teal-400);
@@ -188,7 +200,7 @@
     --t-surface-raised: var(--c-gray-700);
     --t-surface-sunken: #12171a;
     --t-line: #2f3a40;
-    --t-line-strong: #3d4a51;
+    --t-line-strong: #808c93;
     --t-ink: #e6ecee;
     --t-ink-muted: #a9b4b9;
     --t-accent: var(--c-teal-400);
@@ -299,6 +311,13 @@
    Breakpoints are 640 / 1024 / 1440 per the spec. Desktop-first here because
    the sidebar is the default and the tab bar is the exception.
    -------------------------------------------------------------------------- */
+
+/* The document is the scroll container, and the top bar is sticky over it, so
+   every scroll that is not a drag has to stop short of the bar: `#main` from the
+   skip link, an `id` target from an error link, and `scrollIntoView` from a
+   script all land under 52px of chrome otherwise. Anchored to the same token the
+   bar's height reads, so the two cannot drift. */
+.ui-root { scroll-padding-top: var(--topbar-height); }
 
 .ui-page {
   margin: 0;
@@ -417,7 +436,7 @@
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  min-height: 52px;
+  min-height: var(--topbar-height);
   display: flex;
   align-items: center;
   gap: var(--s-3);
@@ -605,7 +624,7 @@
   cursor: pointer;
 }
 .ui-tabs-item:hover { color: var(--t-ink); }
-.ui-tabs-item[aria-selected="true"], .ui-tabs-item.is-active {
+.ui-tabs-item[aria-current="page"], .ui-tabs-item.is-active {
   color: var(--t-accent);
   border-bottom-color: var(--t-accent);
 }
@@ -685,6 +704,9 @@
   outline-offset: 0;
 }
 .ui-checkbox { width: 16px; height: 16px; accent-color: var(--t-accent); }
+/* A radio is a checkbox that happens to be exclusive, so it borrows the same
+   box and accent rather than inventing a second control. */
+.ui-radio { width: 16px; height: 16px; accent-color: var(--t-accent); }
 
 /* Segmented control, used for the theme and density toggles, and for a view
  * switch whose two states are two URLs -- so a segment is either a button or a
@@ -706,8 +728,11 @@
   text-decoration: none;
   cursor: pointer;
 }
+/* Two attributes because the control has two forms: the theme and density
+   toggles are real buttons and carry `aria-pressed`, while a view switch whose
+   two states are two URLs is a pair of links and carries `aria-current`. */
 .ui-segmented button[aria-pressed="true"],
-.ui-segmented a[aria-pressed="true"] { color: var(--t-ink); background: var(--t-surface); box-shadow: var(--shadow-sm); }
+.ui-segmented a[aria-current] { color: var(--t-ink); background: var(--t-surface); box-shadow: var(--shadow-sm); }
 
 /* --------------------------------------------------------------------------
    6. Status badge
@@ -875,8 +900,10 @@
 }
 .ui-sort:hover { color: var(--t-ink); }
 .ui-sort-arrow { font-size: 10px; opacity: .45; }
-.ui-sort[aria-sort="ascending"] .ui-sort-arrow,
-.ui-sort[aria-sort="descending"] .ui-sort-arrow { opacity: 1; color: var(--t-accent); }
+/* The state lives on the `<th>`, which is the only element `aria-sort` is
+   defined on, so the arrow inside the cell is styled from the cell. */
+.ui-table th[aria-sort="ascending"] .ui-sort-arrow,
+.ui-table th[aria-sort="descending"] .ui-sort-arrow { opacity: 1; color: var(--t-accent); }
 
 .ui-table-toolbar {
   display: flex;
@@ -1205,12 +1232,21 @@
    and the whole phrase is the hit target. */
 .ui-checkline { display: inline-flex; align-items: center; gap: var(--s-2); color: var(--t-ink); font-size: var(--font-body); cursor: pointer; }
 .ui-checkgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--s-2); }
+/* A choice that needs a sentence of explanation: the control stays on the first
+   line of the phrase rather than centring against a two-line block. */
+.ui-checkline[data-layout="stack"] { align-items: flex-start; }
+.ui-checkline[data-layout="stack"] > span { display: grid; gap: 2px; }
+.ui-checkline[data-layout="stack"] small { color: var(--t-ink-muted); font-size: var(--font-small); }
 
 /* One stored row -- a source, a rule, a tool profile, a vault entry. The four
    are one component because an operator reads them the same way: what it is, a
    badge saying whether it is on, and the buttons that change it. */
 .ui-record { display: grid; gap: var(--s-3); padding: var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-md); background: var(--t-surface); }
 .ui-record + .ui-record { margin-top: var(--s-3); }
+/* The row whose stored value is loaded in the editor beside it. The accent
+   border is the same cue a selected cover card carries, so 「这条正在编辑」 reads
+   the same way as 「这件已选中」. */
+.ui-record[data-selected="true"] { border-color: var(--t-accent); box-shadow: 0 0 0 2px var(--t-accent-ring); }
 .ui-record-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
 .ui-record-title { color: var(--t-ink); font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
 .ui-record-meta { color: var(--t-ink-muted); font-size: var(--font-small); font-variant-numeric: tabular-nums; }
@@ -1308,7 +1344,7 @@
 
 /* The selected filter is carried by border and weight rather than a fill, so it
    reads the same in both themes without a second colour token. */
-.ui-log-level[aria-pressed="true"] {
+.ui-log-level[aria-current] {
   border-color: var(--t-accent);
   color: var(--t-accent);
   font-weight: 600;

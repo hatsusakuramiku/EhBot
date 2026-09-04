@@ -51,6 +51,27 @@ MASTER_KEY_NAME = "archive_password_key"
 SETTING_KEEP_ORIGINAL = "keep_original"
 SETTING_LIBRARY_TEMPLATE = "library_template"
 
+#: Which language's title `{title}` renders as. It exists because the English
+#: title an upload carries is frequently the one with the illegal characters and
+#: the transliterated punctuation, while `title_jpn` is the name the book
+#: actually has -- so an operator kept getting names the filesystem refused, or
+#: accepted and mangled.
+#:
+#: The default is the Japanese title, which is a deliberate change of behaviour:
+#: `{title}` used to be `Title` unconditionally. It is safe because the fallback
+#: chain never leaves a book unnamed -- a gallery with no `title_jpn` renders its
+#: `Title`, exactly as before.
+SETTING_TITLE_SOURCE = "library_title_source"
+
+#: `japanese` prefers `JapaneseTitle` and falls back to `Title`; `english` is the
+#: reverse. Two values rather than a free-form field name: these are the only two
+#: titles a gallery has, and a setting naming an arbitrary metadata field would
+#: let `{title}` resolve to a rating.
+TITLE_SOURCE_JAPANESE = "japanese"
+TITLE_SOURCE_ENGLISH = "english"
+TITLE_SOURCES: tuple[str, ...] = (TITLE_SOURCE_JAPANESE, TITLE_SOURCE_ENGLISH)
+DEFAULT_TITLE_SOURCE = TITLE_SOURCE_JAPANESE
+
 #: Lossy re-encode level applied while packing the CBZ. Stored as a level name
 #: rather than a JPEG number so the presets can be retuned without rewriting
 #: what operators already saved.
@@ -409,6 +430,35 @@ class ArchiveSettingsService:
             stored.get(SETTING_LIBRARY_TEMPLATE, "").strip()
             or DEFAULT_LIBRARY_TEMPLATE
         )
+
+    async def title_source(self) -> str:
+        """Which language `{title}` prefers, defaulting to Japanese.
+
+        Read tolerantly like every other setting here: an unrecognised stored
+        value falls back rather than raising, because this is called from inside
+        a packing job where a refusal would leave the book unpublished over a
+        preference.
+        """
+        stored = await self._database.archive_settings()
+        value = stored.get(SETTING_TITLE_SOURCE, "").strip().lower()
+        return value if value in TITLE_SOURCES else DEFAULT_TITLE_SOURCE
+
+    async def save_title_source(self, raw: str) -> str:
+        """Store the title preference, refusing anything outside the two."""
+        value = (raw or "").strip().lower()
+        if not value:
+            await self._database.save_archive_settings(
+                {SETTING_TITLE_SOURCE: ""}
+            )
+            return DEFAULT_TITLE_SOURCE
+        if value not in TITLE_SOURCES:
+            raise ArchiveSettingsError(
+                "TITLE_SOURCE_INVALID", "标题来源只能是日文标题或英文标题"
+            )
+        await self._database.save_archive_settings(
+            {SETTING_TITLE_SOURCE: value}
+        )
+        return value
 
     async def save_library_template(self, raw: str) -> str:
         """Store a layout template, refusing one that cannot render safely.

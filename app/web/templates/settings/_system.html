@@ -60,6 +60,20 @@
           </small>
         </div>
         <div class="ui-field">
+          <label for="sys-auto-approval">自动审批间隔（分钟）</label>
+          <input class="ui-input" id="sys-auto-approval" name="auto_approval_interval_minutes"
+                 type="number"
+                 min="{{ bounds.auto_approval_interval_minutes.minimum }}"
+                 max="{{ bounds.auto_approval_interval_minutes.maximum }}"
+                 value="{{ system.auto_approval_interval_minutes }}">
+          <small>
+            后台按此间隔对「待审核」应用自动审批规则，{{ bounds.auto_approval_interval_minutes.minimum }}–{{ bounds.auto_approval_interval_minutes.maximum }}。
+            新候选入库时也会立即评估一次，不必等到下个周期。
+            填 0 表示只在打开「待审核」页时评估。
+            {%- if not system.auto_approval_interval_overridden %} 当前为默认值。{% endif %}
+          </small>
+        </div>
+        <div class="ui-field">
           <label for="sys-timezone">时区</label>
           <input class="ui-input" id="sys-timezone" name="timezone" list="timezone-options"
                  value="{{ system.timezone }}" spellcheck="false"
@@ -139,13 +153,16 @@
     </p>
     {#- Not `ui.tabs`: that macro sets `aria-current="page"`, and a level filter
         is not a different page -- claiming so would put two destinations on the
-        settings page and a screen reader would announce both. The hrefs are
-        built server-side in `settings_snapshot` so the page and the JSON
-        endpoint agree, and so no template re-lists the other parameters. -#}
+        settings page and a screen reader would announce both. `aria-current="true"`
+        is the un-suffixed form and says exactly that: this one of the set is the
+        one in effect. `aria-pressed` was wrong for a different reason -- it is
+        defined on a button, so on these anchors it announced nothing at all.
+        The hrefs are built server-side in `settings_snapshot` so the page and the
+        JSON endpoint agree, and so no template re-lists the other parameters. -#}
     <nav class="ui-log-levels" aria-label="日志级别">
       {% for choice in logs.filters %}
         <a class="ui-log-level" href="{{ choice.href }}"
-           aria-pressed="{{ 'true' if choice.selected else 'false' }}">{{ choice.label }}</a>
+           {% if choice.selected %}aria-current="true"{% endif %}>{{ choice.label }}</a>
       {% endfor %}
     </nav>
     {% if not logs.entries %}

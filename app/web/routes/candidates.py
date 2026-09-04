@@ -150,9 +150,12 @@ async def _render_candidates(
     statuses = CANDIDATE_TABS[tab]
 
     if tab == "pending":
-        # Kept from the old queue page: opening 待审核 is what enriches new
-        # candidates and lets an auto-approval rule fire. Bounded to the
-        # page the operator is looking at, which the pre-R5 version was not.
+        # Enrichment happens here because it is what the operator is about to
+        # read. The approval call beside it is now only a latency optimisation:
+        # `AutoApprovalSweeper` owns the schedule, so a rule fires without
+        # anybody opening this tab, and this call merely means a candidate that
+        # arrived seconds ago is decided before the row is drawn rather than at
+        # the next tick. Bounded to the page being looked at either way.
         first, _ = await deps.database(request).list_candidates_page(
             statuses=statuses,
             search=search,

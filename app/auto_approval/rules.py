@@ -136,6 +136,65 @@ def render_rule_dsl(ast: dict[str, Any]) -> str:
     return f"{field} {operator} {rendered}"
 
 
+def editor_rows(ast: dict[str, Any]) -> tuple[str, tuple[dict[str, str], ...]] | None:
+    """Decompose a stored AST back into the editor's flat rows, or refuse.
+
+    The inverse of `_parse_rule_condition` in `app/web/routes/auto_approval.py`,
+    and it lives here beside `render_rule_dsl` because both answer 「this AST,
+    written for a human」 -- one as text to read, one as form fields to edit.
+
+    Returns None for a shape the flat editor cannot express: a group nested
+    inside a group. Refusing is the point. The editor emits one level, so a
+    nested rule can only have been written straight into the database, and
+    flattening it would silently change what it matches -- an operator who
+    pressed 保存 on a rule that had been rewritten underneath them would get a
+    different rule with the same name and no indication of it. The page offers
+    删除 and 试跑 for those, which need no round trip.
+
+    A single-node rule reads back as one row, matching the way one row saves as
+    itself rather than as a group of one. Its group operator is AND because that
+    is what a lone row combines as when the operator adds a second.
+    """
+    if ast.get("kind") == "group":
+        operator = str(ast.get("operator") or "AND").upper()
+        children = list(ast.get("children") or ())
+        if any(child.get("kind") == "group" for child in children):
+            return None
+        return operator, tuple(_editor_row(child) for child in children)
+    return "AND", (_editor_row(ast),)
+
+
+def _editor_row(node: dict[str, Any]) -> dict[str, str]:
+    """One AST leaf as the four strings its form row submits.
+
+    `HAS_ANY` / `HAS_ALL` join with 「, 」 because that is what
+    `_parse_rule_condition` splits on, so a list rule survives an edit that does
+    not touch it. Everything else stringifies as it was stored: `Rating > 4.5`
+    keeps its `4.5` rather than becoming `4.5000000001` through a float round
+    trip, because the stored value is already the text the operator typed.
+    """
+    if node.get("kind") == "regex":
+        return {
+            "kind": "regex",
+            "field": str(node.get("field") or ""),
+            "operator": "",
+            "value": str(node.get("pattern") or ""),
+        }
+    value = node.get("value")
+    if isinstance(value, list):
+        rendered = ", ".join(str(item) for item in value)
+    elif value is None:
+        rendered = ""
+    else:
+        rendered = str(value)
+    return {
+        "kind": "condition",
+        "field": str(node.get("field") or ""),
+        "operator": str(node.get("operator") or ""),
+        "value": rendered,
+    }
+
+
 def evaluate_rule(ast: dict[str, Any], metadata: dict[str, str]) -> RuleEvaluation:
     """Evaluate a validated AST against effective candidate metadata."""
     conditions: list[dict[str, Any]] = []
@@ -269,6 +328,7 @@ __all__ = [
     "REGEX_FIELDS",
     "RuleEvaluation",
     "RuleValidationError",
+    "editor_rows",
     "evaluate_rule",
     "render_rule_dsl",
     "validate_rule_ast",

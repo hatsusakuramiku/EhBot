@@ -52,6 +52,10 @@ from app.api.status import (
     dependency_view,
     settings_section_view,
 )
+from app.archive.service import (
+    TITLE_SOURCE_ENGLISH,
+    TITLE_SOURCE_JAPANESE,
+)
 from app.auto_approval.rules import (
     ALL_OPERATORS,
     ALLOWED_FIELDS,
@@ -71,8 +75,10 @@ from app.conversion.naming import (
 from app.logs.reader import MAX_LIMIT, clamp_limit, read_log_tail
 from app.review.models import field_label
 from app.settings.service import (
+    MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
     MAX_POLL_INTERVAL_MS,
     MAX_SOURCE_CONCURRENCY,
+    MIN_AUTO_APPROVAL_INTERVAL_MINUTES,
     MIN_POLL_INTERVAL_MS,
     MIN_SOURCE_CONCURRENCY,
 )
@@ -205,6 +211,21 @@ async def _paths_section(request: Request) -> dict[str, Any]:
             "work": str(app_settings.work_path),
         },
         "library_template": await service.library_template(),
+        "title_source": await service.title_source(),
+        # The two choices, with their words, so the radio group is generated from
+        # the same table the validator accepts rather than hand-listed in Jinja.
+        "title_sources": [
+            {
+                "code": TITLE_SOURCE_JAPANESE,
+                "label": field_label("JapaneseTitle"),
+                "hint": "优先使用画廊的 title_jpn，缺失时回退到英文标题。",
+            },
+            {
+                "code": TITLE_SOURCE_ENGLISH,
+                "label": field_label("Title"),
+                "hint": "优先使用画廊的英文标题，缺失时回退到日文标题。",
+            },
+        ],
         "template": {
             "default": DEFAULT_LIBRARY_TEMPLATE,
             "max_segment_length": MAX_SEGMENT_LENGTH,
@@ -247,6 +268,10 @@ async def _system_section(request: Request) -> dict[str, Any]:
             "source_concurrency": {
                 "minimum": MIN_SOURCE_CONCURRENCY,
                 "maximum": MAX_SOURCE_CONCURRENCY,
+            },
+            "auto_approval_interval_minutes": {
+                "minimum": MIN_AUTO_APPROVAL_INTERVAL_MINUTES,
+                "maximum": MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
             },
         },
         **await _log_view(request),

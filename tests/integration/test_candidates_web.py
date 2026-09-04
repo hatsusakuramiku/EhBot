@@ -347,8 +347,16 @@ def test_view_switch_renders_a_table_and_keeps_the_search(tmp_path: Path) -> Non
     assert "ui-table" in listed.text
     assert "ui-cover-grid" not in listed.text
     # Switching back to the grid must not throw the search away: the view is one
-    # parameter of the URL, not a different page.
-    assert "search=Fixture" in href_with(listed.text, 'aria-pressed="false"')
+    # parameter of the URL, not a different page. Matched on the link's own words
+    # rather than on a state attribute: the inactive link carries none, since
+    # `aria-current` is written only on the view actually in effect.
+    assert "search=Fixture" in href_with(listed.text, ">封面<")
+    # The link that *is* in effect says so, and says it in the one way an anchor
+    # can -- `aria-pressed` is defined on a button, so on these two links it
+    # announced nothing. (The theme and density toggles in the shell are real
+    # buttons and keep `aria-pressed`, which is why this checks the anchors.)
+    assert 'aria-current="true"' in listed.text
+    assert not re.search(r"<a\b[^>]*aria-pressed", listed.text)
 
 
 def test_pagination_links_carry_the_current_filter(tmp_path: Path) -> None:

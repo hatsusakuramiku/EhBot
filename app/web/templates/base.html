@@ -17,7 +17,10 @@
   and the whole document follows the operator's theme.
 #}
 <!doctype html>
-<html lang="zh-CN">
+{#- `ui-root` exists so `ui.css` can style the scrolling element without a bare
+    `html` rule: the document is what scrolls, and `scroll-padding-top` has to sit
+    on it or an in-page jump lands under the sticky top bar. -#}
+<html class="ui-root" lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">

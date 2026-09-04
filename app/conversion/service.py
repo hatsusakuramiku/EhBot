@@ -16,7 +16,7 @@ from app.archive.errors import (
 from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
 from app.archive.quality import quality_note
-from app.archive.service import ArchiveSettingsService
+from app.archive.service import ArchiveSettingsService, TITLE_SOURCE_JAPANESE
 from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
 from app.conversion.naming import (
@@ -50,6 +50,34 @@ from app.review.models import (
     METADATA_FIELDS,
     STATUS_APPROVED,
 )
+
+
+def _title_values(
+    metadata, *, source: str, display_title: str
+) -> dict[str, str | None]:
+    """The three title placeholders, resolved from one metadata read.
+
+    Built in one place because `_library_target` (inside a job) and
+    `planned_library_path` (answering an operator) must name the same book the
+    same way -- the previous arrangement had each assembling its own `values`
+    dict, which is how they would drift.
+
+    `{title}` follows the 标题来源 setting and falls back to the other language
+    before the caller's display title: a gallery with only a `title_jpn` must
+    still render under an `english` preference, or the setting would turn into a
+    way to lose a name. `{japanese_title}` and `{english_title}` do not fall back
+    across languages -- a template asking for one language explicitly should get
+    that language or the untitled fallback, not a silent substitution.
+    """
+    japanese = _metadata_lookup(metadata, "JapaneseTitle")
+    english = _metadata_lookup(metadata, "Title")
+    preferred = japanese if source == TITLE_SOURCE_JAPANESE else english
+    alternate = english if source == TITLE_SOURCE_JAPANESE else japanese
+    return {
+        "title": preferred or alternate or display_title,
+        "japanese_title": japanese,
+        "english_title": english,
+    }
 
 
 def _metadata_lookup(metadata, field_name: str) -> str | None:
@@ -180,7 +208,11 @@ class ConversionService:
         values = {
             "category": _metadata_lookup(metadata, "Category"),
             "artist": _metadata_lookup(metadata, "Artist"),
-            "title": title,
+            **_title_values(
+                metadata,
+                source=await self._settings.title_source(),
+                display_title=title,
+            ),
         }
         try:
             relative = render_library_path(
@@ -223,7 +255,11 @@ class ConversionService:
             {
                 "category": _metadata_lookup(metadata, "Category"),
                 "artist": _metadata_lookup(metadata, "Artist"),
-                "title": title,
+                **_title_values(
+                    metadata,
+                    source=await self._settings.title_source(),
+                    display_title=title,
+                ),
             },
             title_fallback=f"candidate-{candidate_id}",
         )

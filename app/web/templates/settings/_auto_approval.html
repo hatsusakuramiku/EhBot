@@ -24,20 +24,26 @@
   is refused whether or not JavaScript ran.
 #}
 
-{% macro condition_row(index, vocabulary) -%}
+{% macro condition_row(index, vocabulary, row=None) -%}
   {#- One condition. Rows submit as parallel lists (`condition_kind` and
       friends), which is what an HTML form does natively with repeated names --
       no JSON in a hidden field, so the rows survive with JavaScript off. A row
       whose field is blank is skipped server-side, which is how the extra empty
-      row costs nothing. -#}
+      row costs nothing.
+
+      `row` is one of `editor_rows`'s dicts when a stored rule is being edited,
+      and absent when creating. The selected state is written into the markup
+      rather than applied by `settings.js`, so the editor arrives filled on a
+      page with JavaScript off -- an edit form that only populates after a script
+      runs is an edit form that silently discards the rule. -#}
   <fieldset class="ui-fieldset" data-condition-row>
     <legend>条件 {{ index }}</legend>
     <div class="ui-form-grid">
       <div class="ui-field">
         <label for="kind-{{ index }}">匹配方式</label>
         <select class="ui-select" id="kind-{{ index }}" name="condition_kind" data-row-kind>
-          <option value="condition">比较</option>
-          <option value="regex">正则</option>
+          <option value="condition" {% if not row or row.kind != 'regex' %}selected{% endif %}>比较</option>
+          <option value="regex" {% if row and row.kind == 'regex' %}selected{% endif %}>正则</option>
         </select>
       </div>
       <div class="ui-field">
@@ -46,7 +52,8 @@
           <option value="">（不使用此条件）</option>
           {% for field in vocabulary.fields %}
             <option value="{{ field.code }}"
-                    data-regex-capable="{{ 'true' if field.code in vocabulary.regex_fields else 'false' }}">
+                    data-regex-capable="{{ 'true' if field.code in vocabulary.regex_fields else 'false' }}"
+                    {% if row and row.field == field.code %}selected{% endif %}>
               {{ field.label }}（{{ field.code }}）
             </option>
           {% endfor %}
@@ -56,7 +63,8 @@
         <label for="op-{{ index }}">运算符</label>
         <select class="ui-select" id="op-{{ index }}" name="condition_operator" data-row-operator>
           {% for operator in vocabulary.operators %}
-            <option value="{{ operator }}">{{ operator }}</option>
+            <option value="{{ operator }}"
+                    {% if row and row.operator == operator %}selected{% endif %}>{{ operator }}</option>
           {% endfor %}
         </select>
       </div>
@@ -64,7 +72,8 @@
     <div class="ui-field">
       <label for="value-{{ index }}">值 / 正则</label>
       <input class="ui-input" id="value-{{ index }}" name="condition_value" type="text"
-             data-row-value placeholder="如 chinese 或 (futa|chinpo)">
+             data-row-value placeholder="如 chinese 或 (futa|chinpo)"
+             value="{{ row.value if row else '' }}">
       <small>正则使用 <code>re.search</code>，区分大小写。忽略大小写写作 <code>(?i)...</code>，整串匹配写作 <code>^...$</code>。EXISTS / NOT_EXISTS 不需要值。</small>
     </div>
   </fieldset>
@@ -73,33 +82,52 @@
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
-      <h2 class="ui-section-title">新增规则</h2>
+      {#- One editor, two modes. The heading and the button say which, and the
+          hidden `rule_id` is the only thing that differs on the wire -- a second
+          form for editing would be a second place for the condition rows to be
+          built, and the two would drift by a field. -#}
+      <h2 class="ui-section-title">{% if edit_rule %}编辑规则{% else %}新增规则{% endif %}</h2>
+      {% if edit_unsupported %}
+        {{ ui.callout("这条规则无法在此编辑", tone="waiting",
+                      detail="它包含嵌套的条件组，而编辑器只表达一层。可以试跑或删除后重建，避免保存时把规则改成别的意思。") }}
+      {% endif %}
       <p class="ui-hint">命中即自动加入下载队列；未命中的候选始终保留人工审核。保存前请先试跑。</p>
       <form class="ui-form" method="post" action="{{ url_for('save_auto_approval_rule') }}"
             data-rule-editor style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {#- Present only when editing, so the same endpoint inserts or updates
+            without the page having to choose a different action. -#}
+        {% if edit_rule %}
+        <input type="hidden" name="rule_id" value="{{ edit_rule.rule_id }}">
+        {% endif %}
         <div class="ui-form-grid">
           <div class="ui-field">
             <label for="rule-name">名称</label>
-            <input class="ui-input" id="rule-name" name="name" maxlength="80" required>
+            <input class="ui-input" id="rule-name" name="name" maxlength="80" required
+                   value="{{ edit_rule.name if edit_rule else '' }}">
           </div>
           <div class="ui-field">
             <label for="rule-priority">优先级</label>
             <input class="ui-input" id="rule-priority" name="priority" type="number"
-                   value="100" required>
+                   value="{{ edit_rule.priority if edit_rule else 100 }}" required>
             <small>从小到大执行。</small>
           </div>
           <div class="ui-field">
             <label for="group-operator">条件组合</label>
             <select class="ui-select" id="group-operator" name="group_operator">
-              <option value="AND">全部满足（AND）</option>
-              <option value="OR">任一满足（OR）</option>
+              <option value="AND" {% if not edit_rule or edit_rule.group_operator == 'AND' %}selected{% endif %}>全部满足（AND）</option>
+              <option value="OR" {% if edit_rule and edit_rule.group_operator == 'OR' %}selected{% endif %}>任一满足（OR）</option>
             </select>
           </div>
         </div>
 
-        {% for index in range(1, 4) %}
-          {{ condition_row(index, vocabulary) }}
+        {#- Always at least three rows, and always one more than the rule uses, so
+            editing a two-condition rule leaves somewhere to add the third
+            without a script. -#}
+        {% set edit_rows = edit_rule.rows if edit_rule else [] %}
+        {% for index in range(1, [edit_rows|length + 1, 3]|max + 1) %}
+          {{ condition_row(index, vocabulary,
+                           row=edit_rows[index - 1] if index <= edit_rows|length else None) }}
         {% endfor %}
 
         {#- The rendered DSL, filled by `settings.js`. Empty until then, and
@@ -109,7 +137,8 @@
         <p class="ui-hint" data-syntax-error role="alert" hidden></p>
 
         <label class="ui-checkline">
-          <input class="ui-checkbox" name="enabled" type="checkbox" checked>
+          <input class="ui-checkbox" name="enabled" type="checkbox"
+                 {% if not edit_rule or edit_rule.enabled %}checked{% endif %}>
           <span>保存后启用</span>
         </label>
         <div class="ui-form-actions">
@@ -117,7 +146,12 @@
               that should be pressed first. -#}
           <button class="ui-btn" type="submit"
                   formaction="{{ url_for('dry_run_auto_approval_rule') }}">试跑</button>
-          <button class="ui-btn" data-variant="primary" type="submit">保存规则</button>
+          <button class="ui-btn" data-variant="primary" type="submit">{% if edit_rule %}保存修改{% else %}保存规则{% endif %}</button>
+          {#- A way out of edit mode that is not「保存」. Without it the only exits
+              are saving the rule or leaving the tab. -#}
+          {% if edit_rule %}
+          <a class="ui-btn" href="{{ url_for('settings_section', section='auto_approval').path }}">取消编辑</a>
+          {% endif %}
         </div>
       </form>
     </section>
@@ -155,7 +189,10 @@
         <span class="ui-record-meta">{{ rules|length }} 项</span>
       </div>
       {% for rule in rules %}
-        <article class="ui-record" style="margin-top: var(--s-4)">
+        {#- `data-selected` marks the rule currently loaded in the editor, so an
+            operator scrolling the list can see which row the form belongs to. -#}
+        <article class="ui-record" style="margin-top: var(--s-4)"
+                 {% if edit_rule_id == rule.rule_id %}data-selected="true"{% endif %}>
           <div class="ui-record-head">
             <span class="ui-record-title">{{ rule.name }}</span>
             <span class="ui-record-meta">优先级 {{ rule.priority }} · 版本 {{ rule.version }}</span>
@@ -165,6 +202,9 @@
               business owning a second DSL writer. -#}
           <pre class="ui-code">{{ rule.dsl }}</pre>
           <div class="ui-form-actions">
+            {#- 编辑 is a link because it only loads the form; the three actions
+                that write are forms. -#}
+            <a class="ui-btn" href="{{ url_for('edit_auto_approval_rule', rule_id=rule.rule_id).path }}">编辑</a>
             <form method="post" action="{{ url_for('toggle_auto_approval_rule', rule_id=rule.rule_id) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="enabled" value="{{ 'off' if rule.enabled else 'on' }}">
@@ -174,6 +214,15 @@
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button class="ui-btn" type="submit">试跑此规则</button>
             </form>
+            {#- The only irreversible action on this tab, so it is the only one
+                that asks first. 停用 sits beside it precisely so parking a rule
+                never requires deleting it. `key` disambiguates the dialog id,
+                because every rule in this loop renders the same label. -#}
+            {{ ui.confirm("删除", "删除这条规则",
+                          "规则会被移除，之后的候选不再受它影响。已经由它自动通过的作品不受影响，历史记录里仍保留当时的规则内容。",
+                          confirm_label="确认删除",
+                          action=url_for('delete_auto_approval_rule', rule_id=rule.rule_id).path,
+                          csrf_token=csrf_token, size="sm", key=rule.rule_id) }}
           </div>
           {% if preview_rule_id == rule.rule_id %}
             <p class="ui-hint">

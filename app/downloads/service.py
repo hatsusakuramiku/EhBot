@@ -247,21 +247,49 @@ class DownloadService:
                     "CANDIDATE_NOT_DOWNLOADABLE",
                     "该候选尚未通过审批，不能进入下载队列",
                 )
-            before = connection.total_changes
+            existing = connection.execute(
+                "SELECT state FROM download_jobs WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            # A second enqueue of the same source updates the existing row back
+            # to PENDING when that row is FAILED or CANCELLED, instead of doing
+            # nothing. `DO NOTHING` made the whole recovery path silent: a
+            # requeued candidate that was approved again reported success while
+            # its dead job row stayed FAILED, so the book never downloaded and
+            # the page showed a failure the operator had just acted on.
+            #
+            # COMPLETED and the open states are left alone deliberately -- the
+            # first is `redownload_work`'s job (it bumps `attempt_count` and is
+            # an explicit operator decision), and re-pending a job the worker
+            # holds would hand the same transfer out twice.
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
                 "details_json) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(idempotency_key) DO NOTHING",
+                "ON CONFLICT(idempotency_key) DO UPDATE SET "
+                "  state = excluded.state, "
+                "  details_json = excluded.details_json, "
+                "  error_code = NULL, "
+                "  error_message = NULL, "
+                "  lease_owner = NULL, "
+                "  lease_expires_at = NULL, "
+                "  retry_at = NULL, "
+                "  updated_at = CURRENT_TIMESTAMP "
+                "WHERE download_jobs.state IN (?, ?)",
                 (
                     candidate_id,
                     idempotency_key,
                     provider,
                     DOWNLOAD_STATE_PENDING,
                     details_json,
+                    DOWNLOAD_STATE_FAILED,
+                    DOWNLOAD_STATE_CANCELLED,
                 ),
             )
-            created = connection.total_changes > before
+            # Read from the pre-flight SELECT rather than from the row count:
+            # the upsert changes a row when it revives one too, and `created`
+            # answers 「这是一条新任务吗」 for the caller's flash message.
+            created = existing is None
             row = connection.execute(
                 "SELECT id, state FROM download_jobs "
                 "WHERE idempotency_key = ?",
