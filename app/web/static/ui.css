@@ -244,6 +244,44 @@
 }
 
 /* --------------------------------------------------------------------------
+   1b. Box model
+   -------------------------------------------------------------------------- */
+
+/* `border-box` everywhere, which is the one place a universal selector is right.
+   The class-scoped rule above is about *appearance* -- a bare `p` or `a` rule
+   reaches markup this stylesheet never meant to style, and that is still banned.
+   The box model is not appearance: it is the arithmetic every rule below already
+   assumes, and applying it per class would mean every new component had to
+   remember to opt in.
+
+   Why it had to change: `.ui-input` is `width: 100%` plus `padding: 8px 12px`
+   plus a 1px border, and under the initial `content-box` those add up to
+   `100% + 26px`. Every field in a panel, a table toolbar, a drawer or a filter
+   grid was therefore 26px wider than the box it sat in -- so it either pushed out
+   of its parent's rounded edge or forced its flex row to wrap, which is the
+   「错位」 an operator sees. Percentage widths and pixel padding cannot both be
+   honoured any other way.
+
+   `::before`/`::after` are included because the table's `data-label` cells on a
+   phone and the segmented control's separators are padded pseudo-elements. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* A replaced element must not exceed its column even when its intrinsic width
+   does. Covers were already constrained by their wrappers; this is the general
+   rule, so a thumbnail from a provider that ignored the requested size cannot
+   widen the grid it sits in. */
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
+}
+
+/* --------------------------------------------------------------------------
    2. Accessibility primitives
    -------------------------------------------------------------------------- */
 
@@ -683,11 +721,24 @@
 .ui-btn[data-size="sm"] { min-height: 28px; padding: 0 var(--s-3); font-size: var(--font-small); }
 .ui-btn[data-size="icon"] { min-height: 32px; width: 32px; padding: 0; }
 
-.ui-field { display: grid; gap: var(--s-2); }
+/* `min-width: 0` because a field is almost always a grid or flex item, and the
+   default `auto` floor is its content's intrinsic width -- which for a `<select>`
+   is its longest option. Without this the item refuses to shrink and the control
+   inside it overflows the column instead of fitting it. */
+.ui-field { display: grid; gap: var(--s-2); min-width: 0; }
 .ui-field > label { color: var(--t-ink); font-size: var(--font-small); font-weight: 600; }
 .ui-field small { color: var(--t-ink-muted); font-size: var(--font-small); }
 .ui-input, .ui-select, .ui-textarea {
+  /* `width: 100%` is the fill, `max-width: 100%` is the promise: an input
+     carrying a `size` attribute, or a `<select>` sized by its longest option,
+     has an intrinsic width that beats the percentage and would otherwise widen
+     -- or escape -- its parent. `min-width: 0` is the flex/grid half of the same
+     rule, because a form control's default `min-width: auto` refuses to shrink
+     below its intrinsic size and is what makes a field overflow a narrow
+     column instead of fitting it. */
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 36px;
   padding: var(--s-2) var(--s-3);
   border: 1px solid var(--t-line-strong);
@@ -697,6 +748,10 @@
   font: inherit;
   font-size: var(--font-body);
 }
+/* Only the axis the layout controls. A textarea resized horizontally by the
+   operator is a field that leaves its panel, and no width rule above can stop a
+   drag; vertical resizing is genuinely useful and costs the layout nothing. */
+.ui-textarea { resize: vertical; }
 .ui-input::placeholder { color: var(--t-ink-muted); }
 .ui-input:focus, .ui-select:focus, .ui-textarea:focus {
   border-color: var(--t-accent);
@@ -914,7 +969,11 @@
   border-bottom: 1px solid var(--t-line);
   background: var(--t-surface);
 }
-.ui-table-toolbar .ui-input { width: auto; min-width: 200px; flex: 1 1 200px; }
+/* Grows to fill the toolbar and shrinks with it. The basis is the preferred
+   200px rather than a `min-width` floor: a floor cannot be crossed, so on a
+   narrow panel the field would have overflowed the toolbar instead of wrapping
+   inside it. */
+.ui-table-toolbar .ui-input { width: auto; flex: 1 1 200px; }
 
 .ui-pagination {
   display: flex;
@@ -971,6 +1030,13 @@
   box-shadow: var(--shadow-lg);
 }
 .ui-bulkbar-count { color: var(--t-ink); font-weight: 700; }
+/* A field whose content is two or three digits. `ch` rather than `em` because the
+   unit is literally 「几个数字宽」, and `flex: 0 0 auto` so the toolbar's
+   `flex-wrap` moves it to the next line intact instead of squeezing it to
+   nothing. Replaces a `style="width: 6em"` written into the markup: an input's
+   size is a component decision, and one spelled inline could not follow the
+   compact density or be corrected in one place. */
+.ui-input[data-width="narrow"] { flex: 0 0 auto; width: 7ch; min-width: 7ch; }
 .ui-bulkbar-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-left: auto; }
 
 @media (max-width: 640px) {
@@ -983,7 +1049,7 @@
    -------------------------------------------------------------------------- */
 
 .ui-filter-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: var(--s-6); align-items: start; margin-top: var(--s-5); }
-.ui-filters { display: grid; gap: var(--s-5); padding: var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-lg); background: var(--t-surface); }
+.ui-filters { display: grid; gap: var(--s-5); padding: var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-lg); background: var(--t-surface); min-width: 0; }
 .ui-filter-group { display: grid; gap: var(--s-2); }
 .ui-filter-group > h3 { margin: 0; color: var(--t-ink-muted); font-size: var(--font-small); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .ui-filter-option { display: flex; align-items: center; gap: var(--s-2); min-height: 28px; color: var(--t-ink); font-size: var(--font-body); cursor: pointer; }
@@ -1225,7 +1291,7 @@
 .ui-form-actions { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
 .ui-form-actions form { margin: 0; }
 
-.ui-fieldset { display: grid; gap: var(--s-2); margin: 0; padding: var(--s-3) var(--s-4) var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-md); }
+.ui-fieldset { display: grid; gap: var(--s-2); margin: 0; padding: var(--s-3) var(--s-4) var(--s-4); border: 1px solid var(--t-line); border-radius: var(--r-md); min-width: 0; }
 .ui-fieldset > legend { padding: 0 var(--s-2); color: var(--t-ink-muted); font-size: var(--font-small); font-weight: 600; }
 
 /* A checkbox and its word travel together, so the label is the flex container
@@ -1329,7 +1395,7 @@
 /* Every rule here is class-scoped, like the rest of the file: a bare `pre` or
    `time` rule would reach /ui-kit and every fragment HTMX swaps in. */
 
-/* The 运行日志 page's toolbar (R16). The level selector and the live controls
+/* The 运行日志 page's toolbar (R17). The level selector and the live controls
    are one row that wraps, so a phone gets two rows without a media query. */
 .ui-log-toolbar {
   display: flex;
@@ -1339,8 +1405,12 @@
   flex-wrap: wrap;
 }
 
-.ui-log-filter { display: flex; align-items: center; gap: var(--s-2); }
-.ui-log-filter-label { color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-log-filter { display: flex; align-items: center; gap: var(--s-2); min-width: 0; }
+/* The label is the fixed part and the select is the elastic one: shrinking the
+   word 「级别」 to save room would make the control unreadable long before the
+   layout ran out of space. */
+.ui-log-filter-label { flex: 0 0 auto; color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-log-filter .ui-select { flex: 0 1 auto; width: auto; }
 .ui-log-live { display: flex; align-items: center; gap: var(--s-3); }
 
 /* `tabular-nums` because this text counts ("已暂停，12 条待显示") and a
@@ -1372,11 +1442,18 @@
   font-weight: 600;
 }
 
-.ui-log-list { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.ui-log-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-2); margin: 0; padding: 0; min-width: 0; list-style: none; }
 
 .ui-log-row {
   display: grid;
   gap: var(--s-1);
+  /* Both ends of the floor. As a grid item of `.ui-log-list` the default
+     `min-width: auto` sizes it to its content's min-content width, and as a grid
+     container its own tracks do the same to the text inside -- so an access-log
+     line carrying a long URL made the row wider than the phone and scrolled the
+     whole document sideways. */
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
   padding: var(--s-3);
   border: 1px solid var(--t-line);
   border-radius: var(--r-md);
@@ -1385,16 +1462,23 @@
 
 .ui-log-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
 .ui-log-head time { color: var(--t-ink-muted); font-size: var(--font-small); font-variant-numeric: tabular-nums; }
-.ui-log-logger { color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-log-logger { min-width: 0; color: var(--t-ink-muted); font-size: var(--font-small); overflow-wrap: anywhere; }
 
-/* `pre-wrap` and `break-word`: an event line carries paths and URLs with no
-   spaces, which would otherwise force the whole panel to scroll sideways. */
+/* `pre-wrap` keeps the formatter's own line breaks; `anywhere` is what stops a
+   URL from widening the page.
+   `break-word` was the bug: both values let a long word break, but only
+   `anywhere` also lowers the element's **min-content contribution**, and that
+   contribution is what a grid track and a flex item size themselves from. With
+   `break-word` the row still reported the full URL as its minimum, so /logs and
+   设置 → 系统 scrolled 340px sideways on a phone while the text itself wrapped
+   perfectly -- the wrap was never the problem, the reported minimum was. */
 .ui-log-event {
   margin: 0;
+  min-width: 0;
   color: var(--t-ink);
   font-size: var(--font-body);
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 /* The upstream's own failure text, under the event name. Muted because the
@@ -1402,13 +1486,14 @@
    message is a sentence and not an identifier. */
 .ui-log-message {
   margin: var(--s-1) 0 0;
+  min-width: 0;
   color: var(--t-ink-muted);
   font-size: var(--font-small);
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
-.ui-log-meta { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin: 0; color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-log-meta { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin: 0; min-width: 0; color: var(--t-ink-muted); font-size: var(--font-small); overflow-wrap: anywhere; }
 
 .ui-log-trace summary { color: var(--t-ink-muted); font-size: var(--font-small); cursor: pointer; }
 

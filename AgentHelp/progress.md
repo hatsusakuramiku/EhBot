@@ -3136,3 +3136,103 @@ viewer into a file export.
 | A record logged during the replay could be shown twice, or lost | Subscribing after the snapshot loses it; subscribing before duplicates it | Subscribe first, then skip sequences already replayed |
 | A test asserting buffer length passed alone and failed in the suite | The broker is process wide and bounded, so at capacity a new record evicts rather than grows | Assert the newest record's sequence and content, and clear the buffer in an autouse fixture |
 | `LOG_TO_FILE=false` meant no log view at all | The only viewer read the file | The in-memory buffer, which needs no file |
+## R18 — 输入框溢出父容器：一个缺失的 box-sizing (v0.2.9, 2026-09-05)
+
+Operator report: 「输入框许多出现错位现象，并且大小固定，应当保持在父控件内」.
+Three separate causes, all of them arithmetic rather than styling.
+
+### 1. `ui.css` never set `box-sizing`
+
+The stylesheet was written from R3 onward with `.ui-input { width: 100%; padding:
+8px 12px; border: 1px }` and no box-model reset anywhere in its 1432 lines. Under
+the CSS initial value of `content-box` those declarations mean
+`100% + 24px + 2px`, so **every** input, select and textarea in the application
+rendered 26px wider than the box containing it. In a `.ui-panel` it pushed past
+the rounded edge; in a flex toolbar it forced a wrap; in the 240px filter column
+it simply left the column. This is the 「错位」, and it was never a per-page
+problem -- it was one missing declaration reaching all 77 controls.
+
+`*, *::before, *::after { box-sizing: border-box }` is the fix. A universal
+selector needs justifying in a stylesheet whose every other rule is class-scoped,
+and the justification is that the two rules are about different things: the
+class-scoping rule exists so no *appearance* leaks into markup this file never
+meant to style, while the box model is the arithmetic the file already assumed
+everywhere. Doing it per component would leave the next component to remember.
+
+`img, svg, video, canvas { max-width: 100% }` went in beside it, so a provider
+thumbnail with an unexpected intrinsic width cannot widen its grid.
+
+### 2. A control could still be beaten by its intrinsic width
+
+`width: 100%` loses to an intrinsic width in two common cases: an `<input>` with
+a `size` attribute, and a `<select>` sized by its longest `<option>` -- which is
+exactly what the level filter on `/logs` is. And as a flex or grid item, a form
+control's default `min-width: auto` refuses to shrink below that intrinsic size,
+so in a narrow column the field overflows instead of fitting.
+
+Hence `max-width: 100%` and `min-width: 0` on the control, and `min-width: 0` on
+the containers that hold them (`.ui-field`, `.ui-filters`, `.ui-fieldset`,
+`.ui-log-filter`). `.ui-table-toolbar .ui-input` lost its `min-width: 200px`
+floor in favour of `flex: 1 1 200px`: a floor cannot be crossed, so on a narrow
+panel that field had to overflow the toolbar rather than wrap inside it.
+
+### 3. `overflow-wrap: break-word` does not do what it looks like it does
+
+Measuring the fix in a real browser turned up a second defect the operator had
+not mentioned and that R17 introduced: `/logs` and 设置 → 系统 scrolled **340px**
+sideways at 390px wide. The text was wrapping correctly, which is why it had not
+been noticed by reading the CSS.
+
+The cause is a genuine subtlety. `break-word` and `anywhere` both allow a long
+word to break, but only `anywhere` lowers the element's **min-content
+contribution** -- and that contribution is what a grid track and a flex item size
+themselves from. So `.ui-log-row` reported the full length of the longest URL in
+an access-log line as its minimum width (693px), the grid honoured it, and the
+document grew. Every `break-word` in the file is now `anywhere`; there are none
+left.
+
+`.ui-log-row` also needed `min-width: 0` **and**
+`grid-template-columns: minmax(0, 1fr)`, because it is a grid item of
+`.ui-log-list` and a grid container for its own text: fixing one end leaves the
+other. Worth stressing that the offending content is the application's own
+access log, so this was the default view, not an edge case.
+
+### 4. `style="width: 6em"` on the priority field
+
+The one hardcoded control width in the templates, and the literal reading of
+「大小固定」. Inline it could not follow the compact density, could not be
+corrected in one place, and no rule in `ui.css` could see it. It is now
+`.ui-input[data-width="narrow"]` with `width: 7ch` (`ch` because the unit really
+is 「几个数字宽」) and `flex: 0 0 auto`, so the bulk bar wraps it intact instead of
+squeezing it to nothing.
+
+### Verification
+
+A static test cannot see a layout, so the fix was measured in a real browser:
+headless Chrome against the built image, all **14 pages** at **1440 / 1024 / 768 /
+390**, comparing every control's border box against its parent's content box.
+
+- Before: overflow on the fields, plus `hScroll=340` on `/logs` and
+  `/settings/system` at 390px.
+- After: **ALL CLEAR** across all 56 page/viewport combinations -- zero
+  overflowing controls, zero horizontal scroll.
+- Sanity-checked the opposite failure: fields still fill their parent
+  (`filling=15/15` on 设置 → 归档), nothing collapsed, every control resolves to
+  `border-box`. The two `w=0` hits are inside the closed rename drawer, which was
+  then opened and measured too (`bad=0 hScroll=0` at both widths).
+- Three new static tests in `test_ui_shell.py` lock the reset, the ban on
+  `break-word`, and the class-not-inline width. Suite: 1122 collected.
+
+Puppeteer's own Chrome download is blocked on this host; the browser came from
+the `zenika/alpine-chrome:with-puppeteer` image on a shared Docker network with
+the application container. Volume mounts do not reach this daemon, so scripts
+went in with `docker cp`.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| Every input rendered 26px wider than its parent | `ui.css` never set `box-sizing`, so `width: 100%` + padding + border was `100% + 26px` | `box-sizing: border-box` on `*`, plus `max-width: 100%` / `min-width: 0` on the controls |
+| A `<select>` overflowed a narrow column | Intrinsic width beats `width: 100%`, and `min-width: auto` refuses to shrink | `max-width: 100%` and `min-width: 0` on the control and its containers |
+| `/logs` and 设置 → 系统 scrolled 340px sideways on a phone | `overflow-wrap: break-word` permits a break but does not lower min-content, and a grid track sizes from min-content | `anywhere` everywhere, plus `min-width: 0` and `minmax(0, 1fr)` on `.ui-log-row` |
+| The priority field's width could not follow the density | `style="width: 6em"` written into the markup | `.ui-input[data-width="narrow"]`, `7ch`, `flex: 0 0 auto` |
+| The toolbar search field overflowed a narrow panel | `min-width: 200px` is a floor that cannot be crossed | `flex: 1 1 200px`, a preferred basis instead of a floor |

@@ -216,9 +216,10 @@
           bounded here as well as in the API so the browser refuses an
           out-of-range value before a request is made. -#}
       <label class="ui-bulkbar-count" for="bulk-priority">优先级</label>
-      <input class="ui-input" id="bulk-priority" name="priority" type="number"
-             x-model="priority" min="{{ min_priority }}" max="{{ max_priority }}"
-             style="width: 6em" aria-describedby="bulk-priority-hint">
+      <input class="ui-input" data-width="narrow" id="bulk-priority" name="priority"
+             type="number" x-model="priority"
+             min="{{ min_priority }}" max="{{ max_priority }}"
+             aria-describedby="bulk-priority-hint">
       <span class="ui-hint" id="bulk-priority-hint" style="margin: 0">数值越小越靠前</span>
       <button class="ui-btn" data-size="sm" type="submit" name="action" value="priority">调整优先级</button>
       {#- A cancelled job terminates and its candidate goes back to the review

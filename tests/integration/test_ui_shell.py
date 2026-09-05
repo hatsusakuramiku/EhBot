@@ -159,6 +159,17 @@ def test_theme_is_applied_before_first_paint(tmp_path: Path) -> None:
     assert 'data-theme="auto"' not in body
 
 
+def _ui_css() -> str:
+    """The stylesheet as text.
+
+    Read from disk rather than through the client: these are assertions about
+    the stylesheet's content, and fetching it would only prove it is served.
+    """
+    return (
+        Path(__file__).resolve().parents[2] / "app" / "web" / "static" / "ui.css"
+    ).read_text(encoding="utf-8")
+
+
 def test_no_page_carries_the_legacy_light_lock(tmp_path: Path) -> None:
     # R9 rewrote the last three pre-refactor pages, so `data-legacy="true"` and
     # the `.ui-main[data-legacy]` rule that pinned a page to light are both gone.
@@ -490,3 +501,80 @@ def test_the_skeleton_attribute_is_known_to_the_css_and_the_script(
     # the document it also covers cards HTMX swaps in later.
     assert 'addEventListener("load"' in script
     assert 'addEventListener("error"' in script
+
+
+def test_controls_are_border_box_and_cannot_exceed_their_parent() -> None:
+    """The arithmetic every width rule in `ui.css` already assumed.
+
+    `.ui-input` is `width: 100%` plus `padding: 8px 12px` plus a 1px border. Under
+    the initial `content-box` those add up to `100% + 26px`, so every field in a
+    panel, a settings column, a table toolbar or a drawer rendered 26px wider than
+    the box it sat in -- pushing past its parent's rounded edge or forcing its
+    flex row to wrap. That is the 「错位」 an operator reported, and no amount of
+    per-component tuning fixes it while the box model is content-box.
+
+    The universal selector is deliberate and is not the class-scoping rule being
+    broken: that rule is about *appearance* -- a bare `p` or `a` reaches markup
+    this stylesheet never meant to style -- while the box model is arithmetic that
+    has to hold for every element, including ones added later.
+    """
+    css = _ui_css()
+
+    assert "*,\n*::before,\n*::after {\n  box-sizing: border-box;\n}" in css
+    # The control's own belt and braces: `max-width` beats an intrinsic width
+    # (a `size` attribute, a `<select>`'s longest option) and `min-width: 0`
+    # removes the flex/grid floor that stops a field shrinking into a column.
+    control_rule = css.split(".ui-input, .ui-select, .ui-textarea {", 1)[1].split("}", 1)[0]
+    for declaration in ("width: 100%", "max-width: 100%", "min-width: 0"):
+        assert declaration in control_rule, declaration
+
+
+def test_a_long_unbroken_token_cannot_widen_the_page() -> None:
+    """`break-word` permits a break; only `anywhere` lowers min-content.
+
+    This distinction is the whole bug behind a 340px horizontal scrollbar on
+    /logs and 设置 → 系统 at phone width: the log text wrapped perfectly, but the
+    row still reported the full URL as its **min-content contribution**, and that
+    contribution is what a grid track sizes itself from. An access-log line
+    carrying a URL therefore set the width of the document.
+
+    Access-log lines are the application's own output, so this is not a
+    hypothetical input -- it is what /logs shows by default.
+    """
+    css = _ui_css()
+
+    # `break-word` is never the right value in this stylesheet: everywhere it
+    # appeared, the element was a grid or flex item whose minimum had to drop.
+    assert "overflow-wrap: break-word" not in css
+
+    for rule in (".ui-log-event", ".ui-log-message"):
+        body = css.split(rule + " {", 1)[1].split("}", 1)[0]
+        assert "overflow-wrap: anywhere" in body, rule
+        # `pre-wrap` is kept: the formatter's own newlines are meaningful.
+        assert "white-space: pre-wrap" in body, rule
+
+    # The row is both a grid item and a grid container, so both ends of the
+    # `min-width: auto` floor have to be removed.
+    row = css.split(".ui-log-row {", 1)[1].split("}", 1)[0]
+    assert "min-width: 0" in row
+    assert "grid-template-columns: minmax(0, 1fr)" in row
+
+
+def test_a_fixed_control_width_is_a_class_not_an_inline_style() -> None:
+    """An input's size is a component decision.
+
+    The priority field carried `style="width: 6em"`. Inline, it could not follow
+    the compact density, could not be corrected in one place, and was invisible to
+    every rule in `ui.css`. As a class it is also `flex: 0 0 auto`, so the bulk
+    bar's `flex-wrap` moves it to the next line intact instead of squeezing it.
+    """
+    css = _ui_css()
+    markup = (
+        Path(__file__).resolve().parents[2]
+        / "app" / "web" / "templates" / "activity.html"
+    ).read_text(encoding="utf-8")
+
+    assert '.ui-input[data-width="narrow"]' in css
+    assert 'data-width="narrow"' in markup
+    assert "width: 6em" not in markup
+    assert "style=\"width" not in markup

@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1119 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1122 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1119 on a machine that has one and 1107 with
+`data/tools/7zip/`, so `passed` is 1122 on a machine that has one and 1110 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -757,3 +757,38 @@ Several are locked by tests. Do not "simplify" them:
 - **A test must not assert on the buffer's length.** It is process wide and
   bounded, so in a full session it is already at capacity and a new record
   evicts rather than grows. Assert the newest record's sequence and content.
+**Added by R18 (the box model):**
+
+- **`ui.css` sets `box-sizing: border-box` on `*`, and that universal selector
+  stays.** It is not the class-scoping rule being broken. That rule is about
+  *appearance* -- a bare `p` or `a` reaches `/ui-kit`, every HTMX fragment and
+  every page added later -- while the box model is the arithmetic every width
+  rule in the file already assumed. Under the initial `content-box`,
+  `.ui-input`'s `width: 100%` plus `padding: 8px 12px` plus a 1px border came to
+  `100% + 26px`, so every field overflowed its panel by 26px. Applying it per
+  component would mean each new one had to remember to opt in.
+- **A control carries `max-width: 100%` and `min-width: 0` as well as
+  `width: 100%`.** The percentage is the fill; `max-width` is what an intrinsic
+  width cannot beat (a `size` attribute, a `<select>` sized by its longest
+  option), and `min-width: 0` removes the flex/grid `auto` floor that otherwise
+  refuses to let a field shrink into a narrow column.
+- **Use `overflow-wrap: anywhere`, never `break-word`.** Both let a long word
+  break, but only `anywhere` lowers the element's **min-content contribution**,
+  and that contribution is what a grid track or flex item sizes itself from. With
+  `break-word` the text wrapped correctly while the element still reported the
+  full URL as its minimum -- which is how `/logs` and 设置 → 系统 scrolled 340px
+  sideways on a phone. The application's own access-log lines contain URLs, so
+  this is default content and not an edge case.
+- **A grid/flex container that holds long text needs `min-width: 0` at both
+  ends.** `.ui-log-row` is an item of `.ui-log-list` *and* a container for its
+  own text, so it also carries `grid-template-columns: minmax(0, 1fr)`; fixing
+  only one end leaves the overflow.
+- **A control's width is a class, never an inline `style`.** `data-width="narrow"`
+  on `.ui-input` replaced a `style="width: 6em"`: inline it could not follow the
+  compact density, could not be corrected in one place, and was invisible to the
+  stylesheet.
+- **`/ui-kit` is not enough on its own for a layout bug.** Overflow only appears
+  at a viewport narrow enough to force it, so it was measured in a real browser
+  at 1440 / 1024 / 768 / 390 across all fourteen pages. Three static assertions
+  in `test_ui_shell.py` lock the values in; they cannot see a layout, which is
+  why the measurement is recorded here.
