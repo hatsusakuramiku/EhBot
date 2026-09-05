@@ -1,18 +1,15 @@
 ﻿from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 
 from app.db.database import Database
 from app.review.models import (
     METADATA_FIELDS,
     REVIEW_APPROVE,
-    REVIEW_EDIT_METADATA,
     REVIEW_NEEDS_REVISION,
     REVIEW_REJECT,
     REVIEW_REQUEUE,
-    REVIEWABLE_STATUSES,
     STATUS_APPROVED,
     STATUS_NEEDS_REVISION,
     STATUS_PENDING_REVIEW,

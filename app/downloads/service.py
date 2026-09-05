@@ -11,7 +11,6 @@ from app.connections.models import ProviderConnectionError
 from app.connections.telegram import TelegramBotApi
 from app.db.database import Database
 from app.downloads.models import (
-    ACTIVE_DOWNLOAD_STATES,
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_FAILED,
     DOWNLOAD_STATE_CANCELLED,
@@ -746,9 +745,75 @@ class DownloadService:
     async def start(self) -> None:
         if self._worker_task is not None:
             return
+        # Before the worker takes anything new, give back what a previous
+        # process was holding when it died. See `reclaim_expired_leases`.
+        await self.reclaim_expired_leases()
         self._worker_task = asyncio.create_task(
             self._run_worker(), name="download-worker"
         )
+
+    async def reclaim_expired_leases(self) -> int:
+        """Return jobs whose lease outlived the process that held it.
+
+        The lease columns were written and never read. `_claim_pending_job_sync`
+        stamps `lease_expires_at` five minutes out, but nothing ever compared it
+        to the clock, so a container killed mid-transfer left the row in
+        `DOWNLOADING` and the candidate in `PROCESSING` -- and every route back
+        was closed: the claim query only looks at `PENDING`, `retry_job` refuses
+        anything that is not FAILED / PAUSED / CANCELLED, `redownload_work`
+        refuses an open state, and `_enqueue` only revives FAILED / CANCELLED.
+        The book had no button anywhere that could move it, which is the same
+        dead end a failed download used to be.
+
+        Called from `start`, which is once per process and before the worker
+        claims anything: two workers cannot race here because there is one
+        worker per process and its own lease is not expired yet. The expiry is
+        what makes this safe rather than a blanket reset -- a live lease is left
+        alone, so this can never take a job away from a running transfer.
+
+        The candidate goes back to `APPROVED` rather than to `PENDING_REVIEW`:
+        it *was* approved, nobody withdrew that, and the only thing that failed
+        was the process. `attempt_count` is deliberately not decremented -- the
+        attempt happened, and a book that has been interrupted four times should
+        read as such.
+        """
+        reclaimed = await asyncio.to_thread(self._reclaim_expired_leases_sync)
+        if reclaimed:
+            # Warning, not info: this only happens after an unclean stop, and
+            # it is the one line that explains why a job's attempt count grew
+            # without a failure being recorded against it.
+            logging.getLogger(__name__).warning(
+                "download_leases_reclaimed jobs=%d",
+                reclaimed,
+                extra={"error_code": "DOWNLOAD_LEASE_RECLAIMED"},
+            )
+        return reclaimed
+
+    def _reclaim_expired_leases_sync(self) -> int:
+        with self._database.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, candidate_id FROM download_jobs "
+                "WHERE state = ? AND lease_expires_at IS NOT NULL "
+                "AND lease_expires_at < datetime('now')",
+                (DOWNLOAD_STATE_DOWNLOADING,),
+            ).fetchall()
+            for job_id, candidate_id in rows:
+                connection.execute(
+                    "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
+                    "lease_expires_at = NULL, retry_at = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (DOWNLOAD_STATE_PENDING, int(job_id)),
+                )
+                # Guarded by status so a candidate an operator has since moved
+                # on -- rejected it, or approved another source -- is not
+                # dragged back by a job row nobody is waiting for.
+                connection.execute(
+                    "UPDATE candidates SET status = 'APPROVED', "
+                    "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND status = 'PROCESSING'",
+                    (int(candidate_id),),
+                )
+        return len(rows)
 
     async def stop(self) -> None:
         if self._worker_task is None:

@@ -169,9 +169,14 @@ def _editor_row(node: dict[str, Any]) -> dict[str, str]:
 
     `HAS_ANY` / `HAS_ALL` join with 「, 」 because that is what
     `_parse_rule_condition` splits on, so a list rule survives an edit that does
-    not touch it. Everything else stringifies as it was stored: `Rating > 4.5`
-    keeps its `4.5` rather than becoming `4.5000000001` through a float round
-    trip, because the stored value is already the text the operator typed.
+    not touch it.
+
+    A numeric comparison is stored as a float, because `validate_rule_ast` calls
+    `float()` on it, so `Rating > 4` is on disk as `4.0`. A whole number is
+    written back without the fraction: the editor is showing an operator what
+    they typed, and 「4.0」 in the box they entered 「4」 into reads as though
+    something rewrote the rule. The value still saves as `4.0`, so this changes
+    what is displayed and nothing about what is matched.
     """
     if node.get("kind") == "regex":
         return {
@@ -185,6 +190,8 @@ def _editor_row(node: dict[str, Any]) -> dict[str, str]:
         rendered = ", ".join(str(item) for item in value)
     elif value is None:
         rendered = ""
+    elif isinstance(value, float) and value.is_integer():
+        rendered = str(int(value))
     else:
         rendered = str(value)
     return {

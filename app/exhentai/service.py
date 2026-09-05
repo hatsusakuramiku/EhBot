@@ -8,8 +8,6 @@ from pathlib import Path
 
 import httpx
 
-from app.connections.exhentai import ExHentaiCredentials
-from app.connections.models import ProviderConnectionError
 from app.db.database import Database
 from app.exhentai.downloader import (
     ExHentaiDownloadError,

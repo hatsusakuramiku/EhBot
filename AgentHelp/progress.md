@@ -2803,3 +2803,165 @@ colon and a slash on purpose.
 | `aria-pressed` on links, `aria-selected` on links, `aria-sort` on a button | States asserted on elements they are not defined for | `aria-current` on the links, `aria-sort` on the `<th>` |
 | Both overlays stole focus at page load and never moved it on open | `x-init` runs at initialisation, and the teleported markup initialises with the page | `$watch('open', …)` on the wrapper, focus returned to the trigger, dialog opens on 取消 |
 | An in-page jump landed under the sticky top bar | `scroll-padding-top` on a non-scrolling element, with a hardcoded 52px | `.ui-root { scroll-padding-top: var(--topbar-height) }` |
+
+## R16 — Three states nothing could leave, and a form that lied (v0.2.7, 2026-09-05)
+
+R15 named a shape: 「a state the interface could reach but not leave」. This
+session went looking for the rest of that shape in the parts R15 did not touch,
+which are the two worker queues and the batch the sweeper reads. Three of the
+four findings are the same bug in different rooms — a row a dead process left
+behind, with no code path that could pick it up again — and the fourth is the
+rule editor showing an operator a value they never typed.
+
+### 1. `lease_expires_at` was written and never read
+
+`_claim_pending_job_sync` has always stamped the lease five minutes out. Nothing
+ever compared it to the clock. A container killed mid-transfer therefore left the
+job row in `DOWNLOADING` and its candidate in `PROCESSING`, and every route back
+was closed by design: the claim query only reads `PENDING`, `retry_job` refuses
+anything that is not FAILED / PAUSED / CANCELLED, `redownload_work` refuses an
+open state, and `_enqueue` only revives FAILED / CANCELLED. The book had no
+button anywhere that could move it — the same dead end a failed download was
+before R15, reached by pulling the plug instead of by a provider error.
+
+`DownloadService.reclaim_expired_leases`, called from `start`, sends an
+**expired** lease back to `PENDING` and its candidate back to `APPROVED`. The
+expiry is the whole safety argument: a blanket reset of every `DOWNLOADING` row
+would hand a transfer that is still running to a second claimer, so a live lease
+is left alone and this can never take work away from a running worker. The
+candidate returns to `APPROVED` rather than `PENDING_REVIEW` because it *was*
+approved and nobody withdrew that; the only thing that failed was the process.
+`attempt_count` is not decremented — the attempt happened, and a book interrupted
+four times should read as such — which is also why the reclaim logs at warning
+level: it is the one line that explains an attempt count growing without a
+failure recorded against it.
+
+The candidate update is guarded on `status = 'PROCESSING'`, so a candidate the
+operator has since rejected is not dragged back by a job row nobody is waiting
+for. A restart must not quietly undo a decision.
+
+### 2. The packing queue had the same hole and no lease column to read
+
+`CONVERSION_RUNNING` survives a kill exactly the same way, and it is worse to be
+stuck in: remove, redownload, rename and re-path all guard on that state, so an
+interrupted pack locks the book out of its own detail page with 「该作品正在打包」
+about a pack that stopped hours ago.
+
+There is no lease column on this queue to expire. What stands in for one is that
+`ConversionService.reclaim_running_jobs` runs **inside `start`**, before this
+process's only conversion worker has claimed anything: a `CONVERSION_RUNNING` row
+at that moment cannot belong to anybody. It re-queues rather than fails, because
+packing is idempotent — it reads the archive artifact and republishes — so the
+honest answer to 「不知道它做完了没有」 is to do it again, where marking it failed
+would ask an operator to press retry for a failure that never happened.
+
+### 3. `SWEEP_BATCH_SIZE` was a window, not a cursor
+
+`pending_candidate_ids` answers newest-first, and the sweeper read it with a
+limit of 100. With a backlog bigger than the batch that is a window that never
+moves: every pass re-read the same newest page, a candidate no rule matched held
+its slot in it forever, and nothing older than the hundredth row was ever
+evaluated at all. The R15 sweeper looked like it swept a backlog across several
+passes; on a backlog large enough to need that, it swept the same hundred rows
+until somebody approved them by hand.
+
+`pending_candidate_ids(oldest_first=True)` makes the ceiling a queue — the
+candidate that has waited longest is examined next. The caller chooses, because
+the trial run wants the other order on purpose: an operator checking a rule is
+asking 「这条规则会命中刚到的东西吗」, which is about what just arrived.
+
+### 4. `Rating > 4` came back into the editor as `4.0`
+
+`validate_rule_ast` calls `float()` on a numeric comparison, so the stored value
+really is `4.0` and `editor_rows` was faithfully rendering it. But the editor's
+job is to show an operator what they typed, and a `.0` nobody entered reads as
+though something rewrote the rule — the same 「保存后变成别的东西」 suspicion the
+nested-group refusal exists to avoid. A whole number now renders without the
+fraction. Only the display changes; the value still saves as `4.0` and matches
+identically.
+
+### Also in this session
+
+- **`app/review/service.py` lost its CRLF line endings** on the way through an
+  editor, which is why its diff reads as a whole-file rewrite for what is two
+  deleted imports (`json`, `REVIEW_EDIT_METADATA`, `REVIEWABLE_STATUSES`). The
+  file keeps its BOM, so it is still on the seven-file list in R14's Not Done.
+- **Six unused imports removed** across `app/api/status.py`,
+  `app/connections/telegram.py`, `app/exhentai/service.py`,
+  `app/web/routes/downloaded.py` and `app/conversion/service.py` (which was
+  importing `SafetyLimits`, `safe_library_name`, three download states and
+  `METADATA_FIELDS` for nothing).
+- **标题来源 is documented as governing the path only.** ComicInfo's `<Title>`
+  stays the English title with `<JapaneseTitle>` beside it whichever way the
+  setting reads, and that is now written down in `app/archive/service.py` and in
+  `AGENTS.md` rather than being an accident of where the setting is read. The two
+  answer different questions: a path has to survive a filesystem, so it is a
+  preference, while ComicInfo is a record of what the gallery said.
+
+### Decisions
+
+- **Recovery runs in `start`, not in a periodic sweep.** A timer would need a
+  lease long enough to outlive a slow transfer and short enough to be useful,
+  which is a tuning problem; process start is the one moment when 「谁都没在跑」
+  is a fact rather than an estimate.
+- **The download queue keeps its lease check even though `start` is the only
+  caller.** The column exists, the five-minute stamp exists, and reading it costs
+  one indexed comparison. Ignoring it and resetting every `DOWNLOADING` row would
+  work today because there is one worker per process — and would be a silent
+  corruption the day that stops being true.
+- **The reclaim returns a count and logs only when it is non-zero.** A clean
+  restart should say nothing; an unclean one should be findable in the log
+  without grepping for the absence of a line.
+- **`oldest_first` is a keyword argument on the query, not a second method.**
+  Two methods differing by `ASC`/`DESC` is the kind of duplication that drifts;
+  the docstring carries why the sweeper needs one order and the trial run the
+  other.
+- **The trailing-zero trim is in `_editor_row` and nowhere near
+  `validate_rule_ast`.** Storing `4` as an int to make the display work would
+  change what the evaluator compares against. Display is a display problem.
+
+### Verification
+- Full suite: **1079 collected / 1067 passed / 12 skipped / 0 failed**
+  (1068 + 11 new), 1129 s. The 12 skips are `test_seven_zip_real.py`; this host
+  has no 7-Zip toolchain.
+- New tests: 4 for the download lease (an expired lease returns the job and its
+  candidate, a live lease is untouched, a candidate the operator rejected is not
+  dragged back, and `start` performs the reclaim before claiming), 4 for the
+  packing queue (a running row is requeued and claimable again, `PENDING` and
+  `COMPLETED` rows are untouched so the count means something, and `start`
+  reclaims first), 1 for the sweep order (a backlog of `SWEEP_BATCH_SIZE + 5`
+  proves the stranded rows a newest-first window cannot reach, then asserts the
+  sweeper visits the oldest batch in order), and 2 for the editor value
+  (`Rating > 4` reads back as `4`, `Rating >= 4.5` keeps its fraction). The
+  existing sweeper fake now asserts `oldest_first is True`, so a sweeper that
+  stopped asking would fail rather than silently pass.
+- Version bumped to `0.2.7` in `pyproject.toml` **and** `uv.lock`; the Dockerfile
+  runs `uv sync --frozen`, so a lockfile that disagrees fails the image build.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| A book stuck in 下载中 forever after an unclean restart, with no button that moved it | `lease_expires_at` was written by the claim and read by nothing; every recovery path refuses a `DOWNLOADING` row | `DownloadService.reclaim_expired_leases`, called from `start`: expired lease -> `PENDING`, candidate -> `APPROVED` |
+| A book stuck in 打包中 forever, refusing remove / redownload / rename / re-path | `CONVERSION_RUNNING` had no reclaim and no lease column | `ConversionService.reclaim_running_jobs` in `start`, before the single worker claims anything |
+| Auto-approval never reached an old candidate in a backlog over 100 | Newest-first plus `SWEEP_BATCH_SIZE` re-read the same page every pass | `pending_candidate_ids(oldest_first=True)` for the sweeper; the trial run keeps newest-first |
+| `Rating > 4` reappeared in the editor as `4.0` | `validate_rule_ast` stores a float and `_editor_row` rendered it verbatim | A whole-number float renders without its fraction; the stored value is unchanged |
+| Six imports referenced nothing | Left behind by earlier refactors | Removed |
+
+### Still Open For The Next Agent
+- **The suite takes ~19 minutes and the cause is argon2** (R14's note, unchanged):
+  ~0.7 s per hash, ~0.85 s per verify, and 179 `create_app(` sites each log in.
+  A cheap hasher in a session fixture, with the real parameters kept in
+  `test_authentication.py` alone, is the fix; it touches every integration
+  module's fixture, which is why it keeps being deferred.
+- **Seven files still carry a UTF-8 BOM** (`app/downloads/models.py`,
+  `app/review/service.py`, `app/exhentai/enrich.py`, `app/exhentai/tagdb_sync.py`,
+  `app/conversion/comicinfo.py`, `app/downloads/__init__.py`,
+  `tests/unit/test_tagdb.py`). Harmless to Python; `ast.parse` on the raw text
+  fails, so any tool that reads sources itself breaks on them.
+- **61 `noqa` codes name ruff rules no tool here checks.** Either configure ruff
+  or drop the codes.
+- **`local_save_path` is still unset in the live deployment**, so
+  `torrent_auto_pack` and the automatic-pack path cannot run until the
+  qBittorrent save directory is mounted and registered.
+- **`LOGGING_PROPOSAL.md` is the one open proposal**; R12-R14 implemented the
+  pipeline, not the whole document.

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.auto_approval.sweeper import AutoApprovalSweeper
+from app.auto_approval.sweeper import SWEEP_BATCH_SIZE, AutoApprovalSweeper
 from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
@@ -166,7 +166,12 @@ def test_one_unapprovable_candidate_does_not_stop_the_sweep() -> None:
     """
 
     class FakeDatabase:
-        async def pending_candidate_ids(self, limit: int = 100) -> tuple[int, ...]:
+        async def pending_candidate_ids(
+            self, limit: int = 100, *, oldest_first: bool = False
+        ) -> tuple[int, ...]:
+            # The sweeper asks for oldest-first, so the fake has to accept it or
+            # this test would pass against a sweeper that stopped asking.
+            assert oldest_first is True
             return (1, 2, 3)
 
     class FakeOrchestrator:
@@ -190,3 +195,59 @@ def test_one_unapprovable_candidate_does_not_stop_the_sweep() -> None:
 
     assert asyncio.run(sweeper.sweep_once()) == 2
     assert orchestrator.seen == [1, 2, 3]
+
+
+def test_the_sweep_reads_the_oldest_candidates_first(tmp_path: Path) -> None:
+    """A batch ceiling only works as a queue if the oldest row is next.
+
+    `pending_candidate_ids` answers newest-first for the trial run, which reads
+    「这条规则会命中刚到的东西吗」. For the sweeper that order is a window that
+    never moves: with more pending candidates than `SWEEP_BATCH_SIZE`, every pass
+    re-read the same newest page, so a candidate no rule matched sat at the top of
+    it forever and everything older than the hundredth row was never evaluated at
+    all. The sweeper therefore asks for the other order.
+    """
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(_seed_candidate(database))
+
+    def _add_pending(count: int) -> None:
+        with database._connect() as connection:  # noqa: SLF001
+            for _ in range(count):
+                connection.execute(
+                    "INSERT INTO candidates (status, filter_result, filter_reason) "
+                    "VALUES ('PENDING_REVIEW', 'ACCEPT', '')"
+                )
+
+    _add_pending(SWEEP_BATCH_SIZE + 5)
+
+    newest = asyncio.run(database.pending_candidate_ids(limit=SWEEP_BATCH_SIZE))
+    oldest = asyncio.run(
+        database.pending_candidate_ids(
+            limit=SWEEP_BATCH_SIZE, oldest_first=True
+        )
+    )
+
+    assert len(newest) == len(oldest) == SWEEP_BATCH_SIZE
+    # The five oldest rows are the ones a newest-first window could never reach.
+    stranded = set(oldest) - set(newest)
+    assert stranded, "a full batch must leave older rows outside the window"
+
+    seen: list[int] = []
+
+    class RecordingOrchestrator:
+        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+            seen.append(candidate_id)
+            return False
+
+    class FakeSettings:
+        async def auto_approval_interval_minutes(self) -> int:
+            return 30
+
+    sweeper = AutoApprovalSweeper(
+        database, RecordingOrchestrator(), FakeSettings()
+    )
+    assert asyncio.run(sweeper.sweep_once()) == 0
+
+    assert seen == list(oldest)
+    assert stranded <= set(seen)

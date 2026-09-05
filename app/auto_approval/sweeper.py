@@ -56,6 +56,12 @@ DISABLED_RECHECK_SECONDS = 60.0
 #: backlog larger than this is swept across several passes rather than in one
 #: long transaction, which keeps a first run on a big database from holding the
 #: event loop while it approves five thousand books.
+#:
+#: Several passes only work because the batch is read oldest-first. Newest-first
+#: plus a limit is a window that never moves: a candidate no rule matches sits at
+#: the top of it forever and everything older than the hundredth row is never
+#: evaluated at all. Oldest-first makes the ceiling a queue -- the candidate that
+#: has waited longest is the one examined next.
 SWEEP_BATCH_SIZE = 100
 
 
@@ -130,7 +136,7 @@ class AutoApprovalSweeper:
         rule matches, so this method does not need to know what a rule is.
         """
         candidate_ids = await self._database.pending_candidate_ids(
-            limit=SWEEP_BATCH_SIZE
+            limit=SWEEP_BATCH_SIZE, oldest_first=True
         )
         if not candidate_ids:
             return 0

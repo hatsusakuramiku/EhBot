@@ -13,7 +13,6 @@ from app.archive.errors import (
     ArchivePasswordRequired,
     ArchiveVolumesMissing,
 )
-from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
 from app.archive.quality import quality_note
 from app.archive.service import ArchiveSettingsService, TITLE_SOURCE_JAPANESE
@@ -27,7 +26,6 @@ from app.conversion.naming import (
     check_library_segment,
     plan_library_path,
     render_library_path,
-    safe_library_name,
     unique_library_target,
 )
 from app.db.database import Database
@@ -40,16 +38,10 @@ from app.downloads.models import (
     CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
     DOWNLOAD_STATE_COMPLETED,
-    DOWNLOAD_STATE_FAILED,
-    DOWNLOAD_STATE_PENDING,
     PROVIDER_CONVERSION,
     RECOVERABLE_CONVERSION_STATES,
-    DownloadState,
 )
-from app.review.models import (
-    METADATA_FIELDS,
-    STATUS_APPROVED,
-)
+from app.review.models import STATUS_APPROVED
 
 
 def _title_values(
@@ -432,9 +424,54 @@ class ConversionService:
     async def start(self) -> None:
         if self._worker_task is not None:
             return
+        await self.reclaim_running_jobs()
         self._worker_task = asyncio.create_task(
             self._run_worker(), name="conversion-worker"
         )
+
+    async def reclaim_running_jobs(self) -> int:
+        """Return packaging jobs a dead process left mid-run to the queue.
+
+        The download queue answers this question with `lease_expires_at`; this
+        one has no lease column to read, because `_claim_pending_job_sync` here
+        never wrote one. What stands in for it is the single fact that makes the
+        lease unnecessary: there is one conversion worker per process, and this
+        runs inside `start`, before that worker has claimed anything. A
+        `CONVERSION_RUNNING` row at this moment therefore cannot belong to
+        anybody -- it is always the residue of a process that died holding it.
+
+        Without this the row stayed `CONVERSION_RUNNING` forever, and every
+        operator action on the work refused with 「该作品正在打包」: remove,
+        redownload, rename and re-path all guard on that state, so an
+        interrupted pack locked the book out of its own detail page.
+
+        Re-queued rather than failed. Packing is idempotent -- it reads the
+        archive artifact and republishes -- so the honest outcome of 「我们不知道
+        它做完了没有」 is to do it again, where marking it failed would ask an
+        operator to press retry for a failure that never happened.
+        """
+        reclaimed = await asyncio.to_thread(self._reclaim_running_jobs_sync)
+        if reclaimed:
+            logging.getLogger(__name__).warning(
+                "conversion_jobs_reclaimed jobs=%d",
+                reclaimed,
+                extra={"error_code": "CONVERSION_JOB_RECLAIMED"},
+            )
+        return reclaimed
+
+    def _reclaim_running_jobs_sync(self) -> int:
+        with self._database.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE download_jobs SET state = ?, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE state = ? AND provider = ?",
+                (
+                    CONVERSION_STATE_PENDING,
+                    CONVERSION_STATE_RUNNING,
+                    PROVIDER_CONVERSION,
+                ),
+            )
+            return int(cursor.rowcount or 0)
 
     async def stop(self) -> None:
         if self._worker_task is None:

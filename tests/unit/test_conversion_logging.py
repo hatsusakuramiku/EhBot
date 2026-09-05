@@ -62,6 +62,33 @@ async def _seed_pending_job(database: Database, tmp_path: Path) -> tuple[int, in
     return await asyncio.to_thread(_seed)
 
 
+async def _state_of(database: Database, job_id: int) -> str:
+    def _read() -> str:
+        with database._connect() as conn:
+            row = conn.execute(
+                "SELECT state FROM download_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return str(row[0])
+    return await asyncio.to_thread(_read)
+
+
+async def _set_state(database: Database, job_id: int, state: str) -> None:
+    """Put a row in one state, connecting inside the worker thread.
+
+    Separate from `_force_state` because that one opens the connection on the
+    event loop and hands `.execute` to a thread, which sqlite3 refuses -- a
+    connection may only be used by the thread that created it.
+    """
+    def _write() -> None:
+        with database._connect() as conn:
+            conn.execute(
+                "UPDATE download_jobs SET state = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (state, job_id),
+            )
+    await asyncio.to_thread(_write)
+
+
 async def _force_state(database: Database, job_id: int, state: str,
                        code: str | None = None, message: str | None = None) -> None:
     """Transition a row to a terminal state directly, bypassing _handle_job.
@@ -190,3 +217,59 @@ async def test_handle_job_pinned_path_rejection_keeps_original_traceback(
     assert caught
     assert caught[0].exc_info is not None
     assert caught[0].exc_info[1].__class__.__name__ == "LibraryPathError"
+
+
+class TestReclaimingAnInterruptedPack:
+    """A `CONVERSION_RUNNING` row at startup belongs to nobody.
+
+    There is no lease column on this queue, so what stands in for one is the
+    fact that `reclaim_running_jobs` runs inside `start`, before this process's
+    only conversion worker has claimed anything. Left alone, the row stayed
+    `CONVERSION_RUNNING` forever and the four `WORK_PACK_RUNNING` guards refused
+    remove, redownload, rename and re-path -- an interrupted pack locked the book
+    out of its own detail page.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_running_pack_is_requeued(self, tmp_path) -> None:
+        service = await _make_service(tmp_path)
+        job_id, _ = await _seed_pending_job(service._database, tmp_path)
+        await _set_state(service._database, job_id, "CONVERSION_RUNNING")
+
+        assert await service.reclaim_running_jobs() == 1
+
+        assert await _state_of(service._database, job_id) == "CONVERSION_PENDING"
+        # Requeued rather than failed: packing is idempotent, so doing it again
+        # is the honest answer to 「不知道它做完了没有」.
+        assert service._claim_pending_job_sync() is not None
+
+    @pytest.mark.asyncio
+    async def test_a_pending_pack_is_untouched(self, tmp_path) -> None:
+        """Only the claimed state is reclaimed, so the count means something."""
+        service = await _make_service(tmp_path)
+        job_id, _ = await _seed_pending_job(service._database, tmp_path)
+
+        assert await service.reclaim_running_jobs() == 0
+        assert await _state_of(service._database, job_id) == "CONVERSION_PENDING"
+
+    @pytest.mark.asyncio
+    async def test_a_completed_pack_is_not_run_again(self, tmp_path) -> None:
+        service = await _make_service(tmp_path)
+        job_id, _ = await _seed_pending_job(service._database, tmp_path)
+        await _set_state(service._database, job_id, "CONVERSION_COMPLETED")
+
+        assert await service.reclaim_running_jobs() == 0
+        assert await _state_of(service._database, job_id) == "CONVERSION_COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_starting_the_worker_reclaims_first(self, tmp_path) -> None:
+        """`start` is the only caller, so the recovery cannot be forgotten."""
+        service = await _make_service(tmp_path)
+        job_id, _ = await _seed_pending_job(service._database, tmp_path)
+        await _set_state(service._database, job_id, "CONVERSION_RUNNING")
+
+        await service.start()
+        try:
+            assert await _state_of(service._database, job_id) != "CONVERSION_RUNNING"
+        finally:
+            await service.stop()

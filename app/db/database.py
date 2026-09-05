@@ -2103,14 +2103,30 @@ class Database:
             metadata.setdefault(str(field_name), str(field_value))
         return metadata
 
-    async def pending_candidate_ids(self, limit: int = 100) -> tuple[int, ...]:
-        return await asyncio.to_thread(self._pending_candidate_ids_sync, limit)
+    async def pending_candidate_ids(
+        self, limit: int = 100, *, oldest_first: bool = False
+    ) -> tuple[int, ...]:
+        """Candidates awaiting review, newest first unless asked otherwise.
 
-    def _pending_candidate_ids_sync(self, limit: int) -> tuple[int, ...]:
+        `oldest_first` exists for `AutoApprovalSweeper` and is not a preference.
+        Newest-first plus a `LIMIT` is a window, not a cursor: with more pending
+        candidates than the batch size, every sweep re-read the same newest page
+        and a candidate that fell out of it was never evaluated again -- a rule
+        would simply never see the oldest book in a backlog. A trial run wants
+        the opposite order, because what an operator is checking is the rule
+        against what just arrived, so the caller says which it needs.
+        """
+        return await asyncio.to_thread(
+            self._pending_candidate_ids_sync, limit, oldest_first
+        )
+
+    def _pending_candidate_ids_sync(
+        self, limit: int, oldest_first: bool = False
+    ) -> tuple[int, ...]:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id FROM candidates WHERE status = 'PENDING_REVIEW' "
-                "ORDER BY id DESC LIMIT ?",
+                "ORDER BY id " + ("ASC" if oldest_first else "DESC") + " LIMIT ?",
                 (limit,),
             ).fetchall()
         return tuple(int(row[0]) for row in rows)

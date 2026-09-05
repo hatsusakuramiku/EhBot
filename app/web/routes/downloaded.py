@@ -36,7 +36,7 @@ from app.api.downloaded import (
     downloaded_snapshot,
 )
 from app.api.events import EVENT_DOWNLOAD
-from app.api.status import DOWNLOADED_TAB_STATUS, downloaded_tab_view
+from app.api.status import downloaded_tab_view
 from app.db.database import DOWNLOADED_PACK_FILTERS
 from app.web import deps
 

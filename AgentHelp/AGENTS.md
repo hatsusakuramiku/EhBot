@@ -80,16 +80,16 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1068 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1079 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1068 on a machine that has one and 1056 with
+`data/tools/7zip/`, so `passed` is 1079 on a machine that has one and 1067 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068. There is no R7 — that number was the library domain,
-deleted on 2026-08-26; its narrow replacement is R10.)
+-> R14 1039 -> R15 1068 -> R16 1079. There is no R7 — that number
+was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
 all of it is argon2: `PasswordHash.recommended()` costs ~0.7 s per hash and
@@ -175,6 +175,28 @@ operator navigation).
   call is a latency optimisation and must stay optional. It re-reads its interval
   every pass, so 「保存即生效」 holds without a restart — do not capture the
   setting at construction.
+- **The sweep reads the pending queue oldest-first; a trial run reads it
+  newest-first.** `pending_candidate_ids(oldest_first=True)` is not a preference.
+  Newest-first plus `SWEEP_BATCH_SIZE` is a window that never moves: with a
+  backlog bigger than the batch, every pass re-read the same newest page, a
+  candidate no rule matched held its slot forever, and nothing older than the
+  hundredth row was ever evaluated. Oldest-first makes the ceiling a queue. The
+  trial run keeps the other order on purpose — an operator checking a rule is
+  asking about what just arrived.
+- **A claimed job is reclaimed at startup, and the expiry is what makes that
+  safe.** `lease_expires_at` was written by `_claim_pending_job_sync` and read by
+  nothing, so a container killed mid-transfer left the row `DOWNLOADING` and the
+  candidate `PROCESSING` with no button anywhere that could move it: the claim
+  query only reads `PENDING`, `retry_job` refuses a running job,
+  `redownload_work` refuses an open state, and `_enqueue` only revives FAILED /
+  CANCELLED. `DownloadService.reclaim_expired_leases` (called from `start`) sends
+  an **expired** lease back to `PENDING` and its candidate back to `APPROVED`;
+  never reset a live one, or a running transfer gets handed out twice.
+  `ConversionService.reclaim_running_jobs` is the same recovery for the packing
+  queue, which has no lease column — what stands in for one is that it runs
+  inside `start`, before this process's only conversion worker has claimed
+  anything, so a `CONVERSION_RUNNING` row at that moment belongs to nobody. It
+  re-queues rather than fails, because packing is idempotent.
 - **Which statuses an action may act on comes from `statuses_allowing(action)`
   (`app/review/models.py`).** `REVIEWABLE_STATUSES` covers approve / reject /
   needs-revision; `REQUEUEABLE_STATUSES` adds `FAILED`, because a failed download
@@ -188,6 +210,11 @@ operator navigation).
   one attempt history rather than splitting across rows. Re-fetching a finished
   book is `redownload_work`'s explicit decision (it bumps `attempt_count`), and
   re-pending a row the worker holds would hand the same transfer out twice.
+- **标题来源 governs the path, never ComicInfo.** `<Title>` stays the English
+  title with `<JapaneseTitle>` beside it whichever way the setting reads. A path
+  has to survive a filesystem, so it is a preference; ComicInfo is a record of
+  what the gallery said, and a setting that rewrote it would change the archive's
+  contents to fix a filename.
 - **A path template resolves `{title}` through the 标题来源 setting, and
   `{japanese_title}` / `{english_title}` never fall back across languages.** An
   ExHentai English title routinely carries `:` and `/`, which is why Japanese is

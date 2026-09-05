@@ -244,3 +244,44 @@ def test_editor_rows_refuses_a_nested_group() -> None:
     )
 
     assert editor_rows(ast) is None
+
+
+def test_a_whole_number_comparison_reads_back_without_a_fraction() -> None:
+    """`Rating > 4` must not come back into the form as `4.0`.
+
+    `validate_rule_ast` calls `float()` on a numeric comparison, so the stored
+    value really is `4.0`. The editor is showing an operator what they typed, and
+    a `.0` nobody entered reads as though something rewrote the rule. Only the
+    display changes -- what is matched is still the float.
+    """
+    ast = validate_rule_ast(
+        {
+            "kind": "condition",
+            "field": "Rating",
+            "operator": ">",
+            "value": "4",
+        }
+    )
+    assert ast["value"] == 4.0
+
+    decomposed = editor_rows(ast)
+    assert decomposed is not None
+    _, rows = decomposed
+    assert rows[0]["value"] == "4"
+
+
+def test_a_fractional_comparison_keeps_its_fraction() -> None:
+    """The trailing-zero trim must not round a real decimal away."""
+    ast = validate_rule_ast(
+        {
+            "kind": "condition",
+            "field": "Rating",
+            "operator": ">=",
+            "value": "4.5",
+        }
+    )
+
+    decomposed = editor_rows(ast)
+    assert decomposed is not None
+    _, rows = decomposed
+    assert rows[0]["value"] == "4.5"

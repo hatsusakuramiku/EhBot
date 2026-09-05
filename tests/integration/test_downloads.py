@@ -566,3 +566,116 @@ async def test_a_lower_priority_value_is_claimed_first(tmp_path: Path) -> None:
 
     assert claimed == [urgent, normal, later]
     assert service._claim_pending_job_sync() is None  # noqa: SLF001
+
+
+class TestReclaimingAnAbandonedLease:
+    """What happens to a job the process died holding.
+
+    `_claim_pending_job_sync` stamps `lease_expires_at` five minutes out, and
+    until now nothing ever read it back. A container killed mid-transfer left the
+    row in `DOWNLOADING` and the candidate in `PROCESSING`, and every route back
+    was closed -- the claim query only reads `PENDING`, `retry_job` refuses a
+    running job, `redownload_work` refuses an open state, and `_enqueue` only
+    revives FAILED / CANCELLED. The book had no button that could move it.
+    """
+
+    @staticmethod
+    def _expire_lease(database: Database, job_id: int) -> None:
+        """Put the job where an unclean shutdown leaves it.
+
+        Written directly rather than by killing a worker: the state under test
+        is a row nobody owns, and the only honest way to produce it in-process
+        is to state it.
+        """
+        with database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE download_jobs SET state = 'DOWNLOADING', "
+                "lease_owner = 'worker', "
+                "lease_expires_at = datetime('now', '-1 minute') "
+                "WHERE id = ?",
+                (job_id,),
+            )
+            connection.execute(
+                "UPDATE candidates SET status = 'PROCESSING' "
+                "WHERE id = (SELECT candidate_id FROM download_jobs WHERE id = ?)",
+                (job_id,),
+            )
+
+    @pytest.mark.asyncio
+    async def test_an_expired_lease_returns_the_job_to_the_queue(
+        self, tmp_path: Path
+    ) -> None:
+        database = Database(tmp_path / "ehbot.db")
+        service = DownloadService(database, tmp_path / "work")
+        candidate_id, job_id = await approved_job(database, service)
+        self._expire_lease(database, job_id)
+
+        assert await service.reclaim_expired_leases() == 1
+
+        assert job_state(database, job_id) == DOWNLOAD_STATE_PENDING
+        candidate = await database.get_candidate(candidate_id)
+        assert candidate.status == "APPROVED"
+        # The point of the reclaim: the worker can pick it up again.
+        assert service._claim_pending_job_sync() is not None  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_a_live_lease_is_left_alone(self, tmp_path: Path) -> None:
+        """The expiry is what makes this safe to run at startup.
+
+        A blanket reset of every `DOWNLOADING` row would hand a transfer that is
+        still running to a second claimer.
+        """
+        database = Database(tmp_path / "ehbot.db")
+        service = DownloadService(database, tmp_path / "work")
+        _, job_id = await approved_job(database, service)
+        with database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE download_jobs SET state = 'DOWNLOADING', "
+                "lease_owner = 'worker', "
+                "lease_expires_at = datetime('now', '+5 minutes') "
+                "WHERE id = ?",
+                (job_id,),
+            )
+
+        assert await service.reclaim_expired_leases() == 0
+        assert job_state(database, job_id) == "DOWNLOADING"
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_the_operator_moved_on_is_not_dragged_back(
+        self, tmp_path: Path
+    ) -> None:
+        """Only a `PROCESSING` candidate follows its job back to the queue.
+
+        A rejection after the process died is a decision, and a restart must not
+        quietly undo it.
+        """
+        database = Database(tmp_path / "ehbot.db")
+        service = DownloadService(database, tmp_path / "work")
+        candidate_id, job_id = await approved_job(database, service)
+        self._expire_lease(database, job_id)
+        with database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE candidates SET status = 'REJECTED' WHERE id = ?",
+                (candidate_id,),
+            )
+
+        assert await service.reclaim_expired_leases() == 1
+
+        candidate = await database.get_candidate(candidate_id)
+        assert candidate.status == "REJECTED"
+
+    @pytest.mark.asyncio
+    async def test_starting_the_worker_reclaims_first(
+        self, tmp_path: Path
+    ) -> None:
+        """`start` is the only caller, so the recovery cannot be forgotten."""
+        database = Database(tmp_path / "ehbot.db")
+        service = DownloadService(database, tmp_path / "work")
+        _, job_id = await approved_job(database, service)
+        self._expire_lease(database, job_id)
+
+        await service.start()
+        try:
+            assert job_state(database, job_id) != "DOWNLOADING"
+        finally:
+            await service.stop()

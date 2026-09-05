@@ -61,6 +61,14 @@ SETTING_LIBRARY_TEMPLATE = "library_template"
 #: `{title}` used to be `Title` unconditionally. It is safe because the fallback
 #: chain never leaves a book unnamed -- a gallery with no `title_jpn` renders its
 #: `Title`, exactly as before.
+#:
+#: **This setting governs the path and not the metadata.** ComicInfo's `<Title>`
+#: stays the English `Title` with the Japanese one beside it in
+#: `<JapaneseTitle>`, whichever way this is set. The two answer different
+#: questions: a path has to survive a filesystem, so it is a preference, while
+#: ComicInfo is a record of what the gallery said and a reader that shows the
+#: wrong field is a reader problem. Making the metadata follow this would mean a
+#: setting silently rewrote the archive's contents.
 SETTING_TITLE_SOURCE = "library_title_source"
 
 #: `japanese` prefers `JapaneseTitle` and falls back to `Title`; `english` is the
