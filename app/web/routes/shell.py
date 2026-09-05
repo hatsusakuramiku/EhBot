@@ -118,7 +118,7 @@ class NavItem:
         return not self.children and self.matches(current_path)
 
 
-#: The five domains, each carrying the pages it absorbed. 已下载 sits between
+#: The six domains, each carrying the pages it absorbed. 已下载 sits between
 #: 活动 and 设置: it was cut on 2026-08-26 as「书库纳管」and reinstated on
 #: 2026-08-28 by operator instruction, scoped to what §1.3.1 of the requirements
 #: document actually asks for -- listing what has been downloaded and acting on
@@ -272,6 +272,11 @@ NAV_ITEMS: tuple[NavItem, ...] = (
             ),
         ),
     ),
+    #: 运行日志 is a leaf: it has no sections, because a level floor is a filter
+    #: on one view and not a second page. It sits before 设置 because it is an
+    #: observation surface and 设置 is a configuration one -- an operator watching
+    #: a job fail is not in the middle of changing a setting.
+    NavItem("logs", "运行日志", "日志", "/logs", "/logs", icon="≡"),
     NavItem(
         "settings",
         "设置",

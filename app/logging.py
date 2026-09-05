@@ -35,6 +35,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.logs.broker import BufferHandler, LogBroker
+
 
 _AUTHORIZATION = re.compile(
     r"(?i)(\bauthorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+"
@@ -94,6 +96,25 @@ _UVICORN_LOGGERS: tuple[str, ...] = ("uvicorn", "uvicorn.error", "uvicorn.access
 #: applications would clear the root handlers repeatedly, so whether a record
 #: was captured depended on construction order.
 _CONFIGURED = False
+
+#: The in-memory tail every application in this process shares.
+#:
+#: Module level, not per application, because the thing it buffers is process
+#: wide: the root logger is a singleton, so a second broker would either receive
+#: nothing or double every record. `create_app` publishes this object on
+#: `app.state.log_broker`, which is how a route reaches it without importing
+#: from here.
+#:
+#: It is created eagerly and outlives `configure_logging`, so the records logged
+#: between interpreter start and the first configure call are not lost -- and so
+#: a test that reconfigures logging does not invalidate a reference a running
+#: application already holds.
+_BROKER = LogBroker()
+
+
+def log_broker() -> LogBroker:
+    """The process's log buffer."""
+    return _BROKER
 
 
 def new_request_id() -> str:
@@ -228,10 +249,17 @@ def configure_logging(
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(JsonFormatter())
 
+    # Fed the formatter's own output, so the in-app tail, the file and stdout
+    # carry byte-identical records -- redaction included, because it happens in
+    # the formatter and there is only one of those.
+    buffer_handler = BufferHandler(_BROKER)
+    buffer_handler.setFormatter(JsonFormatter())
+
     root_logger = logging.getLogger()
     for existing in list(root_logger.handlers):
         root_logger.removeHandler(existing)
     root_logger.addHandler(stream_handler)
+    root_logger.addHandler(buffer_handler)
 
     failed_log_dir: Path | None = None
     if log_dir is not None:

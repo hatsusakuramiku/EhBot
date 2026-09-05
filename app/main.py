@@ -22,7 +22,7 @@ from app.api.v1 import router as api_v1_router
 from app.config import Settings
 from app.db.database import Database
 from app.errors import AppError, app_error_handler
-from app.logging import configure_logging
+from app.logging import configure_logging, log_broker
 from app.session_secret import resolve_session_secret
 from app.web.rendering import STATIC_DIR, build_templates
 from app.web.request_id import RequestIdMiddleware
@@ -35,6 +35,7 @@ from app.web.routes.connections import router as connections_router
 from app.web.routes.dashboard import router as dashboard_router
 from app.web.routes.downloaded import router as downloaded_router
 from app.web.routes.health import router as health_router
+from app.web.routes.logs import router as logs_router
 from app.web.routes.manual_add import router as manual_add_router
 from app.web.routes.settings_pages import router as settings_router
 from app.web.routes.ui_kit import router as ui_kit_router
@@ -98,6 +99,11 @@ def create_app(
     # applications in one test session cannot share a lockout.
     app.state.login_attempts = {}
     app.state.templates = build_templates()
+    # The process's log buffer, published so a route reads it off state like
+    # every other service. Deliberately the module-level singleton and not a new
+    # instance per application: the root logger it is fed from is process wide,
+    # so a second broker would receive nothing.
+    app.state.log_broker = log_broker()
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_middleware(
@@ -136,6 +142,9 @@ def create_app(
     # keeps it beside the other domain pages.
     app.include_router(downloaded_router)
     app.include_router(settings_router)
+    # A single literal path with no parameters, so its position is free; kept
+    # beside 设置 because that is where it sits in the navigation.
+    app.include_router(logs_router)
     app.include_router(ui_kit_router)
     app.include_router(connections_router)
     app.include_router(auth_router)

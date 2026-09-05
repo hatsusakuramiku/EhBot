@@ -1329,6 +1329,28 @@
 /* Every rule here is class-scoped, like the rest of the file: a bare `pre` or
    `time` rule would reach /ui-kit and every fragment HTMX swaps in. */
 
+/* The 运行日志 page's toolbar (R16). The level selector and the live controls
+   are one row that wraps, so a phone gets two rows without a media query. */
+.ui-log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+}
+
+.ui-log-filter { display: flex; align-items: center; gap: var(--s-2); }
+.ui-log-filter-label { color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-log-live { display: flex; align-items: center; gap: var(--s-3); }
+
+/* `tabular-nums` because this text counts ("已暂停，12 条待显示") and a
+   proportional digit makes the row twitch on every increment. */
+.ui-log-status {
+  color: var(--t-ink-muted);
+  font-size: var(--font-small);
+  font-variant-numeric: tabular-nums;
+}
+
 .ui-log-levels { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: var(--s-4) 0; }
 
 .ui-log-level {

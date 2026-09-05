@@ -66,6 +66,7 @@ def test_exactly_one_item_in_the_whole_tree_is_ever_current() -> None:
         "/activity",
         "/activity/packing",
         "/activity/history",
+        "/logs",
         "/settings/connections",
         "/settings/sources",
         "/settings/auto-approval",
@@ -102,6 +103,7 @@ def test_every_live_page_resolves_to_exactly_one_domain() -> None:
         "/activity",
         "/activity/packing",
         "/activity/history",
+        "/logs",
         "/settings/connections",
         "/settings/sources",
         "/settings/auto-approval",
@@ -112,6 +114,20 @@ def test_every_live_page_resolves_to_exactly_one_domain() -> None:
     ):
         matched = [item for item in NAV_ITEMS if item.is_active(path)]
         assert len(matched) == 1, f"{path} matched {[i.key for i in matched]}"
+
+
+def test_the_log_page_is_a_leaf_with_no_sections() -> None:
+    """A level floor is a filter on one view, not a second page.
+
+    Giving it children would put sidebar entries that are the same URL with a
+    query string, and `is_current` would then have to pick one of them as the
+    current page on a view that has no such notion.
+    """
+    logs = next(item for item in NAV_ITEMS if item.key == "logs")
+    assert logs.children == ()
+    assert logs.is_current("/logs")
+    # `/logs-archive` shares a string prefix and is not this page.
+    assert not logs.matches("/logs-archive")
 
 
 def test_active_domain_returns_none_off_the_tree() -> None:

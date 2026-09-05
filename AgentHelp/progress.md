@@ -2965,3 +2965,174 @@ identically.
   qBittorrent save directory is mounted and registered.
 - **`LOGGING_PROPOSAL.md` is the one open proposal**; R12-R14 implemented the
   pipeline, not the whole document.
+
+## R17 — 运行日志: a live log page (v0.2.8, 2026-09-05)
+
+Operator request: 「新增一页，运行日志，实时查看 ehbot 的运行日志，可自选等级，默认 Info」,
+with AstrBot's log service named as the reference. What existed was R12's tail
+panel on 「设置 → 系统」, which reads the file on disk when the page is rendered.
+Two things it cannot do, and both are the request: it is not live, and it needs
+the file to exist -- so the deployment with `LOG_TO_FILE=false`, or the one whose
+data directory turned read-only, has no log view at all, which is precisely the
+deployment where an operator most needs one.
+
+### What AstrBot does, and what was taken from it
+
+Its `LogBroker` is a `deque(maxlen=200)` plus a set of subscriber queues, fed by
+a `logging.Handler`, with the web layer serving the buffer over a live connection.
+That shape is right and it is the shape here: an in-memory ring buffer is what
+makes a log page instant and independent of the filesystem.
+
+What was **not** taken: its handler formats for display and the buffer holds that
+string. This project already has exactly one place where a credential is removed
+-- `JsonFormatter.format` -- and a second formatting path would be a second place
+for one to escape. So `BufferHandler` is given `JsonFormatter` and buffers its
+output verbatim: the buffer, the file and stdout carry byte-identical records.
+
+### 1. `app/logs/broker.py` — the buffer and the fan-out
+
+`LogBroker` holds the newest `BUFFER_SIZE` (1000) formatted lines and offers each
+to every subscriber's bounded queue. The shape deliberately mirrors
+`app/api/events.py`: `publish` never awaits and never raises, a slow subscriber
+loses its oldest queued record rather than stalling the thread that logged, and
+`stream()` removes its subscription in a `finally` so a disconnect cannot leak.
+
+**The bug that shaped the module: `asyncio.Queue` is not thread safe.** The first
+version called `put_nowait` from `publish`, and `publish` runs on whatever thread
+logged -- which in this application is usually a worker thread, because every
+database read runs under `asyncio.to_thread` and both worker loops log from
+there. The record was appended to the queue's deque without ever waking the
+coroutine waiting in `get()`, so the frame sat there until the next keepalive
+timeout expired: a 「实时」 page that was up to fifteen seconds late and only
+arrived by accident. It was found by an end-to-end smoke run that timed out, not
+by a unit test, which is why there is now a test that publishes from a real
+thread with a two-second deadline.
+
+Delivery therefore goes through `loop.call_soon_threadsafe`, and each subscriber
+carries the loop its queue belongs to. `_Subscriber` is `eq=False` so identity
+hashing survives two structurally identical entries, and the buffer plus the
+sequence counter are under a `threading.Lock` because they are now genuinely
+shared across threads.
+
+**The replay is what makes a reconnect seamless.** `stream(replay=N)` registers
+the subscription *before* taking the buffer snapshot, so a record logged during
+the replay is queued rather than lost in the gap -- and then skips any sequence it
+already replayed, so it is not shown twice. Both halves are needed; either alone
+is a visible defect.
+
+### 2. The level selector is a floor, and it does not change the process
+
+`read_log_tail` gained `min_level` beside the existing `level`. They answer
+different questions and both are kept: `level` is 「只看这一个级别」, which is what
+the 系统 tab's filter links have always meant, and `min_level` is 「这个级别及以
+上」, which is what a log viewer's selector means everywhere else. A 「警告」 that
+hid the errors would be a filter that loses evidence on the page that exists for
+the moment evidence matters.
+
+`passes_min_level` lets an **unclassifiable** line through every floor -- a
+crash's partial write, or a dependency's custom level. Hiding what cannot be
+sorted would make the selector a way to lose exactly what an operator is hunting.
+
+**The selector does not touch the runtime threshold.** A `set_runtime_level` was
+written and then deleted: `AGENTS.md` records that the level is deployment state
+because a level living in the interface cannot be raised to debug the startup
+that failed before the interface came up. So the page reports the configured
+level instead, and a floor below it reads as 「没有更多可看」 rather than as a
+filter that broke.
+
+### 3. `/logs` is a page, not a settings tab
+
+设置 is where a deployment is configured; this is where it is observed, and an
+operator watching a download fail is not in the middle of changing a setting. It
+is also the only page whose content arrives continuously, so it owns a stream
+subscription and a 暂停 control that no settings tab should have to carry.
+
+The 系统 tab keeps its panel. That is not a leftover: it is the file on disk shown
+beside the retention settings that produced it, answering 「文件日志开着吗、写到
+哪」, while `/logs` is the live view. One snapshot builder each, no shared URL.
+
+`nav` gains a leaf. It has no children because a level floor is a filter on one
+view rather than a second page -- children would put sidebar entries that are the
+same URL with a query string, and `is_current` would have to pick one of them as
+the current page on a view with no such notion.
+
+### 4. The page degrades, and it offers nothing destructive
+
+The first screen is server-rendered and the level selector is a plain GET form, so
+with JavaScript off `/logs` is still a working viewer with a level filter -- the
+rule every other page here follows. `logs.js` adds the live part, and it clones
+the server's own rendered row as its template so the row markup exists once, in
+`logs.html`. When the page loaded empty there is nothing to clone, so it fetches
+the snapshot rather than assembling a row in JavaScript.
+
+No 清空 and no download link. The buffer is evidence during an incident and a
+button that deleted it would be the opposite of the point; the file is already
+reachable by whoever runs the container, and serving it from here would turn a
+viewer into a file export.
+
+### Decisions
+
+- **The broker is a module-level singleton, not per application.** The root logger
+  it is fed from is process wide, so a second broker would either receive nothing
+  or double every record. `create_app` publishes the one instance on
+  `app.state.log_broker`, which is how a route reaches it without importing the
+  logging setup.
+- **It is created before `configure_logging` runs and outlives it.** Records
+  logged between interpreter start and the first configure call are kept, and a
+  test that reconfigures logging does not invalidate a reference a running
+  application already holds.
+- **The buffer is never filtered on the way in.** The handler carries no level of
+  its own; the root decides what exists and the page decides what it shows.
+  Filtering on ingest would mean switching the page to 警告 shows nothing until
+  new records arrive.
+- **The buffer is preferred over the file, and they are never merged.** They
+  overlap by definition -- the same record is in both -- and de-duplicating
+  formatted lines by content would collapse two genuinely identical events, which
+  during a retry loop is the very pattern being investigated. The file is read
+  only when the buffer has nothing at this level.
+- **The stream is unfiltered and the browser applies the floor.** One broadcast
+  queue: a server-side filter would need the connection rebuilt on every level
+  change, and the records it was opened to catch are the ones lost in that gap.
+- **`CRITICAL` is not offered as a floor.** Nothing here logs at that level, so
+  the choice could only ever produce an empty page. A dependency's `CRITICAL`
+  line still appears under every floor, because the floor is 「及以上」.
+- **A record with no subscriber is still buffered.** Unlike `EventBus`, which
+  drops an event nobody is waiting for because a client refetches state anyway: a
+  log line has nothing to refetch from once it has scrolled out of the file.
+
+### Verification
+- Full suite: **1119 collected / 1107 passed / 12 skipped / 0 failed**
+  (1079 + 40 new), 1095 s. The 12 skips are `test_seven_zip_real.py`; this host
+  has no 7-Zip toolchain.
+- New tests: 15 in `tests/unit/test_log_broker.py` (newest-first order, eviction
+  at capacity, sequence numbers surviving eviction, delivery on the loop,
+  **delivery from another thread inside two seconds**, replay ordering, a
+  replayed record not delivered twice, a slow subscriber dropping the oldest,
+  disconnect cleanup, buffering with nobody listening, the handler buffering the
+  formatter's redacted output, a handler failure never reaching the caller, and
+  the two `LOG_OTHER` envelopes), 19 in `tests/integration/test_logs_web.py`
+  (auth gate, server render, the selector's four levels and no `CRITICAL`, no
+  Chinese severity written in markup, the configured level being reported, no
+  clear/download control, the warning floor still showing errors, the INFO
+  default, unknown-level fallback, buffer preferred over file, file fallback,
+  missing file reported, capacity reported, redaction on both surfaces, page/JSON
+  parity, a context field reaching an entry, and the stream's auth gate, headers
+  and a live frame), 4 in `test_logging.py` (the buffer handler installed with no
+  level of its own, a record reaching the buffer through the real pipeline, the
+  floor vs single-level filter, an unclassifiable line surviving every floor) and
+  2 in `test_web_shell.py` (`/logs` in both path lists, the leaf having no
+  children).
+- One existing assertion updated: `test_configure_logging_is_idempotent` now
+  expects two root handlers (stdout plus the buffer) and asserts handler
+  *identity* across the second call, which is the property that matters -- a
+  reconfiguration that rebuilt handlers would break a stream a browser is
+  reading.
+- Version bumped to `0.2.8` in `pyproject.toml` **and** `uv.lock`.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| A live frame arrived up to 15 s late, or only on the keepalive tick | `asyncio.Queue.put_nowait` from a worker thread appends without waking the loop, and most records are logged from a thread | `loop.call_soon_threadsafe`, with each subscriber carrying its loop |
+| A record logged during the replay could be shown twice, or lost | Subscribing after the snapshot loses it; subscribing before duplicates it | Subscribe first, then skip sequences already replayed |
+| A test asserting buffer length passed alone and failed in the suite | The broker is process wide and bounded, so at capacity a new record evicts rather than grows | Assert the newest record's sequence and content, and clear the buffer in an autouse fixture |
+| `LOG_TO_FILE=false` meant no log view at all | The only viewer read the file | The in-memory buffer, which needs no file |

@@ -51,11 +51,13 @@ from pathlib import Path
 
 import pytest
 
+from app.logs.broker import BufferHandler
 from app.logging import (
     DropAllFilter,
     JsonFormatter,
     RequestIdFilter,
     configure_logging,
+    log_broker,
     redact_sensitive_values,
     request_id_var,
 )
@@ -275,12 +277,37 @@ def test_redact_sensitive_values_redacts_token_in_exception_text():
 
 
 def test_configure_logging_is_idempotent(restore_logging):
+    """A second call changes nothing, handler identity included.
+
+    The count is two since R16 -- stdout plus the in-memory buffer the 运行日志
+    page reads -- and identity is the assertion that carries the property: a
+    reconfiguration that rebuilt the handlers would break a stream a connected
+    browser is already reading.
+    """
     configure_logging(level="INFO", force=True)
     first = list(logging.getLogger().handlers)
     configure_logging(level="INFO")
     second = list(logging.getLogger().handlers)
-    assert len(first) == len(second) == 1
-    assert first[0] is second[0]
+    assert len(first) == len(second) == 2
+    assert first == second
+
+
+def test_configure_logging_installs_the_buffer_handler(restore_logging):
+    """Without it the 运行日志 page has nothing to show on a fresh process.
+
+    Also asserts it carries no level of its own: the root decides what exists,
+    and the page decides what it displays. A handler with a level would make
+    「把页面调到调试」 impossible for records the handler had already dropped.
+    """
+    configure_logging(level="INFO", force=True)
+    handlers = [
+        handler
+        for handler in logging.getLogger().handlers
+        if isinstance(handler, BufferHandler)
+    ]
+    assert len(handlers) == 1
+    assert handlers[0].level == logging.NOTSET
+    assert isinstance(handlers[0].formatter, JsonFormatter)
 
 
 def test_configure_logging_takes_over_uvicorn_loggers(restore_logging):
@@ -350,6 +377,29 @@ def test_configure_logging_falls_back_to_stdout_when_dir_unwritable(restore_logg
     blocker.unlink()
 
 
+def test_a_logged_record_reaches_the_in_memory_buffer(restore_logging):
+    """End to end through the configured pipeline, not through the handler.
+
+    The page reads the buffer, so 「日志页面是空的」 is a real failure mode; this
+    is the assertion that the wiring exists at all.
+
+    Asserted on the newest record's content and on the sequence number, not on
+    the buffer's length: the broker is process wide and bounded, so in a full
+    test session it is already at capacity and one more record evicts one rather
+    than growing the deque. A length assertion passed alone and failed in the
+    suite, which is the least useful kind of test.
+    """
+    configure_logging(level="INFO", force=True)
+    broker = log_broker()
+    before = broker.snapshot()[0].sequence if broker.snapshot() else 0
+
+    logging.getLogger("app.test").warning("buffer_pipeline_probe")
+
+    newest = broker.snapshot()[0]
+    assert newest.sequence == before + 1
+    assert "buffer_pipeline_probe" in newest.line
+
+
 def test_configure_logging_no_log_dir_means_stdout_only(restore_logging):
     configure_logging(level="INFO", log_dir=None, force=True)
     assert not any(
@@ -364,6 +414,7 @@ from app.logs.reader import (
     LogEntry,
     _parse_line,
     clamp_limit,
+    passes_min_level,
     read_log_tail,
 )
 
@@ -506,3 +557,59 @@ def test_read_log_tail_skips_unparseable_lines_without_dropping_others(tmp_path)
     assert entries[1].raw and "partial write" in entries[1].raw
     assert entries[2].event == "good"
 
+
+def test_a_min_level_is_a_floor_and_not_an_equality_test(tmp_path):
+    """`level` means one level; `min_level` means that level and above.
+
+    Both are kept because they answer different questions: the 系统 tab's filter
+    links have always meant 「只看这一个」, while the 运行日志 page's selector is a
+    floor -- choosing 警告 there has to keep showing errors, or lowering the noise
+    is a way to stop seeing what you were looking for.
+    """
+    log_dir = _write_log(tmp_path, [
+        json.dumps({"timestamp": "t1", "level": "DEBUG", "logger": "x", "event": "d"}),
+        json.dumps({"timestamp": "t2", "level": "INFO", "logger": "x", "event": "i"}),
+        json.dumps({"timestamp": "t3", "level": "WARNING", "logger": "x", "event": "w"}),
+        json.dumps({"timestamp": "t4", "level": "ERROR", "logger": "x", "event": "e"}),
+    ])
+
+    entries, _ = read_log_tail(log_dir, min_level="WARNING")
+    assert [entry.event for entry in entries] == ["e", "w"]
+
+    # The single-level filter is unchanged by the addition.
+    only, _ = read_log_tail(log_dir, level="WARNING")
+    assert [entry.event for entry in only] == ["w"]
+
+
+def test_an_unclassifiable_line_survives_every_floor(tmp_path):
+    """A line nobody can classify is what an operator is hunting.
+
+    A crash's partial write, or a dependency's custom level, must not be hidden
+    by a filter -- that would make the level selector a way to lose evidence at
+    exactly the moment it matters.
+    """
+    log_dir = _write_log(tmp_path, [
+        "<<< partial write before crash >>>",
+        json.dumps({"timestamp": "t", "level": "TRACE", "logger": "dep", "event": "custom"}),
+        json.dumps({"timestamp": "t", "level": "INFO", "logger": "x", "event": "ordinary"}),
+    ])
+
+    entries, _ = read_log_tail(log_dir, min_level="ERROR")
+    events = [entry.raw or entry.event for entry in entries]
+    assert any("partial write" in event for event in events)
+    assert "custom" in events
+    # The classifiable one below the floor is still filtered out.
+    assert "ordinary" not in events
+
+
+def test_passes_min_level_shows_everything_without_a_threshold():
+    """No threshold is not the same as an unknown one, and both show everything.
+
+    The caller validates operator input; if something unvalidated reaches here,
+    the safe failure is a page with too much on it rather than one that quietly
+    hides errors.
+    """
+    assert passes_min_level("INFO", None) is True
+    assert passes_min_level("INFO", "bananas") is True
+    assert passes_min_level("INFO", "warning") is False
+    assert passes_min_level("error", "WARNING") is True

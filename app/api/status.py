@@ -24,8 +24,6 @@ from app.downloads.models import (
 )
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
 
-from app.config import LOG_LEVEL_CHOICES
-
 #: Packing states that are waiting on the operator rather than broken.
 _PACK_ATTENTION_STATES: frozenset[str] = frozenset(
     {
@@ -604,6 +602,26 @@ LOG_LEVEL_STATUS: dict[str, StatusView] = {
 #: `app.config.LOG_LEVEL_CHOICES` so the runtime validation and the UI stay
 #: in lock-step.
 LOG_LEVELS: tuple[str, ...] = (LOG_LEVEL_INFO, LOG_LEVEL_WARNING, LOG_LEVEL_ERROR)
+
+#: Order for the 运行日志 page's level floor, lowest first. It differs from
+#: `LOG_LEVELS` on purpose and in two ways.
+#:
+#: `DEBUG` is offered because the floor is a *view* and a file already on disk may
+#: hold debug lines -- a deployment started with `LOG_LEVEL=DEBUG` to reproduce
+#: something needs to be able to see them. Offering it does not enable it: the
+#: threshold stays `LOG_LEVEL`, and the page reports the configured value so a
+#: floor below it reads as 「没有更多可看」 rather than as a broken filter.
+#:
+#: `CRITICAL` is not offered. Nothing in this application logs at that level, so a
+#: choice for it would be a control that can only ever produce an empty page.
+#: A `CRITICAL` line from a dependency still appears under every floor here,
+#: because the floor is 「这个级别及以上」.
+VIEWER_LOG_LEVELS: tuple[str, ...] = (
+    LOG_LEVEL_DEBUG,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARNING,
+    LOG_LEVEL_ERROR,
+)
 
 
 def log_level_view(level: str | None) -> StatusView:

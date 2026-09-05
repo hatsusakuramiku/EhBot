@@ -41,6 +41,43 @@ MAX_LIMIT = 500
 
 DEFAULT_LIMIT = 100
 
+#: Severity order, for the 「这个级别及以上」 filter the 运行日志 page uses.
+#: Numbers rather than `logging`'s own constants so a line written by a release
+#: that emitted a custom level still sorts, and so this module keeps having no
+#: dependency on the logging setup it reads the output of.
+LEVEL_SEVERITY: dict[str, int] = {
+    "DEBUG": 10,
+    "INFO": 20,
+    "WARNING": 30,
+    "ERROR": 40,
+    "CRITICAL": 50,
+}
+
+
+def passes_min_level(level: str, minimum: str | None) -> bool:
+    """Whether a record at `level` should be shown at threshold `minimum`.
+
+    Two deliberate answers:
+
+    **An unknown level always passes.** A line the parser could not read, or one
+    carrying a level this application never emits, is exactly what an operator is
+    hunting during an incident. Hiding it because it does not sort would make the
+    filter a way to lose evidence.
+
+    **An unknown threshold shows everything.** The caller validates operator
+    input; if something unvalidated reaches here, the safe failure is a page with
+    too much on it rather than a page that quietly hides errors.
+    """
+    if minimum is None:
+        return True
+    floor = LEVEL_SEVERITY.get(minimum.strip().upper())
+    if floor is None:
+        return True
+    severity = LEVEL_SEVERITY.get(level.strip().upper())
+    if severity is None:
+        return True
+    return severity >= floor
+
 
 @dataclass(frozen=True, slots=True)
 class LogEntry:
@@ -132,6 +169,7 @@ def read_log_tail(
     *,
     limit: int = DEFAULT_LIMIT,
     level: str | None = None,
+    min_level: str | None = None,
 ) -> tuple[list[LogEntry], bool]:
     """Return the newest entries first, plus whether the file exists.
 
@@ -139,6 +177,14 @@ def read_log_tail(
     logging is off or has not written yet, while 「no matching lines」 means the
     filter excluded everything. The page says something different for each,
     because the first is a configuration answer and the second is not.
+
+    `level` and `min_level` are two different questions and both are kept.
+    `level` is 「只看这一个级别」, which is what the 系统 tab's filter links have
+    always meant. `min_level` is 「这个级别及以上」, which is what a log viewer's
+    level selector means everywhere else and what the 运行日志 page uses:
+    choosing 警告 there has to keep showing errors, or the operator who lowers
+    the noise stops seeing the thing they were looking for. Passing both applies
+    both; the page passes one.
     """
     log_path = log_dir / "ehbot.log"
     try:
@@ -164,6 +210,8 @@ def read_log_tail(
             continue
         entry = _parse_line(text)
         if wanted is not None and entry.level.upper() != wanted:
+            continue
+        if not passes_min_level(entry.level, min_level):
             continue
         entries.append(entry)
         if len(entries) >= limit:

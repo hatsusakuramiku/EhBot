@@ -18,6 +18,7 @@ from app.api.activity import router as activity_router
 from app.api.candidates import router as candidates_router
 from app.api.downloaded import router as downloaded_router
 from app.api.events import EventBus
+from app.api.logs import router as logs_router
 from app.api.settings import router as settings_router
 from app.api.summary import router as summary_router
 from app.api.thumbnails import router as thumbnails_router
@@ -42,6 +43,7 @@ router.include_router(works_router)
 router.include_router(activity_router)
 router.include_router(downloaded_router)
 router.include_router(settings_router)
+router.include_router(logs_router)
 router.include_router(thumbnails_router)
 router.include_router(actions_router)
 

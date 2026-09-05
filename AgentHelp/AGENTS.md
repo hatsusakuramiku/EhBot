@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1079 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1119 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1079 on a machine that has one and 1067 with
+`data/tools/7zip/`, so `passed` is 1119 on a machine that has one and 1107 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -719,3 +719,41 @@ Several are locked by tests. Do not "simplify" them:
   deliberate choice: `request.client` is only trustworthy when
   `TRUST_PROXY_HEADERS` is set, and a forgeable key is worse than a coarse
   one.
+
+
+**Added by R17 (the 运行日志 page):**
+
+- **`app/logs/broker.py` is fed `JsonFormatter`'s output, never its own.**
+  There is exactly one place a credential is removed, and a second formatting
+  path would be a second place for one to escape. The buffer, the file and
+  stdout carry byte-identical lines.
+- **`publish` runs on whatever thread logged, so delivery goes through
+  `loop.call_soon_threadsafe`.** `asyncio.Queue` is not thread safe: a bare
+  `put_nowait` from a worker thread appends without waking the coroutine in
+  `get()`, and every frame then waited for the 15 s keepalive. Most records in
+  this application are logged from a thread, because every database read runs
+  under `asyncio.to_thread`. Never call `_offer` from off the queue's loop.
+- **`stream()` subscribes before it snapshots, and skips what it replayed.**
+  Subscribing after the snapshot loses a record logged in between; subscribing
+  before it delivers that record twice. Both halves are required.
+- **The buffer is never filtered on ingest.** The handler carries no level;
+  the root decides what exists and the page decides what it shows. Filtering
+  here would mean switching the page to 警告 shows nothing until new records
+  arrive.
+- **The page's level is a floor (`min_level`), and it does not change the
+  process.** `read_log_tail` keeps both `level` (only this one) and `min_level`
+  (this and above); the page uses the floor, because a 「警告」 that hid errors
+  is a filter that loses evidence. `LOG_LEVEL` stays deployment state for the
+  reason above -- a `set_runtime_level` was written and deliberately deleted.
+- **An unclassifiable line passes every floor.** A partial write or a
+  dependency's custom level is what an operator is hunting; a filter that hides
+  it is a way to lose the evidence the page exists for.
+- **The buffer and the file are never merged.** They overlap by definition, and
+  de-duplicating formatted lines by content would collapse two genuinely
+  identical events -- which during a retry loop is the pattern being
+  investigated. The file is read only when the buffer has nothing at this level.
+- **`/logs` offers no clear and no download.** The buffer is evidence; the file
+  belongs to whoever runs the container. Do not add either.
+- **A test must not assert on the buffer's length.** It is process wide and
+  bounded, so in a full session it is already at capacity and a new record
+  evicts rather than grows. Assert the newest record's sequence and content.

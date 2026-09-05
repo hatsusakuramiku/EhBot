@@ -1,0 +1,142 @@
+{#
+  运行日志: the live tail.
+
+  Server-rendered first page, then `logs.js` subscribes to
+  `/api/v1/logs/stream` and prepends records as they are logged. With JavaScript
+  off this is still a working viewer with a level filter -- the same rule the
+  other pages follow -- and what the script adds is the live part plus 暂停.
+
+  Three things this page deliberately does not offer:
+
+  * **No clear button.** The buffer is evidence during an incident, and a control
+    that deleted it would be the opposite of the point. It rolls over on its own
+    at `buffer_capacity`.
+  * **No download link.** The file on disk is already reachable to whoever runs
+    the container, and serving it from here would turn a viewer into a file
+    export with a path an operator could influence.
+  * **No level *setting*.** The selector is a floor on what is displayed.
+    `LOG_LEVEL` stays deployment state, because a level that lived in the
+    interface could not be lowered to debug a startup that failed before the
+    interface existed. The panel says which level is configured, so a floor below
+    it reads as 「没有更多可看」 rather than as a filter that broke.
+
+  The row markup lives in one macro used by both the server render and, mirrored
+  in `logs.js`, the live prepend. `data-log-row` and `data-field` are that
+  script's contract: it inserts rows and never rewrites this structure.
+#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}运行日志 · EhBot{% endblock %}
+
+{% block content_class %}ui-content{% endblock %}
+
+{% macro log_row(entry) -%}
+  <li class="ui-log-row" data-log-row>
+    <div class="ui-log-head">
+      {{ ui.badge(entry.level) }}
+      {% if entry.timestamp %}
+        {#- `ui.js` scans `time[datetime]` and rewrites the TEXT into the
+            configured zone, leaving the attribute as the machine-readable UTC.
+            A live row therefore needs `EhBotUI.formatTimes()` after insertion,
+            which is what `logs.js` calls. -#}
+        <time datetime="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
+      {% endif %}
+      {% if entry.logger %}<code class="ui-log-logger">{{ entry.logger }}</code>{% endif %}
+    </div>
+    <p class="ui-log-event">{{ entry.raw if entry.raw else entry.event }}</p>
+    {% if entry.error_message %}
+      <p class="ui-log-message">{{ entry.error_message }}</p>
+    {% endif %}
+    {% if entry.error_code or entry.job_id or entry.candidate_id or entry.request_id %}
+      <p class="ui-log-meta">
+        {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
+        {% if entry.job_id %}<span>任务 #{{ entry.job_id }}</span>{% endif %}
+        {% if entry.candidate_id %}
+          <a href="{{ url_for('work_detail', candidate_id=entry.candidate_id) }}">作品 #{{ entry.candidate_id }}</a>
+        {% endif %}
+        {% if entry.request_id %}<code>{{ entry.request_id }}</code>{% endif %}
+      </p>
+    {% endif %}
+    {% if entry.exception %}
+      <details class="ui-log-trace">
+        <summary>堆栈</summary>
+        <pre>{{ entry.exception }}</pre>
+      </details>
+    {% endif %}
+  </li>
+{%- endmacro %}
+
+{% block content %}
+<header class="ui-page-head">
+  <div>
+    <p class="ui-eyebrow">运行日志</p>
+    <h1 class="ui-title">实时日志</h1>
+    <p class="ui-subtitle">选择的级别是下限，选「警告」仍会显示错误。</p>
+  </div>
+</header>
+
+<section class="ui-panel" data-log-panel
+         data-stream="{{ logs.stream_path }}"
+         data-level="{{ logs.level }}"
+         data-limit="{{ logs.limit }}">
+  <div class="ui-log-toolbar">
+    {#- A form, so the filter works with the script disabled. `logs.js` takes it
+        over and switches the level without a navigation, which is what keeps a
+        live stream from being torn down by a filter change. -#}
+    <form class="ui-log-filter" method="get" action="{{ url_for('logs_page') }}">
+      <label class="ui-log-filter-label" for="log-level">级别</label>
+      <select class="ui-select" id="log-level" name="level" data-log-level>
+        {% for choice in logs.levels %}
+          <option value="{{ choice.code }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
+        {% endfor %}
+      </select>
+      <input type="hidden" name="limit" value="{{ logs.limit }}">
+      {#- Visible only without JavaScript: with the script running, changing the
+          select applies immediately, and a button that then did nothing would be
+          a control that lies. -#}
+      <noscript><button class="ui-btn" type="submit">应用</button></noscript>
+    </form>
+    <div class="ui-log-live" data-log-live hidden>
+      {#- `aria-pressed` is right here and wrong on the level links: this is a
+          real `<button>` with two states, which is exactly what the attribute is
+          defined on. -#}
+      <button class="ui-btn" type="button" data-variant="ghost" data-log-pause
+              aria-pressed="false">暂停</button>
+      <span class="ui-log-status" data-log-status role="status" aria-live="polite"></span>
+    </div>
+  </div>
+
+  <p class="ui-hint">
+    进程级别 <code>{{ logs.configured_level }}</code>（{{ logs.configured_level_label }}），
+    访问日志{% if logs.access_log %}已开启{% else %}已关闭{% endif %}。
+    内存中保留最新 {{ logs.buffer_capacity }} 条，页面一次显示最多 {{ logs.limit }} 条。
+    {%- if not logs.file_enabled %}
+      文件日志已关闭（<code>LOG_TO_FILE=false</code>），重启后内存中的记录会清空。
+    {%- elif not logs.file_present %}
+      尚未生成日志文件；写入第一条后 <code>data/logs/ehbot.log</code> 会出现。
+    {%- endif %}
+  </p>
+
+  {% if logs.source == "file" %}
+    {{ ui.callout("正在显示磁盘上的日志", tone="muted",
+                  detail="本进程内存中还没有这个级别的记录，所以读取了日志文件。新记录会实时出现在最上方。") }}
+  {% endif %}
+
+  <ol class="ui-log-list" data-log-list>
+    {% for entry in logs.entries %}
+      {{ log_row(entry) }}
+    {% endfor %}
+  </ol>
+  {#- Both states exist in the DOM from the start and are toggled by the script:
+      creating an empty state at the moment the list empties is how a live view
+      ends up with two of them. -#}
+  <div data-log-empty{% if logs.entries %} hidden{% endif %}>
+    {{ ui.empty_state("暂无日志", "当前级别下还没有记录。降低级别，或等待新的日志。") }}
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+  <script defer src="{{ url_for('static', path='/logs.js') }}"></script>
+{% endblock %}
