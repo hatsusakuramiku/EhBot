@@ -3236,3 +3236,182 @@ went in with `docker cp`.
 | `/logs` and 设置 → 系统 scrolled 340px sideways on a phone | `overflow-wrap: break-word` permits a break but does not lower min-content, and a grid track sizes from min-content | `anywhere` everywhere, plus `min-width: 0` and `minmax(0, 1fr)` on `.ui-log-row` |
 | The priority field's width could not follow the density | `style="width: 6em"` written into the markup | `.ui-input[data-width="narrow"]`, `7ch`, `flex: 0 0 auto` |
 | The toolbar search field overflowed a narrow panel | `min-width: 200px` is a floor that cannot be crossed | `flex: 1 1 200px`, a preferred basis instead of a floor |
+
+
+## R19 — 六个操作员报告的缺陷 (v0.2.10, 2026-09-06)
+
+Six items in one report, from a live deployment. Two were one-line mistakes with
+disproportionate consequences, two were limits nobody had put there on purpose,
+and two were the same class of bug: **a decision made from the wrong evidence**.
+
+### 1. 取消编辑 answered 「设置分区不存在」
+
+`_auto_approval.html` linked `url_for('settings_section', section='auto_approval')`
+with an underscore. The constant is `SETTINGS_AUTO_APPROVAL = "auto-approval"`, and
+`settings_section` 404s anything not in `SETTINGS_SECTIONS`, so the **only** exit
+from edit mode that was not 保存 was a guaranteed error page. Now
+`section=section.code` -- read from the object the page was rendered with, which
+cannot be misspelled.
+
+### 2. The three-condition limit was one `range()`
+
+The report asked for arbitrary fields per rule. Nothing in the engine ever
+objected: `validate_rule_ast` recurses over any number of `children`,
+`_parse_rule_condition` walks whatever the form sends, `render_rule_dsl` joins
+however many it gets, and the rows post as parallel lists. The cap was
+`range(1, [edit_rows|length + 1, 3]|max + 1)` in the template.
+
+The editor now wraps its rows in `[data-condition-rows]` and `settings.js` adds
+添加条件 / 移除. Two decisions worth recording:
+
+- **The new row is a clone of the last one**, not markup built in JavaScript. The
+  field and operator `<option>` lists are generated from the engine's vocabulary
+  in Jinja, and building a row in the script would put a second copy of the field
+  list in `settings.js` -- which the architecture rules forbid for exactly the
+  reason that it would drift.
+- **移除 means「把字段留空」**, which the server already skips. So the feature
+  degrades correctly: with no JavaScript the always-rendered spare row still grows
+  a rule one condition at a time, which is what it did before.
+
+`resequence()` also re-points every `id`/`for` pair after an add or a remove.
+Without that, two rows share `field-3` and clicking 「字段」 on row 4 focuses row 3.
+
+### 3. Auto-archiving named books before it knew what they were
+
+The report: 「只要有 eh 链接信息就应优先拉取元数据后再进行后续操作」. The reason it
+matters is that metadata is not decoration on this path -- the library path, the
+filename and the whole of ComicInfo.xml are **derived** from it, and the CBZ's
+path is then written into an artifact row. A book packed before its gallery was
+read lands as `candidate-57.cbz` with an empty ComicInfo, and fetching the
+metadata afterwards does not move it. The operator has to rename it by hand.
+
+Enrichment lived in exactly one place: `_render_candidates`, i.e. **opening the
+待审核 tab**. So an unattended deployment -- the one where auto-pack is on and
+nobody is watching -- reliably produced precisely the badly-named files nobody
+was there to notice.
+
+Two call sites now fetch first:
+
+- `ConversionService._handle_job` calls `_ensure_metadata` before its first
+  metadata read.
+- `AutoApprovalSweeper.sweep_once` enriches the **whole batch** before evaluating
+  any of it, because a rule that reads `{Category}` cannot match a gallery that
+  has never been read -- and 「no rule matched」 is the wrong conclusion to draw
+  from missing evidence. Batched because gdata takes 25 galleries per request.
+
+`ExHentaiService.enrich_missing_metadata(ids)` is the new entry point for callers
+that hold ids rather than loaded candidates. It is cheap when there is nothing to
+do -- one `NOT EXISTS` query and **no HTTP call** -- which is what makes it
+acceptable to call before every automatic decision rather than only where
+somebody suspected a problem. Both call sites are best-effort: an unreachable
+gdata means the sweep decides less and the packer uses the title it already had,
+never a parked download.
+
+### 4. 返回 always claimed 「候选列表」
+
+`work_detail.html` hardcoded `<a href="/candidates">返回候选列表</a>`. Reached from
+已下载, the only way back was the sidebar -- which also throws away the tab,
+filter, sort and page, all of which live in the query string.
+
+`resolve_origin` reads an explicit `?return_to=` first, then the `Referer`, and
+puts both through `deps.local_return_to` so neither can become an open redirect.
+`Referrer-Policy: same-origin` is already set, so in-app navigation carries the
+full URL including the query -- which is why 返回 lands on the same filtered view
+the operator left. Resolved server-side rather than with `history.back()`: the
+page must work without JavaScript, and a back-stack entry is not the same thing
+as the list a work belongs to (three metadata saves would send them to the last
+save). Prefixes match longest-first and only on a segment boundary, so
+`/candidates/manual-add` wins over `/candidates` and `/downloadedX` is not
+`/downloaded`.
+
+### 5. One mislabelled page failed a two-hundred-page book
+
+`validate_manifest` raised `ARCHIVE_MEMBER_FAKE_IMAGE` and **failed the entire
+archive** when any member's header disagreed with its extension. A page named
+`.png` holding JPEG bytes is what a batch converter leaves behind and no uploader
+notices -- and it cost the whole book.
+
+The relaxation is careful about which half of the check it touches:
+
+- `detected_image_extension` identifies only formats it can **prove** (JPEG, PNG,
+  GIF, BMP, and WebP via `RIFF` + `WEBP` at offset 8 -- `RIFF` alone is also audio).
+- A member whose bytes it cannot name is **still refused**, so `page.jpg` holding
+  an executable fails exactly as before. The magic-number gate is intact; the
+  message now says which of the two things was wrong.
+- A member whose bytes it *can* name is kept, and `page_file_names` publishes it
+  under the extension the bytes actually are.
+
+It is a **rename, not a transcode**, and that is the interesting decision. The
+report suggested converting the image to the header's format and back to the
+suffix's. But CBZ page names are generated by `page_file_names` and never taken
+from the archive, so the original name is discarded either way -- re-encoding to
+honour a filename nobody will ever see would throw away image quality for
+nothing. Publishing JPEG bytes as `.png` *would* be a real problem, since readers
+dispatch on the extension, and that is the part now fixed.
+
+Also relaxed, in the same spirit: a member with **no** extension whose bytes are
+an image now counts as a page. Books whose pages are named `001` used to fail as
+`ARCHIVE_NO_IMAGES` -- an archive that was entirely images, lost to a naming habit.
+
+### 6. 「Only approved candidates can be converted」 on a book that was ready
+
+The best of the six. A candidate has **one** `status` column, shared by every job
+it spawned, and `_claim` sets it to `PROCESSING`. So a book whose preview-image
+source had finished -- archive complete, on disk -- sat at `PROCESSING` while its
+torrent was still running, and 打包 refused it. The English sentence did not
+describe the situation either.
+
+The root cause is that the gate asked the wrong question. Readiness is 「is there
+a downloaded archive?」, which the very next query already establishes by looking
+for the artifact. Status answers a different question -- **intent** -- and that is
+worth gating on: a rejected book must not be published into the library, and one
+still awaiting review has not been approved for it. So the allowlist became a
+denylist of four pre-decision states, and `ARCHIVE_NOT_READY` (now the real
+readiness gate) got the Chinese message an operator actually reads.
+
+### Verification
+
+Suite: **1154 collected** (up from 1122), 0 failed. New coverage: the origin
+resolver including both hostile inputs, the safety repair including the
+`ARCHIVE_MEMBER_FAKE_IMAGE` case that must still fail, an end-to-end pack of a
+mislabelled book through the real processor, the pack gate at all four refused
+statuses plus the `PROCESSING`-with-artifact case that was the bug, metadata-first
+in both the packer and the sweep, `enrich_missing_metadata` proving it makes no
+request when nothing is missing, 取消编辑 landing on a real page, and a
+five-condition rule round-tripping through save and reopen.
+
+One test goes through `create_app` to assert the sweeper actually **received** an
+enricher, for the reason the R10 log records: a hand-built service takes whatever
+the test hands it, which is how `auto_pack` silently never ran for a release.
+
+Items 2 and 4 were also driven in headless Chrome against the built image, since
+neither is visible to a static test:
+
+- 添加条件 three times gives **6 condition rows** (the old template could render
+  at most 3), legends renumber 条件 1–6, every `field-N` id is unique and each
+  `<label for>` points at its own row, and a cloned row arrives empty. 移除 twice
+  leaves 4 rows, renumbered, with 「4 个条件」 in the status text.
+- 返回 from `/works/1` reached via `/downloaded?tab=all&sort=title` reads
+  「返回已下载」 and lands back on `/downloaded?tab=all&sort=title` -- the sort and
+  the tab survive the round trip, which is the actual complaint.
+
+Browser notes for next time: the app listens on **8080** in the image (not 8000);
+the change-password ids are **hyphenated** (`#current-password`, `#new-password`,
+`#confirmation`) while the field names are underscored; the bootstrap password is
+single-use, so a second script run must fall back to the replacement; and a click
+plus `waitForNavigation` has to be one `Promise.all` race. Scripts are in
+`/tmp/uicheck/` (`login.js`, `rows.js`, `backbtn.js`, `backquery.js`).
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| 取消编辑 → 「设置分区不存在」 | `section='auto_approval'` (underscore) vs `SETTINGS_AUTO_APPROVAL = "auto-approval"` | `section=section.code`, read from the rendered object |
+| A rule accepted at most 3 conditions | One Jinja `range(...)`; the engine never had a limit | `[data-condition-rows]` + 添加条件/移除 in `settings.js`, cloning a row to keep the vocabulary in the template |
+| Two rows shared `field-3`, so a label focused the wrong row | Cloned rows kept the template's ids | `resequence()` re-points every `id`/`for` pair |
+| Auto-packed books landed as `candidate-N.cbz` with empty ComicInfo | Enrichment only ran from `_render_candidates`, i.e. when a human opened 待审核 | `metadata_enricher` on `ConversionService` and `AutoApprovalSweeper`, called before anything derives a name |
+| Rules never matched on unattended deployments | Same cause: the sweep judged metadata that had never been fetched | The sweep enriches the batch before evaluating it |
+| 返回 always went to 候选列表, losing tab/filter/sort/page | `href="/candidates"` hardcoded in the template | `resolve_origin` (explicit `return_to`, else `Referer`), both through `local_return_to` |
+| One page with a wrong extension failed the whole archive | `header_matches_extension` mismatch raised `ARCHIVE_MEMBER_FAKE_IMAGE` for the manifest | Repair by renaming to the detected format; still refuse bytes that are not an identifiable image |
+| A book whose pages were named `001` failed as `ARCHIVE_NO_IMAGES` | `is_image_member` requires a known suffix | An extensionless member whose bytes are an image is a page |
+| 打包 refused a ready book: 「Only approved candidates can be converted」 | One `status` per candidate, shared by all its jobs; any claimed job sets `PROCESSING`, and the gate was an allowlist | Denylist of pre-decision states; readiness comes from the artifact query, with a Chinese message |
+

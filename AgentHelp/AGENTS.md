@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1122 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1154 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1122 on a machine that has one and 1110 with
+`data/tools/7zip/`, so `passed` is 1154 on a machine that has one and 1142 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -792,3 +792,59 @@ Several are locked by tests. Do not "simplify" them:
   at 1440 / 1024 / 768 / 390 across all fourteen pages. Three static assertions
   in `test_ui_shell.py` lock the values in; they cannot see a layout, which is
   why the measurement is recorded here.
+
+
+**Added by R19 (six operator-reported defects):**
+
+- **Readiness is answered by artifacts; intent is answered by status.** A
+  candidate has **one** `status` column shared by every job it spawned, and
+  claiming any job sets it to `PROCESSING` -- so a status is not evidence about
+  what is on disk. `_PACK_FORBIDDEN_STATUSES` in `app/conversion/service.py` is
+  therefore a **denylist** (`REJECTED`, `PENDING_REVIEW`, `NEEDS_INFO`,
+  `NEEDS_REVISION`), and 「is there a downloaded archive?」 is a query for the
+  artifact. Do not restore an allowlist: it refused a book whose preview-image
+  source had finished while its torrent was still running, which is ordinary.
+- **Metadata is fetched before anything derives a name from it.** The library
+  path, the filename and all of ComicInfo.xml come out of `metadata_values`, and
+  the CBZ's path is then recorded in an artifact row -- so a book packed before
+  its gallery was read cannot be fixed by fetching afterwards. `ConversionService`
+  takes a `metadata_enricher` and calls it in `_handle_job` before the first
+  metadata read; `AutoApprovalSweeper` takes one and calls it before evaluating a
+  batch, because a rule reading `{Category}` cannot match a gallery nobody has
+  read. Both are **best-effort**: an ExHentai outage means deciding less, never
+  parking a finished download.
+- **`enrich_missing_metadata(ids)` is the unattended entry point** and is cheap
+  when there is nothing to do -- one `NOT EXISTS` query, no HTTP. That is what
+  makes it safe to call before every automatic decision. `enrich_candidates_for_review`
+  stays the by-object variant for a page render that already read its rows.
+- **The condition-row count was never a rule-engine limit.** The AST, the DSL
+  renderer, `_parse_rule_condition` and the evaluator all take any number of
+  children; the cap of three was one Jinja `range()`. The editor renders
+  `max(rows + 1, 3)` rows so the no-JS path can still grow a rule one condition
+  at a time, and `settings.js` clones the last row for 添加条件. **The clone is
+  deliberate** -- it keeps every `<option>` generated from the engine's
+  vocabulary in the template, so `settings.js` still writes no field names.
+- **A removed condition row means「字段留空」**, which the server already skips.
+  That is why removal works without JavaScript.
+- **`url_for('settings_section', section=...)` takes `section.code`, never a
+  literal.** The sections are hyphenated (`auto-approval`) and a literal with an
+  underscore 404s as 「设置分区不存在」 -- which is exactly how 取消编辑 was broken.
+- **`resolve_origin` in `app/web/routes/works.py` is the only source of 返回.**
+  It reads an explicit `?return_to=` first, then the `Referer`, and passes both
+  through `deps.local_return_to`, so neither can become an open redirect. Prefixes
+  are matched **longest first** and only on a segment boundary (`/downloadedX` is
+  not under `/downloaded`). An unrecognised origin falls back to `/candidates`,
+  which is where the button used to be hardcoded. It is resolved server-side and
+  not with `history.back()`: the page works without JavaScript, and a back-stack
+  entry is not the list a work belongs to.
+- **Mislabelled image pages are repaired, not refused -- but the magic-number
+  gate itself is untouched.** `detected_image_extension` names only formats it can
+  positively identify, and `validate_manifest` still raises
+  `ARCHIVE_MEMBER_FAKE_IMAGE` when the bytes are not any image (`page.jpg` holding
+  an executable). What changed is that a *real* image under the wrong extension no
+  longer fails the whole archive: `page_file_names` publishes it under the
+  extension its bytes are. This is a **rename**, not a transcode -- CBZ page names
+  are generated and never taken from the archive, so re-encoding to satisfy a name
+  nobody sees would only lose quality. A member with **no** extension whose bytes
+  are an image counts as a page, because uploaders do ship books named `001`.
+
