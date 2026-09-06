@@ -73,10 +73,14 @@ class AutoApprovalSweeper:
         database,
         orchestrator,
         settings_service: SystemSettingsService,
+        metadata_enricher=None,
     ) -> None:
         self._database = database
         self._orchestrator = orchestrator
         self._settings = settings_service
+        # Optional so a deployment without ExHentai, and the tests that drive
+        # this class with fakes, keep working unchanged.
+        self._metadata_enricher = metadata_enricher
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -140,6 +144,17 @@ class AutoApprovalSweeper:
         )
         if not candidate_ids:
             return 0
+        # Metadata before rules, for the whole batch in one call. A rule reads
+        # metadata: 「{Category} = 'Manga'」 cannot match a candidate whose gallery
+        # has not been read, so an unenriched batch is not 「no rule matched」 --
+        # it is a decision made on absent evidence. Enrichment used to happen
+        # only when an operator opened 待审核, which meant the unattended sweep
+        # judged exactly the candidates nobody had looked at yet.
+        #
+        # Batched rather than per-candidate because gdata takes 25 galleries per
+        # request, and one pass over a hundred candidates should be a handful of
+        # requests rather than a hundred.
+        await self._enrich_metadata(candidate_ids)
         approved = 0
         for candidate_id in candidate_ids:
             try:
@@ -171,6 +186,26 @@ class AutoApprovalSweeper:
                 len(candidate_ids),
             )
         return approved
+
+    async def _enrich_metadata(self, candidate_ids: tuple[int, ...]) -> None:
+        """Fill in missing gallery metadata for a batch, tolerating failure.
+
+        Best-effort on purpose. ExHentai being unreachable is a reason for a
+        sweep to decide less, not a reason for it to stop: candidates a rule
+        cannot judge stay pending and are re-examined next pass, which is what
+        already happens to a candidate no rule matches.
+        """
+        if self._metadata_enricher is None:
+            return
+        try:
+            await self._metadata_enricher(candidate_ids)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - enrichment is best-effort
+            LOGGER.exception(
+                "auto_approval_metadata_enrichment_failed",
+                extra={"error_code": "AUTO_APPROVAL_METADATA_FAILED"},
+            )
 
 
 __all__ = [

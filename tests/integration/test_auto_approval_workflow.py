@@ -251,3 +251,103 @@ def test_the_sweep_reads_the_oldest_candidates_first(tmp_path: Path) -> None:
 
     assert seen == list(oldest)
     assert stranded <= set(seen)
+
+
+# ---------------------------------------------------------------------------
+#  元数据优先 (item 3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_sweep_fetches_metadata_before_it_judges_the_batch() -> None:
+    """A rule reads metadata, so a batch is enriched before it is evaluated.
+
+    Enrichment used to happen only in `_render_candidates`, so the unattended
+    sweep judged exactly the candidates nobody had opened: 「{Category} = 'Manga'」
+    could not match a gallery that had never been read, and the candidate was
+    left pending as though no rule applied to it. That is a decision taken with
+    no evidence, not an absence of a match.
+    """
+    order: list[str] = []
+
+    class FakeDatabase:
+        async def pending_candidate_ids(
+            self, limit: int = 100, *, oldest_first: bool = False
+        ) -> tuple[int, ...]:
+            return (7, 8)
+
+    class FakeOrchestrator:
+        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+            order.append(f"judge:{candidate_id}")
+            return False
+
+    class FakeSettings:
+        async def auto_approval_interval_minutes(self) -> int:
+            return 30
+
+    async def enricher(candidate_ids) -> int:
+        # One call for the whole batch: gdata takes 25 galleries per request, so
+        # a hundred candidates must not become a hundred requests.
+        order.append(f"enrich:{tuple(candidate_ids)}")
+        return len(tuple(candidate_ids))
+
+    sweeper = AutoApprovalSweeper(
+        FakeDatabase(),
+        FakeOrchestrator(),
+        FakeSettings(),
+        metadata_enricher=enricher,
+    )
+
+    assert asyncio.run(sweeper.sweep_once()) == 0
+    assert order == ["enrich:(7, 8)", "judge:7", "judge:8"]
+
+
+def test_an_unreachable_metadata_source_does_not_stop_the_sweep() -> None:
+    """Best-effort: ExHentai being down means deciding less, not stopping."""
+    judged: list[int] = []
+
+    class FakeDatabase:
+        async def pending_candidate_ids(
+            self, limit: int = 100, *, oldest_first: bool = False
+        ) -> tuple[int, ...]:
+            return (1, 2)
+
+    class FakeOrchestrator:
+        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+            judged.append(candidate_id)
+            return True
+
+    class FakeSettings:
+        async def auto_approval_interval_minutes(self) -> int:
+            return 30
+
+    async def exploding(candidate_ids) -> int:
+        raise RuntimeError("gdata unreachable")
+
+    sweeper = AutoApprovalSweeper(
+        FakeDatabase(),
+        FakeOrchestrator(),
+        FakeSettings(),
+        metadata_enricher=exploding,
+    )
+
+    assert asyncio.run(sweeper.sweep_once()) == 2
+    assert judged == [1, 2]
+
+
+def test_the_running_app_wires_metadata_enrichment_into_the_sweep(
+    tmp_path: Path,
+) -> None:
+    """Only a test through `create_app` can catch an unwired callable.
+
+    A sweeper built by hand takes the enricher a test hands it, so it would pass
+    just as happily if `wiring.py` never passed one -- which is how `auto_pack`
+    silently never ran for a release.
+    """
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        sweeper = client.app.state.auto_approval_sweeper
+        assert sweeper._metadata_enricher is not None  # noqa: SLF001
+        # No ExHentai reference on this candidate, so the enricher is reached and
+        # answers「nothing to do」 without an HTTP call.
+        assert asyncio.run(sweeper._enrich_metadata((1,))) is None  # noqa: SLF001
+

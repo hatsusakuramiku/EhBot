@@ -76,6 +76,36 @@ class ExHentaiService:
         refs = await asyncio.to_thread(
             self._missing_metadata_refs_sync, candidates
         )
+        return await self._enrich_refs(refs)
+
+    async def enrich_missing_metadata(self, candidate_ids) -> int:
+        """Fetch metadata for these candidates, by id, before anything acts on them.
+
+        The by-object variant above is what a page render has: it already read
+        the rows it is about to draw. Callers on the unattended paths -- the
+        approval sweeper, the packer -- hold ids and nothing else, and asking
+        them to load a full candidate each just to find a gallery reference
+        would be a query per candidate for two columns.
+
+        Cheap when there is nothing to do: one statement establishes which of
+        these ids have an ExHentai reference and no ExHentai metadata yet, and
+        an empty answer means no HTTP call at all. That is what makes it safe to
+        call before every automatic decision rather than only where somebody
+        suspected metadata might be missing.
+        """
+        ids = tuple(int(candidate_id) for candidate_id in candidate_ids)
+        if not ids:
+            return 0
+        refs = await asyncio.to_thread(self._missing_metadata_ids_sync, ids)
+        return await self._enrich_refs(refs)
+
+    async def _enrich_refs(self, refs: list[tuple[int, int, str]]) -> int:
+        """Fetch and persist metadata for gallery references already filtered.
+
+        Shared by both entry points above so that 「what enrichment does」 is
+        written once: a gdata batch, an HTML fallback per gallery gdata does not
+        know, and the same three writes plus a rule re-evaluation for each.
+        """
         if not refs:
             return 0
 
@@ -120,6 +150,30 @@ class ExHentaiService:
             )
             enriched += 1
         return enriched
+
+    def _missing_metadata_ids_sync(
+        self, candidate_ids: tuple[int, ...]
+    ) -> list[tuple[int, int, str]]:
+        """The gallery references among these ids that have no metadata yet.
+
+        One statement rather than a read per candidate, and the `NOT EXISTS`
+        does the same filtering `_missing_metadata_refs_sync` does with a second
+        query -- the difference is only that this caller starts from ids.
+        """
+        if not candidate_ids:
+            return []
+        placeholders = ",".join("?" for _ in candidate_ids)
+        with self._database.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, ex_gid, ex_gallery_token FROM candidates "
+                "WHERE id IN (" + placeholders + ") "
+                "AND ex_gid IS NOT NULL AND ex_gallery_token IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM metadata_values mv "
+                "WHERE mv.candidate_id = candidates.id "
+                "AND mv.value_source = 'EXHENTAI')",
+                candidate_ids,
+            ).fetchall()
+        return [(int(row[0]), int(row[1]), str(row[2])) for row in rows]
 
     def _missing_metadata_refs_sync(
         self, candidates: list

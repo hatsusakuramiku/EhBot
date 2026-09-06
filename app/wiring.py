@@ -199,6 +199,23 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     )
 
 
+async def _enrich_candidate_metadata(app, candidate_ids) -> int:
+    """Fetch ExHentai metadata for these candidates, if the service exists.
+
+    A named function rather than a lambda because both call sites need the same
+    「service may not be configured」 guard, and because `ExHentaiService` is
+    attached during lifespan startup after the two services that ask for this --
+    reading it off `app.state` at call time is what makes the ordering irrelevant.
+
+    Returns how many candidates were enriched, which is 0 both when there is
+    nothing missing and when ExHentai is not configured at all.
+    """
+    service = getattr(app.state, "exhentai_service", None)
+    if service is None:
+        return 0
+    return await service.enrich_missing_metadata(candidate_ids)
+
+
 async def _sweep_new_candidates(app) -> None:
     """Apply automatic-approval rules to a freshly ingested batch.
 
@@ -480,6 +497,17 @@ def build_lifespan(
                         EVENT_CONVERSION, **data
                     )
                 ),
+                # Read off `application.state` per job, like `auto_pack` above:
+                # the ExHentai service is built further down this same startup,
+                # and a deployment without credentials never attaches one at all.
+                # A book must not be packed before its gallery has been read --
+                # the library path and the whole of ComicInfo.xml come out of
+                # that metadata.
+                metadata_enricher=(
+                    lambda candidate_id: _enrich_candidate_metadata(
+                        application, (candidate_id,)
+                    )
+                ),
             )
             application.state.conversion_service = conversion_service
             await conversion_service.start()
@@ -558,6 +586,14 @@ def build_lifespan(
                 database,
                 application.state.review_orchestrator,
                 application.state.system_settings_service,
+                # A rule reads metadata, so the sweep enriches the batch before
+                # judging it: a candidate whose gallery has not been read is not
+                # 「no rule matched」, it is a decision taken with no evidence.
+                metadata_enricher=(
+                    lambda candidate_ids: _enrich_candidate_metadata(
+                        application, candidate_ids
+                    )
+                ),
             )
             await application.state.auto_approval_sweeper.start()
             if application.state.torrent_service is not None:

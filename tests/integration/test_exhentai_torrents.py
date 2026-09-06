@@ -321,3 +321,100 @@ async def test_locking_a_field_with_no_stored_value_is_refused(
 
     with pytest.raises(LookupError):
         await database.set_metadata_lock(1, "operator", "Artist", True)
+
+
+# ---------------------------------------------------------------------------
+#  enrich_missing_metadata (item 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_enrichment_by_id_fetches_a_gallery_that_has_no_metadata_yet(
+    tmp_path: Path,
+) -> None:
+    """The entry point the unattended paths use, which hold ids and nothing else.
+
+    The approval sweep and the packer both need metadata before they act, and
+    neither has a loaded candidate to hand -- asking them to read one just to
+    find a gallery reference would be a query per candidate for two columns.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await make_candidate(database, 4108964, "torrenttoken")
+    service = build_service(database, tmp_path, GDATA_RESPONSE)
+
+    assert await service.enrich_missing_metadata((1,)) == 1
+    assert scraped_title(database) == "Torrent Sample"
+    # The torrent availability the router needs lands here too, exactly as it
+    # does on the page-driven path.
+    candidate = await database.get_candidate(1)
+    assert candidate is not None
+    assert candidate.torrent_count == 2
+
+
+@pytest.mark.asyncio
+async def test_enrichment_by_id_makes_no_request_when_nothing_is_missing(
+    tmp_path: Path,
+) -> None:
+    """What makes it safe to call before every automatic decision.
+
+    The transport raises, so any HTTP call at all fails this test: a candidate
+    that already has its metadata, one with no gallery reference, and an empty
+    batch must each be answered by the database alone.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await make_candidate(database, 4108964, "torrenttoken")
+    await build_service(database, tmp_path, GDATA_RESPONSE).enrich_missing_metadata((1,))
+
+    async def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request expected, got {request.url}")
+
+    async def no_credentials():
+        return None
+
+    strict = ExHentaiService(
+        database=database,
+        work_path=tmp_path / "work",
+        library_path=tmp_path / "library",
+        credentials_provider=no_credentials,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse)),
+    )
+
+    assert await strict.enrich_missing_metadata((1,)) == 0
+    assert await strict.enrich_missing_metadata(()) == 0
+    # A candidate that does not exist is 「nothing missing」 rather than an error:
+    # the callers are best-effort and a removed candidate must not raise at them.
+    assert await strict.enrich_missing_metadata((9999,)) == 0
+
+
+@pytest.mark.asyncio
+async def test_enrichment_by_id_skips_a_candidate_with_no_gallery_link(
+    tmp_path: Path,
+) -> None:
+    """「只要有 eh 链接」 is the condition; a magnet-only work has nothing to fetch."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    candidate_id = await database.create_manual_candidate(
+        filter_reason="手动添加：磁力链接",
+        magnet_url="magnet:?xt=urn:btih:" + "a" * 40,
+        torrent_hash="a" * 40,
+        title="Magnet Only",
+    )
+
+    async def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"no request expected, got {request.url}")
+
+    async def no_credentials():
+        return None
+
+    service = ExHentaiService(
+        database=database,
+        work_path=tmp_path / "work",
+        library_path=tmp_path / "library",
+        credentials_provider=no_credentials,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(refuse)),
+    )
+
+    assert await service.enrich_missing_metadata((candidate_id,)) == 0
+
