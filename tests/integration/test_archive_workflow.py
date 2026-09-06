@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.archive.service import ArchiveSettingsService
 from app.archive.vault import decrypt_password
 from app.config import Settings
+from app.conversion.convert import ConversionError
 from app.conversion.service import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_PENDING,
@@ -770,3 +771,178 @@ async def test_conversion_publishes_into_the_overridden_library(
     library_path, work_path = await conversion._effective_paths()  # noqa: SLF001
     assert library_path == moved
     assert work_path == tmp_path / "work"
+
+
+# ---------------------------------------------------------------------------
+#  打包闸门 (item 6) 与「先拉元数据」(item 3)
+# ---------------------------------------------------------------------------
+
+
+async def set_candidate_status(database: Database, status: str) -> None:
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = ? WHERE id = 1", (status,)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_work_downloading_from_a_second_source_can_still_be_packed(
+    tmp_path: Path,
+) -> None:
+    """The reported bug, as the situation that produces it.
+
+    A candidate has one status field shared by every job it spawned, and
+    claiming any job sets it to PROCESSING. So a book whose preview-image source
+    had finished -- archive on disk, ready to pack -- sat at PROCESSING while its
+    torrent was still running, and 打包 answered 「Only approved candidates can be
+    converted」: a refusal of something legitimate, in a sentence that did not
+    describe the situation.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg", "02.jpg"))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    await set_candidate_status(database, "PROCESSING")
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    job_id = await service.enqueue_for_candidate(candidate_id)
+
+    assert job_id > 0
+    assert job_state(database, job_id)[0] == CONVERSION_STATE_PENDING
+
+
+@pytest.mark.asyncio
+async def test_packing_is_still_refused_before_a_decision_and_after_a_rejection(
+    tmp_path: Path,
+) -> None:
+    """Readiness was relaxed; intent was not.
+
+    Packing publishes into the library, so a book the operator rejected -- or has
+    not looked at yet -- must not get there however complete its archive is.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    for status in ("PENDING_REVIEW", "REJECTED", "NEEDS_INFO", "NEEDS_REVISION"):
+        await set_candidate_status(database, status)
+        with pytest.raises(ConversionError) as error:
+            await service.enqueue_for_candidate(candidate_id)
+        assert error.value.code == "CANDIDATE_NOT_READY"
+        # The message names the状态 that refused, because 「不能打包」 alone does
+        # not tell an operator whether to approve the book or to stop trying.
+        assert status in error.value.public_message
+
+
+@pytest.mark.asyncio
+async def test_packing_without_an_archive_says_so_in_the_operator_language(
+    tmp_path: Path,
+) -> None:
+    """`ARCHIVE_NOT_READY` is now the real readiness gate, so it is what is read."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "INSERT INTO candidates (id, status) VALUES (1, 'APPROVED')"
+        )
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    with pytest.raises(ConversionError) as error:
+        await service.enqueue_for_candidate(1)
+
+    assert error.value.code == "ARCHIVE_NOT_READY"
+    assert "还没有下载完成的压缩包" in error.value.public_message
+
+
+@pytest.mark.asyncio
+async def test_metadata_is_fetched_before_the_book_is_named(
+    tmp_path: Path,
+) -> None:
+    """Item 3: an eh link means metadata first, then everything derived from it.
+
+    The library path, the filename and the whole of ComicInfo.xml come out of
+    metadata, and an artifact row records the path -- so a book packed before its
+    gallery was read stays `candidate-1.cbz` no matter what is fetched later.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    # No metadata at all, which is the state a download that never passed
+    # through 待审核 leaves behind.
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute("DELETE FROM metadata_values")
+
+    enriched: list[int] = []
+
+    async def enricher(target_id: int) -> None:
+        enriched.append(target_id)
+        with database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source) "
+                "VALUES (?, 'Title', 'Fetched From Gallery', 'EXHENTAI')",
+                (target_id,),
+            )
+
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+        metadata_enricher=enricher,
+    )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    assert enriched == [candidate_id]
+    # Named from the metadata the pack itself fetched, not `candidate-1`.
+    assert (tmp_path / "library" / "Fetched From Gallery.cbz").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_metadata_fetch_does_not_strand_a_downloaded_book(
+    tmp_path: Path,
+) -> None:
+    """Enrichment is best-effort: an ExHentai outage must not park a finished download."""
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+
+    async def exploding(target_id: int) -> None:
+        raise RuntimeError("gdata unreachable")
+
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+        metadata_enricher=exploding,
+    )
+
+    job_id = await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    assert job_state(database, job_id)[0] == CONVERSION_STATE_COMPLETED
+    # Packed under the title it already had, rather than not packed at all.
+    assert (tmp_path / "library" / "Archive Title.cbz").exists()
+

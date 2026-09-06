@@ -41,7 +41,36 @@ from app.downloads.models import (
     PROVIDER_CONVERSION,
     RECOVERABLE_CONVERSION_STATES,
 )
-from app.review.models import STATUS_APPROVED
+from app.review.models import (
+    STATUS_NEEDS_INFO,
+    STATUS_NEEDS_REVISION,
+    STATUS_PENDING_REVIEW,
+    STATUS_REJECTED,
+)
+
+#: Candidate states that must never be packed, whatever is on disk.
+#:
+#: Deliberately a denylist. The readiness question -- 「is there a downloaded
+#: archive?」 -- is answered by looking for the artifact, not by the candidate's
+#: status, because a candidate has one status field for every job it spawned and
+#: any claimed job sets it to `PROCESSING`. An allowlist therefore refused a book
+#: whose preview-image source had completed while its torrent was still running,
+#: which is an ordinary situation and not an error.
+#:
+#: What remains here is about *intent*, which a status is the right place to
+#: record: a rejected book must not reach the library, and one still awaiting
+#: review has not been approved for it. `PROCESSING`, `DOWNLOADED`, `APPROVED` and
+#: `FAILED` are all packable when an archive exists -- `FAILED` included, because
+#: the failure may have been one source of several and the operator re-packing is
+#: how they recover it.
+_PACK_FORBIDDEN_STATUSES: frozenset[str] = frozenset(
+    {
+        STATUS_REJECTED,
+        STATUS_PENDING_REVIEW,
+        STATUS_NEEDS_INFO,
+        STATUS_NEEDS_REVISION,
+    }
+)
 
 
 def _title_values(
@@ -116,6 +145,7 @@ class ConversionService:
         settings_service: ArchiveSettingsService | None = None,
         data_path: Path | None = None,
         notify: Callable[..., object] | None = None,
+        metadata_enricher: Callable[[int], object] | None = None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -128,6 +158,10 @@ class ConversionService:
         )
         self._worker_task: asyncio.Task[None] | None = None
         self._notify = notify
+        # Optional because a deployment without ExHentai configured has nothing
+        # to enrich from, and because most tests construct this service directly
+        # and do not care where metadata came from.
+        self._metadata_enricher = metadata_enricher
 
     async def _effective_paths(self) -> tuple[Path, Path]:
         """Read the directories per job so an operator change applies at once.
@@ -349,10 +383,26 @@ class ConversionService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
-            if str(candidate_row[0]) not in {STATUS_APPROVED, "DOWNLOADED"}:
+            # What packing actually requires is a downloaded archive, which the
+            # next query establishes. The candidate's status is a *different*
+            # question, and gating on it was wrong for a case that happens
+            # routinely: a candidate has ONE status field shared by every job it
+            # spawned, and claiming any job sets it to PROCESSING. So a book whose
+            # preview-image source had already finished, while its qBittorrent
+            # torrent was still running, sat at PROCESSING with a complete archive
+            # on disk -- and 打包 answered 「Only approved candidates can be
+            # converted」, which is both a refusal of something legitimate and a
+            # sentence that does not describe the situation.
+            #
+            # REJECTED and the pre-approval states are still refused, because
+            # packing a book the operator rejected would publish it into the
+            # library. That is a statement about intent, so it is a status check;
+            # readiness is not.
+            status = str(candidate_row[0])
+            if status in _PACK_FORBIDDEN_STATUSES:
                 raise ConversionError(
                     "CANDIDATE_NOT_READY",
-                    "Only approved candidates can be converted",
+                    f"候选状态为 {status}，不能打包",
                 )
             artifact_row = connection.execute(
                 "SELECT a.path FROM download_jobs dj "
@@ -363,9 +413,11 @@ class ConversionService:
                 (candidate_id, DOWNLOAD_STATE_COMPLETED),
             ).fetchone()
             if artifact_row is None:
+                # This is now the readiness gate, so the message has to be the
+                # one an operator reads when 打包 is pressed too early.
                 raise ConversionError(
                     "ARCHIVE_NOT_READY",
-                    "No downloaded archive available for conversion",
+                    "该作品还没有下载完成的压缩包，无法打包",
                 )
             before = connection.total_changes
             connection.execute(
@@ -640,6 +692,18 @@ class ConversionService:
             )
             return
 
+        # Metadata first, always. Everything below this line is derived from it:
+        # the library path the template renders, the filename, and the whole of
+        # ComicInfo.xml. A book packed before its gallery was read lands as
+        # `candidate-57.cbz` with an empty ComicInfo, and re-fetching afterwards
+        # does not move it -- the path is written into an artifact row by then, so
+        # the damage is a file the operator has to rename by hand.
+        #
+        # The order was previously the other way round for the automatic path: a
+        # download finishing enqueued a pack immediately, and enrichment only ran
+        # when somebody opened 待审核. So an unattended deployment reliably
+        # produced exactly the badly-named files nobody was there to notice.
+        await self._ensure_metadata(job["candidate_id"])
         metadata = await asyncio.to_thread(
             self._fetch_metadata_sync, job["candidate_id"]
         )
@@ -769,6 +833,34 @@ class ConversionService:
         )
         if not await self._settings.keep_original():
             await asyncio.to_thread(self._remove_original_sync, source_path)
+
+    async def _ensure_metadata(self, candidate_id: int) -> None:
+        """Pull the gallery's metadata before packing, if it is still missing.
+
+        A no-op when the candidate has no ExHentai reference or already has its
+        metadata -- the enricher answers that with one query and no HTTP call, so
+        this costs nothing on the ordinary path and only does work in the case
+        that would otherwise publish an unnamed book.
+
+        A failure is logged, not raised. The archive is downloaded and packing it
+        under a fallback name is a worse outcome than not packing it at all only
+        if the operator never finds out; parking the job because ExHentai was
+        briefly unreachable would strand a complete download behind an outage.
+        """
+        if self._metadata_enricher is None:
+            return
+        try:
+            await self._metadata_enricher(candidate_id)
+        except Exception as exc:  # noqa: BLE001 - enrichment is best-effort
+            logging.getLogger(__name__).warning(
+                "conversion_metadata_enrichment_failed candidate=%d error=%s",
+                candidate_id,
+                exc,
+                extra={
+                    "candidate_id": candidate_id,
+                    "error_code": "CONVERSION_METADATA_ENRICH_FAILED",
+                },
+            )
 
     async def _build_processor(
         self, image_quality: str | None = None
