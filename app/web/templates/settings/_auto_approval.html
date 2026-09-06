@@ -37,7 +37,15 @@
       page with JavaScript off -- an edit form that only populates after a script
       runs is an edit form that silently discards the rule. -#}
   <fieldset class="ui-fieldset" data-condition-row>
-    <legend>条件 {{ index }}</legend>
+    <legend>
+      <span data-row-number>条件 {{ index }}</span>
+      {#- Removing a row is 「clear its field」, because a row whose field is blank
+          is already skipped server-side. So this works with JavaScript off too:
+          选「（不使用此条件）」 has always been the way to drop a condition, and
+          `settings.js` additionally takes the row out of the DOM. -#}
+      <button class="ui-btn" data-size="sm" data-variant="ghost" type="button"
+              data-row-remove hidden>移除</button>
+    </legend>
     <div class="ui-form-grid">
       <div class="ui-field">
         <label for="kind-{{ index }}">匹配方式</label>
@@ -121,14 +129,32 @@
           </div>
         </div>
 
-        {#- Always at least three rows, and always one more than the rule uses, so
-            editing a two-condition rule leaves somewhere to add the third
-            without a script. -#}
+        {#- Always one more row than the rule uses, and never fewer than three, so
+            a fresh rule has room to type and editing an existing one leaves
+            somewhere to add the next condition without a script.
+
+            There is no upper bound. The rows submit as parallel lists and
+            `_parse_rule_condition` walks however many arrive, so the limit was
+            only ever this loop -- the AST, the DSL renderer and the evaluator
+            have always taken an arbitrary number of children. 添加条件 below
+            clones a row for anyone with JavaScript; without it, the spare row
+            plus 保存 still grows a rule one condition at a time. -#}
         {% set edit_rows = edit_rule.rows if edit_rule else [] %}
-        {% for index in range(1, [edit_rows|length + 1, 3]|max + 1) %}
-          {{ condition_row(index, vocabulary,
-                           row=edit_rows[index - 1] if index <= edit_rows|length else None) }}
-        {% endfor %}
+        <div data-condition-rows>
+          {% for index in range(1, [edit_rows|length + 1, 3]|max + 1) %}
+            {{ condition_row(index, vocabulary,
+                             row=edit_rows[index - 1] if index <= edit_rows|length else None) }}
+          {% endfor %}
+        </div>
+        {#- Revealed by `settings.js`. Hidden by default because without the
+            script it would be a button that does nothing -- the no-JS path is
+            the spare row that is always rendered. -#}
+        <div class="ui-form-actions" data-condition-add-row hidden>
+          <button class="ui-btn" data-size="sm" type="button" data-condition-add>
+            添加条件
+          </button>
+          <span class="ui-hint" data-condition-count role="status" aria-live="polite"></span>
+        </div>
 
         {#- The rendered DSL, filled by `settings.js`. Empty until then, and
             `.ui-code:empty` takes no space, so the no-JS page has no blank box.
@@ -149,8 +175,13 @@
           <button class="ui-btn" data-variant="primary" type="submit">{% if edit_rule %}保存修改{% else %}保存规则{% endif %}</button>
           {#- A way out of edit mode that is not「保存」. Without it the only exits
               are saving the rule or leaving the tab. -#}
+          {#- `section.code` rather than a literal: the section is
+              「auto-approval」 with a hyphen, this said `auto_approval` with an
+              underscore, and `settings_section` 404s on anything not in
+              `SETTINGS_SECTIONS` -- so 取消编辑 was a guaranteed 「设置分区不存在」.
+              Reading the code the page was rendered with cannot misspell it. -#}
           {% if edit_rule %}
-          <a class="ui-btn" href="{{ url_for('settings_section', section='auto_approval').path }}">取消编辑</a>
+          <a class="ui-btn" href="{{ url_for('settings_section', section=section.code).path }}">取消编辑</a>
           {% endif %}
         </div>
       </form>

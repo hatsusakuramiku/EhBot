@@ -9,6 +9,7 @@ arguments is exercised rather than assumed.
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from pathlib import Path
 
@@ -750,6 +751,155 @@ class TestRuleSaving:
         # One row stores as that row's node rather than a group of one, which is
         # what `_parse_rule_condition` does on a create too.
         assert rules[0].condition["value"] == "漫画"
+
+    def test_leaving_the_editor_lands_on_the_tab_rather_than_a_404(
+        self, tmp_path: Path
+    ) -> None:
+        """The reported bug: 取消编辑 answered 「设置分区不存在」.
+
+        The link was written `section='auto_approval'` with an underscore while
+        the section is `auto-approval` with a hyphen, and `settings_section` 404s
+        on anything not in `SETTINGS_SECTIONS` -- so the only way out of edit mode
+        that was not 保存 was guaranteed to be an error page.
+        """
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        asyncio.run(
+            database.save_auto_approval_rule(
+                rule_id=None,
+                name="Cancellable",
+                enabled=True,
+                priority=50,
+                condition={
+                    "kind": "condition",
+                    "field": "Category",
+                    "operator": "=",
+                    "value": "漫画",
+                },
+                dsl_snapshot='{Category} = "漫画"',
+            )
+        )
+        rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            editing = client.get(f"/auto-approval-rules/{rule_id}/edit")
+            target = re.search(
+                r'href="([^"]+)"[^>]*>取消编辑', editing.text
+            )
+            assert target is not None
+            landed = client.get(target.group(1))
+
+        assert landed.status_code == 200
+        # And the rule is still there: 取消编辑 abandons the edit, it does not
+        # delete anything.
+        assert "Cancellable" in landed.text
+
+    def test_a_rule_takes_as_many_conditions_as_the_operator_writes(
+        self, tmp_path: Path
+    ) -> None:
+        """The reported limit of three was the Jinja loop, not the rule engine.
+
+        The AST takes any number of children and `_parse_rule_condition` walks
+        whatever the form sends, so this posts five parallel rows and expects one
+        group of five back.
+        """
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            saved = client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Five Fields",
+                    "priority": "20",
+                    "enabled": "on",
+                    "condition_kind": ["condition"] * 5,
+                    "condition_field": [
+                        "Category",
+                        "Language",
+                        "Artist",
+                        "Pages",
+                        "Rating",
+                    ],
+                    "condition_operator": ["=", "=", "CONTAINS", ">=", ">="],
+                    "condition_value": ["漫画", "中文", "Someone", "20", "4"],
+                },
+                follow_redirects=False,
+            )
+
+        assert saved.status_code == 303
+        rules = asyncio.run(database.list_auto_approval_rules())
+        assert len(rules) == 1
+        condition = rules[0].condition
+        assert condition["kind"] == "group"
+        assert len(condition["children"]) == 5
+        assert [child["field"] for child in condition["children"]] == [
+            "Category",
+            "Language",
+            "Artist",
+            "Pages",
+            "Rating",
+        ]
+
+    def test_the_editor_offers_a_way_to_add_and_remove_condition_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """The controls `settings.js` needs, asserted on the rendered markup.
+
+        Only the hooks are checked here, not the scripted behaviour: the no-JS
+        path is the spare row the loop always renders, and these attributes are
+        the contract between the template and the script.
+        """
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/auto-approval")
+
+        assert "data-condition-rows" in page.text
+        assert "data-condition-add" in page.text
+        assert "data-row-remove" in page.text
+        # Still three rows without a script, so a rule can be grown one
+        # condition at a time by saving and reopening. Counted with the closing
+        # bracket, or `data-condition-rows` on the container matches too.
+        assert page.text.count("data-condition-row>") >= 3
+
+    def test_a_rule_of_many_conditions_reopens_with_all_of_them(
+        self, tmp_path: Path
+    ) -> None:
+        """Editing must not be where a five-condition rule loses two of them."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Four Fields",
+                    "priority": "20",
+                    "enabled": "on",
+                    "condition_kind": ["condition"] * 4,
+                    "condition_field": ["Category", "Language", "Pages", "Rating"],
+                    "condition_operator": ["=", "=", ">=", ">="],
+                    "condition_value": ["漫画", "中文", "20", "4"],
+                },
+                follow_redirects=False,
+            )
+            rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+            editing = client.get(f"/auto-approval-rules/{rule_id}/edit")
+
+        assert editing.status_code == 200
+        rows = editing.context["edit_rule"]["rows"]
+        assert len(rows) == 4
+        # One spare row past the four, which is what makes the no-JS path work.
+        assert editing.text.count("data-condition-row>") == 5
 
     def test_a_rule_can_be_deleted(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
