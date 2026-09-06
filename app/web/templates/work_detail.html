@@ -74,7 +74,13 @@
     </p>
   </div>
   <div class="ui-row-actions">
-    <a class="ui-btn" data-size="sm" href="/candidates">返回候选列表</a>
+    {#- Resolved by `resolve_origin`: an explicit `?return_to=` from the list that
+        linked here, else the referrer, else the candidate list -- which is where
+        this button always used to go. The label names the destination, so 返回
+        never lies about where it lands. It carries the list's query string, so an
+        operator returns to the tab, filter, sort and page they left rather than
+        to a reset view. -#}
+    <a class="ui-btn" data-size="sm" href="{{ origin.href }}" rel="up">{{ origin.label }}</a>
   </div>
 </header>
 

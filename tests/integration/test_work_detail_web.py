@@ -529,3 +529,73 @@ def test_a_gated_action_returns_to_this_page(tmp_path: Path) -> None:
     dialog = dialog.split("</form>")[0]
     assert 'name="return_to"' in dialog
     assert f'value="/works/{candidate_id}"' in dialog
+
+
+def test_the_return_button_goes_back_to_the_page_it_was_opened_from(
+    tmp_path: Path,
+) -> None:
+    """The reported inconvenience: 返回 always claimed 「候选列表」.
+
+    Opening a work from 已下载 left the sidebar as the only way back, which loses
+    the tab, filter, sort and page -- all of which live in the query string. The
+    button now names and reaches the list the operator actually came from.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        from_downloaded = client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": "http://testserver/downloaded?tab=packed&page=2"},
+        )
+        from_candidates = client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": "http://testserver/candidates?tab=pending"},
+        )
+        cold = client.get(f"/works/{candidate_id}")
+
+    assert from_downloaded.context["origin"] == {
+        "href": "/downloaded?tab=packed&page=2",
+        "label": "返回已下载",
+    }
+    assert "返回已下载" in from_downloaded.text
+    assert 'href="/downloaded?tab=packed&amp;page=2"' in from_downloaded.text
+
+    assert from_candidates.context["origin"]["label"] == "返回候选列表"
+    assert from_candidates.context["origin"]["href"] == "/candidates?tab=pending"
+
+    # No referrer at all -- a bookmark, or a fresh tab -- behaves exactly like the
+    # hardcoded link that used to be there.
+    assert cold.context["origin"] == {
+        "href": "/candidates",
+        "label": "返回候选列表",
+    }
+
+
+def test_the_return_button_cannot_be_pointed_off_site(tmp_path: Path) -> None:
+    """A referrer and a query parameter are both attacker-supplied.
+
+    Neither may put an absolute URL in the page's own 返回 link, or the app would
+    be lending its origin to somebody else's destination.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        by_referer = client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": "https://evil.example/downloaded"},
+        )
+        by_query = client.get(
+            f"/works/{candidate_id}?return_to=https://evil.example/x"
+        )
+
+    for page in (by_referer, by_query):
+        assert page.status_code == 200
+        assert page.context["origin"]["href"] == "/candidates"
+        assert "evil.example" not in page.text
+

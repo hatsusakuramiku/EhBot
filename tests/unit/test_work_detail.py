@@ -36,6 +36,7 @@ from app.downloads.models import (
 )
 from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR, ReviewActionEntry
 from app.web.deps import local_return_to
+from app.web.routes.works import resolve_origin
 
 
 ALL_SOURCES = frozenset(
@@ -536,3 +537,101 @@ def test_nothing_at_all_is_not_a_target() -> None:
     assert local_return_to("") is None
     assert local_return_to("   ") is None
     assert local_return_to("works/12") is None
+
+
+# --- 返回 (item 4) ----------------------------------------------------------
+#
+# The detail page used to offer one hardcoded 「返回候选列表」, so arriving from
+# 已下载 and wanting to go back meant the sidebar -- which loses the tab, filter,
+# sort and page the operator had. These pin the resolution rules rather than the
+# button's wording, which belongs to the template.
+
+
+class _FakeUrl:
+    def __init__(self, netloc: str) -> None:
+        self.netloc = netloc
+
+
+class _FakeRequest:
+    """The three things `resolve_origin` reads, and nothing else."""
+
+    def __init__(
+        self,
+        *,
+        return_to: str | None = None,
+        referer: str | None = None,
+        netloc: str = "ehbot.example",
+    ) -> None:
+        self.query_params = {"return_to": return_to} if return_to else {}
+        self.headers = {"referer": referer} if referer else {}
+        self.url = _FakeUrl(netloc)
+
+
+def test_an_explicit_return_to_wins_and_keeps_its_query_string() -> None:
+    origin = resolve_origin(
+        _FakeRequest(return_to="/downloaded?tab=packed&page=3")
+    )
+    assert origin["href"] == "/downloaded?tab=packed&page=3"
+    assert origin["label"] == "返回已下载"
+
+
+def test_the_referrer_names_the_list_the_operator_came_from() -> None:
+    """No list appends `return_to` yet, so the header is the working path."""
+    for referer, label in (
+        ("https://ehbot.example/downloaded?tab=all", "返回已下载"),
+        ("https://ehbot.example/candidates?tab=pending", "返回候选列表"),
+        ("https://ehbot.example/activity", "返回活动"),
+        ("https://ehbot.example/logs?level=INFO", "返回运行日志"),
+        ("https://ehbot.example/", "返回工作台"),
+    ):
+        origin = resolve_origin(_FakeRequest(referer=referer))
+        assert origin["label"] == label
+        assert origin["href"].startswith("/")
+
+
+def test_the_referrer_carries_the_filter_back() -> None:
+    origin = resolve_origin(
+        _FakeRequest(referer="https://ehbot.example/downloaded?tab=packed&sort=title")
+    )
+    assert origin["href"] == "/downloaded?tab=packed&sort=title"
+
+
+def test_an_off_site_referrer_is_ignored_rather_than_followed() -> None:
+    """The same rule `local_return_to` enforces: a header is not a destination."""
+    origin = resolve_origin(
+        _FakeRequest(referer="https://evil.example/downloaded")
+    )
+    assert origin == {"href": "/candidates", "label": "返回候选列表"}
+
+
+def test_a_crafted_return_to_cannot_send_an_operator_off_site() -> None:
+    for hostile in ("https://evil.example/x", "//evil.example/x", "/\\evil.example"):
+        origin = resolve_origin(_FakeRequest(return_to=hostile))
+        assert origin["href"] == "/candidates"
+
+
+def test_another_work_page_is_not_an_origin() -> None:
+    """Otherwise 返回 would reload the page it is drawn on."""
+    origin = resolve_origin(_FakeRequest(referer="https://ehbot.example/works/9"))
+    assert origin["href"] == "/candidates"
+
+
+def test_an_unknown_page_falls_back_to_the_old_hardcoded_destination() -> None:
+    origin = resolve_origin(_FakeRequest(referer="https://ehbot.example/settings/paths"))
+    assert origin == {"href": "/candidates", "label": "返回候选列表"}
+
+
+def test_a_path_that_merely_starts_with_a_known_prefix_is_not_under_it() -> None:
+    """`/downloadedX` is somebody else's page, whatever `startswith` thinks."""
+    origin = resolve_origin(_FakeRequest(referer="https://ehbot.example/downloadedX"))
+    assert origin["label"] == "返回候选列表"
+
+
+def test_the_manual_add_page_beats_the_candidate_list_prefix() -> None:
+    """Longest-prefix-first, or `/candidates/manual-add` would be mislabelled."""
+    origin = resolve_origin(
+        _FakeRequest(referer="https://ehbot.example/candidates/manual-add")
+    )
+    assert origin["href"] == "/candidates/manual-add"
+    assert origin["label"] == "返回手动添加"
+
