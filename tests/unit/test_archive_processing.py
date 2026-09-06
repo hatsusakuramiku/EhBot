@@ -33,6 +33,8 @@ from app.archive.models import (
 from app.archive.processor import ArchiveProcessor
 from app.archive.toolchain import install_root
 from app.archive.safety import (
+    detected_image_extension,
+    effective_page_extension,
     natural_sort_key,
     normalize_member_name,
     page_file_names,
@@ -59,6 +61,7 @@ from app.archive.quality import (
 from tests.unit.archive_fixtures import (
     ALL_PROFILES,
     JPEG_HEADER,
+    PNG_HEADER,
     SEVEN_ZIP_PROFILE,
     ZIP_ONLY_PROFILES,
     image_bytes,
@@ -210,17 +213,113 @@ def test_validate_manifest_enforces_limits() -> None:
 
 
 def test_validate_manifest_rejects_fake_image_extension() -> None:
+    """Bytes that are not any image this application knows still fail the book.
+
+    This is the half of the check that must not be relaxed: `01.png` holding an
+    executable is refused exactly as it was before the mislabelled-page repair
+    was added beside it.
+    """
     with pytest.raises(ArchiveSafetyError) as error:
         validate_manifest(
             _manifest(_member("01.png", header=b"MZ\x90\x00 not an image")),
             SafetyLimits(),
         )
     assert error.value.code == "ARCHIVE_MEMBER_FAKE_IMAGE"
+    # The message has to say which of the two things was wrong, because the
+    # remedies differ: a mislabelled page is repaired silently, and this is not
+    # that case.
+    assert "不是可识别的图片格式" in error.value.public_message
+
+
+# --- 放宽解压校验 (item 5) ---------------------------------------------------
+#
+# The reported problem: one page whose header disagreed with its extension --
+# what a batch converter leaves behind and no uploader notices -- failed the
+# whole archive with `ARCHIVE_MEMBER_FAKE_IMAGE`, so a complete two-hundred-page
+# book could not be packed at all. A real image under a wrong name is now
+# published under the extension its bytes actually are.
+
+
+def test_a_mislabelled_page_is_repaired_instead_of_failing_the_book() -> None:
+    pages = validate_manifest(
+        _manifest(
+            _member("01.png", header=JPEG_HEADER),
+            _member("02.jpg", header=PNG_HEADER),
+            _member("03.jpg", header=JPEG_HEADER),
+        ),
+        SafetyLimits(),
+    )
+    assert [member.name for member in pages] == ["01.png", "02.jpg", "03.jpg"]
+    # Each page carries the extension of its own bytes: readers dispatch on the
+    # extension, so publishing JPEG bytes as `.png` is a page that silently
+    # fails to render in some of them.
+    assert page_file_names(pages) == ("0001.jpg", "0002.png", "0003.jpg")
+
+
+def test_an_extensionless_member_is_judged_by_its_bytes() -> None:
+    """Books whose pages are named `001` used to fail as `ARCHIVE_NO_IMAGES`."""
+    pages = validate_manifest(
+        _manifest(_member("001", header=JPEG_HEADER), _member("002", header=PNG_HEADER)),
+        SafetyLimits(),
+    )
+    assert len(pages) == 2
+    assert page_file_names(pages) == ("0001.jpg", "0002.png")
+
+
+def test_an_extensionless_non_image_is_still_not_a_page() -> None:
+    """Relaxing the naming rule must not turn every stray file into a page."""
+    with pytest.raises(ArchiveSafetyError) as error:
+        validate_manifest(
+            _manifest(_member("readme", header=b"just some text here")),
+            SafetyLimits(),
+        )
+    assert error.value.code == "ARCHIVE_NO_IMAGES"
+
+
+def test_detected_image_extension_names_only_what_it_can_prove() -> None:
+    assert detected_image_extension(JPEG_HEADER) == ".jpg"
+    assert detected_image_extension(PNG_HEADER) == ".png"
+    assert detected_image_extension(b"GIF89a" + b"\x00" * 6) == ".gif"
+    assert detected_image_extension(b"BM" + b"\x00" * 10) == ".bmp"
+    assert detected_image_extension(b"RIFF\x00\x00\x00\x00WEBP") == ".webp"
+    # `RIFF` alone is any RIFF container, including audio.
+    assert detected_image_extension(b"RIFF\x00\x00\x00\x00WAVE") is None
+    assert detected_image_extension(b"MZ\x90\x00") is None
+    assert detected_image_extension(b"") is None
+
+
+def test_a_page_named_for_a_signatureless_format_is_repaired_too() -> None:
+    """`.avif` has no fixed signature, so the mismatch check cannot see it.
+
+    `header_matches_extension` answers True for JPEG bytes called `01.avif` --
+    there is no AVIF signature to compare against -- so the page would have been
+    published as `.avif` and failed to open. Repair keys on positive
+    identification instead, which sees it.
+    """
+    assert effective_page_extension("01.avif", JPEG_HEADER) == ".jpg"
+    # And a page whose bytes really are unidentifiable keeps the name it came
+    # with: an actual AVIF must not be renamed on a guess.
+    assert effective_page_extension("01.avif", b"\x00\x00\x00 ftypavif") == ".avif"
+
+
+def test_a_correctly_named_page_keeps_its_own_extension() -> None:
+    """`.jpeg` stays `.jpeg`: agreement is not a reason to rewrite a name."""
+    assert effective_page_extension("01.jpeg", JPEG_HEADER) == ".jpeg"
+    assert effective_page_extension("01.png", PNG_HEADER) == ".png"
+    # No header captured at all is no evidence, so the claim stands.
+    assert effective_page_extension("01.webp", b"") == ".webp"
 
 
 def test_page_file_names_are_stable_and_collision_free() -> None:
+    # `_member` defaults to a JPEG header, so the PNG page has to be given its
+    # own: page names now follow the bytes, and a `.png` name over JPEG bytes is
+    # the mislabelled-page case covered below rather than this one.
     names = page_file_names(
-        (_member("b/01.jpg"), _member("a/01.jpg"), _member("cover.png"))
+        (
+            _member("b/01.jpg"),
+            _member("a/01.jpg"),
+            _member("cover.png", header=PNG_HEADER),
+        )
     )
     assert names == ("0001.jpg", "0002.jpg", "0003.png")
     assert len(set(names)) == 3
@@ -466,6 +565,34 @@ def test_processor_records_task_snapshot(tmp_path: Path) -> None:
     assert result.page_count == 2
     assert result.volume_count == 1
     assert result.password_id is None
+
+
+def test_a_book_with_mislabelled_pages_still_packs(tmp_path: Path) -> None:
+    """The whole point of the relaxation, driven through the real processor.
+
+    Before this, the archive below produced `ARCHIVE_MEMBER_FAKE_IMAGE` and no
+    CBZ at all, because one page was named `.png` while holding JPEG bytes.
+    """
+    source = tmp_path / "src.zip"
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("01.png", image_bytes("01.jpg"))
+        archive.writestr("02.jpg", image_bytes("02.jpg"))
+    destination = tmp_path / "library" / "out.cbz"
+
+    result = _processor().process(
+        source,
+        destination=destination,
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda count: b"<ComicInfo />",
+        library_path=tmp_path / "library",
+    )
+
+    assert result.page_count == 2
+    # The mislabelled page is published as what it is, and the bytes are
+    # untouched -- the repair is a rename, not a transcode.
+    pages = _cbz_pages(destination)
+    assert sorted(pages) == ["0001.jpg", "0002.jpg"]
+    assert pages["0001.jpg"] == image_bytes("01.jpg")
 
 
 def test_processor_cleans_up_work_directory(tmp_path: Path) -> None:

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import PurePosixPath
 
 from app.archive.errors import ArchiveSafetyError
 from app.archive.models import ArchiveManifest, ArchiveMember, SafetyLimits
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -25,6 +29,30 @@ _IMAGE_SIGNATURES: tuple[tuple[bytes, frozenset[str]], ...] = (
     (b"GIF89a", frozenset({".gif"})),
     (b"BM", frozenset({".bmp"})),
 )
+
+#: The extension each signature *should* have carried. One canonical extension
+#: per format rather than the set of names that format may go by: a page repaired
+#: to `.jpeg` would be just as correct and needlessly unlike every other page in
+#: the book.
+_SIGNATURE_EXTENSIONS: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", ".png"),
+    (b"GIF87a", ".gif"),
+    (b"GIF89a", ".gif"),
+    (b"BM", ".bmp"),
+)
+
+#: Every extension that correctly names a given detected format, so a page that
+#: is already named acceptably is left alone. `.jpeg` and `.jpg` are the same
+#: claim about the same bytes, and rewriting one into the other would be churn
+#: dressed up as a repair.
+_EXTENSION_ALIASES: dict[str, frozenset[str]] = {
+    ".jpg": frozenset({".jpg", ".jpeg"}),
+    ".png": frozenset({".png"}),
+    ".gif": frozenset({".gif"}),
+    ".bmp": frozenset({".bmp"}),
+    ".webp": frozenset({".webp"}),
+}
 
 _DIGITS = re.compile(r"(\d+)")
 
@@ -116,6 +144,59 @@ def header_matches_extension(name: str, header: bytes) -> bool:
     return True
 
 
+def detected_image_extension(header: bytes) -> str | None:
+    """The extension these bytes actually are, or None if they are not an image.
+
+    Positive identification, not a guess: it answers only for containers with a
+    fixed signature, and a payload it cannot name gets None rather than a
+    plausible default. That is what makes it usable as the 「is this really an
+    image?」 half of a relaxation -- an executable renamed to `.jpg` is still
+    refused, because nothing here identifies it.
+
+    WebP needs both halves of its header: `RIFF` alone is any RIFF container,
+    including audio, so the `WEBP` form at offset 8 is what distinguishes it.
+    AVIF, HEIF and JXL are deliberately absent -- their `ftyp` box needs real
+    parsing to tell the brands apart, and mislabelling one as another would be a
+    worse answer than declining to name it.
+    """
+    if not header:
+        return None
+    for signature, extension in _SIGNATURE_EXTENSIONS:
+        if header.startswith(signature):
+            return extension
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def effective_page_extension(name: str, header: bytes) -> str:
+    """The extension a page should be published under.
+
+    The claimed one, unless the bytes say otherwise and can say what they are.
+    This is the whole of the 「header does not match the extension」 repair, and it
+    is a rename rather than a transcode on purpose: CBZ page names are generated
+    by `page_file_names`, never taken from the archive, so the original member
+    name is not preserved either way -- and re-encoding PNG bytes into a `.jpg`
+    to honour a name nobody will ever see would throw away image quality to
+    satisfy a filename the uploader got wrong.
+    """
+    suffix = PurePosixPath(name.lower()).suffix
+    detected = detected_image_extension(header)
+    if detected is None:
+        # No positive identification means no grounds to rename: an AVIF or JXL
+        # page, which nothing here can name, keeps the extension it came with.
+        return suffix
+    if suffix in _EXTENSION_ALIASES[detected]:
+        return suffix
+    # Deliberately not routed through `header_matches_extension`, which is a
+    # laxer question and answers True in two cases that still need repairing: a
+    # member with no extension at all (`001` -- no claim to contradict, but
+    # publishing `0001` with no suffix gives readers nothing to dispatch on), and
+    # JPEG bytes named `.avif` (an image extension with no fixed signature, so
+    # the mismatch is invisible to that check).
+    return detected
+
+
 def member_depth(name: str) -> int:
     return len(PurePosixPath(name).parts)
 
@@ -176,11 +257,36 @@ def validate_manifest(
                 "ARCHIVE_COMPRESSION_RATIO",
                 f"\u6210\u5458 {member.name} \u538b\u7f29\u7387\u5f02\u5e38\uff0c\u53ef\u80fd\u662f\u538b\u7f29\u70b8\u5f39",
             )
-        if is_image_member(name):
-            if not header_matches_extension(name, member.header):
-                raise ArchiveSafetyError(
-                    "ARCHIVE_MEMBER_FAKE_IMAGE",
-                    f"\u6210\u5458 {member.name} \u7684\u6587\u4ef6\u5934\u4e0e\u6269\u5c55\u540d\u4e0d\u7b26",
+        detected = detected_image_extension(member.header)
+        # A member with no extension at all is judged by its bytes. Uploaders do
+        # ship books whose pages are named `001` with no suffix, and refusing
+        # those produced `ARCHIVE_NO_IMAGES` for an archive that was entirely
+        # images -- a whole book lost to a naming habit.
+        if is_image_member(name) or (not suffix and detected is not None):
+            mislabelled = detected is not None and suffix not in _EXTENSION_ALIASES[
+                detected
+            ]
+            if mislabelled or not header_matches_extension(name, member.header):
+                if detected is None:
+                    # Still refused: the bytes are not any image this
+                    # application can identify, so `page.jpg` holding an
+                    # executable fails exactly as it did before. The magic-number
+                    # gate is not what was relaxed.
+                    raise ArchiveSafetyError(
+                        "ARCHIVE_MEMBER_FAKE_IMAGE",
+                        f"\u6210\u5458 {member.name} \u7684\u6587\u4ef6\u5934\u4e0e\u6269\u5c55\u540d\u4e0d\u7b26"
+                        "\uff0c\u4e5f\u4e0d\u662f\u53ef\u8bc6\u522b\u7684\u56fe\u7247\u683c\u5f0f",
+                    )
+                # A real image under the wrong name. This used to fail the entire
+                # archive: one page called `.png` while holding JPEG bytes -- a
+                # mistake an uploader makes with a batch converter and never
+                # notices -- meant none of the other two hundred pages were
+                # published either. The page is kept and `page_file_names` gives
+                # it the extension its bytes actually are.
+                LOGGER.info(
+                    "archive_member_extension_repaired member=%s detected=%s",
+                    member.name,
+                    detected,
                 )
             pages.append(member)
     if not pages:
@@ -193,11 +299,19 @@ def validate_manifest(
 
 
 def page_file_names(members: tuple[ArchiveMember, ...]) -> tuple[str, ...]:
-    """Return stable, collision-free CBZ page names in the given order."""
+    """Return stable, collision-free CBZ page names in the given order.
+
+    The extension follows the bytes wherever they disagree with the member's own
+    name, so a published page is never labelled as a format it is not. Readers
+    dispatch on the extension, so a JPEG published as `0007.png` is a page that
+    silently fails to display in some of them.
+    """
     used: set[str] = set()
     names: list[str] = []
     for index, member in enumerate(members, start=1):
-        suffix = PurePosixPath(normalize_member_name(member.name).lower()).suffix
+        suffix = effective_page_extension(
+            normalize_member_name(member.name), member.header
+        )
         name = f"{index:04d}{suffix}"
         attempt = 1
         while name.lower() in used:
@@ -212,6 +326,8 @@ __all__ = [
     "ALLOWED_SIDECAR_NAMES",
     "IMAGE_EXTENSIONS",
     "NESTED_ARCHIVE_EXTENSIONS",
+    "detected_image_extension",
+    "effective_page_extension",
     "header_matches_extension",
     "is_image_member",
     "looks_like_image",
