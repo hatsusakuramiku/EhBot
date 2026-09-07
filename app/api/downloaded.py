@@ -190,6 +190,14 @@ async def _refile_for_repack(
     """
     if await archived_service.has_manual_path_pin(candidate_id):
         return
+    # Before reading it, not after. Everything below derives a name from this
+    # metadata and then pins that name, and `_library_target` prefers a pin
+    # over the template -- so a batch that computed a path while the gallery
+    # was still unread filed the book as `Candidate 57.cbz` and made it
+    # permanent, where the single-work path (which enriches inside the job)
+    # got the real title. Same entry point as the packer's own, so the two
+    # cannot disagree about when metadata is fetched.
+    await conversion_service.ensure_metadata(candidate_id)
     metadata = await conversion_service.metadata_for(candidate_id)
     title = conversion_service.title_of(metadata, candidate_id)
     try:

@@ -703,7 +703,7 @@ class ConversionService:
         # download finishing enqueued a pack immediately, and enrichment only ran
         # when somebody opened 待审核. So an unattended deployment reliably
         # produced exactly the badly-named files nobody was there to notice.
-        await self._ensure_metadata(job["candidate_id"])
+        await self.ensure_metadata(job["candidate_id"])
         metadata = await asyncio.to_thread(
             self._fetch_metadata_sync, job["candidate_id"]
         )
@@ -834,8 +834,16 @@ class ConversionService:
         if not await self._settings.keep_original():
             await asyncio.to_thread(self._remove_original_sync, source_path)
 
-    async def _ensure_metadata(self, candidate_id: int) -> None:
+    async def ensure_metadata(self, candidate_id: int) -> None:
         """Pull the gallery's metadata before packing, if it is still missing.
+
+        Public because packing is not the only step that derives a name from
+        this metadata. The batch re-file on `/downloaded` computes a library
+        path and *pins* it before the job is even enqueued, and a pin beats
+        the template forever -- so a batch that read the metadata before it
+        was fetched did not merely produce a bad name once, it recorded that
+        name as the operator's own decision. Both callers now go through here
+        first, which is what makes 「先拉元数据」 one rule rather than two.
 
         A no-op when the candidate has no ExHentai reference or already has its
         metadata -- the enricher answers that with one query and no HTTP call, so

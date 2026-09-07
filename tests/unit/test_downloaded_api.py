@@ -287,6 +287,10 @@ class FakeConversion:
     def __init__(self, unusable: frozenset[int] = frozenset()) -> None:
         self.enqueued: list[int] = []
         self.planned: list[int] = []
+        # Recorded in order against `planned`, because the ordering is the point:
+        # a path computed before the metadata was fetched gets pinned, and a pin
+        # beats the template forever.
+        self.enriched: list[int] = []
         # Candidates whose rendered path this filesystem will not take. The real
         # cause is a long title or a bad character; the batch only sees the
         # refusal.
@@ -295,6 +299,9 @@ class FakeConversion:
     async def enqueue_for_candidate(self, candidate_id: int) -> int:
         self.enqueued.append(candidate_id)
         return candidate_id * 100
+
+    async def ensure_metadata(self, candidate_id: int) -> None:
+        self.enriched.append(candidate_id)
 
     async def metadata_for(self, candidate_id: int):
         return ()
@@ -501,6 +508,42 @@ class TestBatchRefile:
         assert [entry[0] for entry in archived.pinned] == [1, 2]
         assert conversion.enqueued == [1, 2]
         assert len(result["applied"]) == 2
+
+    def test_metadata_is_fetched_before_a_path_is_derived_from_it(self) -> None:
+        """The reported defect: a single repack scraped first, a batch did not.
+
+        Packing one work enriches inside the job, so it names the file from the
+        gallery. The batch computes the path *itself*, before enqueueing, and it
+        used to do that against whatever metadata happened to be stored -- so a
+        work whose gallery had never been read was filed as `Candidate 1.cbz`.
+
+        That is worse than the same mistake made inside the job, because the batch
+        then *pins* the name, and `_library_target` prefers a pin over the
+        template: the bad name became the operator's own recorded decision and no
+        later repack would correct it.
+        """
+        archived, conversion = FakeArchived(), FakeConversion()
+
+        run_batch(archived, conversion, "repack", [1, 2])
+
+        assert conversion.enriched == [1, 2]
+        # Per work, and before that work's path is computed -- not one sweep up
+        # front, because a batch is a loop and the second book must not be planned
+        # from the first book's fetch.
+        assert conversion.enriched == conversion.planned
+
+    def test_a_manual_pin_is_not_worth_a_scrape(self) -> None:
+        """No path is derived, so there is nothing to derive it from.
+
+        The guard sits after the `is_manual` return for that reason: enriching
+        here would be an HTTP call whose answer is discarded.
+        """
+        archived = FakeArchived(manual_pins=frozenset({2}))
+        conversion = FakeConversion()
+
+        run_batch(archived, conversion, "repack", [1, 2])
+
+        assert conversion.enriched == [1]
 
     def test_a_path_the_operator_typed_is_left_alone(self) -> None:
         """`is_manual` is the guard, and this is the case it exists for.
