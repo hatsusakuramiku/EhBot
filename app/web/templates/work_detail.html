@@ -22,7 +22,11 @@
     with a hidden `return_to`, so there is one set of job endpoints rather than a
     second copy under `/works`.
 #}
-{% extends "base.html" %}
+{#- `layout` is `base.html` for a navigation and `_fragment.html` for an
+    in-place update; `page_layout` decides from the request. Same template
+    either way, so an updated action bar can never disagree with a freshly
+    loaded one. -#}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}{{ work.title or "未命名作品" }} · EhBot{% endblock %}
@@ -39,7 +43,10 @@
       The token and the return path are parameters rather than reads of the
       surrounding context: a macro that reached for `csrf_token` on its own would
       still work here and break the moment this file was imported anywhere. -#}
-  <form method="post" action="{{ action }}">
+  {#- `hx-post` is the whole opt-in: the target and the swap are inherited from
+      `<main>`, and the endpoint is the same one `action` names, so the button
+      still works unchanged when HTMX is not there. -#}
+  <form method="post" action="{{ action }}" hx-post="{{ action }}">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
             data-size="sm" type="submit"
@@ -51,7 +58,8 @@
   {#- `return_to` is why a pause taken here does not drop the operator onto the
       queue page. It is validated server-side by `local_return_to`; a value that
       is not a rooted local path is ignored rather than followed. -#}
-  <form method="post" action="/activity/jobs/{{ job_id }}/{{ action }}">
+  <form method="post" action="/activity/jobs/{{ job_id }}/{{ action }}"
+        hx-post="/activity/jobs/{{ job_id }}/{{ action }}">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="hidden" name="return_to" value="{{ return_to }}">
     <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
@@ -136,6 +144,7 @@
           <dd>
             {% if work.actions.edit_metadata %}
             <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
+                  hx-post="/candidates/{{ work.candidate_id }}/metadata"
                   class="ui-row-actions">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <input type="hidden" name="field_name" value="{{ entry.field_name }}">
@@ -230,7 +239,8 @@
                     detail="下次打包时会把书移到 " ~ work.archive_path.relative_path) }}
       {% endif %}
       <form class="ui-form" method="post"
-            action="/works/{{ work.candidate_id }}/archive-path">
+            action="/works/{{ work.candidate_id }}/archive-path"
+            hx-post="/works/{{ work.candidate_id }}/archive-path">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
           <label for="archive-directory">目录</label>
@@ -283,7 +293,7 @@
                           confirm_label="确认取消",
                           action="/activity/jobs/" ~ node.job.job_id ~ "/cancel",
                           csrf_token=csrf_token, hidden={"return_to": work_href},
-                          size="sm", key=node.job.job_id) }}
+                          size="sm", key=node.job.job_id, swap=true) }}
             {% endif %}
           {% endcall %}
         {% else %}
@@ -318,7 +328,7 @@
     {{ ui.confirm("驳回", "驳回这件作品",
                   "候选会进入「已驳回」队列，不会被删除；需要时可在该队列里重新排队。",
                   confirm_label="确认驳回", action=base ~ "/reject",
-                  csrf_token=csrf_token, size="sm") }}
+                  csrf_token=csrf_token, size="sm", swap=true) }}
     {% endif %}
     {% if work.actions.requeue %}
     {{ post_button(base ~ "/requeue", "重新排队", csrf_token) }}
@@ -345,7 +355,7 @@
     {{ ui.confirm(source.provider.label, "用 Archive Download 取原档",
                   "Archive Download 会消耗 GP。种子与预览页都不花 GP，可先确认这两条是否可用。",
                   confirm_label="确认消耗 GP", action=source.action,
-                  csrf_token=csrf_token, variant=None, size="sm") }}
+                  csrf_token=csrf_token, variant=None, size="sm", swap=true) }}
     {% else %}
     {{ post_button(source.action, source.provider.label, csrf_token,
                    disabled=not source.available, hint=source.hint) }}

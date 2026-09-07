@@ -904,3 +904,90 @@ def test_the_archive_path_form_is_not_nested_in_another_form(
 
     assert nested_form_lines(page.text) == []
 
+
+def test_an_action_updates_the_list_in_place_rather_than_reloading_it(
+    tmp_path: Path,
+) -> None:
+    """The reported complaint: every action reloaded the whole page.
+
+    Packing a book in a library of fifty threw the operator back to the top of
+    the list. An HTMX request gets the content column and nothing else, so the
+    shell is not re-sent, not re-parsed, and the scroll position survives.
+
+    The same template renders both, which is what stops the two from drifting:
+    the fragment is the page's own content block, not a partial written twice.
+    """
+    settings, _library, ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded")
+        token = page.context["csrf_token"]
+        swapped = client.post(
+            "/downloaded/batch",
+            data={
+                "csrf_token": token,
+                "action": "repack",
+                "tab": "all",
+                "candidate_ids": [ids["packed"]],
+            },
+            headers={"hx-request": "true"},
+            follow_redirects=True,
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert swapped.status_code == 200
+    # The content column, and only it.
+    assert "<!doctype html" not in swapped.text.lower()
+    assert "ui-sidebar" not in swapped.text
+    assert "<title>" not in swapped.text
+    # Still a whole, usable list: the rows and the batch form came back.
+    assert "data-downloaded-root" in swapped.text
+    assert "data-downloaded-form" in swapped.text
+    assert "已加入打包队列" in swapped.text or "件作品已执行" in swapped.text
+
+
+def test_a_navigation_still_gets_the_whole_document(tmp_path: Path) -> None:
+    """No HTMX, no fragment. This is what keeps the page working without JavaScript.
+
+    The header HTMX sets is the only thing that selects the fragment layout, so a
+    plain browser request -- and a crawler, and `curl` -- gets a complete page.
+    """
+    settings, _library, _ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded")
+        # HTMX asks for a whole document when restoring from a history miss.
+        restored = client.get(
+            "/downloaded",
+            headers={
+                "hx-request": "true",
+                "hx-history-restore-request": "true",
+            },
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    for response in (page, restored):
+        assert "<!doctype html" in response.text.lower()
+        assert "ui-sidebar" in response.text
+
+
+def test_the_row_and_batch_buttons_opt_into_the_swap(tmp_path: Path) -> None:
+    """One `hx-post` on the form covers every button that submits it.
+
+    The row 打包 retargets the same submission with `formaction`, which HTMX
+    honours -- so there is one opt-in rather than one per button, and no button
+    can be left behind doing a full reload.
+    """
+    settings, _library, _ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        body = client.get("/downloaded").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert 'hx-post="/downloaded/batch"' in body
+    # Declared once on the shell, inherited by everything inside it.
+    assert 'hx-target="#main"' in body
+    assert "/downloaded/" in body and "/repack" in body

@@ -46,6 +46,18 @@
       }
     })();
   </script>
+  {#- HTMX refuses to swap a 4xx by default, which would silently drop exactly
+      the answers an operator most needs to read: a refused action re-renders this
+      page with the reason on it and answers 400, and the default rule would leave
+      the old markup on screen as though nothing had been pressed.
+
+      So 400 and 422 are swapped and are still errors -- `error: true` keeps
+      `htmx:responseError` firing, so nothing that listens for a failure stops
+      hearing about one. 401 is deliberately NOT in the list: the session is gone
+      and the response is a login redirect, which belongs in the address bar and
+      not inside the content column. 5xx keeps the default too -- a stack trace is
+      not a page. -#}
+  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "400", "swap": true, "error": true}, {"code": "422", "swap": true, "error": true}, {"code": "[45]..", "swap": false, "error": true}]}'>
   <link rel="stylesheet" href="{{ url_for('static', path='/ui.css') }}">
   <script defer src="{{ url_for('static', path='/vendor/htmx-2.0.4.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>
@@ -121,7 +133,25 @@
         </div>
       </header>
 
-      <main class="{% block content_class %}ui-content{% endblock %}" id="main">{% block content %}{% endblock %}</main>
+      {#- `id="main"` is both the skip link's destination and the element an
+          in-place update replaces the contents of (`deps.CONTENT_TARGET`).
+          `aria-live` is deliberately absent: this is the whole page, and
+          announcing every swap would read the entire content column out
+          after each action. The updated region carries its own message
+          instead. -#}
+      {#- `hx-target` / `hx-swap` are declared once, here, because HTMX
+          inherits both down the tree: a form that opts into an in-place
+          update says only `hx-post`, and no page repeats where the answer
+          goes. A form without `hx-post` is untouched by this and still does
+          a normal submit, which is what keeps the no-JavaScript path whole.
+
+          `show:none` is the point of the exercise: HTMX otherwise scrolls
+          the target into view after a swap, so updating the pack status of
+          the fortieth book would throw the operator back to the top of the
+          list -- the same jolt a full reload gives, which is what these
+          swaps exist to remove. -#}
+      <main class="{% block content_class %}ui-content{% endblock %}" id="main"
+            hx-target="#main" hx-swap="innerHTML show:none">{% block content %}{% endblock %}</main>
 
       {# -------- phone: the same list as a tab bar. Sub-pages move into a
                  drawer rather than a second set of links. -------- #}

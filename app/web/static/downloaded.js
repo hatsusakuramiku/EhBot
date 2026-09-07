@@ -18,23 +18,20 @@
 (function () {
   "use strict";
 
-  var root = document.querySelector("[data-downloaded-root]");
-  if (!root) return;
-
-  var form = document.querySelector("[data-downloaded-form]");
-  var tab = root.getAttribute("data-tab") || "all";
-  var live = root.getAttribute("data-live") === "true";
-
-  /* --------------------------------------------------------- reveal controls */
+  /* Re-read on every in-place update, because a batch action replaces the whole
+   * list: the previous `form` is detached, the tab may have changed, and `live`
+   * flips the moment a pack is queued. Everything below is therefore looked up
+   * when it is used or rebound by `setUp`, and nothing is captured once at load.
+   */
+  var form = null;
+  var tab = "all";
+  var live = false;
 
   function reveal(selector) {
     document.querySelectorAll(selector).forEach(function (node) {
       node.hidden = false;
     });
   }
-
-  reveal("[data-select-tools]");
-  reveal("[data-rename-open]");
 
   /* -------------------------------------------------------------- selection */
 
@@ -71,25 +68,34 @@
     form.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  if (form) {
-    form.addEventListener("change", syncSelected);
-    syncSelected();
-  }
+  /* Bound to the new markup after each swap. Listeners go on the elements the
+   * swap brought in, so there is nothing to remove: the old ones went away with
+   * the nodes they were attached to. */
+  function bindSelection() {
+    if (form) {
+      form.addEventListener("change", syncSelected);
+      syncSelected();
+    }
 
-  document.querySelectorAll("[data-select]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      var mode = button.getAttribute("data-select");
-      boxes().forEach(function (box) {
-        if (mode === "all") box.checked = true;
-        else if (mode === "none") box.checked = false;
-        else if (mode === "invert") box.checked = !box.checked;
+    document.querySelectorAll("[data-select]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var mode = button.getAttribute("data-select");
+        boxes().forEach(function (box) {
+          if (mode === "all") box.checked = true;
+          else if (mode === "none") box.checked = false;
+          else if (mode === "invert") box.checked = !box.checked;
+        });
+        announceSelection();
       });
-      announceSelection();
     });
-  });
+  }
 
   /* ---------------------------------------------------------- rename drawer */
 
+  /* The drawer itself is teleported out of `<main>` by Alpine, so a swap does
+   * not touch it and these stay valid for the life of the document. Only the row
+   * buttons that open it are replaced, which is why `bindRenameTriggers` is the
+   * part that re-runs. */
   var drawer = document.querySelector("[data-rename-drawer]");
   var renameForm = drawer ? drawer.querySelector("[data-rename-form]") : null;
   var currentLine = drawer ? drawer.querySelector("[data-rename-current]") : null;
@@ -131,11 +137,13 @@
     if (filenameField) filenameField.focus();
   }
 
-  document.querySelectorAll("[data-rename-open]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      openDrawer(button);
+  function bindRenameTriggers() {
+    document.querySelectorAll("[data-rename-open]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        openDrawer(button);
+      });
     });
-  });
+  }
 
   if (drawer) {
     drawer.querySelectorAll("[data-rename-close]").forEach(function (node) {
@@ -148,17 +156,16 @@
 
   /* ------------------------------------------------------------ live packing */
 
-  /* Only started when the server says something is moving, which is what keeps a
-   * library of finished books from waking the process every few seconds. */
-  if (!live) return;
-
-  var notice = document.querySelector("[data-queue-changed]");
   var timer = null;
 
   /* Fallbacks only. The real values come from `/api/v1/meta`, so the cadence is
    * an operator setting rather than a constant compiled into this file. */
   var interval = 5000;
   var idleInterval = 20000;
+
+  function notice() {
+    return document.querySelector("[data-queue-changed]");
+  }
 
   function patch(item) {
     var host = document.querySelector('[data-work-id="' + item.candidate_id + '"]');
@@ -200,9 +207,10 @@
         payload.works.forEach(function (item) {
           if (!patch(item)) unknown = true;
         });
-        if (unknown && notice) {
-          notice.hidden = false;
-          notice.textContent = "列表有更新，刷新以查看";
+        var host = notice();
+        if (unknown && host) {
+          host.hidden = false;
+          host.textContent = "列表有更新，刷新以查看";
         }
         if (!payload.live && timer) {
           window.clearInterval(timer);
@@ -224,24 +232,75 @@
     timer = window.setInterval(poll, wait);
   }
 
-  fetch("/api/v1/meta", { headers: { Accept: "application/json" } })
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .then(function (meta) {
-      if (meta && meta.polling) {
-        interval = meta.polling.interval_ms || interval;
-        idleInterval = meta.polling.idle_interval_ms || idleInterval;
-      }
-    })
-    .catch(function () {
-      /* Keep the fallbacks: a page that cannot read the cadence still polls. */
-    })
-    .then(function () {
-      schedule();
-    });
+  function stopPolling() {
+    if (timer) {
+      window.clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  /* ---------------------------------------------------------------- start */
+
+  var started = false;
+
+  /* Runs on load and after every swap. Order matters: the DOM references are
+   * refreshed first, then the controls are rebound, then polling is re-armed
+   * against the new `live` flag -- a batch that queued fifty packs arrives with
+   * `data-live="true"` and starts the progress updates without a reload. */
+  function setUp() {
+    var root = document.querySelector("[data-downloaded-root]");
+    if (!root) {
+      stopPolling();
+      return;
+    }
+    form = document.querySelector("[data-downloaded-form]");
+    tab = root.getAttribute("data-tab") || "all";
+    live = root.getAttribute("data-live") === "true";
+
+    reveal("[data-select-tools]");
+    reveal("[data-rename-open]");
+    bindSelection();
+    bindRenameTriggers();
+
+    stopPolling();
+    /* Only polled when the server says something is moving, which is what keeps
+     * a library of finished books from waking the process every few seconds. */
+    if (live) schedule();
+  }
+
+  var ready = window.EhBotUI && window.EhBotUI.onContentReady;
+  if (!ready) {
+    ready = function (callback) {
+      callback();
+    };
+  }
+
+  ready(function () {
+    if (!started) {
+      started = true;
+      /* Read once per document: the cadence is a settings value, and re-fetching
+       * it after every action would be a request per click. */
+      fetch("/api/v1/meta", { headers: { Accept: "application/json" } })
+        .then(function (response) {
+          return response.ok ? response.json() : null;
+        })
+        .then(function (meta) {
+          if (meta && meta.polling) {
+            interval = meta.polling.interval_ms || interval;
+            idleInterval = meta.polling.idle_interval_ms || idleInterval;
+          }
+        })
+        .catch(function () {
+          /* Keep the fallbacks: a page that cannot read the cadence still polls. */
+        })
+        .then(setUp);
+      return;
+    }
+    setUp();
+  });
 
   document.addEventListener("visibilitychange", function () {
+    if (!live) return;
     if (document.visibilityState === "visible") poll();
     schedule();
   });

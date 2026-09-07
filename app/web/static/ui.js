@@ -293,6 +293,38 @@
     settleLoadedCovers();
   }
 
+  /* -------------------------------------------------- content lifecycle */
+
+  /* Page scripts run once, but an in-place update replaces the whole content
+   * column -- so every listener a page bound to a button inside it is gone, and
+   * every element it cached is detached. `onContentReady` is the one place that
+   * knows when that happened: it calls back now and again after each swap.
+   *
+   * A page script must therefore be idempotent, which is why the callback is
+   * handed a fresh root each time and why the two callers below clear their
+   * timers before arming new ones. The alternative -- rebinding by hand at each
+   * call site -- is how a page ends up with four pollers after four actions.
+   *
+   * `htmx:load` fires for swapped-in content and NOT for the initial document,
+   * which is why the first call is made here rather than left to the event. */
+  var contentCallbacks = [];
+
+  function onContentReady(callback) {
+    contentCallbacks.push(callback);
+    callback();
+  }
+
+  function runContentCallbacks() {
+    for (var i = 0; i < contentCallbacks.length; i += 1) {
+      try {
+        contentCallbacks[i]();
+      } catch (error) {
+        /* One page's re-init must not stop the others', and a swap that half
+         * re-armed is still better than a dead column. */
+      }
+    }
+  }
+
   /* ------------------------------------------------------------ wiring */
 
   function bind() {
@@ -330,6 +362,12 @@
     /* A swapped-in card whose cover was already in the browser cache is
      * `complete` on arrival, so it needs the same catch-up pass. */
     document.body.addEventListener("htmx:load", settleLoadedCovers);
+
+    /* One listener for every page script's re-init. `htmx:afterSettle` rather
+     * than `afterSwap`: Alpine initialises the new markup during the settle
+     * step, and a script that queried for `x-data` roots before that would bind
+     * to elements Alpine had not adopted yet. */
+    document.body.addEventListener("htmx:afterSettle", runContentCallbacks);
   }
 
   if (document.readyState === "loading") {
@@ -339,6 +377,7 @@
   }
 
   window.EhBotUI = {
+    onContentReady: onContentReady,
     toast: toast,
     applyTheme: applyTheme,
     applyDensity: applyDensity,

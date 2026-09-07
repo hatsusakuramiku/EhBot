@@ -217,7 +217,7 @@
 
 {# ------------------------------------------------------- confirm dialog #}
 
-{% macro confirm(label, title, body, confirm_label="确认", action=None, method="post", variant="danger", csrf_token=None, hidden=None, form=None, field=None, value=None, formaction=None, size=None, key="", hint=None) -%}
+{% macro confirm(label, title, body, confirm_label="确认", action=None, method="post", variant="danger", csrf_token=None, hidden=None, form=None, field=None, value=None, formaction=None, size=None, key="", hint=None, swap=false) -%}
   {#- Destructive actions get a second step. The confirm button submits a real
       form, so the action still works with JavaScript disabled once the dialog
       is bypassed — the guard is UX, not the authorisation.
@@ -234,7 +234,15 @@
 
       `key` disambiguates the dialog's `id` when a page renders the same label
       more than once -- fifty queue rows each offering 取消 would otherwise
-      point fifty `aria-labelledby` attributes at one element. -#}
+      point fifty `aria-labelledby` attributes at one element.
+
+      `swap` opts the `action` form into an in-place update. It has to name the
+      target explicitly, unlike every other form on a converted page: this markup
+      is teleported to the end of `<body>`, so it is not a descendant of `<main>`
+      and inherits none of the attributes declared there. Only the `action`
+      variant can be swapped -- the `form=` variant submits a form that lives on
+      the page and already carries its own `hx-post`, and adding a second one here
+      would fire two requests for one click. -#}
   {%- set dialog_id = "dlg-" ~ (label ~ key) | replace(" ", "") -%}
   {#- The trigger takes the caller's variant, which may be none -- a costly
       action is not necessarily a red one. The confirm button inside always has a
@@ -274,7 +282,9 @@
             <div class="ui-dialog-foot">
               <button class="ui-btn" type="button" x-ref="dismiss" @click="open = false">取消</button>
               {% if action %}
-                <form method="{{ method }}" action="{{ action }}">
+                <form method="{{ method }}" action="{{ action }}"
+                      {% if swap %}hx-post="{{ action }}" hx-target="#main"
+                      hx-swap="innerHTML show:none"{% endif %}>
                   {% if csrf_token %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
                   {% for hidden_name, hidden_value in (hidden or {}).items() %}
                   <input type="hidden" name="{{ hidden_name }}" value="{{ hidden_value }}">

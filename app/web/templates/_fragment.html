@@ -1,0 +1,16 @@
+{#
+  The layout a fragment render extends instead of `base.html`.
+
+  It exists so an in-place update and a full page load are the *same template*.
+  A converted page extends `layout`, which is `base.html` for a navigation and
+  this file for an HTMX swap, so the shell -- head, sidebar, tab bar, toast
+  region -- is emitted once per real page load and an update carries only the
+  content block. The alternative was a second template holding a copy of the
+  page body, and two renderings of one page drift: that is the lesson R5 already
+  paid for, and it is why there is no `work_detail_fragment.html` here.
+
+  Deliberately nothing but the block. No wrapper element, because the swap
+  replaces the *inside* of `#main` and a div here would nest one more level on
+  every single update.
+#}
+{% block content %}{% endblock %}

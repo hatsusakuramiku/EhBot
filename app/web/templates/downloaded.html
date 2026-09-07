@@ -23,7 +23,9 @@
     bodies, because 「默认不移除文件」 is only true if the operator can see which
     one they picked.
 #}
-{% extends "base.html" %}
+{#- `base.html` for a navigation, the bare content block for an in-place
+    update. One template either way -- see `_fragment.html`. -#}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}{{ tab_title }} · 已下载 · EhBot{% endblock %}
@@ -164,7 +166,16 @@
     </div>
 
     {% if works %}
+    {#- `hx-post` here covers every button that submits this form: the batch
+        actions, and the per-row 打包 whose `formaction` retargets the same
+        submission. HTMX honours `formaction`, so one attribute converts them all
+        and the row button lands on `/downloaded/{id}/repack` exactly as before.
+
+        This is the one the operator complained about: updating a pack status
+        reloaded the whole list and threw away their scroll position in a library
+        of fifty books. -#}
     <form data-downloaded-form id="downloaded-batch" method="post" action="/downloaded/batch"
+          hx-post="/downloaded/batch"
           x-data="{ selected: 0 }"
           @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -233,6 +244,27 @@
     {% endif %}
   </div>
 </div>
+
+{#- The membership notice. `downloaded.js` fills it in when a poll finds a work
+    the page has never rendered: it patches fields in place and deliberately does
+    not construct rows, because row markup built in JavaScript is a second copy
+    of the `work_row` macro and the two would drift. -#}
+<div data-queue-changed hidden></div>
+
+{#- Inside the content block, not beside the script, because an in-place update
+    has to be able to change what these say. `data-live` flips the moment a batch
+    queues a pack, and it is what re-arms polling after an action; `data-tab` is
+    what the poller asks about. Left beside the script tag they would keep
+    answering for the render that first drew them, so a freshly queued batch would
+    sit there never updating -- and the poll would ask about the wrong tab after a
+    tab switch.
+
+    The rename drawer stays out there on purpose: it is teleported out of the
+    content column anyway, it holds transient operator input, and a swap landing
+    mid-edit must not wipe a half-typed filename. -#}
+<div data-downloaded-root
+     data-live="{{ 'true' if live else 'false' }}"
+     data-tab="{{ tab }}" hidden></div>
 {% endblock %}
 
 {% block scripts %}
@@ -285,14 +317,5 @@
   </aside>
 </div>
 
-{#- The membership notice. `downloaded.js` fills it in when a poll finds a work
-    the page has never rendered: it patches fields in place and deliberately does
-    not construct rows, because row markup built in JavaScript is a second copy
-    of the `work_row` macro and the two would drift. -#}
-<div data-queue-changed hidden></div>
-
-<div data-downloaded-root
-     data-live="{{ 'true' if live else 'false' }}"
-     data-tab="{{ tab }}" hidden></div>
 <script defer src="{{ url_for('static', path='/downloaded.js') }}"></script>
 {% endblock %}

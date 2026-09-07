@@ -174,6 +174,7 @@ async def _render_downloaded(
             "empty_hint": current["empty_hint"],
             "error": error,
             "notice": notice,
+            "layout": deps.page_layout(request),
         },
     )
 

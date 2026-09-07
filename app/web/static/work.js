@@ -21,12 +21,6 @@
 (function () {
   "use strict";
 
-  var root = document.querySelector("[data-work-root]");
-  if (!root) return;
-
-  var workId = root.getAttribute("data-work-id");
-  if (!workId) return;
-
   /* Fallbacks only. The real cadence comes from `/api/v1/meta`, so it stays a
    * server decision an operator can change in one place. */
   var interval = 2000;
@@ -34,9 +28,35 @@
 
   var timer = null;
   var stream = null;
-  var stopped = root.getAttribute("data-live") !== "true";
+  var stopped = true;
   var inFlight = false;
-  var renderedNodes = parseInt(root.getAttribute("data-timeline"), 10) || 0;
+  var renderedNodes = 0;
+  var workId = null;
+
+  /* Re-read after every in-place update, because an action replaces the whole
+   * content column: the previous `root` is detached, `data-live` may have
+   * flipped (an action that queued a job makes the page live again), and the
+   * timeline may have grown -- so `renderedNodes` has to be re-baselined or the
+   * next poll would announce structure that is already on screen.
+   *
+   * This is also what re-arms polling after 重新打包: the swap arrives with
+   * `data-live="true"`, and a file that had stopped watching a finished book
+   * starts again without a reload. */
+  function adopt() {
+    var root = document.querySelector("[data-work-root]");
+    if (!root) {
+      /* Navigated away from a work page inside the same document. Stop rather
+       * than keep polling for a work nobody is looking at. */
+      stop();
+      return false;
+    }
+    var id = root.getAttribute("data-work-id");
+    if (!id) return false;
+    workId = id;
+    renderedNodes = parseInt(root.getAttribute("data-timeline"), 10) || 0;
+    stopped = root.getAttribute("data-live") !== "true";
+    return true;
+  }
 
   /* ------------------------------------------------------------- patching */
 
@@ -123,6 +143,16 @@
     reload.setAttribute("type", "button");
     reload.textContent = "刷新查看";
     reload.addEventListener("click", function () {
+      /* An in-place refetch when HTMX is present, a reload when it is not. Same
+       * destination either way; this one just does not throw away the operator's
+       * scroll position. */
+      if (window.htmx) {
+        window.htmx.ajax("GET", window.location.pathname + window.location.search, {
+          target: "#main",
+          swap: "innerHTML show:none",
+        });
+        return;
+      }
       window.location.reload();
     });
     actions.appendChild(reload);
@@ -133,7 +163,7 @@
   /* -------------------------------------------------------------- polling */
 
   function poll() {
-    if (inFlight || stopped) return;
+    if (inFlight || stopped || !workId) return;
     inFlight = true;
     fetch("/api/v1/works/" + encodeURIComponent(workId), {
       headers: { Accept: "application/json" },
@@ -198,21 +228,55 @@
 
   /* ---------------------------------------------------------------- start */
 
-  fetch("/api/v1/meta", { headers: { Accept: "application/json" } })
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .catch(function () {
-      return null;
-    })
-    .then(function (meta) {
-      if (meta && meta.polling) {
-        interval = meta.polling.interval_ms || interval;
-        idleInterval = meta.polling.idle_interval_ms || idleInterval;
-      }
-      arm();
-      subscribe();
-    });
+  /* The cadence is read once per document, not once per swap: it cannot change
+   * without a settings save, and re-fetching it after every action would be a
+   * request per click. */
+  var started = false;
+
+  function begin() {
+    if (!adopt()) return;
+    /* One EventSource per document. Re-subscribing on each swap would leak a
+     * connection per action, and the stream is not tied to a work anyway -- the
+     * handler re-reads `workId` when an event arrives. */
+    if (!stream) subscribe();
+    arm();
+    /* The swap that replaced the page may have arrived while a job was already
+     * finished, so ask once immediately rather than waiting a whole interval. */
+    poll();
+  }
+
+  /* `ui.js` is loaded before this file and both are `defer`, so the helper is
+   * always there; the guard is for the ordering being changed by somebody who
+   * did not know this depended on it. Without HTMX or `ui.js` the page still
+   * polls -- it just never re-arms after a swap, because there are no swaps. */
+  var ready = window.EhBotUI && window.EhBotUI.onContentReady;
+  if (!ready) {
+    ready = function (callback) {
+      callback();
+    };
+  }
+
+  ready(function () {
+    if (!started) {
+      started = true;
+      fetch("/api/v1/meta", { headers: { Accept: "application/json" } })
+        .then(function (response) {
+          return response.ok ? response.json() : null;
+        })
+        .catch(function () {
+          return null;
+        })
+        .then(function (meta) {
+          if (meta && meta.polling) {
+            interval = meta.polling.interval_ms || interval;
+            idleInterval = meta.polling.idle_interval_ms || idleInterval;
+          }
+          begin();
+        });
+      return;
+    }
+    begin();
+  });
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible") poll();

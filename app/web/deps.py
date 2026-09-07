@@ -229,6 +229,32 @@ def query_href(request: Request, **params: object) -> str:
     return f"{url.path}?{url.query}" if url.query else url.path
 
 
+#: The element an in-place update replaces the contents of. `base.html` puts
+#: this id on `<main>`, so a fragment render lands exactly where the full page
+#: put its content block and no page needs a wrapper of its own.
+CONTENT_TARGET = "main"
+
+
+def page_layout(request: Request) -> str:
+    """`base.html` for a navigation, the bare fragment for an HTMX swap.
+
+    Read from the request rather than passed by each caller, so 「is this an
+    update or a page load」 is answered in one place. `HX-Request` is set by HTMX
+    on every request it makes; a browser navigation never carries it, which is
+    what keeps the no-JavaScript path rendering a whole document.
+
+    `HX-History-Restore-Request` is the one exception. HTMX sends it when
+    restoring a page from its history cache after a miss, and it wants a *whole*
+    document back -- answering that with a fragment would replace the entire body
+    with a bare content block.
+    """
+    if request.headers.get("hx-request") != "true":
+        return "base.html"
+    if request.headers.get("hx-history-restore-request") == "true":
+        return "base.html"
+    return "_fragment.html"
+
+
 def local_return_to(raw: str | None) -> str | None:
     """Accept a same-site path to come back to, or nothing.
 
@@ -251,6 +277,7 @@ def local_return_to(raw: str | None) -> str | None:
 
 
 __all__ = [
+    "CONTENT_TARGET",
     "archive_settings_service",
     "connection_manager",
     "conversion_service",
@@ -259,6 +286,7 @@ __all__ = [
     "exhentai_service",
     "int_param",
     "local_return_to",
+    "page_layout",
     "query_href",
     "refresh_display_timezone",
     "require_authenticated",
