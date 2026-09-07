@@ -3415,3 +3415,123 @@ plus `waitForNavigation` has to be one `Promise.all` race. Scripts are in
 | A book whose pages were named `001` failed as `ARCHIVE_NO_IMAGES` | `is_image_member` requires a known suffix | An extensionless member whose bytes are an image is a page |
 | 打包 refused a ready book: 「Only approved candidates can be converted」 | One `status` per candidate, shared by all its jobs; any claimed job sets `PROCESSING`, and the gate was an allowlist | Denylist of pre-decision states; readiness comes from the artifact query, with a Chinese message |
 
+
+## R20 — 全页面刷新与两个顺序缺陷 (v0.2.11, 2026-09-07)
+
+Three items, reported together after R19 shipped. The third is the one with
+reach: 「许多页面做操作都会刷新整个页面，观感很差」. The first two are both
+**ordering** bugs, and the second one is the same defect R19 fixed on one path and
+left on the other.
+
+### 1. 批量打包 did not fetch metadata; 单独打包 did
+
+R19 made the packer enrich before it reads metadata, inside `_handle_job`. That
+covered the detail page's 重新打包 and every automatic pack. It did **not** cover
+the batch, because the batch does not let the job derive the path -- it computes
+one itself in `_refile_for_repack` and *pins* it, before the job is even enqueued.
+
+Why the pin is what makes this bad. `_library_target` prefers a pin over the
+template, deliberately: a rename the operator typed must survive a repack. So a
+batch that planned a path against metadata nobody had fetched did not merely
+misname the book once -- it recorded `Candidate 57.cbz` as a decision, and every
+later repack read the pin back and kept it. The single-work path had no pin, so
+the next pack quietly corrected itself; that asymmetry is exactly what the
+operator saw.
+
+`_ensure_metadata` became the public `ensure_metadata`, and the batch calls it per
+work. It sits *after* the `is_manual` early return: a work whose path the operator
+typed derives nothing from metadata, so a fetch there would be an HTTP call whose
+answer is discarded.
+
+### 2. 返回 was demoted to 返回候选列表 by any action
+
+R19 resolved the origin from `?return_to=` then the `Referer`. Both are correct
+for arriving at the page. Neither says anything after an action, because every
+action is a POST that answers 303 back to `/works/{id}` -- and the referrer the
+browser sends on that redirect names the detail page itself, which
+`resolve_origin` excludes for the good reason that a 返回 pointing at the page it
+is drawn on goes nowhere.
+
+So the third source is memory: one session entry, keyed by candidate id, written
+whenever the first two answer and replaced when another work is opened. Keyed and
+single rather than a map, so the cookie cannot grow with every book visited; and
+re-validated on the way out, because a session outlives a deploy and a path that
+stopped being an origin must not keep being offered.
+
+One thing fixed on the way past: an explicit `?return_to=` was accepted on the
+strength of being a local path. The label is looked up *from* the path, so an
+unrecognised destination was offered under `_label_for`'s fallback -- a button
+reading 「返回候选列表」 that went somewhere else. Local enough to be safe is not
+the same as known enough to be named.
+
+### 3. Every action reloaded the whole page
+
+The complaint was 更新打包状态 on `/downloaded`: pressing 打包 on the fortieth
+book of a library rebuilt the document and threw the operator back to the top.
+
+HTMX and the `.htmx-request` styling were already vendored from R0, and `ui.js`
+already listened for `htmx:load`. What was missing was a way to answer with the
+page's content and nothing else.
+
+**The mechanism.** `_fragment.html` is a layout holding only
+`{% block content %}`. A converted page extends `layout`, and
+`deps.page_layout(request)` returns `base.html` or the fragment depending on the
+`HX-Request` header. So an update and a page load render **the same template** --
+there is no partial, and no second assembly of the same page to drift from the
+first. `work_detail_fragment.html` does not exist and should not be created.
+
+`hx-target="#main"` and `hx-swap="innerHTML show:none"` are declared once, on
+`<main>`, and inherited: a form opts in with `hx-post` alone. `show:none` matters
+as much as the swap does -- HTMX otherwise scrolls the target into view afterwards,
+which reproduces the jolt this was meant to remove.
+
+**Four things that each cost a run:**
+
+* **HTMX discards 4xx by default.** A refused action re-renders the page with the
+  reason on it and answers 400, so the default rule meant pressing 驳回 on a
+  candidate that could not be rejected did visibly nothing. The `htmx-config` meta
+  tag swaps 400 and 422 while keeping them errors. 401 stays excluded: it is a
+  login redirect and belongs in the address bar.
+* **A teleported dialog inherits nothing.** `ui.confirm` is moved to the end of
+  `<body>` by Alpine, so it is not a descendant of `<main>`. `swap=true` names the
+  target explicitly, and only the `action=` variant may use it -- the `form=`
+  variant submits a form that already has its own `hx-post`, and both would fire.
+* **A swap detaches everything a page script cached.** `EhBotUI.onContentReady`
+  is the one place that knows when: it fires on load and on each
+  `htmx:afterSettle` (settle, not swap -- Alpine adopts the markup during settle).
+  Both page scripts were restructured to re-read their roots and clear their
+  timers before arming new ones, and the payoff is that `data-live` flipping to
+  `true` after a batch **starts** the progress polling that used to need a reload.
+* **`data-downloaded-root` was outside the swap.** It carries `data-live` and
+  `data-tab` and sat beside the `<script>` tag, so it kept answering for the
+  render that first drew it: a batch that queued fifty packs left it saying
+  `false` forever. Moved into the content block. The rename drawer stays outside
+  on purpose -- it holds half-typed input a swap must not wipe.
+
+### Verified in a browser
+
+Static tests cannot see a reload or a scroll position, so both were measured
+against the built image with headless Chrome (`/tmp/uicheck/r20.js`, `leak2.js`,
+`nojs.js`, `refusal2.js`):
+
+* 重新打包 on `/works/1` and 打包 on `/downloaded`: **0** full document loads,
+  `scrollY` unchanged (38→38, 166→166), the notice rendered, all six rows intact.
+* 返回 read 返回已下载 before *and after* the action, and landed back on
+  `/downloaded?tab=all&sort=title` with the sort preserved.
+* Five consecutive swaps on each page: **1** live interval, **0** concurrent
+  EventSources, **0** repeat `/api/v1/meta` fetches.
+* A refused archive path swapped in place and showed 「名称不能是 . 或 ..」.
+* **JavaScript disabled:** the row 打包 still posts, redirects to
+  `/downloaded?notice=...`, and returns a complete document with the sidebar.
+
+### Bug Log
+| Symptom | Cause | Fix |
+|---|---|---|
+| 批量打包 skipped the metadata fetch that 单独打包 did | The batch computes and **pins** a path itself, before the job runs, so the packer's own enrichment never applied | `ensure_metadata` made public and called per work in `_refile_for_repack`, after the `is_manual` return |
+| A batch-packed book kept a wrong name forever | `_library_target` prefers a pin over the template, so the bad name became a recorded decision | Same fix: the name is derived from metadata that exists |
+| 返回已下载 became 返回候选列表 after any action | A POST answers 303 to `/works/{id}`; that referrer is the detail page, which is excluded | Origin remembered in the session per candidate, re-validated on read |
+| `?return_to=/anything-local` got a wrong label | Only checked for being local, while the label is looked up from the path | Also matched against `_ORIGINS` |
+| Every action rebuilt the document and lost the scroll position | No way to answer with just the content column | `_fragment.html` + `layout` + `page_layout`, chosen by `HX-Request` |
+| A refused action appeared to do nothing | HTMX discards 4xx by default | `htmx-config` meta tag swaps 400/422, keeps them errors, leaves 401 alone |
+| Progress polling stayed dead after a batch queued packs | `data-downloaded-root` sat outside the swap, so `data-live` never changed | Moved into the content block |
+| Page scripts would have died after the first swap | Both cached DOM at module scope and returned early | `EhBotUI.onContentReady`, with both scripts made idempotent |

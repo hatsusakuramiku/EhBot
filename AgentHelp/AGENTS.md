@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1154 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1163 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1154 on a machine that has one and 1142 with
+`data/tools/7zip/`, so `passed` is 1163 on a machine that has one and 1151 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -848,3 +848,65 @@ Several are locked by tests. Do not "simplify" them:
   nobody sees would only lose quality. A member with **no** extension whose bytes
   are an image counts as a page, because uploaders do ship books named `001`.
 
+
+**Added by R20 (in-place updates, and two ordering defects):**
+
+- **An action updates the content column; it does not reload the page.** Every
+  converted page extends `layout` -- `base.html` for a navigation,
+  `_fragment.html` for an HTMX swap -- and `deps.page_layout(request)` chooses
+  from the `HX-Request` header. There is **no partial template**: the fragment is
+  the page's own `{% block content %}`, so an updated page and a freshly loaded
+  one cannot drift. That was R5's lesson and it is why
+  `work_detail_fragment.html` does not exist.
+- **`HX-History-Restore-Request` must be answered with a whole document.** HTMX
+  sends it on a history-cache miss and replaces the entire body with what comes
+  back; a fragment there leaves the operator on a bare content block with no
+  shell.
+- **`hx-target` / `hx-swap` are declared once, on `<main>` in `base.html`.** HTMX
+  inherits both, so a form opts in with `hx-post` alone. `show:none` is part of
+  it: without it HTMX scrolls the target into view after every swap, which is the
+  same jolt as a reload and is what these swaps exist to remove.
+- **A teleported dialog cannot inherit any of that.** `ui.confirm`'s markup is
+  moved to the end of `<body>` by Alpine, so `swap=true` names `hx-target`
+  explicitly. Only the `action=` variant may be swapped -- the `form=` variant
+  submits a form that already carries its own `hx-post`, and a second one would
+  fire two requests per click.
+- **400 and 422 are swapped; 401 and 5xx are not.** The `htmx-config` meta tag in
+  `base.html` overrides HTMX's default of discarding 4xx, because a refused action
+  re-renders the page with the reason on it and answers 400 -- the default left
+  the operator pressing a button that appeared to do nothing. 401 is excluded on
+  purpose: it is a login redirect and belongs in the address bar, not inside the
+  content column.
+- **A page script must be idempotent and must re-arm through
+  `EhBotUI.onContentReady`.** A swap detaches every element a script cached and
+  removes every listener bound to one. The callback fires once on load and again
+  after each `htmx:afterSettle` (not `afterSwap` -- Alpine adopts the new markup
+  during settle). `work.js` and `downloaded.js` re-read their roots, rebind their
+  controls and clear their timers before arming new ones; measured in a browser,
+  five consecutive swaps leave **one** interval and **zero** concurrent
+  EventSources.
+- **A marker element a swap has to update belongs inside the content block.**
+  `data-downloaded-root` carries `data-live` and `data-tab` and was beside the
+  `<script>` tag, outside the swap -- so a batch that queued fifty packs left it
+  answering `false` forever and the progress updates never started. The rename
+  drawer deliberately stays outside: it holds half-typed operator input that a
+  swap must not wipe.
+- **The remembered origin is what makes 返回 survive an action.** Every action is
+  a POST answering 303 back to `/works/{id}`, and the referrer on that redirect is
+  the detail page itself -- which `resolve_origin` excludes, correctly. So the
+  origin is stored in the session under `_ORIGIN_SESSION_KEY`, keyed by candidate
+  id and replaced when another work is opened, and re-validated on the way out
+  because a session outlives a deploy. Without it 返回已下载 silently became
+  返回候选列表 on the first 拉取元数据.
+- **An explicit `?return_to=` must be a *known* origin, not merely a local path.**
+  The label is looked up from the path, so an unrecognised destination would be
+  offered under whatever `_label_for` falls back to -- a button that lies about
+  where it goes. Being local is enough to be safe and not enough to be nameable.
+- **`ConversionService.ensure_metadata` is public because packing is not the only
+  step that derives a name from metadata.** The batch re-file on `/downloaded`
+  computes a library path and **pins** it before enqueueing, and `_library_target`
+  prefers a pin over the template -- so a batch that planned a path before the
+  gallery was read did not merely misname a book once, it recorded that name as
+  the operator's own decision and no later repack corrected it. `_refile_for_repack`
+  now enriches per work, after the `is_manual` return (a pinned path derives
+  nothing, so a scrape there would be an HTTP call whose answer is discarded).
