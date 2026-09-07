@@ -50,11 +50,24 @@ _ORIGINS: tuple[tuple[str, str], ...] = (
 #: exactly the way the old hardcoded link did.
 _DEFAULT_ORIGIN = ("/candidates", "返回候选列表")
 
+#: Session key holding the list this work was opened from.
+#:
+#: The reason it has to be remembered at all: every action on the detail page is
+#: a POST that answers 303 back to `/works/{id}`, and the `Referer` the browser
+#: then sends is the detail page itself -- which `resolve_origin` excludes, for
+#: the good reason that pointing 返回 at the page it is drawn on is useless. So
+#: without this, 拉取元数据 or 重新打包 silently demoted 「返回已下载」 to the
+#: default 「返回候选列表」, and the operator was thrown into a list their work
+#: was not in. One entry, not a map: it is scoped to the work it was recorded
+#: for and replaced when another work is opened, so the cookie cannot grow with
+#: every book an operator visits.
+_ORIGIN_SESSION_KEY = "work_origin"
 
-def resolve_origin(request: Request) -> dict[str, str]:
+
+def resolve_origin(request: Request, candidate_id: int | None = None) -> dict[str, str]:
     """Where 返回 goes, and what it is called.
 
-    Two sources, in order of trustworthiness:
+    Three sources, in order of trustworthiness:
 
     * An explicit `?return_to=`, which is what a list page appends to its own
       links. It carries the query string, so 返回 lands on the same filtered,
@@ -62,17 +75,29 @@ def resolve_origin(request: Request) -> dict[str, str]:
     * The `Referer` header, for a link that predates this and for a bookmark
       followed from elsewhere in the app. Header-derived, so it is advisory: it
       only ever selects among the fixed paths below.
+    * What this work's origin was the last time one of the two above answered.
+      This is what survives an action: a POST redirects to `/works/{id}` with no
+      query string and a referrer naming the detail page, so the first two
+      sources have nothing to say and only memory does.
 
-    Both go through `local_return_to`, so a crafted `return_to` cannot turn this
-    into an open redirect -- the same guard the job actions already use. A value
-    that does not resolve falls back to the candidate list rather than being
-    rejected: this is a navigation affordance, and answering a whole page with an
-    error because a referrer looked odd would be worse than sending the operator
-    somewhere sensible.
+    The first two go through `local_return_to`, so a crafted `return_to` cannot
+    turn this into an open redirect -- the same guard the job actions already
+    use. The remembered value was itself resolved through that guard before it
+    was stored, and is re-checked on the way out rather than trusted: a session
+    outlives a deploy, and a path that stopped being an origin must not keep
+    being offered. A value that does not resolve falls back to the candidate list
+    rather than being rejected: this is a navigation affordance, and answering a
+    whole page with an error because a referrer looked odd would be worse than
+    sending the operator somewhere sensible.
     """
     explicit = deps.local_return_to(request.query_params.get("return_to"))
-    if explicit:
-        return {"href": explicit, "label": _label_for(explicit)}
+    # Checked against the known origins for the same reason the referrer is: the
+    # label is looked up from the path, so a destination no prefix matches would
+    # be sent with whatever `_label_for` falls back to -- a button reading
+    # 「返回候选列表」 that goes somewhere else. Being local is enough to be safe
+    # and not enough to be nameable.
+    if explicit and _matches_known_origin(urlsplit(explicit).path or "/"):
+        return _remember(request, candidate_id, explicit)
 
     referer = request.headers.get("referer") or ""
     if referer:
@@ -90,10 +115,55 @@ def resolve_origin(request: Request) -> dict[str, str]:
                 candidate = path + (f"?{parsed.query}" if parsed.query else "")
                 target = deps.local_return_to(candidate)
                 if target and _matches_known_origin(path):
-                    return {"href": target, "label": _label_for(path)}
+                    return _remember(request, candidate_id, target)
+
+    remembered = _remembered_origin(request, candidate_id)
+    if remembered:
+        return {"href": remembered, "label": _label_for(remembered)}
 
     href, label = _DEFAULT_ORIGIN
     return {"href": href, "label": label}
+
+
+def _remember(
+    request: Request, candidate_id: int | None, href: str
+) -> dict[str, str]:
+    """Record this work's origin, and return it ready for the template.
+
+    Recording happens on the way *out* of a successful resolution rather than at
+    a call site, so there is no path that resolves an origin and forgets to keep
+    it -- which is the bug this whole mechanism exists to prevent, one level up.
+    """
+    if candidate_id is not None:
+        try:
+            request.session[_ORIGIN_SESSION_KEY] = {
+                "id": int(candidate_id),
+                "href": href,
+            }
+        except (AttributeError, TypeError, ValueError):
+            # No session on this request (an internal render, a test double).
+            # Losing the memory costs one button label; raising would cost the
+            # page.
+            pass
+    return {"href": href, "label": _label_for(href)}
+
+
+def _remembered_origin(
+    request: Request, candidate_id: int | None
+) -> str | None:
+    """The stored origin, if it was stored for *this* work and still resolves."""
+    if candidate_id is None:
+        return None
+    try:
+        stored = request.session.get(_ORIGIN_SESSION_KEY)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not isinstance(stored, dict) or stored.get("id") != int(candidate_id):
+        return None
+    href = deps.local_return_to(stored.get("href"))
+    if not href or not _matches_known_origin(urlsplit(href).path or "/"):
+        return None
+    return href
 
 
 def _matches_known_origin(path: str) -> bool:
@@ -134,6 +204,12 @@ async def render_work(
     API would refuse. The error path renders this same page rather than a
     stripped-down variant: an operator whose approval was refused needs the
     timeline and the metadata in front of them to decide what to do next.
+
+    An HTMX request gets the same render through the fragment layout, which is
+    what makes an action update this page in place instead of navigating. There
+    is no second assembler and no partial template: `layout` swaps the shell out,
+    nothing else changes, so the page an update produces is the page a reload
+    produces.
     """
     snapshot = await work_snapshot(
         deps.database(request),
@@ -160,7 +236,8 @@ async def render_work(
             # same thing as the list this work belongs to -- an operator who got
             # here through three metadata saves would be sent to the last of
             # them.
-            "origin": resolve_origin(request),
+            "origin": resolve_origin(request, candidate_id),
+            "layout": deps.page_layout(request),
         },
         status_code=status_code,
     )

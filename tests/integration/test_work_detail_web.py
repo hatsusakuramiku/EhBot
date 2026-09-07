@@ -114,6 +114,35 @@ async def seed_work(database: Database, *, status: str = "PENDING_REVIEW") -> in
     return candidate_id
 
 
+async def add_candidate(
+    database: Database, *, message_id: int, update_id: int
+) -> int:
+    """A second candidate in the same channel, for the tests that need two works."""
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": update_id,
+                "channel_post": {
+                    "message_id": message_id,
+                    "date": 1_700_000_400,
+                    "chat": {"id": -100123, "title": "Fixture Channel"},
+                    "caption": f"Second Fixture {message_id}",
+                    "document": {
+                        "file_id": f"second-archive-{message_id}",
+                        "file_unique_id": f"second-archive-uniq-{message_id}",
+                        "file_name": "second.zip",
+                        "mime_type": "application/zip",
+                        "file_size": 2048,
+                    },
+                },
+            }
+        ]
+    )
+    await CandidateIngestor(database).process_pending_updates()
+    candidates = await database.list_candidates()
+    return max(item.candidate_id for item in candidates)
+
+
 def set_status(database: Database, candidate_id: int, status: str) -> None:
     with database._connect() as connection:  # noqa: SLF001
         connection.execute(
@@ -554,7 +583,19 @@ def test_the_return_button_goes_back_to_the_page_it_was_opened_from(
             f"/works/{candidate_id}",
             headers={"referer": "http://testserver/candidates?tab=pending"},
         )
-        cold = client.get(f"/works/{candidate_id}")
+
+    # A session that has never opened this work -- a bookmark, or a cold start --
+    # behaves exactly like the hardcoded link that used to be there. Its own
+    # deployment, not just its own client: within one session the origin is
+    # deliberately remembered (the next test is about that), and the bootstrap
+    # password a fresh `create_app` writes is single-use, so a second app over the
+    # same data path cannot be logged into.
+    cold_settings = make_settings(tmp_path / "cold")
+    cold_database = Database(cold_settings.data_path / "ehbot.db")
+    cold_id = asyncio.run(seed_work(cold_database, status="DOWNLOADED"))
+    with TestClient(create_app(cold_settings)) as client:
+        authenticate(client, cold_settings)
+        cold = client.get(f"/works/{cold_id}")
 
     assert from_downloaded.context["origin"] == {
         "href": "/downloaded?tab=packed&page=2",
@@ -566,8 +607,6 @@ def test_the_return_button_goes_back_to_the_page_it_was_opened_from(
     assert from_candidates.context["origin"]["label"] == "返回候选列表"
     assert from_candidates.context["origin"]["href"] == "/candidates?tab=pending"
 
-    # No referrer at all -- a bookmark, or a fresh tab -- behaves exactly like the
-    # hardcoded link that used to be there.
     assert cold.context["origin"] == {
         "href": "/candidates",
         "label": "返回候选列表",
@@ -599,3 +638,96 @@ def test_the_return_button_cannot_be_pointed_off_site(tmp_path: Path) -> None:
         assert page.context["origin"]["href"] == "/candidates"
         assert "evil.example" not in page.text
 
+
+def test_an_action_does_not_demote_the_return_button(tmp_path: Path) -> None:
+    """The reported inconvenience: 返回已下载 became 返回候选列表 after any action.
+
+    Every action on this page is a POST that answers 303 back to `/works/{id}`,
+    and the referrer the browser sends on that redirect is the detail page
+    itself -- which `resolve_origin` excludes, correctly, because a 返回 pointing
+    at the page it is drawn on goes nowhere. So the origin fell through to the
+    default and an operator working from 已下载 was thrown into 候选列表 the
+    moment they pressed 拉取元数据.
+
+    The work's origin is remembered for the session, so it survives the round
+    trip that has nothing to say about it.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        opened = client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": "http://testserver/downloaded?tab=all&sort=title"},
+        )
+        assert opened.context["origin"]["label"] == "返回已下载"
+
+        # The redirect a POST lands on: no query string, and a referrer that names
+        # this same page.
+        after_action = client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": f"http://testserver/works/{candidate_id}"},
+        )
+
+    assert after_action.context["origin"] == {
+        "href": "/downloaded?tab=all&sort=title",
+        "label": "返回已下载",
+    }
+
+
+def test_a_remembered_origin_belongs_to_the_work_it_was_recorded_for(
+    tmp_path: Path,
+) -> None:
+    """Opening a second work must not inherit the first one's list.
+
+    One entry keyed by candidate, rather than a map that would grow with every
+    book an operator looked at -- so the guard is that the key is checked, not
+    that the value happens to be right.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    first = asyncio.run(seed_work(database, status="DOWNLOADED"))
+    second = asyncio.run(add_candidate(database, message_id=78, update_id=901))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        client.get(
+            f"/works/{first}",
+            headers={"referer": "http://testserver/downloaded?tab=packed"},
+        )
+        other = client.get(f"/works/{second}")
+
+    assert other.context["origin"] == {
+        "href": "/candidates",
+        "label": "返回候选列表",
+    }
+
+
+def test_a_remembered_origin_survives_an_unusable_return_to(
+    tmp_path: Path,
+) -> None:
+    """A `return_to` naming no known page does not erase what was remembered.
+
+    `_label_for` would call such a path 返回候选列表 while sending the operator to
+    it, which is a button that lies about where it goes. It is refused, and the
+    origin recorded when the work was opened is what the page keeps offering.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        client.get(
+            f"/works/{candidate_id}",
+            headers={"referer": "http://testserver/downloaded?tab=all"},
+        )
+        page = client.get(f"/works/{candidate_id}?return_to=/retired-page")
+
+    assert page.context["origin"] == {
+        "href": "/downloaded?tab=all",
+        "label": "返回已下载",
+    }
+    assert "/retired-page" not in page.text
