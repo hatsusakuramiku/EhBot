@@ -51,6 +51,7 @@ from app.downloads.service import DownloadService
 from app.exhentai.service import ExHentaiService
 from app.exhentai.tagdb import TagTranslator
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
+from app.logging import apply_runtime_log_level
 from app.review.orchestration import ReviewOrchestrator
 from app.secrets import SecretStore
 from app.settings.service import DEFAULT_TIMEZONE, SystemSettingsService
@@ -157,6 +158,7 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.system_settings_service = SystemSettingsService(
         database,
         default_source_concurrency=app_settings.telegraph_concurrency,
+        default_log_level=app_settings.log_level,
     )
     # Seeded with the default so a page rendered before startup finishes -- or
     # after a startup that failed -- still has a zone to format in. The stored
@@ -273,6 +275,9 @@ def build_lifespan(
             ):
                 ensure_writable_directory(path)
             await database.initialize()
+            apply_runtime_log_level(
+                await application.state.system_settings_service.log_level()
+            )
             # The shell renders every page's timestamps in this zone and cannot
             # await, so the stored value is cached on application.state here and
             # refreshed whenever the 系统 form saves it.

@@ -50,8 +50,8 @@ services:
       TORRENT_KEEP_SEEDING: "true"
       TZ: "Asia/Shanghai"
       LOG_LEVEL: "INFO"
-      LOG_ACCESS: "true"
       LOG_TO_FILE: "true"
+      LOG_FILE_BACKUPS: "5"
     volumes:
       # Finished qBittorrent payloads are read from here. Enter this same host
       # path as the qBittorrent local save path on the archive settings page,
@@ -63,7 +63,7 @@ services:
       # Losing this directory means re-entering every credential, so keep it.
       - ./data:/app/data
     # The default json-file driver retains everything, so an unattended
-    # deployment eventually fills its disk with access log lines.
+    # deployment eventually fills its disk. DEBUG also includes access lines.
     logging:
       driver: json-file
       options:

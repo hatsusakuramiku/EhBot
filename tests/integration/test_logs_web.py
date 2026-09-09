@@ -235,6 +235,21 @@ class TestTheLevelFloor:
         assert payload["level"] == "INFO"
         assert DEFAULT_VIEW_LEVEL == "INFO"
 
+    def test_a_saved_level_becomes_the_view_default(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            asyncio.run(
+                client.app.state.system_settings_service.save(
+                    {"log_level": "DEBUG"}
+                )
+            )
+            payload = client.get("/api/v1/logs").json()
+
+        assert payload["level"] == "DEBUG"
+        assert payload["configured_level"] == "DEBUG"
+        assert payload["access_log"] is True
+
     def test_an_unknown_level_falls_back_instead_of_failing(self) -> None:
         """This arrives from a select element and from stale bookmarks.
 

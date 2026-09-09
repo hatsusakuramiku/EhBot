@@ -16,6 +16,7 @@ import pytest
 from app.db.database import Database
 from app.settings.service import (
     DEFAULT_IDLE_POLL_INTERVAL_MS,
+    DEFAULT_LOG_LEVEL,
     DEFAULT_POLL_INTERVAL_MS,
     DEFAULT_TIMEZONE,
     MAX_POLL_INTERVAL_MS,
@@ -23,6 +24,7 @@ from app.settings.service import (
     MIN_POLL_INTERVAL_MS,
     MIN_SOURCE_CONCURRENCY,
     SETTING_POLL_INTERVAL_MS,
+    SETTING_LOG_LEVEL,
     SETTING_SOURCE_CONCURRENCY,
     SETTING_TIMEZONE,
     SystemSettingsError,
@@ -47,9 +49,20 @@ class TestDefaults:
         assert snapshot["poll_interval_ms"] == DEFAULT_POLL_INTERVAL_MS
         assert snapshot["source_concurrency"] == 3
         assert snapshot["timezone"] == DEFAULT_TIMEZONE
+        assert snapshot["log_level"] == DEFAULT_LOG_LEVEL
+        assert snapshot["log_access"] is False
         assert snapshot["poll_interval_overridden"] is False
         assert snapshot["source_concurrency_overridden"] is False
         assert snapshot["timezone_overridden"] is False
+        assert snapshot["log_level_overridden"] is False
+
+    @pytest.mark.asyncio
+    async def test_the_environment_supplies_the_starting_log_level(
+        self, tmp_path: Path
+    ) -> None:
+        settings = await service(tmp_path, default_log_level="WARNING")
+
+        assert (await settings.snapshot())["log_level"] == "WARNING"
 
     @pytest.mark.asyncio
     async def test_the_environment_supplies_the_starting_concurrency(
@@ -89,6 +102,7 @@ class TestReadsNeverRaise:
                 SETTING_POLL_INTERVAL_MS: "soon",
                 SETTING_SOURCE_CONCURRENCY: "",
                 SETTING_TIMEZONE: "Mars/Olympus Mons",
+                SETTING_LOG_LEVEL: "VERBOSE",
             }
         )
 
@@ -98,6 +112,7 @@ class TestReadsNeverRaise:
         # A name that is not a zone name is not passed to the browser to guess
         # at: the display falls back to UTC, which is at least unambiguous.
         assert snapshot["timezone"] == DEFAULT_TIMEZONE
+        assert snapshot["log_level"] == DEFAULT_LOG_LEVEL
 
     @pytest.mark.asyncio
     async def test_a_stored_value_outside_the_bounds_is_clamped(
@@ -128,6 +143,7 @@ class TestSaving:
                 SETTING_POLL_INTERVAL_MS: "5000",
                 SETTING_SOURCE_CONCURRENCY: "6",
                 SETTING_TIMEZONE: "Asia/Shanghai",
+                SETTING_LOG_LEVEL: "DEBUG",
             }
         )
 
@@ -135,6 +151,8 @@ class TestSaving:
         assert saved["poll_interval_ms"] == 5000
         assert saved["source_concurrency"] == 6
         assert saved["timezone"] == "Asia/Shanghai"
+        assert saved["log_level"] == "DEBUG"
+        assert saved["log_access"] is True
         assert saved["poll_interval_overridden"] is True
 
     @pytest.mark.asyncio
@@ -187,6 +205,7 @@ class TestSaving:
             ),
             ({SETTING_TIMEZONE: "not a zone"}, "TIMEZONE_INVALID"),
             ({SETTING_TIMEZONE: "../etc/localtime"}, "TIMEZONE_INVALID"),
+            ({SETTING_LOG_LEVEL: "TRACE"}, "LOG_LEVEL_INVALID"),
         ],
     )
     @pytest.mark.asyncio

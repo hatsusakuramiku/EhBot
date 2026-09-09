@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1163 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1181 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1163 on a machine that has one and 1151 with
+`data/tools/7zip/`, so `passed` is 1181 on a machine that has one and 1169 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -667,10 +667,20 @@ Several are locked by tests. Do not "simplify" them:
 - **Retention is a preference, not a precondition.** A read-only `data/`
   must not prevent startup; the file handler is dropped with a
   `LOG_FILE_UNAVAILABLE` warning and the service continues with stdout only.
-- **Log level is deployment-level, not per-request.** It lives in the
-  environment (`LOG_LEVEL`), not in `system_settings` -- a deployment whose
-  log level lives in the database cannot raise it to debug the startup that
-  failed before the database opened.
+- **7-Zip is application-managed, including on Windows.** Windows downloads the
+  pinned official architecture installer plus official `7zr.exe`, verifies both
+  digests, and uses the latter to extract only `7z.exe` and `7z.dll` under
+  `data/tools`. The installer is never executed. Runtime discovery does not read
+  `PATH`, the registry or `Program Files`; a host-installed version must not
+  change archive behavior.
+- **The environment level is only the pre-database fallback.** `LOG_LEVEL`
+  controls startup until SQLite opens; `system_settings.log_level` then becomes
+  the persisted runtime and viewer default. `DEBUG` enables `uvicorn.access`;
+  `INFO`, `WARNING` and `ERROR` suppress it.
+- **File logs roll on the UTC date.** `{yyyy-MM-dd}.log` receives every emitted
+  record and `{yyyy-MM-dd}_error.log` receives `WARNING` and above. Both use the
+  same formatter and redaction path, and `LOG_FILE_BACKUPS` is the number of UTC
+  day buckets retained, including the current day.
 - **`configure_logging()` is idempotent.** A test session that builds
   several applications must not reset the root handlers on every call;
   the explicit setup from `app.server.main` runs once with `force=True`.
@@ -743,8 +753,8 @@ Several are locked by tests. Do not "simplify" them:
 - **The page's level is a floor (`min_level`), and it does not change the
   process.** `read_log_tail` keeps both `level` (only this one) and `min_level`
   (this and above); the page uses the floor, because a 「警告」 that hid errors
-  is a filter that loses evidence. `LOG_LEVEL` stays deployment state for the
-  reason above -- a `set_runtime_level` was written and deliberately deleted.
+  is a filter that loses evidence. When no query level is supplied, the WebUI's
+  persisted level is the floor.
 - **An unclassifiable line passes every floor.** A partial write or a
   dependency's custom level is what an operator is hunting; a filter that hides
   it is a way to lose the evidence the page exists for.

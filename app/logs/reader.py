@@ -6,14 +6,14 @@ until now the only way to see why a pack failed was to reach the host and run
 
 Three constraints shape the whole module:
 
-**It takes no path.** The file is derived from `Settings.log_dir`, the same value
+**It takes no path.** Files are derived from `Settings.log_dir`, the same value
 the handler writes to. A caller-supplied path would turn a page behind a session
 into a file-disclosure primitive for the container's whole filesystem, which is
 the same reasoning that keeps a URL parameter off the thumbnail proxy.
 
-**It is bounded.** Only the last `_READ_BYTES` are read, and only `limit` lines
-are returned. A log file is allowed to reach ten megabytes, and rendering that
-into a page would be a denial of service an operator inflicts on themselves.
+**It is bounded.** Only the last `_READ_BYTES` of each daily file are read, and
+only `limit` lines are returned. Rendering every retained record into a page
+would be a denial of service an operator inflicts on themselves.
 
 **It never raises for an unreadable line.** Records are JSON because this
 application wrote them, but the file may also hold a line from a crash before
@@ -26,6 +26,7 @@ incident.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,7 @@ _READ_BYTES = 1 * 1024 * 1024
 MAX_LIMIT = 500
 
 DEFAULT_LIMIT = 100
+_DAILY_MAIN_LOG = re.compile(r"^\d{4}-\d{2}-\d{2}\.log$")
 
 #: Severity order, for the 「这个级别及以上」 filter the 运行日志 page uses.
 #: Numbers rather than `logging`'s own constants so a line written by a release
@@ -164,6 +166,41 @@ def clamp_limit(raw: str | int | None) -> int:
     return min(parsed, MAX_LIMIT)
 
 
+def main_log_paths(log_dir: Path) -> tuple[Path, ...]:
+    """Daily main logs newest first, with the pre-daily file as a fallback."""
+    try:
+        daily = sorted(
+            (
+                path
+                for path in log_dir.iterdir()
+                if path.is_file() and _DAILY_MAIN_LOG.fullmatch(path.name)
+            ),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+    except OSError:
+        daily = []
+    legacy = log_dir / "ehbot.log"
+    if legacy.is_file():
+        daily.append(legacy)
+    return tuple(daily)
+
+
+def log_file_exists(log_dir: Path) -> bool:
+    """Whether a daily or legacy main log can be read."""
+    return bool(main_log_paths(log_dir))
+
+
+def _tail_lines(log_path: Path) -> tuple[str, ...]:
+    size = log_path.stat().st_size
+    with log_path.open("rb") as handle:
+        if size > _READ_BYTES:
+            handle.seek(size - _READ_BYTES)
+            handle.readline()
+        blob = handle.read()
+    return tuple(reversed(blob.decode("utf-8", errors="replace").splitlines()))
+
+
 def read_log_tail(
     log_dir: Path,
     *,
@@ -186,17 +223,8 @@ def read_log_tail(
     the noise stops seeing the thing they were looking for. Passing both applies
     both; the page passes one.
     """
-    log_path = log_dir / "ehbot.log"
-    try:
-        size = log_path.stat().st_size
-        with log_path.open("rb") as handle:
-            if size > _READ_BYTES:
-                handle.seek(size - _READ_BYTES)
-                # The seek probably landed mid-line; that partial line is not a
-                # record and would render as unparsable noise.
-                handle.readline()
-            blob = handle.read()
-    except OSError:
+    log_paths = main_log_paths(log_dir)
+    if not log_paths:
         return [], False
 
     wanted = (level or "").strip().upper() or None
@@ -204,16 +232,21 @@ def read_log_tail(
     # Reversed so the read stops as soon as `limit` matches are found: with a
     # level filter on a large file, the alternative parses every line to discard
     # almost all of them.
-    for line in reversed(blob.decode("utf-8", errors="replace").splitlines()):
-        text = line.strip()
-        if not text:
+    for log_path in log_paths:
+        try:
+            lines = _tail_lines(log_path)
+        except OSError:
             continue
-        entry = _parse_line(text)
-        if wanted is not None and entry.level.upper() != wanted:
-            continue
-        if not passes_min_level(entry.level, min_level):
-            continue
-        entries.append(entry)
-        if len(entries) >= limit:
-            break
+        for line in lines:
+            text = line.strip()
+            if not text:
+                continue
+            entry = _parse_line(text)
+            if wanted is not None and entry.level.upper() != wanted:
+                continue
+            if not passes_min_level(entry.level, min_level):
+                continue
+            entries.append(entry)
+            if len(entries) >= limit:
+                return entries, True
     return entries, True

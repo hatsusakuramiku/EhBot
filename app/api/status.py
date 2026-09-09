@@ -594,23 +594,17 @@ LOG_LEVEL_STATUS: dict[str, StatusView] = {
     LOG_LEVEL_OTHER: _view(LOG_LEVEL_OTHER, "其他", TONE_MUTED),
 }
 
-#: Order for the level filter shown in the UI: only the three levels an
-#: operator sets the runtime to. `DEBUG` and `CRITICAL` are still in
-#: `LOG_LEVEL_STATUS` because log files already on disk may contain them
-#: (old releases, dependencies that emit their own custom levels) and the
-#: tail reader renders whatever the file holds. The set is taken from
-#: `app.config.LOG_LEVEL_CHOICES` so the runtime validation and the UI stay
-#: in lock-step.
-LOG_LEVELS: tuple[str, ...] = (LOG_LEVEL_INFO, LOG_LEVEL_WARNING, LOG_LEVEL_ERROR)
+#: Order for both the persisted setting and the exact-level file filter.
+LOG_LEVELS: tuple[str, ...] = (
+    LOG_LEVEL_DEBUG,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARNING,
+    LOG_LEVEL_ERROR,
+)
 
-#: Order for the 运行日志 page's level floor, lowest first. It differs from
-#: `LOG_LEVELS` on purpose and in two ways.
-#:
-#: `DEBUG` is offered because the floor is a *view* and a file already on disk may
-#: hold debug lines -- a deployment started with `LOG_LEVEL=DEBUG` to reproduce
-#: something needs to be able to see them. Offering it does not enable it: the
-#: threshold stays `LOG_LEVEL`, and the page reports the configured value so a
-#: floor below it reads as 「没有更多可看」 rather than as a broken filter.
+#: Order for the 运行日志 page's level floor, lowest first. It currently matches
+#: the persisted choices, but remains a separate name because the viewer and the
+#: runtime setting are different contracts.
 #:
 #: `CRITICAL` is not offered. Nothing in this application logs at that level, so a
 #: choice for it would be a control that can only ever produce an empty page.

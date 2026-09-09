@@ -69,9 +69,12 @@ docker compose logs
 
 ### Windows 上的注意事项
 
-**Windows 请务必用 Docker，不要在宿主机上直接跑。** 归档环节依赖官方发布的 Linux 版 7-Zip 静态构建
-（服务自己下载到 `data/tools` 并校验 SHA-256），Windows 上没有这个形式的二进制，因此宿主机运行时
-RAR / 7z 解压能力缺失。容器里没有这个问题。
+Windows 宿主机运行时，服务会下载固定版本的官方 7-Zip Windows 安装包和
+`7zr.exe`，校验两份 SHA-256 后仅将便携的 `7z.exe` 与 `7z.dll` 解到
+`data/tools`。它不会运行安装程序，也不读取 `PATH`、注册表或
+`Program Files` 中的系统 7-Zip。
+
+正式部署仍建议使用 Docker；如果在 Windows 上使用 Docker：
 
 - 安装 Docker Desktop 并启用 WSL 2 后端。
 - **把绑定目录放在 WSL 文件系统里**（例如在 `\\wsl$\...` 下建目录），而不是 `C:\Users\...`。

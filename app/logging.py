@@ -29,12 +29,13 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
-import logging.handlers
 import re
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
 
+from app.config import LOG_LEVEL_CHOICES
 from app.logs.broker import BufferHandler, LogBroker
 
 
@@ -90,6 +91,7 @@ _CONTEXT_FIELDS: tuple[str, ...] = (
 )
 
 _UVICORN_LOGGERS: tuple[str, ...] = ("uvicorn", "uvicorn.error", "uvicorn.access")
+_DAILY_LOG_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_error)?\.log$")
 
 #: Set once `configure_logging` has run. Guards against the reconfiguration that
 #: used to happen on every `create_app()`: a test session building several
@@ -165,7 +167,7 @@ class DropAllFilter(logging.Filter):
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "event": redact_sensitive_values(record.getMessage()),
@@ -199,36 +201,135 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False)
 
 
-def _build_file_handler(
-    log_path: Path, *, max_bytes: int, backups: int
-) -> logging.Handler | None:
-    """A rotating file handler, or `None` when the directory is unusable.
+class UtcDailyFileHandler(logging.FileHandler):
+    """Write one UTC calendar day per file and remove expired day buckets."""
+
+    def __init__(
+        self,
+        log_dir: Path,
+        *,
+        error_file: bool = False,
+        retention_days: int = 5,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.log_dir = log_dir
+        self.error_file = error_file
+        self.retention_days = max(1, retention_days)
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._day = self._utc_day()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(self._path_for(self._day), encoding="utf-8")
+        self._cleanup_old_days()
+
+    def _utc_day(self) -> date:
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        return now.astimezone(UTC).date()
+
+    def _path_for(self, day: date) -> Path:
+        suffix = "_error" if self.error_file else ""
+        return self.log_dir / f"{day.isoformat()}{suffix}.log"
+
+    def _cleanup_old_days(self) -> None:
+        dated_files: list[tuple[date, Path]] = []
+        for path in self.log_dir.iterdir():
+            match = _DAILY_LOG_NAME.fullmatch(path.name)
+            if match is None:
+                continue
+            try:
+                day = date.fromisoformat(match.group(1))
+            except ValueError:
+                continue
+            dated_files.append((day, path))
+        retained = {
+            day
+            for day in sorted({day for day, _ in dated_files}, reverse=True)[
+                : self.retention_days
+            ]
+        }
+        for day, path in dated_files:
+            if day not in retained:
+                path.unlink(missing_ok=True)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            day = self._utc_day()
+            if day != self._day:
+                if self.stream is not None:
+                    self.stream.close()
+                self._day = day
+                self.baseFilename = str(self._path_for(day).absolute())
+                self.stream = self._open()
+                self._cleanup_old_days()
+            super().emit(record)
+        except Exception:
+            self.handleError(record)
+
+
+def _build_file_handlers(
+    log_dir: Path, *, retention_days: int
+) -> tuple[logging.Handler, logging.Handler] | None:
+    """Daily main/error handlers, or `None` when the directory is unusable.
 
     Retention must not be able to stop the service. A deployment whose data
     directory is read-only has a problem worth reporting, but refusing to start
     over it would turn a logging preference into an outage, so the caller falls
     back to stdout alone and says so.
     """
+    handlers: list[logging.Handler] = []
     try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            log_path,
-            maxBytes=max_bytes,
-            backupCount=backups,
-            encoding="utf-8",
+        main_handler = UtcDailyFileHandler(
+            log_dir, retention_days=retention_days
         )
+        handlers.append(main_handler)
+        error_handler = UtcDailyFileHandler(
+            log_dir, error_file=True, retention_days=retention_days
+        )
+        handlers.append(error_handler)
     except OSError:
+        for handler in handlers:
+            handler.close()
         return None
-    handler.setFormatter(JsonFormatter())
-    return handler
+    formatter = JsonFormatter()
+    main_handler.setFormatter(formatter)
+    error_handler.setFormatter(formatter)
+    error_handler.setLevel(logging.WARNING)
+    return main_handler, error_handler
+
+
+def _set_access_log(enabled: bool) -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    for existing_filter in list(access_logger.filters):
+        if isinstance(existing_filter, DropAllFilter):
+            access_logger.removeFilter(existing_filter)
+    if not enabled:
+        access_logger.addFilter(DropAllFilter())
+
+
+def apply_runtime_log_level(level: str) -> str:
+    """Apply a persisted level without rebuilding handlers.
+
+    DEBUG includes Uvicorn's request access records. INFO, WARNING and ERROR
+    suppress them while retaining application records at the selected floor.
+    """
+    candidate = level.strip().upper()
+    resolved = logging.getLevelNamesMapping().get(candidate)
+    if candidate not in LOG_LEVEL_CHOICES or resolved is None:
+        candidate = "INFO"
+        resolved = logging.INFO
+    logging.getLogger().setLevel(resolved)
+    for name in _UVICORN_LOGGERS:
+        logging.getLogger(name).setLevel(resolved)
+    _set_access_log(candidate == "DEBUG")
+    return candidate
 
 
 def configure_logging(
     *,
     level: str = "INFO",
-    access_log: bool = True,
+    access_log: bool = False,
     log_dir: Path | None = None,
-    file_max_bytes: int = 10 * 1024 * 1024,
     file_backups: int = 5,
     force: bool = False,
 ) -> None:
@@ -263,15 +364,14 @@ def configure_logging(
 
     failed_log_dir: Path | None = None
     if log_dir is not None:
-        file_handler = _build_file_handler(
-            log_dir / "ehbot.log",
-            max_bytes=file_max_bytes,
-            backups=file_backups,
+        file_handlers = _build_file_handlers(
+            log_dir, retention_days=file_backups
         )
-        if file_handler is None:
+        if file_handlers is None:
             failed_log_dir = log_dir
         else:
-            root_logger.addHandler(file_handler)
+            for file_handler in file_handlers:
+                root_logger.addHandler(file_handler)
 
     for existing_filter in list(root_logger.filters):
         root_logger.removeFilter(existing_filter)
@@ -289,8 +389,7 @@ def configure_logging(
         uvicorn_logger.propagate = True
         uvicorn_logger.setLevel(resolved)
 
-    if not access_log:
-        logging.getLogger("uvicorn.access").addFilter(DropAllFilter())
+    _set_access_log(access_log)
 
     _CONFIGURED = True
 

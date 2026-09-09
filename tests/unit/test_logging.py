@@ -47,6 +47,7 @@ def test_json_formatter_redacts_telegram_bot_token_in_url_path() -> None:
 import json
 import logging
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,8 @@ from app.logging import (
     DropAllFilter,
     JsonFormatter,
     RequestIdFilter,
+    UtcDailyFileHandler,
+    apply_runtime_log_level,
     configure_logging,
     log_broker,
     redact_sensitive_values,
@@ -81,6 +84,8 @@ def restore_logging():
         lg = logging.getLogger(name)
         for h in list(lg.handlers):
             lg.removeHandler(h)
+            if h not in handlers:
+                h.close()
         for h in handlers:
             lg.addHandler(h)
         for fl in list(lg.filters):
@@ -351,10 +356,14 @@ def test_configure_logging_installs_file_handler_when_dir_writable(restore_loggi
     configure_logging(level="INFO", log_dir=log_dir, force=True)
     file_handlers = [
         h for h in logging.getLogger().handlers
-        if isinstance(h, logging.handlers.RotatingFileHandler)
+        if isinstance(h, UtcDailyFileHandler)
     ]
-    assert len(file_handlers) == 1
-    assert file_handlers[0].baseFilename.endswith("ehbot.log")
+    today = datetime.now(UTC).date().isoformat()
+    assert len(file_handlers) == 2
+    assert {Path(h.baseFilename).name for h in file_handlers} == {
+        f"{today}.log",
+        f"{today}_error.log",
+    }
 
 
 def _unwritable_path() -> Path:
@@ -371,7 +380,7 @@ def test_configure_logging_falls_back_to_stdout_when_dir_unwritable(restore_logg
     blocker = _unwritable_path()
     configure_logging(level="INFO", log_dir=blocker, force=True)
     assert not any(
-        isinstance(h, logging.handlers.RotatingFileHandler)
+        isinstance(h, UtcDailyFileHandler)
         for h in logging.getLogger().handlers
     )
     blocker.unlink()
@@ -403,8 +412,87 @@ def test_a_logged_record_reaches_the_in_memory_buffer(restore_logging):
 def test_configure_logging_no_log_dir_means_stdout_only(restore_logging):
     configure_logging(level="INFO", log_dir=None, force=True)
     assert not any(
-        isinstance(h, logging.handlers.RotatingFileHandler)
+        isinstance(h, UtcDailyFileHandler)
         for h in logging.getLogger().handlers
+    )
+
+
+def test_daily_files_duplicate_warning_and_error_records(restore_logging, tmp_path):
+    log_dir = tmp_path / "logs"
+    configure_logging(level="INFO", log_dir=log_dir, force=True)
+    logger = logging.getLogger("app.test.daily")
+
+    logger.info("ordinary_info")
+    logger.warning("detailed_warning")
+    logger.error("detailed_error")
+
+    today = datetime.now(UTC).date().isoformat()
+    main = (log_dir / f"{today}.log").read_text(encoding="utf-8")
+    errors = (log_dir / f"{today}_error.log").read_text(encoding="utf-8")
+    assert "ordinary_info" in main
+    assert "detailed_warning" in main
+    assert "detailed_error" in main
+    assert "ordinary_info" not in errors
+    assert "detailed_warning" in errors
+    assert "detailed_error" in errors
+
+
+def test_daily_handler_rolls_at_utc_midnight(tmp_path):
+    now = [datetime(2026, 9, 8, 23, 59, tzinfo=UTC)]
+    handler = UtcDailyFileHandler(tmp_path, clock=lambda: now[0])
+    handler.setFormatter(JsonFormatter())
+    try:
+        handler.handle(_make_record("app.test", logging.INFO, "before_midnight"))
+        now[0] = datetime(2026, 9, 9, 0, 0, tzinfo=UTC)
+        handler.handle(_make_record("app.test", logging.INFO, "after_midnight"))
+    finally:
+        handler.close()
+
+    assert "before_midnight" in (tmp_path / "2026-09-08.log").read_text(
+        encoding="utf-8"
+    )
+    assert "after_midnight" in (tmp_path / "2026-09-09.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_daily_handler_retains_the_latest_utc_day_buckets(tmp_path):
+    for day in range(1, 9):
+        (tmp_path / f"2026-09-{day:02d}.log").write_text("main\n", encoding="utf-8")
+        (tmp_path / f"2026-09-{day:02d}_error.log").write_text(
+            "error\n", encoding="utf-8"
+        )
+
+    handler = UtcDailyFileHandler(
+        tmp_path,
+        retention_days=5,
+        clock=lambda: datetime(2026, 9, 8, tzinfo=UTC),
+    )
+    handler.close()
+
+    names = {path.name for path in tmp_path.iterdir()}
+    assert "2026-09-03.log" not in names
+    assert "2026-09-03_error.log" not in names
+    assert "2026-09-04.log" in names
+    assert "2026-09-08_error.log" in names
+
+
+def test_runtime_debug_toggles_access_without_rebuilding_handlers(restore_logging):
+    configure_logging(level="INFO", access_log=False, force=True)
+    handlers = list(logging.getLogger().handlers)
+
+    assert apply_runtime_log_level("DEBUG") == "DEBUG"
+    assert logging.getLogger().level == logging.DEBUG
+    assert not any(
+        isinstance(item, DropAllFilter)
+        for item in logging.getLogger("uvicorn.access").filters
+    )
+
+    assert apply_runtime_log_level("INFO") == "INFO"
+    assert list(logging.getLogger().handlers) == handlers
+    assert any(
+        isinstance(item, DropAllFilter)
+        for item in logging.getLogger("uvicorn.access").filters
     )
 
 
@@ -543,6 +631,27 @@ def test_read_log_tail_filters_by_level(tmp_path):
 
 def test_read_log_tail_default_limit_is_hundred(tmp_path):
     assert DEFAULT_LIMIT == 100
+
+
+def test_read_log_tail_reads_daily_main_files_without_duplicating_error_file(
+    tmp_path,
+):
+    old = json.dumps(
+        {"timestamp": "t1", "level": "INFO", "logger": "x", "event": "old"}
+    )
+    newest = json.dumps(
+        {"timestamp": "t2", "level": "ERROR", "logger": "x", "event": "new"}
+    )
+    (tmp_path / "2026-09-07.log").write_text(old + "\n", encoding="utf-8")
+    (tmp_path / "2026-09-08.log").write_text(newest + "\n", encoding="utf-8")
+    (tmp_path / "2026-09-08_error.log").write_text(
+        newest + "\n", encoding="utf-8"
+    )
+
+    entries, present = read_log_tail(tmp_path, limit=10)
+
+    assert present is True
+    assert [entry.event for entry in entries] == ["new", "old"]
 
 
 def test_read_log_tail_skips_unparseable_lines_without_dropping_others(tmp_path):

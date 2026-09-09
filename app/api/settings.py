@@ -258,8 +258,9 @@ async def _passwords_section(request: Request) -> dict[str, Any]:
 
 async def _system_section(request: Request) -> dict[str, Any]:
     service = deps.system_settings_service(request)
+    system = await service.snapshot()
     return {
-        "system": await service.snapshot(),
+        "system": system,
         "bounds": {
             "poll_interval_ms": {
                 "minimum": MIN_POLL_INTERVAL_MS,
@@ -274,11 +275,11 @@ async def _system_section(request: Request) -> dict[str, Any]:
                 "maximum": MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
             },
         },
-        **await _log_view(request),
+        **await _log_view(request, configured_level=str(system["log_level"])),
     }
 
 
-async def _log_view(request: Request) -> dict[str, Any]:
+async def _log_view(request: Request, *, configured_level: str) -> dict[str, Any]:
     """The log tail for the 系统 tab, read off disk on demand.
 
     Read here rather than in the page route so the JSON endpoint and the render
@@ -287,15 +288,17 @@ async def _log_view(request: Request) -> dict[str, Any]:
     of a rotating file is real disk I/O.
     """
     settings = request.app.state.settings
-    level = (request.query_params.get("log_level") or "").strip().upper() or None
+    level = (
+        request.query_params.get("log_level") or configured_level
+    ).strip().upper()
     if level is not None and level not in LOG_LEVELS:
         # An unknown level is dropped rather than refused: unlike a settings
         # section this arrives from a filter link, and showing everything is a
         # safe answer where a 404 on the whole tab is not.
-        level = None
+        level = configured_level
     limit = clamp_limit(request.query_params.get("log_limit"))
     entries, present = await asyncio.to_thread(
-        read_log_tail, settings.log_dir, limit=limit, level=level
+        read_log_tail, settings.log_dir, limit=limit, min_level=level
     )
     return {
         "logs": {
@@ -307,8 +310,9 @@ async def _log_view(request: Request) -> dict[str, Any]:
             "filters": _log_filters(request, level),
             "limit": limit,
             "max_limit": MAX_LIMIT,
-            "configured_level": settings.log_level,
-            "access_log": settings.log_access,
+            "configured_level": configured_level,
+            "access_log": configured_level == "DEBUG",
+            "retention_days": settings.log_file_backups,
         }
     }
 

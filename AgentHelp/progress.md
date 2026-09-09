@@ -721,7 +721,7 @@
 
 ### Scope
 - **Status:** complete
-- The user asked to verify on Docker whatever Windows cannot prove. Windows can never exercise the managed 7-Zip install, because the pinned assets are Linux `.tar.xz` builds and `asset_for_platform()` refuses Windows by design.
+- At the time, the user asked to verify on Docker whatever the then-Linux-only installer could prove. R22 later added an official portable Windows path and superseded this limitation.
 - Added `scripts/verify_docker_linux.py` so this verification is one repeatable command instead of ad-hoc container invocations.
 
 ### What The Script Checks
@@ -3535,3 +3535,19 @@ against the built image with headless Chrome (`/tmp/uicheck/r20.js`, `leak2.js`,
 | A refused action appeared to do nothing | HTMX discards 4xx by default | `htmx-config` meta tag swaps 400/422, keeps them errors, leaves 401 alone |
 | Progress polling stayed dead after a batch queued packs | `data-downloaded-root` sat outside the swap, so `data-live` never changed | Moved into the content block |
 | Page scripts would have died after the first swap | Both cached DOM at module scope and returned early | `EhBotUI.onContentReady`, with both scripts made idempotent |
+
+## R21 — WebUI 日志等级与 UTC 日志分流 (2026-09-08)
+
+日志保存等级和运行日志页默认展示等级现在共用「设置 → 系统」中的持久设置。默认值为 `INFO`；只有 `DEBUG` 开启 `uvicorn.access`，切换保存后立即生效，不重建日志处理器。环境变量 `LOG_LEVEL` 只负责 SQLite 打开前的启动阶段以及数据库尚未保存该设置时的默认值。
+
+文件日志由大小轮转改为 UTC 日切：`{yyyy-MM-dd}.log` 保存达到当前等级的全部记录，`{yyyy-MM-dd}_error.log` 额外保存 `WARNING` 及以上记录。两个文件复用同一 JSON 格式化和凭据脱敏路径，异常堆栈保持完整；`LOG_FILE_BACKUPS` 表示保留的 UTC 日期桶数量。WebUI 读取每日主日志，并保留对旧 `ehbot.log` 的兼容读取，不会重复读取错误副本。
+
+验证结果：日志相关定向测试 152 项通过；独立临时目录实测主文件包含 INFO/WARNING/ERROR、错误文件仅包含 WARNING/ERROR；全量测试收集 1174 项，0 失败、0 错误、12 项因本机无真实 7-Zip 工具链跳过。`compileall` 和 `git diff --check` 通过。
+
+## R22 — Windows 便携式托管 7-Zip (v0.2.12, 2026-09-09)
+
+Windows 不再依赖系统安装的 7-Zip。托管安装器按架构下载固定版本的官方 Windows 包，并另行下载官方单文件 `7zr.exe`；两份内容均先校验固定 SHA-256，再由 `7zr.exe` 将安装包解到临时目录。安装程序从不执行，最终版本目录只发布 `7z.exe` 与配套的完整 `7z.dll`，临时安装包和引导器随即清理。支持 x86、x64 和 ARM64；未验证的 ARM32 不宣称支持。
+
+运行解析始终优先 `<DATA_PATH>/tools/7zip/<version>`，并删除了 PATH 和 `Program Files` 自动发现，因此同一份 EhBot 数据目录携带同一版本工具链。显式绝对路径 profile 仅作为托管文件尚不存在时的旧配置兼容入口。
+
+验证使用官方 26.02 x64 资产实际安装到临时数据目录，生成的 `7z.exe` 成功加载同目录 `7z.dll`。12 项真实集成测试全部通过，覆盖 7z 创建/解包、加密与头部加密、密码尝试、分卷、CBZ 发布和清理。归档安装/处理/启动设置定向回归 105 项通过。两次全量测试均收集 1181 项且 7-Zip 0 跳过；首次有 1 个无关的缩略图并发时序用例失败，重跑有 1 个无关的自动审批/下载 worker 时序用例失败，两个用例各自单独复跑均通过。工具链相关测试没有失败。

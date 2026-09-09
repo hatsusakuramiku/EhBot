@@ -58,3 +58,23 @@ def test_torrent_settings_fall_back_to_safe_defaults(
     assert settings.torrent_enabled is False
     # Not defaulted: dropping a seed is only ever done when asked.
     assert settings.torrent_keep_seeding is False
+
+
+def test_info_is_the_default_and_suppresses_access_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.log_level == "INFO"
+    assert settings.log_access is False
+
+
+def test_debug_enables_access_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    settings = Settings.from_env()
+
+    assert settings.log_level == "DEBUG"
+    assert settings.log_access is True

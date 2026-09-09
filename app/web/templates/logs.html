@@ -14,11 +14,8 @@
   * **No download link.** The file on disk is already reachable to whoever runs
     the container, and serving it from here would turn a viewer into a file
     export with a path an operator could influence.
-  * **No level *setting*.** The selector is a floor on what is displayed.
-    `LOG_LEVEL` stays deployment state, because a level that lived in the
-    interface could not be lowered to debug a startup that failed before the
-    interface existed. The panel says which level is configured, so a floor below
-    it reads as 「没有更多可看」 rather than as a filter that broke.
+  * **No level setting on this page.** The selector is a temporary view floor;
+    the persisted default lives under 设置 → 系统.
 
   The row markup lives in one macro used by both the server render and, mirrored
   in `logs.js`, the live prepend. `data-log-row` and `data-field` are that
@@ -114,7 +111,7 @@
     {%- if not logs.file_enabled %}
       文件日志已关闭（<code>LOG_TO_FILE=false</code>），重启后内存中的记录会清空。
     {%- elif not logs.file_present %}
-      尚未生成日志文件；写入第一条后 <code>data/logs/ehbot.log</code> 会出现。
+      尚未生成日志文件；写入第一条后，按 UTC 日期命名的日志文件会出现。
     {%- endif %}
   </p>
 

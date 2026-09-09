@@ -2,9 +2,9 @@
 
 What belongs here and what does not
 -----------------------------------
-Four preferences are stored: how often the interface polls, how many preview
-images are fetched at once, which timezone timestamps are read in, and how often
-the automatic-approval sweep runs. Theme and density are deliberately absent --
+Five preferences are stored: how often the interface polls, how many preview
+images are fetched at once, which timezone timestamps are read in, how often
+the automatic-approval sweep runs, and the logging floor. Theme and density are deliberately absent --
 they live in `localStorage`, per browser, because they answer 「这块屏幕看起来怎
 样」 rather than 「这个部署怎么运行」, and a server-stored theme would follow an
 operator onto a screen where it is wrong.
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 
+from app.config import LOG_LEVEL_CHOICES
 from app.db.database import Database
 
 
@@ -28,6 +29,7 @@ SETTING_POLL_INTERVAL_MS = "poll_interval_ms"
 SETTING_SOURCE_CONCURRENCY = "source_concurrency"
 SETTING_TIMEZONE = "timezone"
 SETTING_AUTO_APPROVAL_INTERVAL_MINUTES = "auto_approval_interval_minutes"
+SETTING_LOG_LEVEL = "log_level"
 
 #: Visible-tab polling cadence. 2s matches what `/api/v1/meta` served as a
 #: constant before this was editable, so an operator who never opens the
@@ -70,6 +72,7 @@ MIN_AUTO_APPROVAL_INTERVAL_MINUTES = 0
 MAX_AUTO_APPROVAL_INTERVAL_MINUTES = 1440
 
 DEFAULT_TIMEZONE = "UTC"
+DEFAULT_LOG_LEVEL = "INFO"
 
 #: An IANA zone name: `UTC`, or `Area/Location` with at most one further level
 #: (`America/Argentina/Salta`). The name is validated by shape rather than
@@ -101,16 +104,26 @@ def _read_int(stored: dict[str, str], key: str, default: int) -> int:
 
 
 class SystemSettingsService:
-    """Read and write the three system preferences."""
+    """Read and write the operator-editable system preferences."""
 
     def __init__(
-        self, database: Database, *, default_source_concurrency: int = 3
+        self,
+        database: Database,
+        *,
+        default_source_concurrency: int = 3,
+        default_log_level: str = DEFAULT_LOG_LEVEL,
     ) -> None:
         self._database = database
         # The environment still supplies the starting value, so a deployment
         # that tuned `TELEGRAPH_CONCURRENCY` keeps its number until an operator
         # overrides it here.
         self._default_source_concurrency = default_source_concurrency
+        candidate_level = default_log_level.strip().upper()
+        self._default_log_level = (
+            candidate_level
+            if candidate_level in LOG_LEVEL_CHOICES
+            else DEFAULT_LOG_LEVEL
+        )
 
     async def snapshot(self) -> dict[str, object]:
         """Every preference, clamped, plus the derived idle cadence."""
@@ -140,6 +153,9 @@ class SystemSettingsService:
         timezone = stored.get(SETTING_TIMEZONE, "").strip() or DEFAULT_TIMEZONE
         if not _TIMEZONE_PATTERN.match(timezone):
             timezone = DEFAULT_TIMEZONE
+        log_level = stored.get(SETTING_LOG_LEVEL, "").strip().upper()
+        if log_level not in LOG_LEVEL_CHOICES:
+            log_level = self._default_log_level
         auto_approval_interval_minutes = min(
             max(
                 _read_int(
@@ -160,6 +176,8 @@ class SystemSettingsService:
             ),
             "source_concurrency": concurrency,
             "timezone": timezone,
+            "log_level": log_level,
+            "log_access": log_level == "DEBUG",
             "auto_approval_interval_minutes": auto_approval_interval_minutes,
             # Whether the operator has moved this off the default. A row holding
             # an empty string is not an override -- that is how a cleared field is
@@ -172,6 +190,9 @@ class SystemSettingsService:
             ),
             "timezone_overridden": bool(
                 stored.get(SETTING_TIMEZONE, "").strip()
+            ),
+            "log_level_overridden": bool(
+                stored.get(SETTING_LOG_LEVEL, "").strip()
             ),
             "auto_approval_interval_overridden": bool(
                 stored.get(SETTING_AUTO_APPROVAL_INTERVAL_MINUTES, "").strip()
@@ -189,6 +210,9 @@ class SystemSettingsService:
 
     async def timezone(self) -> str:
         return str((await self.snapshot())["timezone"])
+
+    async def log_level(self) -> str:
+        return str((await self.snapshot())["log_level"])
 
     async def auto_approval_interval_minutes(self) -> int:
         return int((await self.snapshot())["auto_approval_interval_minutes"])
@@ -238,6 +262,13 @@ class SystemSettingsService:
                     "时区必须是 IANA 名称，例如 Asia/Shanghai",
                 )
             cleaned[SETTING_TIMEZONE] = raw
+        if SETTING_LOG_LEVEL in values:
+            level = str(values[SETTING_LOG_LEVEL] or "").strip().upper()
+            if level and level not in LOG_LEVEL_CHOICES:
+                raise SystemSettingsError(
+                    "LOG_LEVEL_INVALID", "日志等级必须是 DEBUG、INFO、WARNING 或 ERROR"
+                )
+            cleaned[SETTING_LOG_LEVEL] = level
         if cleaned:
             await self._database.save_system_settings(cleaned)
         return await self.snapshot()
@@ -275,6 +306,7 @@ def _validate_bounded_int(
 __all__ = [
     "DEFAULT_AUTO_APPROVAL_INTERVAL_MINUTES",
     "DEFAULT_IDLE_POLL_INTERVAL_MS",
+    "DEFAULT_LOG_LEVEL",
     "DEFAULT_POLL_INTERVAL_MS",
     "DEFAULT_TIMEZONE",
     "MAX_AUTO_APPROVAL_INTERVAL_MINUTES",
@@ -284,6 +316,7 @@ __all__ = [
     "MIN_POLL_INTERVAL_MS",
     "MIN_SOURCE_CONCURRENCY",
     "SETTING_AUTO_APPROVAL_INTERVAL_MINUTES",
+    "SETTING_LOG_LEVEL",
     "SETTING_POLL_INTERVAL_MS",
     "SETTING_SOURCE_CONCURRENCY",
     "SETTING_TIMEZONE",

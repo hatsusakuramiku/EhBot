@@ -15,7 +15,6 @@ def main() -> None:
         level=settings.log_level,
         access_log=settings.log_access,
         log_dir=settings.log_dir if settings.log_to_file else None,
-        file_max_bytes=settings.log_file_max_bytes,
         file_backups=settings.log_file_backups,
         force=True,
     )

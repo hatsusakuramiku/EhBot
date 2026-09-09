@@ -477,24 +477,23 @@ def test_seven_zip_backend_rejects_missing_absolute_executable(
 def test_resolve_seven_zip_executable_prefers_managed_install(
     tmp_path: Path,
 ) -> None:
-    """A managed install under the data directory wins over host lookup."""
-    managed = install_root(tmp_path / "tools") / "7zzs"
+    """A managed install under the data directory is the only lookup."""
+    managed = install_root(tmp_path / "tools") / "7z.exe"
     managed.parent.mkdir(parents=True, exist_ok=True)
-    managed.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    managed.chmod(0o755)
+    managed.write_bytes(b"managed executable")
+    (managed.parent / "7z.dll").write_bytes(b"managed runtime")
 
     resolved = resolve_seven_zip_executable("7zz", tmp_path / "tools")
 
     assert resolved == str(managed)
 
 
-def test_resolve_seven_zip_executable_ignores_empty_managed_directory(
+def test_resolve_seven_zip_executable_never_uses_the_host_environment(
     tmp_path: Path,
 ) -> None:
     resolved = resolve_seven_zip_executable("7zz", tmp_path / "tools")
 
-    # Falls back to whatever the host provides, which may be nothing.
-    assert resolved is None or Path(resolved).is_file()
+    assert resolved is None
 
 
 def test_seven_zip_backend_extract_requires_expected_members(

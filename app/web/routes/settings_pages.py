@@ -31,6 +31,7 @@ from app.conversion.naming import (
     render_library_path,
     validate_library_template,
 )
+from app.logging import apply_runtime_log_level
 from app.review.models import field_label
 from app.settings.service import SystemSettingsError
 from app.torrent.models import TorrentError
@@ -366,19 +367,16 @@ async def save_library_template(request: Request, csrf_token: str = Form()):
     return settings_redirect(request, SETTINGS_PATHS)
 
 #: The 系统 tab's only writer, and the one settings endpoint with no legacy
-#: path to inherit -- 并发上限, 轮询间隔 and 时区 had no page before R8 -- so it
+#: path to inherit -- its preferences had no page before R8 -- so it
 #: is named for where it lives rather than for a retired form.
 @router.post("/settings/system")
 async def save_system_settings(request: Request, csrf_token: str = Form()):
     """Store the system preferences and make them current.
 
-    `refresh_display_timezone` is the whole reason this is not just a write:
-    the timezone is read by `shell_context`, which is synchronous and runs
-    for every page, so it lives on `app.state` and has to be re-read here.
-    The others need nothing -- the cadences are read per job or per sweep
-    through the settings service, which is why only the timezone is refreshed.
-    The automatic-approval interval is re-read by the sweeper on every pass for
-    exactly that reason: a saved interval must not wait for a restart.
+    The display timezone is cached on `app.state`, while the logging level is
+    process state, so both are applied immediately after a successful write.
+    Cadences are read through the settings service per job or per sweep and need
+    no explicit refresh here.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
@@ -394,6 +392,7 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
                     "poll_interval_ms",
                     "timezone",
                     "auto_approval_interval_minutes",
+                    "log_level",
                 )
                 if key in form
             }
@@ -406,6 +405,9 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
             status_code=400,
         )
     await deps.refresh_display_timezone(request)
+    apply_runtime_log_level(
+        await deps.system_settings_service(request).log_level()
+    )
     return settings_redirect(request, SETTINGS_SYSTEM)
 
 

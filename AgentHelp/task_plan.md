@@ -263,7 +263,7 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - `test_startup_survives_a_failing_toolchain_install` locks in that a host unable to fetch 7-Zip still serves `/healthz` and `/archive-settings`.
 
 ## Phase 12 Assumptions And Boundaries
-- Windows is not expected to install the managed binary; upstream publishes no such asset and the platform check refuses it deliberately. Windows verification is limited to the unit suite plus an operator-provided `7z.exe`.
+- Superseded by R22: Windows now installs the pinned official `7z.exe` and `7z.dll` portably under `data/tools`; it does not depend on an operator-installed copy.
 - The verification script needs a running Docker engine and network access; it exits with code 2 and a clear message when the engine is unreachable, rather than reporting a false failure.
 - Linux suite dependencies come from `uv.lock` so the check cannot silently drift from the project's declared dependencies.
 
@@ -388,3 +388,19 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 ### Deferred After Phase 15
 - Still open: **`local_save_path` is unset in the live deployment**, so `torrent_auto_pack` and the autonomous automatic-pack path cannot run until the qBittorrent save directory is mounted and registered.
 - Outstanding from earlier phases: the phase 6 low-resource pass, a recorded encrypted RAR fixture, the `BRIDGE` profile protocol, and the `{category}/{artist}/{title}` library layout.
+
+### R21: Runtime Log Level And UTC Daily Files
+- [x] Persist one WebUI log level for both runtime output and the viewer default
+- [x] Default to `INFO`; enable `uvicorn.access` only at `DEBUG`
+- [x] Write `{yyyy-MM-dd}.log` and duplicate `WARNING`+ into `{yyyy-MM-dd}_error.log`
+- [x] Roll and retain files by UTC day while preserving the legacy `ehbot.log` reader fallback
+- [x] Verify configuration, runtime switching, WebUI behavior, UTC rollover, retention and file contents
+- **Status:** complete; 1174 collected, 0 failed, 12 environment-dependent 7-Zip skips.
+
+### R22: Portable Managed 7-Zip On Windows
+- [x] Pin official Windows x86, x64 and ARM64 26.02 assets and SHA-256 digests
+- [x] Verify the official `7zr.exe` bootstrap separately
+- [x] Extract only `7z.exe` and `7z.dll` without running the installer
+- [x] Prefer the managed version and remove PATH / registry / Program Files discovery
+- [x] Run all 12 real archive integration tests against the portable Windows pair
+- **Status:** complete; 1181 collected, all 12 real 7-Zip tests execute on Windows.

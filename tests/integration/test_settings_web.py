@@ -9,6 +9,7 @@ arguments is exercised rather than assumed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -214,6 +215,7 @@ class TestSystemTab:
                     "source_concurrency": "5",
                     "poll_interval_ms": "4000",
                     "timezone": "Asia/Shanghai",
+                    "log_level": "DEBUG",
                 },
                 follow_redirects=False,
             )
@@ -223,6 +225,39 @@ class TestSystemTab:
         assert saved.headers["location"] == "/settings/system"
         assert page.context["system"]["source_concurrency"] == 5
         assert page.context["system"]["poll_interval_ms"] == 4000
+        assert page.context["system"]["log_level"] == "DEBUG"
+        assert page.context["system"]["log_access"] is True
+        assert page.context["logs"]["configured_level"] == "DEBUG"
+        assert page.context["logs"]["access_log"] is True
+        assert 'option value="DEBUG" selected' in page.text
+
+    def test_info_closes_access_logging_immediately(self, tmp_path: Path) -> None:
+        from app.logging import DropAllFilter
+
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/settings/system",
+                data={"csrf_token": csrf, "log_level": "DEBUG"},
+            )
+            assert not any(
+                isinstance(item, DropAllFilter)
+                for item in logging.getLogger("uvicorn.access").filters
+            )
+
+            client.post(
+                "/settings/system",
+                data={"csrf_token": csrf, "log_level": "INFO"},
+            )
+            page = client.get("/settings/system")
+
+        assert page.context["system"]["log_level"] == "INFO"
+        assert page.context["logs"]["access_log"] is False
+        assert any(
+            isinstance(item, DropAllFilter)
+            for item in logging.getLogger("uvicorn.access").filters
+        )
 
     def test_out_of_bounds_is_refused(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,17 +30,6 @@ _PASSWORD_MARKERS: tuple[str, ...] = (
     "wrong password",
     "cannot open encrypted archive",
     "password is incorrect",
-)
-
-# Upstream ships `7zzs`/`7zz` on Linux and macOS. `7z`/`7za` only appear
-# on Windows development hosts, where the operator installs 7-Zip.
-_CANDIDATE_EXECUTABLES: tuple[str, ...] = ("7zzs", "7zz", "7z", "7za")
-
-# Default Windows install locations, probed only on Windows development
-# hosts when the configured name is not resolvable through PATH.
-_WINDOWS_FALLBACK_DIRECTORIES: tuple[str, ...] = (
-    r"C:\Program Files\7-Zip",
-    r"C:\Program Files (x86)\7-Zip",
 )
 
 _ATTRIBUTE_DIRECTORY = "D"
@@ -79,18 +67,18 @@ class SevenZipBackend:
             raise ArchiveToolUnavailable(
                 f"\u5de5\u5177 profile {self._profile.name} \u672a\u914d\u7f6e\u53ef\u6267\u884c\u6587\u4ef6"
             )
+        managed = resolve_seven_zip_executable(configured, self._tools_path)
+        if managed is not None:
+            return managed
         if Path(configured).is_absolute():
             if not Path(configured).is_file():
                 raise ArchiveToolUnavailable(
                     f"\u5de5\u5177 profile {self._profile.name} \u7684\u53ef\u6267\u884c\u6587\u4ef6\u4e0d\u5b58\u5728"
                 )
             return configured
-        resolved = resolve_seven_zip_executable(configured, self._tools_path)
-        if resolved is None:
-            raise ArchiveToolUnavailable(
-                f"\u672a\u627e\u5230\u53ef\u7528\u7684 7-Zip \u53ef\u6267\u884c\u6587\u4ef6\uff08\u5df2\u5c1d\u8bd5 {configured}\uff09"
-            )
-        return resolved
+        raise ArchiveToolUnavailable(
+            f"\u672a\u627e\u5230\u53ef\u7528\u7684\u6258\u7ba1 7-Zip \u53ef\u6267\u884c\u6587\u4ef6\uff08{configured}\uff09"
+        )
 
     def _run_subprocess(
         self, arguments: tuple[str, ...], working_directory: Path | None = None
@@ -277,27 +265,14 @@ def resolve_seven_zip_executable(
 ) -> str | None:
     """Resolve a 7-Zip executable name to an absolute path.
 
-    Resolution order is the managed install under `tools_path` first, then the
-    configured name on `PATH`, then the other known 7-Zip command names, then
-    the default Windows install directories. Only fixed, known names are
-    probed; no value from an archive or a remote source is ever used.
+    Only the managed install under `tools_path` is considered. EhBot carries its
+    own pinned executable and DLL so behavior does not depend on PATH, registry
+    state, or a machine-wide 7-Zip version.
     """
     if tools_path is not None:
         managed = installed_executable(tools_path)
         if managed is not None:
             return str(managed)
-    names: list[str] = [configured]
-    names.extend(name for name in _CANDIDATE_EXECUTABLES if name != configured)
-    for name in names:
-        resolved = shutil.which(name)
-        if resolved:
-            return resolved
-    if os.name == "nt":
-        for directory in _WINDOWS_FALLBACK_DIRECTORIES:
-            for name in names:
-                candidate = Path(directory) / f"{Path(name).stem}.exe"
-                if candidate.is_file():
-                    return str(candidate)
     return None
 
 

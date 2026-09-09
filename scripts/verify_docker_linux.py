@@ -1,9 +1,8 @@
 """Verify the archive toolchain on real Linux using Docker.
 
-Windows cannot exercise the managed 7-Zip install: upstream publishes no
-Windows binary for the pinned assets, which are Linux `.tar.xz` builds. This
-script runs that verification where it actually matters, inside a Linux
-container that starts with no 7-Zip installed at all.
+This script verifies the Linux half of the managed 7-Zip install inside a
+container that starts with no 7-Zip installed. Windows uses a separate portable
+`7z.exe` + `7z.dll` path covered by its own unit and real-binary tests.
 
 Usage (needs a running Docker engine):
 

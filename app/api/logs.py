@@ -11,11 +11,11 @@ The level selector is a **floor**, not an equality test: choosing 警告 keeps
 showing errors. A viewer whose 「警告」 hid the errors would be a filter that
 loses evidence, and this page exists for the moment evidence matters.
 
-The selector does **not** change the process's threshold. `LOG_LEVEL` stays a
-deployment setting for the reason `AGENTS.md` records: a level that lived in the
-interface could not be raised to debug the startup that failed before the
-interface came up. So a level below the configured one shows nothing new, and the
-page says so rather than pretending it filtered.
+The selector does **not** change the process's threshold. The persisted setting
+under 设置 → 系统 controls both the runtime threshold and this page's default
+floor; `LOG_LEVEL` is only the fallback used before SQLite opens. A temporary
+view below the configured threshold therefore shows nothing new, and the page
+says so rather than pretending it filtered.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from app.logs.reader import (
     MAX_LIMIT,
     LogEntry,
     clamp_limit,
+    log_file_exists,
     passes_min_level,
     read_log_tail,
 )
@@ -74,7 +75,7 @@ def log_broker(request: Request) -> LogBroker:
     return broker
 
 
-def resolve_view_level(raw: str | None) -> str:
+def resolve_view_level(raw: str | None, default: str = DEFAULT_VIEW_LEVEL) -> str:
     """The level floor to apply, defaulting rather than refusing.
 
     Unknown input becomes the default instead of a 400: this arrives from a
@@ -84,7 +85,7 @@ def resolve_view_level(raw: str | None) -> str:
     candidate = (raw or "").strip().upper()
     if candidate in VIEWER_LOG_LEVELS:
         return candidate
-    return DEFAULT_VIEW_LEVEL
+    return default if default in VIEWER_LOG_LEVELS else DEFAULT_VIEW_LEVEL
 
 
 def buffered_entry(line: str) -> dict[str, Any]:
@@ -149,7 +150,10 @@ async def log_snapshot(request: Request) -> dict[str, Any]:
     a retry loop is the very pattern being investigated.
     """
     settings = request.app.state.settings
-    level = resolve_view_level(request.query_params.get("level"))
+    configured_level = await request.app.state.system_settings_service.log_level()
+    level = resolve_view_level(
+        request.query_params.get("level"), default=configured_level
+    )
     limit = clamp_limit(request.query_params.get("limit"))
     broker = log_broker(request)
 
@@ -188,9 +192,9 @@ async def log_snapshot(request: Request) -> dict[str, Any]:
         # What the process is actually emitting. A floor below this one cannot
         # reveal anything, and the page says so instead of leaving the operator
         # to wonder why 调试 looks identical to 信息.
-        "configured_level": settings.log_level,
-        "configured_level_label": log_level_view(settings.log_level).label,
-        "access_log": settings.log_access,
+        "configured_level": configured_level,
+        "configured_level_label": log_level_view(configured_level).label,
+        "access_log": configured_level == "DEBUG",
         "buffered": len(broker.snapshot()),
         "buffer_capacity": broker.capacity,
         "dropped": broker.dropped_count,
@@ -200,7 +204,7 @@ async def log_snapshot(request: Request) -> dict[str, Any]:
 
 
 def _log_file_exists(log_dir) -> bool:
-    return (log_dir / "ehbot.log").exists()
+    return log_file_exists(log_dir)
 
 
 @router.get("/logs")

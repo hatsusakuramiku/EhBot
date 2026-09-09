@@ -19,13 +19,10 @@
   validated by shape rather than against a list. The datalist below is a
   convenience for the common cases, not the set of legal values.
 
-  The log panel at the bottom is read-only and deliberately so: it exists
-  because this is a single-operator service with a web interface, and needing
-  to reach the host to run `docker compose logs` for one traceback is a gap in
-  that shape. It offers no way to clear, download or configure anything -- the
-  level and retention are deployment settings in the environment, and a button
-  that deleted evidence would be the opposite of the point. Levels come from
-  `log_level_view`, so no Chinese severity name is written here.
+  The log panel at the bottom remains read-only: it offers no way to clear or
+  download evidence. The runtime and viewer default level is configured in the
+  form above; file output and retention remain deployment settings. Levels come
+  from `log_level_view`, so no Chinese severity name is written here.
 #}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
@@ -71,6 +68,19 @@
             新候选入库时也会立即评估一次，不必等到下个周期。
             填 0 表示只在打开「待审核」页时评估。
             {%- if not system.auto_approval_interval_overridden %} 当前为默认值。{% endif %}
+          </small>
+        </div>
+        <div class="ui-field">
+          <label for="sys-log-level">日志等级</label>
+          <select class="ui-select" id="sys-log-level" name="log_level">
+            {% for choice in logs.levels %}
+              <option value="{{ choice.code }}"{% if choice.code == system.log_level %} selected{% endif %}>{{ choice.label }}（{{ choice.code }}）</option>
+            {% endfor %}
+          </select>
+          <small>
+            同时作为日志保存和页面展示的默认等级。
+            DEBUG 会记录 HTTP 访问日志，INFO、WARNING、ERROR 均关闭访问日志。
+            {%- if not system.log_level_overridden %} 当前为默认值。{% endif %}
           </small>
         </div>
         <div class="ui-field">
@@ -127,6 +137,8 @@
          "note": "由轮询间隔推导"},
         {"label": "时区", "value": system.timezone,
          "note": none if system.timezone_overridden else "默认"},
+        {"label": "日志等级", "value": system.log_level,
+         "note": none if system.log_level_overridden else "默认"},
       ]) }}
     </section>
   </div>
@@ -146,10 +158,11 @@
     </p>
   {% else %}
     <p class="ui-hint">
-      只读，最新在前，最多 {{ logs.limit }} 条。
+      只读，最新在前，最多 {{ logs.limit }} 条；所选等级是展示下限。
       当前级别 <code>{{ logs.configured_level }}</code>，
       访问日志{% if logs.access_log %}已开启{% else %}已关闭{% endif %}。
-      级别与保留在环境变量里设定（<code>LOG_LEVEL</code>、<code>LOG_FILE_MAX_BYTES</code>）。
+      主日志按 UTC 日期写入 <code>{yyyy-MM-dd}.log</code>，警告和错误同时写入
+      <code>{yyyy-MM-dd}_error.log</code>，保留最近 {{ logs.retention_days }} 个 UTC 日。
     </p>
     {#- Not `ui.tabs`: that macro sets `aria-current="page"`, and a level filter
         is not a different page -- claiming so would put two destinations on the

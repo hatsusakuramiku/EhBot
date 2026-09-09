@@ -26,10 +26,11 @@ from app.archive.processor import ArchiveProcessor
 from tests.unit.archive_fixtures import ALL_PROFILES, JPEG_HEADER, image_bytes
 
 
-SEVEN_ZIP = resolve_seven_zip_executable("7zz")
+TOOLS_PATH = Path(os.getenv("EHBOT_TEST_TOOLS_PATH", "data/tools"))
+SEVEN_ZIP = resolve_seven_zip_executable("7zz", TOOLS_PATH)
 
 pytestmark = pytest.mark.skipif(
-    SEVEN_ZIP is None, reason="no 7-Zip executable is installed on this host"
+    SEVEN_ZIP is None, reason="no managed 7-Zip executable is installed"
 )
 
 
@@ -67,7 +68,10 @@ def _process(
     passwords: tuple[tuple[int, str], ...] = (),
 ):
     processor = ArchiveProcessor(
-        profiles=ALL_PROFILES, limits=SafetyLimits(), passwords=passwords
+        profiles=ALL_PROFILES,
+        limits=SafetyLimits(),
+        passwords=passwords,
+        tools_path=TOOLS_PATH,
     )
     return processor.process(
         source,
@@ -270,7 +274,9 @@ def test_backend_inspect_reports_real_member_sizes(tmp_path: Path) -> None:
     _run("a", "-t7z", "-bso0", "-bsp0", str(archive), str(source / "*"))
 
     profile = ALL_PROFILES[1]
-    manifest = SevenZipBackend(profile).inspect((archive,), None)
+    manifest = SevenZipBackend(profile, tools_path=TOOLS_PATH).inspect(
+        (archive,), None
+    )
 
     assert manifest.source_format == "7z"
     assert manifest.member_count == 2
