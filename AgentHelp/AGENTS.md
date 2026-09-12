@@ -626,7 +626,11 @@ operator navigation).
 
 Several are locked by tests. Do not "simplify" them:
 
-- Nothing downloads before review; only `APPROVED`/`DOWNLOADED` may enqueue.
+- Review is a one-time door. Nothing downloads before review, and nothing after
+  that entry is re-reviewed: once a candidate has had a download job enqueued it
+  was approved, and a later failure, cancel or source switch never puts it back
+  through the review queue. Re-adding from another source, a re-download, or a
+  retry may therefore enqueue with no approval gate.
 - ExHentai is the only metadata authority.
 - ExHentai Archive Download is never routed automatically (it spends GP).
 - A stalled torrent is not a failure — `WAITING_TORRENT` reports the stall,

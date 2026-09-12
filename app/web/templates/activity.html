@@ -119,7 +119,7 @@
         {% endif %}
         {% if job.actions.cancel %}
         {{ ui.confirm("取消", "取消这项任务",
-                      "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                      "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
                       confirm_label="确认取消", form="queue-batch",
                       formaction=job_base ~ "/cancel",
                       size="sm", key=job.job_id) }}
@@ -227,7 +227,7 @@
           one asks first. The dialog's button submits this form by id -- see the
           `confirm` macro -- and carries the same `action=cancel`. -#}
       {{ ui.confirm("批量取消", "取消选中的任务",
-                    "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                    "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
                     confirm_label="确认取消", form="queue-batch",
                     field="action", value="cancel", size="sm") }}
     {% endcall %}

@@ -1721,6 +1721,67 @@ class Database:
     async def get_candidate(self, candidate_id: int) -> CandidateDetail | None:
         return await asyncio.to_thread(self._get_candidate_sync, candidate_id)
 
+    async def adjacent_candidate_ids(
+        self, candidate_id: int
+    ) -> tuple[int | None, int | None]:
+        """The neighbouring candidate ids, `(prev, next)` by id order.
+
+        The detail page offers 上一个作品 / 下一个作品 as a quick jump; the
+        natural order is the candidate id, which is also the order the 候选
+        list is newest-first in. `prev` is the id immediately below, `next`
+        immediately above; either may be ``None`` at the ends of the set.
+        """
+        return await asyncio.to_thread(
+            self._adjacent_candidate_ids_sync, candidate_id
+        )
+
+    def _adjacent_candidate_ids_sync(
+        self, candidate_id: int
+    ) -> tuple[int | None, int | None]:
+        with self.connection() as connection:
+            prev = connection.execute(
+                "SELECT id FROM candidates WHERE id < ? "
+                "ORDER BY id DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            next = connection.execute(
+                "SELECT id FROM candidates WHERE id > ? "
+                "ORDER BY id ASC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+        return (
+            int(prev[0]) if prev is not None else None,
+            int(next[0]) if next is not None else None,
+        )
+
+    async def set_candidate_eh_ref(
+        self, candidate_id: int, ex_gid: int, ex_gallery_token: str | None
+    ) -> None:
+        """Re-point a work at a different ExHentai gallery, by id, for metadata.
+
+        The gallery reference is what the metadata scraper and every derived
+        fact (torrent, cover, archive path) read from, so an operator relinking
+        a work may do so by id; whatever upstream says about the *new* gallery
+        is fetched on the next enrich instead of trusting guesses here.
+        """
+        await asyncio.to_thread(
+            self._set_candidate_eh_ref_sync,
+            candidate_id,
+            ex_gid,
+            ex_gallery_token,
+        )
+
+    def _set_candidate_eh_ref_sync(
+        self, candidate_id: int, ex_gid: int, ex_gallery_token: str | None
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
+                "torrent_count = NULL, torrent_hash = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (ex_gid, ex_gallery_token, candidate_id),
+            )
+
     def _get_candidate_sync(self, candidate_id: int) -> CandidateDetail | None:
         with self.connection() as connection:
             row = connection.execute(

@@ -119,10 +119,23 @@
         {"label": "种子", "value": work.torrent_count, "note": "尚未查询" if work.torrent_count is none else none},
         {"label": "筛选结果", "value": work.filter_result, "note": work.filter_reason},
       ] %}
-      {{ ui.kv(overview) }}
+    {{ ui.kv(overview) }}
       {% if work.preview_url %}
       <p class="ui-hint">预览页：{{ work.preview_url }}</p>
       {% endif %}
+      {#- Manual escape hatch for the gallery reference: an operator who knows
+          the right ExHentai gallery can re-point this work by URL or id and
+          then pull the metadata without re-running ingestion. `url_or_gid`
+          accepts a full gallery link or a bare numeric id. -#}
+      <form method="post" action="/works/{{ work.candidate_id }}/eh-ref"
+            class="ui-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input class="ui-input" type="text" name="ex_gid"
+               aria-label="Eh 画廊链接或编号"
+               placeholder="粘贴 ExHentai 链接，或填写纯数字编号"
+               value="{{ work.ex_gid or '' }}">
+        <button class="ui-btn" data-size="sm" type="submit">切换 Eh 编号</button>
+      </form>
     </section>
 
     <section class="ui-panel">
@@ -289,7 +302,7 @@
                 their own form. -#}
             {% if node.actions.cancel %}
             {{ ui.confirm("取消", "取消这项任务",
-                          "任务会终止，候选退回「待审核」队列，不会丢失；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                          "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
                           confirm_label="确认取消",
                           action="/activity/jobs/" ~ node.job.job_id ~ "/cancel",
                           csrf_token=csrf_token, hidden={"return_to": work_href},
@@ -363,6 +376,24 @@
     {% endfor %}
   </div>
 </div>
+
+{#- 快捷翻页：the previous and next work by candidate id, which is also the
+    newest-first order of the 候选 list. Links vanish at the ends of the set
+    rather than being disabled, so a leading「上一个」can never be a dead
+    button. -#}
+<nav class="ui-actionbar" role="group" aria-label="切换到相邻作品">
+  <div class="ui-actionbar-actions">
+    {% if prev_work %}
+    <a class="ui-btn" href="/works/{{ prev_work }}">上一个作品</a>
+    {% endif %}
+    {% if next_work %}
+    <a class="ui-btn" href="/works/{{ next_work }}">下一个作品</a>
+    {% endif %}
+    {% if not prev_work and not next_work %}
+    <span class="ui-hint">没有相邻作品</span>
+    {% endif %}
+  </div>
+</nav>
 {% endblock %}
 
 {% block scripts %}

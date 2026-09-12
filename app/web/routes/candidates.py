@@ -681,13 +681,22 @@ async def download_exhentai_archive(
     candidate_id: int,
     csrf_token: str = Form(),
 ):
+    """Queue the ExHentai Archive Download on demand.
+
+    Queued rather than run inline because the archive can be large enough to
+    take the request server with it: the worker owns the transfer, reports
+    progress and failures, advances the candidate to DOWNLOADED, and hands the
+    finished archive to auto-pack. This is the same shape as every other
+    source route; the download itself only spends GP when the worker actually
+    runs it.
+    """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
     try:
-        await deps.exhentai_service(request).download_archive_for_candidate(candidate_id)
-    except ExHentaiDownloadError as exc:
+        await deps.download_service(request).enqueue_exhentai_download(candidate_id)
+    except DownloadError as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message
         )

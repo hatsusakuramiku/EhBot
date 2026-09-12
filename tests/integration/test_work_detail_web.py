@@ -731,3 +731,119 @@ def test_a_remembered_origin_survives_an_unusable_return_to(
         "label": "返回已下载",
     }
     assert "/retired-page" not in page.text
+
+
+def test_adjacent_works_offer_previous_and_next_navigation(
+    tmp_path: Path,
+) -> None:
+    """The detail page links the neighbouring works, in id order.
+
+    The 候选 list is newest-first by candidate id, so id order is also the
+    order an operator walks the list in: 上一个 is the id immediately below,
+    下一个 immediately above. Link sets vanish at the ends rather than link
+    somewhere dead.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    first = asyncio.run(seed_work(database, status="PENDING_REVIEW"))
+    second = asyncio.run(
+        add_candidate(database, message_id=1001, update_id=1101)
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+
+        first_page = client.get(f"/works/{first}")
+        assert first_page.status_code == 200
+        # Newest first: 上一个 is the only neighbour of the oldest work.
+        assert first_page.context["prev_work"] is None
+        assert first_page.context["next_work"] == second
+        assert "上一个作品" not in first_page.text
+        assert f'/works/{second}' in first_page.text
+
+        second_page = client.get(f"/works/{second}")
+        assert second_page.status_code == 200
+        assert second_page.context["prev_work"] == first
+        assert second_page.context["next_work"] is None
+        assert f'/works/{first}' in second_page.text
+        assert "下一个作品" not in second_page.text
+
+
+def test_manual_eh_ref_repoints_and_clears_stale_torrent(
+    tmp_path: Path,
+) -> None:
+    """A URL or bare gid re-points the work and drops the old gallery's facts.
+
+    Setting a new gallery makes the previously fetched torrent meaningless, so
+    the write clears `torrent_count`/`torrent_hash`; the metadata scrape pulls
+    whatever the *new* gallery actually has. A link is parsed for both gid and
+    token; a bare gid is accepted too because the operator may only know the
+    number.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET ex_gid = 111, ex_gallery_token = 'old', "
+            "torrent_count = 3, torrent_hash = 'abc' WHERE id = ?",
+            (candidate_id,),
+        )
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        response = client.post(
+            f"/works/{candidate_id}/eh-ref",
+            data={
+                "csrf_token": csrf,
+                "ex_gid": "https://exhentai.org/g/12345/deadbeef",
+            },
+        )
+
+    assert response.status_code == 303
+    assert f"/works/{candidate_id}" in response.headers["location"]
+    with database._connect() as connection:  # noqa: SLF001
+        row = connection.execute(
+            "SELECT ex_gid, ex_gallery_token, torrent_count, torrent_hash "
+            "FROM candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+    assert row[0] == 12345
+    assert row[1] == "deadbeef"
+    assert row[2] is None
+    assert row[3] is None
+
+    # A bare gid is accepted by itself.
+    csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+    bare = client.post(
+        f"/works/{candidate_id}/eh-ref",
+        data={"csrf_token": csrf, "ex_gid": "99999"},
+    )
+    assert bare.status_code == 303
+    with database._connect() as connection:  # noqa: SLF001
+        row = connection.execute(
+            "SELECT ex_gid, ex_gallery_token FROM candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+    assert row[0] == 99999
+    assert row[1] is None
+
+
+def test_manual_eh_ref_refuses_a_garbage_gallery_id(tmp_path: Path) -> None:
+    """Neither URL nor number -> the page comes back with the reason on it."""
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="PENDING_REVIEW"))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        response = client.post(
+            f"/works/{candidate_id}/eh-ref",
+            data={"csrf_token": csrf, "ex_gid": "not-a-gallery"},
+        )
+
+    assert response.status_code == 400
+    assert response.context["work"]["candidate_id"] == candidate_id
+    assert "无法识别画廊编号" in response.text

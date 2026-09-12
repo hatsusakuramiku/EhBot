@@ -236,12 +236,28 @@ class DownloadService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
-            # A candidate may spawn a new download while it is APPROVED and
-            # while it is DOWNLOADED (an operator re-fetching another source or
-            # re-running a finished job). Blocking DOWNLOADED is what produced
-            # the misleading "必须审批后才能进入下载队列" error after a job had
-            # already been approved and completed.
-            if str(candidate_row[0]) not in {"APPROVED", "DOWNLOADED"}:
+            # Approval is a one-time door into the queue, and nothing a later
+            # job does withdraws it. A candidate that is currently APPROVED may
+            # enqueue (first entry); one that has *already* had a download job
+            # was approved when that job was enqueued, so it may enqueue again
+            # from any post-queue status -- APPROVED, PROCESSING, DOWNLOADED,
+            # FAILED, or even NEEDS_INFO / PENDING_REVIEW reached after a job
+            # failed or was cancelled. Rejecting on that check rather than on a
+            # fixed status list is what keeps a switched-source re-download, or
+            # a re-add after a failure, from requiring a second pass through
+            # review. Only a candidate that has never been approved (its status
+            # is PENDING_REVIEW / NEEDS_REVISION / REJECTED, or a fresh
+            # NEEDS_INFO that no job has followed) is refused.
+            enqueueable_status = str(candidate_row[0])
+            if enqueueable_status != "APPROVED":
+                already_enqueued = connection.execute(
+                    "SELECT 1 FROM download_jobs "
+                    "WHERE candidate_id = ? LIMIT 1",
+                    (candidate_id,),
+                ).fetchone()
+            else:
+                already_enqueued = (1,)
+            if not already_enqueued:
                 raise DownloadError(
                     "CANDIDATE_NOT_DOWNLOADABLE",
                     "该候选尚未通过审批，不能进入下载队列",
@@ -496,7 +512,14 @@ class DownloadService:
         return DOWNLOAD_STATE_PENDING
 
     async def cancel_job(self, job_id: int) -> str:
-        """Cancel a job and release its candidate back to manual review."""
+        """Cancel a job without withdrawing the candidate's approval.
+
+        The candidate was approved when its job entered the queue, and a cancel
+        is a queue-level action: it stops this attempt, it does not send the
+        work back through review. That is what lets the operator switch source
+        or re-enqueue after a cancelled or failed download without a second
+        approval gate.
+        """
         await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._cancel_job_sync, job_id)
 
@@ -637,10 +660,9 @@ class DownloadService:
         candidate_id = await asyncio.to_thread(
             self._job_candidate_sync, job_id
         )
+        # Cancelling no longer withdraws approval (that is a queue-level action),
+        # so the candidate is already enqueueable again; nothing to restore.
         await self.cancel_job(job_id)
-        # The candidate went back to PENDING_REVIEW on cancel, and only an
-        # approved candidate can be queued, so the approval is restored here.
-        await asyncio.to_thread(self._reapprove_candidate_sync, candidate_id)
         if provider == PROVIDER_TELEGRAPH:
             result = await self.enqueue_telegraph_download(candidate_id)
         else:
@@ -658,16 +680,6 @@ class DownloadService:
                 "JOB_NOT_FOUND", "\u4e0b\u8f7d\u4efb\u52a1\u4e0d\u5b58\u5728"
             )
         return int(row[0])
-
-    def _reapprove_candidate_sync(self, candidate_id: int) -> None:
-        with self._database.connection() as connection:
-            connection.execute(
-                "UPDATE candidates SET status = 'APPROVED', "
-                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN "
-                "('PENDING_REVIEW', 'PROCESSING', 'FAILED', 'NEEDS_INFO')",
-                (candidate_id,),
-            )
 
     def _cancel_job_sync(self, job_id: int) -> str:
         with self._database.connection() as connection:
@@ -687,10 +699,15 @@ class DownloadService:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (DOWNLOAD_STATE_CANCELLED, job_id),
             )
+            # The candidate had already been approved when this job entered the
+            # queue; cancelling the attempt must not send it back through
+            # review. Return it to APPROVED so a source switch or a re-add can
+            # happen on the spot, without a second approval gate.
             connection.execute(
-                "UPDATE candidates SET status = 'PENDING_REVIEW', "
+                "UPDATE candidates SET status = 'APPROVED', "
                 "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN ('APPROVED', 'PROCESSING', 'FAILED')",
+                "WHERE id = ? AND status IN "
+                "('APPROVED', 'PROCESSING', 'FAILED', 'NEEDS_INFO')",
                 (int(row[1]),),
             )
         return DOWNLOAD_STATE_CANCELLED

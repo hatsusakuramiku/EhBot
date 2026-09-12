@@ -192,6 +192,41 @@ async def test_worker_failure_updates_candidate_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_candidate_switches_source_without_re_review(
+    tmp_path: Path,
+) -> None:
+    """A download that failed may re-enqueue from another source on the spot.
+
+    The candidate was approved when its job entered the queue; a later failure
+    is a queue-level outcome, not a withdrawal of approval. Re-adding from
+    another source must therefore work without a second pass through review.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'APPROVED' WHERE id = ?",
+            (candidate_id,),
+        )
+    service = DownloadService(database, tmp_path / "work")
+    await service.enqueue_telegram_download(
+        candidate_id,
+        {"file_id": "x", "file_name": "x.cbz"},
+    )
+    assert await service._process_one() is True  # noqa: SLF001
+
+    candidate = await database.get_candidate(candidate_id)
+    assert candidate is not None
+    assert candidate.status == "FAILED"
+
+    # The previous job left the candidate FAILED; enqueueing the preview-page
+    # fallback is a source switch and must not be refused for lack of approval.
+    again = await service.enqueue_telegraph_download(candidate_id)
+    assert again.job_id > 0
+    assert again.created is True
+
+
+@pytest.mark.asyncio
 async def test_enqueue_rejects_non_archive_attachment(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_archive(database, file_name="comic.cbz")
@@ -461,9 +496,16 @@ async def test_running_job_cannot_be_paused(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_releases_the_candidate_back_to_review(
+async def test_cancel_keeps_the_candidate_approved(
     tmp_path: Path,
 ) -> None:
+    """Cancelling a job withdraws the attempt, not the approval.
+
+    The candidate was approved when its job entered the queue; a cancel is a
+    queue-level action, and sending the work back through review on a cancel
+    is why a switched-source re-download had to re-approve. Restoring APPROVED
+    is what lets the operator pick another source on the spot.
+    """
     database = Database(tmp_path / "ehbot.db")
     service = DownloadService(database, tmp_path / "work")
     candidate_id, job_id = await approved_job(database, service)
@@ -474,7 +516,7 @@ async def test_cancel_releases_the_candidate_back_to_review(
 
     candidate = await database.get_candidate(candidate_id)
     assert candidate is not None
-    assert candidate.status == "PENDING_REVIEW"
+    assert candidate.status == "APPROVED"
 
 
 @pytest.mark.asyncio

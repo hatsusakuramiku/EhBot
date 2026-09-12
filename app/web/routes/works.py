@@ -19,6 +19,7 @@ from app.api.works import (
     effective_library_path,
     work_snapshot,
 )
+from app.candidates.links import GALLERY_URL_PATTERN
 from app.review.models import METADATA_FIELDS, field_label
 from app.web import deps
 
@@ -220,6 +221,9 @@ async def render_work(
     )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    prev_id, next_id = await deps.database(request).adjacent_candidate_ids(
+        candidate_id
+    )
     return deps.templates(request).TemplateResponse(
         request=request,
         name="work_detail.html",
@@ -237,6 +241,8 @@ async def render_work(
             # here through three metadata saves would be sent to the last of
             # them.
             "origin": resolve_origin(request, candidate_id),
+            "prev_work": prev_id,
+            "next_work": next_id,
             "layout": deps.page_layout(request),
         },
         status_code=status_code,
@@ -327,6 +333,56 @@ async def work_detail(
         return redirect
     return await render_work(
         request, candidate_id, error=error, message=message
+    )
+
+
+@router.post("/works/{candidate_id}/eh-ref")
+async def set_work_eh_ref(
+    request: Request,
+    candidate_id: int,
+    ex_gid: str = Form(),
+    ex_gallery_token: str | None = Form(default=None),
+    csrf_token: str = Form(),
+):
+    """Re-point a work at a different ExHentai gallery, for metadata.
+
+    ``ex_gid`` accepts either an ExHentai/e-hentai gallery URL or a bare
+    gallery id; a URL also carries its token across. This is the manual escape
+    hatch for an operator who knows the right gallery when the ingestor did
+    not pick it up -- a fast way to relink and then pull the metadata without
+    re-running ingestion. The refreshed page redraws through the same render
+    as every other action, so nothing drifts.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+
+    gid: int | None = None
+    token: str | None = None
+    match = GALLERY_URL_PATTERN.search(ex_gid)
+    if match:
+        gid = int(match.group(1))
+        token = match.group(2)
+    elif ex_gid.strip().isdigit():
+        gid = int(ex_gid.strip())
+        token = ex_gallery_token.strip() if ex_gallery_token else ""
+    if gid is None:
+        return await render_review_error(
+            request,
+            candidate_id,
+            "无法识别画廊编号：请粘贴 ExHentai 画廊链接，或直接填写纯数字编号。",
+        )
+    if token == "":
+        token = None
+
+    await deps.database(request).set_candidate_eh_ref(
+        candidate_id, gid, token
+    )
+    notice = f"已切换画廊编号为 {gid}"
+    return RedirectResponse(
+        f"/works/{candidate_id}?message={quote_plus(notice)}",
+        status_code=303,
     )
 
 
