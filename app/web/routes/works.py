@@ -19,7 +19,11 @@ from app.api.works import (
     effective_library_path,
     work_snapshot,
 )
-from app.candidates.links import GALLERY_URL_PATTERN
+from app.candidates.links import (
+    GALLERY_URL_PATTERN,
+    find_magnet_ref,
+    normalize_preview_url,
+)
 from app.review.models import METADATA_FIELDS, field_label
 from app.web import deps
 
@@ -341,45 +345,125 @@ async def set_work_eh_ref(
     request: Request,
     candidate_id: int,
     ex_gid: str = Form(),
-    ex_gallery_token: str | None = Form(default=None),
     csrf_token: str = Form(),
 ):
     """Re-point a work at a different ExHentai gallery, for metadata.
 
-    ``ex_gid`` accepts either an ExHentai/e-hentai gallery URL or a bare
-    gallery id; a URL also carries its token across. This is the manual escape
-    hatch for an operator who knows the right gallery when the ingestor did
-    not pick it up -- a fast way to relink and then pull the metadata without
-    re-running ingestion. The refreshed page redraws through the same render
-    as every other action, so nothing drifts.
+    ``ex_gid`` must be a full ExHentai/e-hentai gallery URL, because the link
+    is the only thing that carries both the gallery id and its token. A bare
+    numeric id is refused: without a token the metadata scraper cannot address
+    the gallery, so accepting a number would store a reference nothing could
+    fetch. This is the manual escape hatch for an operator who knows the right
+    gallery when the ingestor did not pick it up -- a fast way to relink and
+    then pull the metadata without re-running ingestion. The refreshed page
+    redraws through the same render as every other action, so nothing drifts.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
 
-    gid: int | None = None
-    token: str | None = None
-    match = GALLERY_URL_PATTERN.search(ex_gid)
-    if match:
-        gid = int(match.group(1))
-        token = match.group(2)
-    elif ex_gid.strip().isdigit():
-        gid = int(ex_gid.strip())
-        token = ex_gallery_token.strip() if ex_gallery_token else ""
-    if gid is None:
+    # A full URL (not something a bare id would match): the whole input has to
+    # be the link, so trailing whitespace and nothing else is trimmed. This is
+    # what keeps a stray paste of a number from being saved as a gallery ref.
+    match = GALLERY_URL_PATTERN.fullmatch(ex_gid.strip())
+    if match is None:
         return await render_review_error(
             request,
             candidate_id,
-            "无法识别画廊编号：请粘贴 ExHentai 画廊链接，或直接填写纯数字编号。",
+            "无法识别画廊：请粘贴完整的 ExHentai/e-hentai 画廊链接"
+            "（须同时包含画廊编号和 token）。",
         )
-    if token == "":
-        token = None
+    gid, token = int(match.group(1)), match.group(2)
 
     await deps.database(request).set_candidate_eh_ref(
         candidate_id, gid, token
     )
     notice = f"已切换画廊编号为 {gid}"
+    return RedirectResponse(
+        f"/works/{candidate_id}?message={quote_plus(notice)}",
+        status_code=303,
+    )
+
+
+@router.post("/works/{candidate_id}/preview")
+async def set_work_preview(
+    request: Request,
+    candidate_id: int,
+    preview_url: str = Form(""),
+    csrf_token: str = Form(),
+):
+    """Manually pin the Telegraph page that previews a work.
+
+    A channel may post the preview as a link whose text is「预览」, or the
+    ingestor may have missed it; either way the operator can set the page by
+    hand here and it becomes the value every downstream reader sees. The input
+    is validated as a Telegraph page before it is saved, so a paste of a random
+    URL cannot become the work's preview. Clearing it (an empty field) is
+    allowed.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+
+    raw = preview_url.strip()
+    normalized = None
+    if raw:
+        normalized = normalize_preview_url(raw)
+        if normalized is None:
+            return await render_review_error(
+                request,
+                candidate_id,
+                "无法识别预览链接：仅支持 telegra.ph / graph.org 页面。",
+            )
+
+    await deps.database(request).set_candidate_preview_url(
+        candidate_id, normalized
+    )
+    notice = "已设置预览页" if normalized else "已清除预览页"
+    return RedirectResponse(
+        f"/works/{candidate_id}?message={quote_plus(notice)}",
+        status_code=303,
+    )
+
+
+@router.post("/works/{candidate_id}/torrent")
+async def set_work_torrent(
+    request: Request,
+    candidate_id: int,
+    magnet: str = Form(""),
+    csrf_token: str = Form(),
+):
+    """Manually pin a magnet as the work's torrent source.
+
+    The operator's answer to a torrent the ingestor could not pull: a paste of
+    the magnet link is validated for its btih hash and stored so the EH_TORRENT
+    provider pushes it by magnet rather than fetching a `.torrent`. Clearing it
+    (an empty field) takes the manual pin away and returns the work to gallery
+    resolution.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+
+    raw = magnet.strip()
+    btih = None
+    if raw:
+        ref = find_magnet_ref(raw)
+        if ref is None:
+            return await render_review_error(
+                request,
+                candidate_id,
+                "无法识别磁力链接：需包含 xt=urn:btih: 哈希。",
+            )
+        btih = ref[0]
+
+    await deps.database(request).set_candidate_manual_torrent(
+        candidate_id, raw or None, btih
+    )
+    notice = "已设置种子(磁力)" if raw else "已清除手动种子"
     return RedirectResponse(
         f"/works/{candidate_id}?message={quote_plus(notice)}",
         status_code=303,

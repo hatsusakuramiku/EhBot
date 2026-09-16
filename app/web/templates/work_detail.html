@@ -124,17 +124,41 @@
       <p class="ui-hint">预览页：{{ work.preview_url }}</p>
       {% endif %}
       {#- Manual escape hatch for the gallery reference: an operator who knows
-          the right ExHentai gallery can re-point this work by URL or id and
-          then pull the metadata without re-running ingestion. `url_or_gid`
-          accepts a full gallery link or a bare numeric id. -#}
+          the right ExHentai gallery can re-point this work by pasting its full
+          gallery link (which carries both the id and its token) and then pull
+          the metadata without re-running ingestion. A bare numeric id is
+          refused -- without the token nothing can address the gallery. -#}
       <form method="post" action="/works/{{ work.candidate_id }}/eh-ref"
             class="ui-row">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input class="ui-input" type="text" name="ex_gid"
-               aria-label="Eh 画廊链接或编号"
-               placeholder="粘贴 ExHentai 链接，或填写纯数字编号"
+               aria-label="Eh 画廊链接"
+               placeholder="粘贴完整的 ExHentai 画廊链接（含编号与 token）"
                value="{{ work.ex_gid or '' }}">
-        <button class="ui-btn" data-size="sm" type="submit">切换 Eh 编号</button>
+        <button class="ui-btn" data-size="sm" type="submit">切换画廊</button>
+      </form>
+
+      {#- Manual escape hatch for the torrent and preview the ingestor may have
+          missed. A pasted magnet is validated for its btih hash and pushed by
+          magnet by the EH_TORRENT provider; the preview must be a Telegraph
+          page. Both accept an empty value to clear the manual pin. -#}
+      <form method="post" action="/works/{{ work.candidate_id }}/torrent"
+            class="ui-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input class="ui-input" type="text" name="magnet"
+               aria-label="手动种子（磁力链接）"
+               placeholder="粘贴磁力链接覆盖种子来源（可留空清除）"
+               value="{{ work.magnet_url or '' }}">
+        <button class="ui-btn" data-size="sm" type="submit">手动种子</button>
+      </form>
+      <form method="post" action="/works/{{ work.candidate_id }}/preview"
+            class="ui-row">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input class="ui-input" type="text" name="preview_url"
+               aria-label="手动预览页链接"
+               placeholder="粘贴 telegra.ph 预览页链接（可留空清除）"
+               value="{{ work.preview_url or '' }}">
+        <button class="ui-btn" data-size="sm" type="submit">手动预览</button>
       </form>
     </section>
 
@@ -374,15 +398,12 @@
                    disabled=not source.available, hint=source.hint) }}
     {% endif %}
     {% endfor %}
-  </div>
-</div>
 
-{#- 快捷翻页：the previous and next work by candidate id, which is also the
-    newest-first order of the 候选 list. Links vanish at the ends of the set
-    rather than being disabled, so a leading「上一个」can never be a dead
-    button. -#}
-<nav class="ui-actionbar" role="group" aria-label="切换到相邻作品">
-  <div class="ui-actionbar-actions">
+    {#- 快捷翻页 keeps the previous and next work by candidate id in the same
+        bar as the stage actions, newest-first order of the 候选 list. Links
+        vanish at the ends of the set rather than being disabled, so a leading
+        「上一个」can never be a dead button. -#}
+    <span class="ui-actionbar-sep" aria-hidden="true"></span>
     {% if prev_work %}
     <a class="ui-btn" href="/works/{{ prev_work }}">上一个作品</a>
     {% endif %}
@@ -393,7 +414,7 @@
     <span class="ui-hint">没有相邻作品</span>
     {% endif %}
   </div>
-</nav>
+</div>
 {% endblock %}
 
 {% block scripts %}

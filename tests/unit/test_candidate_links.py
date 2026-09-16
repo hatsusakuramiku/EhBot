@@ -1,5 +1,6 @@
 from app.candidates.links import (
     find_gallery_ref,
+    find_magnet_ref,
     message_urls,
     normalize_preview_url,
     preview_urls,
@@ -111,3 +112,30 @@ def test_gallery_reference_prefers_the_message_text() -> None:
 
 def test_no_gallery_reference_anywhere_returns_none() -> None:
     assert find_gallery_ref(("https://telegra.ph/Sample-08-21",), "标题") is None
+
+
+def test_magnet_reference_returns_btih_and_the_original_link() -> None:
+    magnet = "magnet:?xt=urn:btih:DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF&dn=Book"
+    assert find_magnet_ref(magnet) == (
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        magnet,
+    )
+
+
+def test_magnet_btih_is_lowercased_regardless_of_case() -> None:
+    assert find_magnet_ref("magnet:?xt=urn:btih:ABCDEF" + "0" * 26)[0] == (
+        "abcdef" + "0" * 26
+    )
+
+
+def test_magnet_is_found_embedded_in_a_longer_message() -> None:
+    text = "书 下载 magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678"
+    assert find_magnet_ref(text) == (
+        "1234567890abcdef1234567890abcdef12345678",
+        text,
+    )
+
+
+def test_a_non_magnet_link_returns_none() -> None:
+    assert find_magnet_ref("https://exhentai.org/g/1/tok/") is None
+    assert find_magnet_ref("") is None

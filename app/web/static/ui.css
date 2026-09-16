@@ -1261,6 +1261,7 @@ canvas {
 .ui-actionbar-stage { color: var(--t-ink-muted); font-size: var(--font-small); }
 .ui-actionbar-actions { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin-left: auto; }
 .ui-actionbar-actions form { margin: 0; }
+.ui-actionbar-sep { width: 1px; align-self: stretch; background: var(--t-line-strong); margin: 0 var(--s-1); }
 
 @media (max-width: 640px) {
   .ui-actionbar { flex-direction: column; align-items: stretch; }

@@ -25,7 +25,13 @@ from app.api.status import STAGE_ARCHIVED, STAGE_CANDIDATE, STAGE_DOWNLOAD
 from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
-from app.downloads.models import PROVIDER_CONVERSION, PROVIDER_TELEGRAM
+from app.downloads.models import (
+    CONVERSION_STATE_COMPLETED,
+    CONVERSION_STATE_PENDING,
+    PROVIDER_CONVERSION,
+    PROVIDER_TELEGRAM,
+)
+from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.models import AUTO_OPERATOR
 from tests.integration.markup import (
@@ -156,6 +162,7 @@ def insert_job(
     *,
     state: str,
     provider: str = PROVIDER_TELEGRAM,
+    idempotency_key: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> int:
@@ -166,7 +173,7 @@ def insert_job(
             "error_message, details_json) VALUES (?, ?, ?, ?, ?, ?, '{}')",
             (
                 candidate_id,
-                f"work-detail:{state}:{next(_KEYS)}",
+                idempotency_key or f"work-detail:{state}:{next(_KEYS)}",
                 provider,
                 state,
                 error_code,
@@ -772,13 +779,13 @@ def test_adjacent_works_offer_previous_and_next_navigation(
 def test_manual_eh_ref_repoints_and_clears_stale_torrent(
     tmp_path: Path,
 ) -> None:
-    """A URL or bare gid re-points the work and drops the old gallery's facts.
+    """A full gallery URL re-points the work and drops the old gallery's facts.
 
     Setting a new gallery makes the previously fetched torrent meaningless, so
     the write clears `torrent_count`/`torrent_hash`; the metadata scrape pulls
-    whatever the *new* gallery actually has. A link is parsed for both gid and
-    token; a bare gid is accepted too because the operator may only know the
-    number.
+    whatever the *new* gallery actually has. A link carries both the gid and
+    the token, which is the only form the metadata scraper can address; a bare
+    id without a token is refused below.
     """
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
@@ -814,20 +821,15 @@ def test_manual_eh_ref_repoints_and_clears_stale_torrent(
     assert row[2] is None
     assert row[3] is None
 
-    # A bare gid is accepted by itself.
+    # A bare gid without a token is refused: the scraper cannot address a
+    # gallery by number alone, so accepting it would store a dead reference.
     csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
     bare = client.post(
         f"/works/{candidate_id}/eh-ref",
         data={"csrf_token": csrf, "ex_gid": "99999"},
     )
-    assert bare.status_code == 303
-    with database._connect() as connection:  # noqa: SLF001
-        row = connection.execute(
-            "SELECT ex_gid, ex_gallery_token FROM candidates WHERE id = ?",
-            (candidate_id,),
-        ).fetchone()
-    assert row[0] == 99999
-    assert row[1] is None
+    assert bare.status_code == 400
+    assert "无法识别画廊" in bare.text
 
 
 def test_manual_eh_ref_refuses_a_garbage_gallery_id(tmp_path: Path) -> None:
@@ -846,4 +848,129 @@ def test_manual_eh_ref_refuses_a_garbage_gallery_id(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.context["work"]["candidate_id"] == candidate_id
-    assert "无法识别画廊编号" in response.text
+    assert "无法识别画廊" in response.text
+
+
+def test_manual_preview_url_is_set_and_cleared(tmp_path: Path) -> None:
+    """A pasted Telegraph page is pinned, an empty field clears it, junk is refused."""
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        saved = client.post(
+            f"/works/{candidate_id}/preview",
+            data={
+                "csrf_token": csrf,
+                "preview_url": "https://telegra.ph/example-page",
+            },
+        )
+        after_save = client.get(f"/works/{candidate_id}")
+        bad = client.post(
+            f"/works/{candidate_id}/preview",
+            data={"csrf_token": csrf, "preview_url": "https://example.com/nope"},
+        )
+        cleared = client.post(
+            f"/works/{candidate_id}/preview",
+            data={"csrf_token": csrf, "preview_url": ""},
+        )
+        after_clear = client.get(f"/works/{candidate_id}")
+
+    assert saved.status_code == 303
+    assert after_save.context["work"]["preview_url"] == (
+        "https://telegra.ph/example-page"
+    )
+    assert bad.status_code == 400
+    assert "无法识别预览链接" in bad.text
+    assert cleared.status_code == 303
+    assert after_clear.context["work"]["preview_url"] is None
+
+
+def test_manual_magnet_torrent_is_set_and_cleared(tmp_path: Path) -> None:
+    """A pasted magnet is pinned as the work's torrent, empty clears it, junk refused."""
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    magnet = (
+        "magnet:?xt=urn:btih:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        "&dn=Book"
+    )
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        saved = client.post(
+            f"/works/{candidate_id}/torrent",
+            data={"csrf_token": csrf, "magnet": magnet},
+        )
+        after_save = client.get(f"/works/{candidate_id}")
+        bad = client.post(
+            f"/works/{candidate_id}/torrent",
+            data={"csrf_token": csrf, "magnet": "not a magnet"},
+        )
+        cleared = client.post(
+            f"/works/{candidate_id}/torrent",
+            data={"csrf_token": csrf, "magnet": ""},
+        )
+        after_clear = client.get(f"/works/{candidate_id}")
+
+    assert saved.status_code == 303
+    assert after_save.context["work"]["magnet_url"] == magnet
+    assert after_save.context["work"]["torrent_hash"] == "deadbeef" * 5
+    assert bad.status_code == 400
+    assert "无法识别磁力链接" in bad.text
+    assert cleared.status_code == 303
+    assert after_clear.context["work"]["magnet_url"] is None
+    assert after_clear.context["work"]["torrent_hash"] is None
+
+
+def test_editing_metadata_on_a_packed_work_requeues_a_repack(
+    tmp_path: Path,
+) -> None:
+    """A metadata correction on an archived work starts a repack of the CBZ."""
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    set_status(database, candidate_id, "DOWNLOADED")
+    download_id = insert_job(database, candidate_id, state="COMPLETED")
+    insert_artifact(
+        database, download_id, artifact_type="ARCHIVE", path="/work/source.zip"
+    )
+    pack_id = insert_job(
+        database,
+        candidate_id,
+        state=CONVERSION_STATE_COMPLETED,
+        provider=PROVIDER_CONVERSION,
+        idempotency_key=f"convert:{candidate_id}",
+    )
+    insert_artifact(
+        database, pack_id, artifact_type="CBZ", path="/library/book.cbz"
+    )
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        response = client.post(
+            f"/candidates/{candidate_id}/metadata",
+            data={
+                "csrf_token": csrf,
+                "field_name": "Title",
+                "field_value": "Renamed Book",
+            },
+        )
+
+    assert response.status_code == 303
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    repacked = [
+        job
+        for job in jobs
+        if job.provider == PROVIDER_CONVERSION
+        and job.state == CONVERSION_STATE_PENDING
+    ]
+    assert repacked, [job.state for job in jobs]

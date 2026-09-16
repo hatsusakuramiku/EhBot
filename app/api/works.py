@@ -416,6 +416,7 @@ async def work_snapshot(
         # tell「未查询」from「确认无种」.
         "torrent_count": candidate.torrent_count,
         "torrent_hash": candidate.torrent_hash,
+        "magnet_url": candidate.magnet_url,
         "messages": [
             {
                 "chat_title": message.chat_title,

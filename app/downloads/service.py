@@ -394,28 +394,123 @@ class DownloadService:
     async def retry_job(self, job_id: int) -> str:
         """Requeue a failed or paused job without creating a duplicate.
 
-        The torrent route tries the cheap outcome first: if the saved payload
-        is already readable on disk (an operator corrected the save path after
-        a content-read failure), the job is completed in place instead of being
-        pushed again. Otherwise the stale client entry is removed and the job
-        re-enters the queue, which re-reads the latest settings on the next
-        push. The original row is reused so the `idempotency_key` contract
-        holds and the attempt history is preserved.
+        The torrent route tries two outcomes before a plain requeue. First the
+        cheap one: if the saved payload is already readable on disk (an operator
+        corrected the save path after a content-read failure), the job is
+        completed in place. Failing that, the seed is assumed gone -- a
+        `TORRENT_VANISHED` retry is exactly that -- so the retry re-adds the
+        torrent itself and parks the job on peers, rather than only requeuing
+        and waiting for the worker to push on its next cycle. Only a torrent
+        job whose re-add fails falls back to a plain requeue. The original row
+        is reused so the `idempotency_key` contract holds and the attempt
+        history is preserved.
         """
         provider, state = await asyncio.to_thread(
             self._job_provider_state_sync, job_id
         )
-        if (
-            provider == PROVIDER_EH_TORRENT
-            and self._torrent_verify is not None
-        ):
-            if await self._torrent_verify(job_id):
+        if provider == PROVIDER_EH_TORRENT:
+            if self._torrent_verify is not None and await self._torrent_verify(
+                job_id
+            ):
                 return DOWNLOAD_STATE_COMPLETED
+            if self._torrent_push is not None:
+                return await self._repark_torrent(job_id)
         # A retry re-pushes the torrent, and qBittorrent absorbs a duplicate
         # hash, so the stale entry is removed first to keep one job to one
         # client entry rather than relying on that.
         await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._retry_job_sync, job_id)
+
+    async def _repark_torrent(self, job_id: int) -> str:
+        """Re-add a seed that vanished and park the job back on peers.
+
+        A retry on a torrent job exists because the seed left qBittorrent, and
+        clicking 重试 must hand it back, not merely re-queue it. The stale
+        entry is abandoned first (a no-op when it is already gone) so one job
+        maps to one client entry, then the seed is pushed again and the job
+        returns to `WAITING_TORRENT` for the poller. A refused re-add surfaces
+        as the failure rather than being masked behind a requeue.
+        """
+        candidate_id = await asyncio.to_thread(
+            self._job_candidate_sync, job_id
+        )
+        await self._abandon_torrent(job_id)
+        try:
+            details = await self._torrent_push(candidate_id)
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            await asyncio.to_thread(
+                self._mark_job_failed_sync,
+                job_id,
+                str(getattr(exc, "code", "TORRENT_PUSH_REJECTED")),
+                str(getattr(exc, "public_message", exc)),
+            )
+            return DOWNLOAD_STATE_FAILED
+        await asyncio.to_thread(
+            self._retry_torrent_sync, job_id, details or {}
+        )
+        return DOWNLOAD_STATE_WAITING_TORRENT
+
+    def _retry_torrent_sync(self, job_id: int, details: dict) -> None:
+        """Re-park a re-added torrent, applying the same retry gates as
+        `retry_job` and restoring the candidate to `APPROVED`.
+
+        The plain retry path routes through `_retry_job_sync` for the state and
+        permanent-error checks and the approval restore; this is that same
+        gating but ending in `WAITING_TORRENT`, because the seed is already back
+        in the client. The push details are merged onto the previous attempt's
+        so a retry keeps whatever the earlier try learned.
+        """
+        with self._database.connection() as connection:
+            row = connection.execute(
+                "SELECT state, error_code, candidate_id FROM download_jobs "
+                "WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
+            state = str(row[0])
+            if state not in {
+                DOWNLOAD_STATE_FAILED,
+                DOWNLOAD_STATE_PAUSED,
+                DOWNLOAD_STATE_CANCELLED,
+            }:
+                raise DownloadError(
+                    "JOB_NOT_RETRYABLE",
+                    "只有已失败、已暂停或已取消的任务可以重试",
+                )
+            if row[1] is not None and str(row[1]) in PERMANENT_DOWNLOAD_ERRORS:
+                raise DownloadError(
+                    "JOB_PERMANENTLY_FAILED",
+                    "该任务的失败原因无法通过重试解决",
+                )
+            existing = self._safe_details(
+                connection.execute(
+                    "SELECT details_json FROM download_jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()[0]
+            )
+            merged = dict(existing)
+            merged.update(details)
+            connection.execute(
+                "UPDATE download_jobs SET state = ?, details_json = ?, "
+                "error_code = NULL, error_message = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL, "
+                "retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (
+                    DOWNLOAD_STATE_WAITING_TORRENT,
+                    json.dumps(
+                        merged, separators=(",", ":"), ensure_ascii=False
+                    ),
+                    job_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE candidates SET status = 'APPROVED', "
+                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status IN "
+                "('FAILED', 'PROCESSING', 'NEEDS_INFO')",
+                (int(row[2]),),
+            )
 
     def _retry_job_sync(self, job_id: int) -> str:
         with self._database.connection() as connection:

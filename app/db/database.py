@@ -1782,6 +1782,64 @@ class Database:
                 (ex_gid, ex_gallery_token, candidate_id),
             )
 
+    async def set_candidate_preview_url(
+        self, candidate_id: int, preview_url: str | None
+    ) -> None:
+        """Manually record the Telegraph page that previews a work.
+
+        An operator who has a preview page the ingestor missed can pin it here
+        rather than re-posting the whole message: the detail page reads this
+        single value, so writing it is all a correction needs.
+        """
+        await asyncio.to_thread(
+            self._set_candidate_preview_url_sync, candidate_id, preview_url
+        )
+
+    def _set_candidate_preview_url_sync(
+        self, candidate_id: int, preview_url: str | None
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE candidates SET preview_url = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (preview_url, candidate_id),
+            )
+
+    async def set_candidate_manual_torrent(
+        self,
+        candidate_id: int,
+        magnet_url: str | None,
+        torrent_hash: str | None,
+    ) -> None:
+        """Manually pin a magnet as the work's torrent source.
+
+        The operator's correction to a torrent the ingestor could not pull. The
+        EH_TORRENT provider reads `magnet_url` sized to `torrent_hash` (the btih)
+        ahead of a `.torrent` fetch, so pinning both is what routes the download
+        through the magnet rather than the gallery. The gallery's own torrent
+        count is dropped because a manual pin overrides it.
+        """
+        await asyncio.to_thread(
+            self._set_candidate_manual_torrent_sync,
+            candidate_id,
+            magnet_url,
+            torrent_hash,
+        )
+
+    def _set_candidate_manual_torrent_sync(
+        self,
+        candidate_id: int,
+        magnet_url: str | None,
+        torrent_hash: str | None,
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE candidates SET magnet_url = ?, torrent_hash = ?, "
+                "torrent_count = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (magnet_url, torrent_hash, candidate_id),
+            )
+
     def _get_candidate_sync(self, candidate_id: int) -> CandidateDetail | None:
         with self.connection() as connection:
             row = connection.execute(
@@ -1790,7 +1848,7 @@ class Database:
                 " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
                 " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
                 "c.ex_gid, c.ex_gallery_token, c.preview_url, c.torrent_count, "
-                "c.torrent_hash FROM candidates c WHERE c.id = ?",
+                "c.torrent_hash, c.magnet_url FROM candidates c WHERE c.id = ?",
 
                 (candidate_id,),
             ).fetchone()
@@ -1828,6 +1886,7 @@ class Database:
             preview_url=str(row[7]) if row[7] is not None else None,
             torrent_count=int(row[8]) if row[8] is not None else None,
             torrent_hash=str(row[9]) if row[9] is not None else None,
+            magnet_url=str(row[10]) if row[10] is not None else None,
         )
 
     async def locate_candidate_message(

@@ -589,6 +589,16 @@ async def test_a_hash_that_vanished_from_the_client_is_retryable(
     assert jobs[0].error_code == "TORRENT_VANISHED"
     assert jobs[0].is_retryable is True
 
+    # A retry re-adds the seed that vanished, then parks the job for the
+    # poller, instead of only requeuing it for a later push.
+    assert len(fake.added) == 1
+    state = await downloads.retry_job(jobs[0].job_id)
+    assert state == "WAITING_TORRENT"
+    assert len(fake.added) == 2
+    jobs = await downloads.list_jobs_for_candidate(candidate_id)
+    assert jobs[0].state == "WAITING_TORRENT"
+    assert jobs[0].error_code is None
+
 
 @pytest.mark.asyncio
 async def test_a_client_error_state_fails_the_job(tmp_path: Path) -> None:

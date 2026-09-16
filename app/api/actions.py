@@ -529,12 +529,26 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     except ReviewError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
 
+    repacked = False
+    work = await database.downloaded_work(candidate_id)
+    if work is not None and work.is_packaged:
+        # A metadata correction on a work that is already packed starts a repack
+        # so the CBZ re-derives its name. `is_packaged` reads the artifact, not
+        # the state, so a FAILED pack counts as never-packed; before packing the
+        # next pack simply reads the edited value. A refused repack is reported
+        # as an error rather than silently dropping the edit's effect.
+        await deps.conversion_service(request).enqueue_for_candidate(
+            candidate_id
+        )
+        repacked = True
+
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
     return {
         "candidate_id": candidate_id,
         "updated": sorted(fields),
         "locked": sorted(name for name, on in locks.items() if on),
         "unlocked": sorted(name for name, on in locks.items() if not on),
+        "repacked": repacked,
         "metadata": await database.effective_metadata(candidate_id),
     }
 

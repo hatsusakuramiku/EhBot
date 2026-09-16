@@ -17,6 +17,13 @@ GALLERY_URL_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 
+# A magnet link's identity is the btih hash it names; the surrounding query
+# parameters and display name are ignored. 32 or 40 hex chars is a bare SHA-1
+# or its fully-qualified form, which is all e-hentai and exhentai emit.
+MAGNET_PATTERN = re.compile(
+    r"magnet:\?.*?xt=urn:btih:([A-Fa-f0-9]{32,40})", re.IGNORECASE
+)
+
 # Closing punctuation is excluded so a URL wrapped in brackets, or sitting at
 # the end of a sentence, does not absorb the trailing character. The two CJK
 # blocks are 　-〿 (、。「」〈〉) and ＀-￯ (the fullwidth forms
@@ -115,11 +122,26 @@ def find_gallery_ref(
     return int(match.group(1)), match.group(2)
 
 
+def find_magnet_ref(text: str) -> tuple[str, str] | None:
+    """Return ``(btih, magnet_url)`` when ``text`` names a magnet link, else None.
+
+    The whole input is not required to be the magnet: the hash is pulled out of
+    ``magnet:?xt=urn:btih:...`` wherever it sits, as the ingestor accepts a
+    bare magnet pasted into a message.
+    """
+    match = MAGNET_PATTERN.search(text)
+    if match is None:
+        return None
+    return match.group(1).lower(), text.strip()
+
+
 __all__ = [
     "GALLERY_URL_PATTERN",
+    "MAGNET_PATTERN",
     "PREVIEW_HOSTS",
     "entity_urls",
     "find_gallery_ref",
+    "find_magnet_ref",
     "message_urls",
     "normalize_preview_url",
     "preview_urls",

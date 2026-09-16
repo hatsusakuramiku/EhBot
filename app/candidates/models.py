@@ -71,6 +71,7 @@ class CandidateDetail:
     # 「确认无种」; the router treats only an explicit 0 as「无种」.
     torrent_count: int | None = None
     torrent_hash: str | None = None
+    magnet_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

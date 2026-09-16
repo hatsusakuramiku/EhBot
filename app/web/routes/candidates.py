@@ -562,6 +562,16 @@ async def edit_metadata(
         return await render_review_error(
             request, candidate_id, exc.public_message
         )
+    # A metadata correction matters most once the book is on disk: the CBZ was
+    # packed from the old title, so an edit after packing starts a repack that
+    # re-derives the name. Before packing there is nothing to rebuild; the next
+    # pack reads the edited value. `downloaded_work`'s `is_packaged` reads the
+    # artifact, not the state, so a FAILED task still counts as never-packed.
+    work = await deps.database(request).downloaded_work(candidate_id)
+    if work is not None and work.is_packaged:
+        await deps.conversion_service(request).enqueue_for_candidate(
+            candidate_id
+        )
     return RedirectResponse(
         request.url_for("work_detail", candidate_id=candidate_id).path,
         status_code=303,
