@@ -120,7 +120,7 @@
 
 - 候选页支持：多选 → 批量通过/驳回/待补充；行内快速通过；键盘快捷键（`j/k` 移动、`a` 通过、`x` 驳回）。
 - 元数据编辑改为**抽屉内就地编辑**，字段显示来源标注（gdata / 翻译 / 手动），支持**字段锁定**防止后续刮削覆盖。
-- 自动审批规则编辑器（参考 autobrr）：条件分组、字段下拉、实时语法校验、**对历史候选试跑并显示命中数与命中样例**。
+- 自动审批规则编辑器：条件分组、字段下拉、DSL 实时渲染预览、按字段角色的运算符/值形态校验、**对历史候选试跑并显示命中数与命中样例**（R24 起为纯类 SQL：`= / <> / > / >= / < / <= / LIKE / NOT LIKE / IN / NOT IN / EXISTS / NOT EXISTS`，`LIKE` 的 `%`/`_` 通配与 `[%]`/`[_]` 转义，匹配默认不区分大小写、逐条可选开关）。
 
 ### 4.5 已下载内容管理（§1.3.1，2026-08-28 恢复）
 
@@ -193,9 +193,10 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 | `metadata_values.is_locked` | 字段锁定标记 | ✅ R2 |
 | `download_jobs.priority` | 队列优先级（`ORDER BY priority, id`，同优先级内保持 FIFO） | ✅ R2 |
 | `artifacts.page_count` | 打包页数（原先被错写进 `size_bytes`，R2 修正） | ✅ R2 |
-| `archive_settings` 新键 | 归档路径模板、并发上限、主题偏好 | R8 |
+| `archive_settings` 键 | `keep_original`、`auto_pack_after_download`、`image_quality`、`library_path` / `work_path`、`library_template`（归档路径模板）、`library_title_source`、`torrent_*`（qBittorrent 客户端） | R8 |
+| `system_settings` 键 | `poll_interval_ms`、`source_concurrency`、`timezone`、`auto_approval_interval_minutes`、`log_level`（主题与密度**不**入库，存在浏览器 `localStorage`） | R13 |
 
-**约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `014_*`）。
+**约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `016_*`）。`016_` 是唯一例外：自动审批 DSL 重写后旧规则（正则分支、`CONTAINS`/`STARTS_WITH`/`HAS*`）无法等价迁移，迁移在加 `case_sensitive` 列的同时清空规则表——有操作者明确背书。
 
 ### 5.4 打包任务与下载任务解耦
 
@@ -207,7 +208,7 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 
 ### 6.1 继续做
 
-Telegram 监听与消息摄取、消息归并、ExHentai 元数据与中文标签翻译、候选审核、正则自动审批、来源降级链下载、归档安全流水线、CBZ + `ComicInfo.xml` 发布、Docker 单容器部署。
+Telegram 监听与消息摄取、消息归并、ExHentai 元数据与中文标签翻译、候选审核、类 SQL 自动审批（R24 起，见 §4.4）、来源降级链下载、归档安全流水线、CBZ + `ComicInfo.xml` 发布、Docker 单容器部署。
 
 **Telegram 用户账户（MTProto）**：Bot API 的 20 MB 下载上限在协议里，所以另加一条 MTProto 通道用于取回超限附件。原先「不引入 MTProto/Telethon」的判断已于 2026-08-28 按操作者要求撤销——当时的替代方案是转种子或预览页，但前者依赖有人做种、后者只有 1280px 重编码，都不能等价替代上传者的原档。Bot 仍是收消息的一端，用户账户只负责下载；小于 20 MB 的附件仍走 Bot。
 

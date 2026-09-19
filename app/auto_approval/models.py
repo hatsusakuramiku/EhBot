@@ -14,6 +14,9 @@ class AutoApprovalRule:
     dsl_snapshot: str
     created_at: str
     updated_at: str
+    #: Whether this rule's text and tag comparisons are case-sensitive. Off by
+    #: default: matching is case-insensitive unless the operator turns it on.
+    case_sensitive: bool = False
 
 
 @dataclass(frozen=True, slots=True)

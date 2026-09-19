@@ -12,7 +12,7 @@
 
 主要能力：
 
-- **审核先行**：任何东西在你点通过之前都不会下载。支持批量通过/驳回、自动审批规则（可增删改、可对历史候选试跑，后台按设定间隔自动跑）。
+- **审核先行**：任何东西在你点通过之前都不会下载。支持批量通过/驳回、自动审批规则（类 SQL 条件：`LIKE` 通配符、`IN`、数值比较、标签集合，默认不区分大小写且可逐条开关；可对历史候选试跑，后台按设定间隔自动跑）。
 - **四级下载选路**：Telegram Bot → Telegram 用户账户（绕过 20 MB 上限）→ ExHentai 种子 → telegra.ph 预览页，
   按「画质优先、成本其次」自动降级。消耗 GP 的 ExHentai Archive Download 永不自动触发，只作手动按钮。
 - **元数据以 ExHentai 为唯一权威源**，标签自动汉化，你手改过的字段可以锁定，不被后续刮削覆盖。
@@ -116,7 +116,7 @@ docker compose up -d
 
 | 文件 | 内容 |
 |------|------|
-| [docs/USAGE.md](docs/USAGE.md) | 逐项功能说明：五个域的页面、下载选路、用户账户登录、qBittorrent、归档处理、缩略图代理、全部环境变量 |
+| [docs/USAGE.md](docs/USAGE.md) | 逐项功能说明：六个域的页面、下载选路、用户账户登录、qBittorrent、归档处理、缩略图代理、全部环境变量 |
 | [compose.deploy.yaml](compose.deploy.yaml) | 生产部署参考，环境变量逐条带注释 |
 | [.env.example](.env.example) | 环境变量默认值 |
 | [AgentHelp/](AgentHelp/) | 开发者文档：需求规格、开发计划、实现日志、设计方案 |

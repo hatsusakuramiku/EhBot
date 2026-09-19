@@ -37,7 +37,9 @@ class AutomaticApprovalService:
         metadata = await self._database.effective_metadata(candidate_id)
         for rule in await self._database.list_auto_approval_rules(enabled_only=True):
             try:
-                result = evaluate_rule(rule.condition, metadata)
+                result = evaluate_rule(
+                    rule.condition, metadata, case_sensitive=rule.case_sensitive
+                )
             except RuleValidationError:
                 continue
             if result.matched:
@@ -52,7 +54,9 @@ class AutomaticApprovalService:
         matched: list[int] = []
         for candidate_id in await self._database.pending_candidate_ids():
             metadata = await self._database.effective_metadata(candidate_id)
-            if evaluate_rule(rule.condition, metadata).matched:
+            if evaluate_rule(
+                rule.condition, metadata, case_sensitive=rule.case_sensitive
+            ).matched:
                 matched.append(candidate_id)
         return tuple(matched)
 
@@ -60,10 +64,20 @@ class AutomaticApprovalService:
         self,
         condition: dict,
         *,
+        case_sensitive: bool = False,
         scan_limit: int = DRY_RUN_SCAN_LIMIT,
         sample_limit: int = DRY_RUN_SAMPLE_LIMIT,
     ) -> AutoApprovalDryRun:
         """Report what a rule would match, without approving anything.
+
+        `case_sensitive` is submitted with the form like the operators are: a
+        trial run tests the unsaved rule as it stands in the editor, so its case
+        setting is part of what gets tried. Takes a condition rather than a
+        stored rule so the editor can try an unsaved one: the point of a trial
+        run is to find out before saving. It reads candidates in every status,
+        not just those pending review, because the question being asked is 「这条
+        规则历史上会命中什么」 -- restricting the scan to the pending queue would
+        answer it with whatever happens to be undecided this afternoon.
 
         Takes a condition rather than a stored rule so the editor can try an
         unsaved one: the point of a trial run is to find out before saving. It
@@ -84,7 +98,7 @@ class AutomaticApprovalService:
         for item in candidates:
             metadata = await self._database.effective_metadata(item.candidate_id)
             try:
-                result = evaluate_rule(condition, metadata)
+                result = evaluate_rule(condition, metadata, case_sensitive=case_sensitive)
             except RuleValidationError:
                 # An unusable condition matches nothing rather than aborting the
                 # run: the editor's own validation reports the syntax error, and

@@ -14,8 +14,12 @@ from fastapi.responses import RedirectResponse
 from app.api.serializers import auto_approval_dry_run
 from app.api.status import SETTINGS_AUTO_APPROVAL
 from app.auto_approval.rules import (
+    EXISTENCE_OPS,
+    IN_OPS,
+    COLLECTION_FIELD,
     RuleValidationError,
     editor_rows,
+    normalize_operator,
     render_rule_dsl,
     validate_rule_ast,
 )
@@ -29,7 +33,7 @@ router = APIRouter()
 def _parse_rule_condition(form) -> dict:
     """Build one automatic-approval AST from the editor's submitted rows.
 
-    The editor submits parallel lists -- `condition_kind`, `condition_field`,
+    The editor submits parallel lists -- `condition_field`,
     `condition_operator`, `condition_value` -- because that is what repeated
     form field names give natively, so the rows survive with JavaScript off.
     A row whose field is blank is skipped, which is how the spare empty row
@@ -39,11 +43,13 @@ def _parse_rule_condition(form) -> dict:
     `render_rule_dsl` prints and what the browser previews: a simple rule
     should read simply in the stored DSL.
 
-    A form carrying no rows at all falls back to the single `field`/`pattern`
-    pair the page used before the editor existed. That shape is exactly one
-    regex row, so nothing is lost by keeping it accepted.
+    The operator is normalised here (`not like` / `Not Like` / `NOT LIKE` ->
+    `NOT_LIKE`) so the parser can decide the value's shape before `validate`
+    runs: a list operator splits the comma-separated input into a list, an
+    EXISTS on the TAG collection keeps its single tag, and a scalar EXISTS drops
+    the value entirely. Whether a comparison needs a value at all is the
+    validator's call, not this one's.
     """
-    kinds = form.getlist("condition_kind")
     fields = form.getlist("condition_field")
     operators = form.getlist("condition_operator")
     values = form.getlist("condition_value")
@@ -63,38 +69,31 @@ def _parse_rule_condition(form) -> dict:
         field = str(raw_field or "").strip()
         if not field:
             continue
-        raw_value = at(values, index).strip()
-        if at(kinds, index, "condition") == "regex":
-            children.append(
-                {"kind": "regex", "field": field, "pattern": raw_value}
-            )
-            continue
-        operator = at(operators, index).upper()
+        operator = normalize_operator(at(operators, index))
         node: dict = {
             "kind": "condition",
             "field": field,
             "operator": operator,
         }
-        if operator in {"HAS_ANY", "HAS_ALL"}:
+        if operator in IN_OPS:
             # A list operator gets a list, split the way `settings.js`
-            # previews it, so 「chinese, futa」 means two tags in both places.
+            # previews it, so 「chinese, futa」 means two values in both places.
             node["value"] = [
-                item.strip() for item in raw_value.split(",") if item.strip()
+                item.strip() for item in at(values, index).split(",") if item.strip()
             ]
-        elif operator not in {"EXISTS", "NOT_EXISTS"}:
-            node["value"] = raw_value
+        elif operator in EXISTENCE_OPS:
+            if field == COLLECTION_FIELD:
+                node["value"] = at(values, index).strip()
+        else:
+            node["value"] = at(values, index).strip()
         children.append(node)
     if not children:
-        return {
-            "kind": "regex",
-            "field": str(form.get("field") or "").strip(),
-            "pattern": str(form.get("pattern") or ""),
-        }
+        return None
     if len(children) == 1:
         return children[0]
     return {
         "kind": "group",
-        "operator": str(form.get("group_operator") or "AND").upper(),
+        "operator": normalize_operator(str(form.get("group_operator") or "AND")),
         "children": children,
     }
 
@@ -144,10 +143,13 @@ async def save_auto_approval_rule(request: Request):
         # meant is how an operator ends up with two rules approving everything.
         raw_rule_id = str(form.get("rule_id") or "").strip()
         rule_id = int(raw_rule_id) if raw_rule_id else None
-        # `validate_rule_ast` is the gate, not the editor: every pattern is
-        # compiled here, so a regex the browser accepted and Python does not
-        # is refused at the moment it would be stored.
-        ast = validate_rule_ast(_parse_rule_condition(form))
+        # `validate_rule_ast` is the gate, not the editor: every operator and
+        # value is checked here, so something the browser accepted and the
+        # engine cannot is refused at the moment it would be stored.
+        ast = _parse_rule_condition(form)
+        if ast is None:
+            raise RuleValidationError("请至少填写一个条件")
+        ast = validate_rule_ast(ast)
         await deps.database(request).save_auto_approval_rule(
             rule_id=rule_id,
             name=name,
@@ -155,6 +157,7 @@ async def save_auto_approval_rule(request: Request):
             priority=priority,
             condition=ast,
             dsl_snapshot=render_rule_dsl(ast),
+            case_sensitive=form.get("case_sensitive") == "on",
         )
     except LookupError:
         # The rule was deleted between the page render and the save. Reported as
@@ -186,7 +189,10 @@ async def dry_run_auto_approval_rule(request: Request):
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
     try:
-        condition = validate_rule_ast(_parse_rule_condition(form))
+        condition = _parse_rule_condition(form)
+        if condition is None:
+            raise RuleValidationError("请至少填写一个条件")
+        condition = validate_rule_ast(condition)
     except (RuleValidationError, ValueError) as exc:
         return await render_settings(
             request,
@@ -194,7 +200,9 @@ async def dry_run_auto_approval_rule(request: Request):
             error=str(exc),
             status_code=400,
         )
-    result = await AutomaticApprovalService(deps.database(request)).dry_run(condition)
+    result = await AutomaticApprovalService(deps.database(request)).dry_run(
+        condition, case_sensitive=form.get("case_sensitive") == "on"
+    )
     return await render_settings(
         request,
         SETTINGS_AUTO_APPROVAL,
@@ -254,6 +262,7 @@ async def edit_auto_approval_rule(rule_id: int, request: Request):
             "priority": rule.priority,
             "enabled": rule.enabled,
             "group_operator": group_operator,
+            "case_sensitive": rule.case_sensitive,
             "rows": list(rows),
         },
     )

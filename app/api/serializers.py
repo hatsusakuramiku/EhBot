@@ -485,6 +485,7 @@ def auto_approval_rule(rule: Any) -> dict[str, Any]:
         "version": rule.version,
         "condition": rule.condition,
         "dsl": rule.dsl_snapshot,
+        "case_sensitive": rule.case_sensitive,
         "created_at": rule.created_at,
         "updated_at": rule.updated_at,
     }

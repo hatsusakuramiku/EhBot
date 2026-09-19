@@ -3,19 +3,20 @@
  * Everything on the settings page already works without this file: every control
  * is a real form field, 试跑 and 预览 are real submit buttons posting to real
  * endpoints, and the server validates every value it stores. What this adds is
- * that the operator finds out about a bad regex or an odd path before pressing
- * 保存 rather than after.
+ * that the operator sees the rule's DSL as they build it, and can grow the
+ * condition list from an HTML button instead of saving each row.
  *
  * Two rules, the same ones `work.js` follows:
  *
- * 1. It writes no vocabulary. There is no state label in this file. The only
- *    Chinese it produces is the browser's own regex error text, which is data
- *    from the engine, not a status word.
- * 2. It is never the gate. The DSL rendered here is a preview of what
- *    `render_rule_dsl` will produce, and the syntax check is `new RegExp` in the
- *    same browser. The authority is `validate_rule_ast` on the server, which
- *    runs whether or not this file loaded -- so a disagreement between the two
- *    can only ever cost the operator one refused save, never an unchecked one.
+ * 1. It writes no vocabulary. There is no state label in this file and no
+ *    Chinese: field and operator choices come from the `vocabulary` the
+ *    template was rendered with, and the preview is a rendering of what
+ *    `render_rule_dsl` will produce.
+ * 2. It is never the gate. The DSL rendered here is a preview, and every rule
+ *    is validated by `validate_rule_ast` on the server when it is saved. The
+ *    engine's own grammar is the only authority on what an operator may store,
+ *    so a disagreement between the browser and the server can only ever cost
+ *    one refused save -- the same thing a missing this file costs anyway.
  */
 (function () {
   "use strict";
@@ -25,45 +26,48 @@
   var editor = document.querySelector("[data-rule-editor]");
   if (editor) {
     var preview = editor.querySelector("[data-dsl-preview]");
-    var problem = editor.querySelector("[data-syntax-error]");
 
     /* Mirrors `render_rule_dsl`'s quoting closely enough to be recognisable.
      * JSON.stringify is what the Python side uses too (`json.dumps`), so a
-     * pattern with a quote or a backslash renders the same on both sides. */
+     * value with a quote or a backslash renders the same on both sides. */
     var quote = function (value) {
       return JSON.stringify(value);
     };
 
+    /* Two-word operators are stored as one token, rendered with a space. The
+     * inverse map lives in the server's `_OPERATOR_RENDER`, too. */
+    var SPACED = {
+      NOT_LIKE: "NOT LIKE",
+      NOT_IN: "NOT IN",
+      NOT_EXISTS: "NOT EXISTS",
+    };
+
+    /* The parse that asked an operator "does it apply to this field?" -- the
+     * engine's vocabulary already locked the operator list to what the field's
+     * role allows, so the browser only has to render the submitted token. */
     var renderRow = function (row) {
       var field = row.querySelector("[data-row-field]");
-      var kind = row.querySelector("[data-row-kind]");
       var operator = row.querySelector("[data-row-operator]");
       var value = row.querySelector("[data-row-value]");
       if (!field || !field.value) return null;
 
       var token = "{" + field.value + "}";
       var raw = value ? value.value.trim() : "";
-
-      if (kind && kind.value === "regex") {
-        if (!raw) return null;
-        try {
-          new RegExp(raw);
-        } catch (error) {
-          /* The message is the engine's, not ours. JavaScript's regex dialect
-           * is not Python's, so this catches the common mistakes (an unclosed
-           * group, a dangling quantifier) and misses the dialect-specific ones
-           * -- which the server then refuses. */
-          return { error: String(error.message || error) };
-        }
-        return { text: "Regex(" + token + ", " + quote(raw) + ")" };
-      }
-
       var op = operator ? operator.value : "";
+      var spaced = SPACED[op] || op;
+
       if (op === "EXISTS" || op === "NOT_EXISTS") {
-        return { text: token + " " + op };
+        /* A collection field carries one tag in parens; a scalar field carries
+         * nothing. Both match `render_rule_dsl`. */
+        if (field.value === "TAG") {
+          return raw
+            ? { text: token + " " + spaced + "(" + quote(raw) + ")" }
+            : null;
+        }
+        return { text: token + " " + spaced };
       }
       if (!raw) return null;
-      if (op === "HAS_ANY" || op === "HAS_ALL") {
+      if (op === "IN" || op === "NOT_IN") {
         var items = raw
           .split(",")
           .map(function (item) {
@@ -71,38 +75,21 @@
           })
           .filter(Boolean);
         if (!items.length) return null;
-        return { text: token + " " + op + " " + JSON.stringify(items) };
+        return { text: token + " " + spaced + " " + JSON.stringify(items) };
       }
       if (op === ">" || op === ">=" || op === "<" || op === "<=") {
-        if (isNaN(parseFloat(raw))) {
-          return { error: raw };
-        }
-        return { text: token + " " + op + " " + parseFloat(raw) };
+        return { text: token + " " + spaced + " " + parseFloat(raw) };
       }
-      return { text: token + " " + op + " " + quote(raw) };
+      return { text: token + " " + spaced + " " + quote(raw) };
     };
 
     var render = function () {
       var rows = editor.querySelectorAll("[data-condition-row]");
       var parts = [];
-      var failure = null;
       for (var i = 0; i < rows.length; i += 1) {
         var result = renderRow(rows[i]);
         if (!result) continue;
-        if (result.error) {
-          failure = result.error;
-          continue;
-        }
         parts.push(result.text);
-      }
-
-      if (problem) {
-        /* `hidden` rather than removing the node: the element carries
-         * `role="alert"`, and a live region that is created at the moment it
-         * gets its first message is the classic way to get one that never
-         * announces. */
-        problem.hidden = !failure;
-        problem.textContent = failure || "";
       }
 
       if (!preview) return;
@@ -155,7 +142,7 @@
         var index = i + 1;
         var number = row.querySelector("[data-row-number]");
         if (number) number.textContent = "条件 " + index;
-        ["kind", "field", "op", "value"].forEach(function (prefix) {
+        ["field", "op", "value"].forEach(function (prefix) {
           var control = row.querySelector("[id^='" + prefix + "-']");
           var label = row.querySelector("label[for^='" + prefix + "-']");
           if (!control) return;

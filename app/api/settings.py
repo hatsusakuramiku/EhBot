@@ -60,9 +60,8 @@ from app.auto_approval.rules import (
     ALL_OPERATORS,
     ALLOWED_FIELDS,
     COLLECTION_OPERATORS,
-    EXISTENCE_OPERATORS,
+    EXISTENCE_OPS,
     NUMERIC_OPERATORS,
-    REGEX_FIELDS,
     TEXT_OPERATORS,
 )
 from app.auto_approval.service import DRY_RUN_SCAN_LIMIT
@@ -161,12 +160,11 @@ async def _auto_approval_section(request: Request) -> dict[str, Any]:
                 {"code": field, "label": field_label(field)}
                 for field in sorted(ALLOWED_FIELDS)
             ],
-            "regex_fields": sorted(REGEX_FIELDS),
             "operators": sorted(ALL_OPERATORS),
             "text_operators": sorted(TEXT_OPERATORS),
             "numeric_operators": sorted(NUMERIC_OPERATORS),
             "collection_operators": sorted(COLLECTION_OPERATORS),
-            "existence_operators": sorted(EXISTENCE_OPERATORS),
+            "existence_operators": sorted(EXISTENCE_OPS),
         },
         # How far a trial run reads, so the page can say what 「命中 3」 is out of
         # before the operator asks.

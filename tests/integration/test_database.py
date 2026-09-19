@@ -7,6 +7,72 @@ from app.db.database import Database
 
 
 @pytest.mark.asyncio
+async def test_auto_approval_rule_case_sensitive_round_trips(
+    tmp_path: Path,
+) -> None:
+    """`case_sensitive` survives a save, a read, and an update-overwrite.
+
+    Migration 016 adds the column and clears the old rules, so a fresh database
+    starts with neither rules nor a schema that could drop the flag.
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(auto_approval_rules)")
+        }
+        leftover = connection.execute("SELECT COUNT(*) FROM auto_approval_rules").fetchone()[0]
+    assert "case_sensitive" in columns
+    assert leftover == 0
+
+    condition = {"kind": "condition", "field": "Title", "operator": "LIKE", "value": "%miku%"}
+    # Default is insensitive; the insertion path defaults the column to off.
+    first = await database.save_auto_approval_rule(
+        rule_id=None,
+        name="Insensitive by default",
+        enabled=True,
+        priority=10,
+        condition=condition,
+        dsl_snapshot='{Title} LIKE "%miku%"',
+    )
+    assert first.case_sensitive is False
+
+    # A case-sensitive rule round-trips its flag through a read...
+    second = await database.save_auto_approval_rule(
+        rule_id=None,
+        name="Case sensitive",
+        enabled=True,
+        priority=20,
+        condition=condition,
+        dsl_snapshot='{Title} LIKE "%Miku%"',
+        case_sensitive=True,
+    )
+    assert second.case_sensitive is True
+
+    stored = await database.list_auto_approval_rules()
+    by_id = {rule.rule_id: rule for rule in stored}
+    assert by_id[first.rule_id].case_sensitive is False
+    assert by_id[second.rule_id].case_sensitive is True
+
+    # ...and through an overwrite, which is the UPDATE path that 编辑 exercises.
+    updated = await database.save_auto_approval_rule(
+        rule_id=second.rule_id,
+        name="Case sensitive, flipped",
+        enabled=True,
+        priority=20,
+        condition=condition,
+        dsl_snapshot='{Title} LIKE "%Miku%"',
+        case_sensitive=False,
+    )
+    assert updated.case_sensitive is False
+    reread = await database.get_auto_approval_rule(second.rule_id)
+    assert reread is not None
+    assert reread.case_sensitive is False
+
+
+@pytest.mark.asyncio
 async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     tmp_path: Path,
 ) -> None:
@@ -68,7 +134,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 15
+    assert migration_count == 16
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",

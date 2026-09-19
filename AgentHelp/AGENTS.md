@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1181 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1207 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1181 on a machine that has one and 1169 with
+`data/tools/7zip/`, so `passed` is 1207 on a machine that has one and 1195 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -230,8 +230,14 @@ operator navigation).
 - **The event bus drops rather than blocks**, and events carry ids only. A
   browser that stops reading must never stall the download worker; the client
   re-reads authoritative state over REST.
-- **Migrations are append-only.** The existing fifteen are frozen; add `016_*`
-  onward.
+- **Migrations are append-only.** The existing sixteen are frozen; add `017_*`
+  onward. `016_auto_approval_case_sensitive.sql` is the exception that
+  deliberately does *not* freeze old state: it adds the `case_sensitive` column
+  and then `DELETE FROM auto_approval_rules`, because the DSL rewrite made every
+  old rule (regex branches, `CONTAINS`/`STARTS_WITH`/`HAS*`) unrepresentable.
+  Emptying a table in a migration is a last resort that had operator sign-off;
+  the R24 rule is: a migration may only wipe that table, and only while its
+  schema also changes in the same file.
 - **`GET /api/v1/thumbnails/{hash}` accepts a hash and nothing else.** A URL
   parameter would make it an open proxy for anyone holding a session. The only
   admission point is the scrape path, which writes `candidates.thumb_url` and a
@@ -527,9 +533,22 @@ operator navigation).
   database call on that path is a read; a test asserts the candidate's status,
   `review_actions` and `auto_approval_rules` are all untouched afterwards.
 - **`settings.js` previews; `validate_rule_ast` decides.** The browser renders
-  the DSL and compiles the regex for immediate feedback, and the server compiles
-  every pattern again at save time. A disagreement between the two can cost one
-  refused save and never an unchecked one.
+  the DSL as a preview, and the server re-validates every condition on save and
+  again on dry-run. Since R24 the operator set is closed (twelve tokens: `=`,
+  `<>`, `>`, `>=`, `<`, `<=`, `LIKE`, `NOT_LIKE`, `IN`, `NOT_IN`, `EXISTS`,
+  `NOT_EXISTS`) and `LIKE` is always a valid pattern (`%` any-run, `_` single,
+  `[%]`/`[_]` the only escapes), there is no compile step a browser and server
+  could disagree on — a refused save means an operator/field mismatch, not a
+  regex portability problem. Matching is case-insensitive via full `casefold()`
+  unless the rule's `case_sensitive` flag is set — the flag is per-rule and
+  stored on the rule row rather than in the AST, so it survives an edit that
+  overwrites the AST.
+- **Text operators are role-checked, and so is the value shape.** `>`/`<`/`>=`
+  `/`<=` are numeric-only; `TAG` is a pseudo-field for the tag *set* (scalar
+  fields take `EXISTS`/`NOT_EXISTS` with no value, `TAG` demands exactly one
+  tag); `IN`/`NOT_IN` is a non-empty list. `validate_rule_ast` rejects each
+  violation with a Chinese message — keep it authoritative, because the editor's
+  dropdowns are built from the same tables and can drift from it.
 - **Live settings go through a provider callable; the timezone is the one
   exception.** The conversion service reads the layout template per job,
   `TelegraphService` takes a `concurrency_provider`, `/api/v1/meta` reads the
@@ -654,7 +673,6 @@ Several are locked by tests. Do not "simplify" them:
   cannot take the action under `skipped`, with its reason, and runs the rest.
 - A packaging job is not a download job: `PROVIDER_CONVERSION` stays out of
   `SUPPORTED_PROVIDERS`, and the two queues stay separate in view and API.
-
 
 **Logging invariants (added by R12):**
 
@@ -924,3 +942,28 @@ Several are locked by tests. Do not "simplify" them:
   the operator's own decision and no later repack corrected it. `_refile_for_repack`
   now enriches per work, after the `is_manual` return (a pinned path derives
   nothing, so a scrape there would be an HTTP call whose answer is discarded).
+
+## Documentation sync is part of the change
+
+Docs drift because nobody treats them as part of the diff. In this repo they are. A
+change is not done until the operator-facing and agent-facing records say what the
+code now does:
+
+- **`README.md` + `docs/USAGE.md` follow user-visible behavior.** Feature lands →
+  describe it there; behavior changes → edit the paragraph; a feature is deleted →
+  delete its paragraph. Leaving a stale paragraph ("regex auto-approval",
+  "`LOG_ACCESS` env var", "五个域的页面") is recorded as a defect, because a doc
+  that states a false thing is worse than one that stays silent. Tables with
+  environment variables or page names are the highest-drift surface; check them
+  explicitly.
+- **`AgentHelp/progress.md` gets one R-entry per phase**, appended, following the
+  neighboring entries' shape: the phase title and version/date, what changed (with
+  the *why* for anything an operator or future agent would otherwise "fix"), the
+  verified result, and the new test baseline. R-numbers are never reused; gaps are
+  explained in the entry.
+- **`AgentHelp/AGENTS.md` baselines stay live.** When a suite run moves the
+  collected count, that line and the per-phase chain update in the same change.
+  The test baseline is the cheapest lie detector in the repo: it has caught two
+  stale numbers already.
+- When a change touches none of the above (pure internal refactor), say so in the
+  commit message — "no doc change" is a statement of consideration, not an ad-lib.

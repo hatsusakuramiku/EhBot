@@ -560,7 +560,6 @@ class TestDryRun:
                 "/auto-approval-rules/dry-run",
                 data={
                     "csrf_token": csrf,
-                    "condition_kind": ["condition"],
                     "condition_field": ["Title"],
                     "condition_operator": ["="],
                     "condition_value": ["Matching Title"],
@@ -582,7 +581,6 @@ class TestDryRun:
                 "/auto-approval-rules/dry-run",
                 data={
                     "csrf_token": csrf,
-                    "condition_kind": ["condition"],
                     "condition_field": ["Title"],
                     "condition_operator": ["="],
                     "condition_value": ["Does Not Exist"],
@@ -591,7 +589,10 @@ class TestDryRun:
         assert page.status_code == 200
         assert page.context["dry_run"]["matched"] == 0
 
-    def test_dry_run_with_bad_regex_is_refused(self, tmp_path: Path) -> None:
+    def test_dry_run_refuses_a_comparison_a_field_cannot_make(
+        self, tmp_path: Path
+    ) -> None:
+        """Text fields cannot range-compare, and the dry run refuses before trying."""
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
@@ -599,10 +600,9 @@ class TestDryRun:
                 "/auto-approval-rules/dry-run",
                 data={
                     "csrf_token": csrf,
-                    "condition_kind": ["regex"],
                     "condition_field": ["Title"],
-                    "condition_operator": [""],
-                    "condition_value": ["[unclosed"],
+                    "condition_operator": [">"],
+                    "condition_value": ["100"],
                 },
             )
         assert page.status_code == 400
@@ -620,7 +620,6 @@ class TestDryRun:
                 data={
                     "csrf_token": csrf,
                     "group_operator": "AND",
-                    "condition_kind": ["condition", "condition"],
                     "condition_field": ["Title", "Title"],
                     "condition_operator": ["=", "="],
                     "condition_value": ["A Title", "A Title"],
@@ -645,7 +644,6 @@ class TestDryRun:
                 data={
                     "csrf_token": csrf,
                     "group_operator": "AND",
-                    "condition_kind": ["condition", "condition"],
                     "condition_field": ["Title", "Title"],
                     "condition_operator": ["=", "="],
                     "condition_value": ["A Title", "Another"],
@@ -672,7 +670,6 @@ class TestDryRun:
                 "/auto-approval-rules/dry-run",
                 data={
                     "csrf_token": csrf,
-                    "condition_kind": ["condition"],
                     "condition_field": ["Title"],
                     "condition_operator": ["="],
                     "condition_value": ["A Title"],
@@ -711,7 +708,6 @@ class TestRuleSaving:
                     "name": "Only Doujinshi",
                     "priority": "50",
                     "enabled": "on",
-                    "condition_kind": ["condition"],
                     "condition_field": ["Category"],
                     "condition_operator": ["="],
                     "condition_value": ["同人志"],
@@ -745,7 +741,6 @@ class TestRuleSaving:
                     "name": "Only Doujinshi",
                     "priority": "50",
                     "enabled": "on",
-                    "condition_kind": ["condition"],
                     "condition_field": ["Category"],
                     "condition_operator": ["="],
                     "condition_value": ["同人志"],
@@ -768,7 +763,6 @@ class TestRuleSaving:
                     "name": "Only Manga",
                     "priority": "10",
                     "enabled": "on",
-                    "condition_kind": ["condition"],
                     "condition_field": ["Category"],
                     "condition_operator": ["="],
                     "condition_value": ["漫画"],
@@ -853,7 +847,6 @@ class TestRuleSaving:
                     "name": "Five Fields",
                     "priority": "20",
                     "enabled": "on",
-                    "condition_kind": ["condition"] * 5,
                     "condition_field": [
                         "Category",
                         "Language",
@@ -861,7 +854,7 @@ class TestRuleSaving:
                         "Pages",
                         "Rating",
                     ],
-                    "condition_operator": ["=", "=", "CONTAINS", ">=", ">="],
+                    "condition_operator": ["=", "=", "LIKE", ">=", ">="],
                     "condition_value": ["漫画", "中文", "Someone", "20", "4"],
                 },
                 follow_redirects=False,
@@ -920,7 +913,6 @@ class TestRuleSaving:
                     "name": "Four Fields",
                     "priority": "20",
                     "enabled": "on",
-                    "condition_kind": ["condition"] * 4,
                     "condition_field": ["Category", "Language", "Pages", "Rating"],
                     "condition_operator": ["=", "=", ">=", ">="],
                     "condition_value": ["漫画", "中文", "20", "4"],
@@ -949,7 +941,6 @@ class TestRuleSaving:
                     "csrf_token": csrf,
                     "name": "Doomed",
                     "priority": "50",
-                    "condition_kind": ["condition"],
                     "condition_field": ["Category"],
                     "condition_operator": ["="],
                     "condition_value": ["同人志"],
@@ -1023,12 +1014,14 @@ class TestRuleSaving:
         assert page.context["edit_unsupported"] is True
         assert "edit_rule" not in page.context
 
-    def test_an_invalid_regex_is_refused_at_save(self, tmp_path: Path) -> None:
-        """The acceptance criterion: 规则非法正则在保存时拒绝, and nothing is stored.
+    def test_a_rule_with_an_unknown_operator_is_refused_at_save(
+        self, tmp_path: Path
+    ) -> None:
+        """The acceptance criterion: an invalid rule is refused at save, and nothing is stored.
 
-        `settings.js` compiles the pattern in the browser too, but that check is
-        a courtesy -- this posts straight past it, which is what a script-off
-        browser and a curl call both do.
+        `settings.js` previews in the browser, but that is a courtesy -- this
+        posts straight past it, which is what a script-off browser and a curl
+        call both do. `CONTAINS` was the old DSL, and it has no place here.
         """
         settings = _settings(tmp_path)
         database = Database(settings.data_path / "ehbot.db")
@@ -1042,10 +1035,9 @@ class TestRuleSaving:
                     "csrf_token": csrf,
                     "name": "Broken",
                     "priority": "50",
-                    "condition_kind": ["regex"],
                     "condition_field": ["Title"],
-                    "condition_operator": [""],
-                    "condition_value": ["[unclosed"],
+                    "condition_operator": ["CONTAINS"],
+                    "condition_value": ["futa"],
                 },
             )
 
@@ -1066,7 +1058,6 @@ class TestRuleSaving:
                     "csrf_token": csrf,
                     "name": "  ",
                     "priority": "50",
-                    "condition_kind": ["condition"],
                     "condition_field": ["Title"],
                     "condition_operator": ["="],
                     "condition_value": ["A Title"],

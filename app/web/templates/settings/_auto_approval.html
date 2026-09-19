@@ -9,10 +9,10 @@
   what gets saved -- a separate preview form could drift from the editor above it
   by a character and still look right.
 
-  A row is either a comparison (`{Field} OPERATOR value`) or a regex
-  (`Regex({Field}, 'pattern')`). Rows are combined by the group operator into the
-  `group` node `validate_rule_ast` already understands. One row saves as itself
-  rather than as a group of one, so a simple rule reads simply in the DSL.
+  A row is one comparison (`{Field} OPERATOR value`). Rows are combined by the
+  group operator into the `group` node `validate_rule_ast` already understands.
+  One row saves as itself rather than as a group of one, so a simple rule reads
+  simply in the DSL.
 
   Field and operator lists come from `vocabulary`, built in
   `app/api/settings.py` from the engine's own tables. A field the evaluator does
@@ -25,7 +25,7 @@
 #}
 
 {% macro condition_row(index, vocabulary, row=None) -%}
-  {#- One condition. Rows submit as parallel lists (`condition_kind` and
+  {#- One condition. Rows submit as parallel lists (`condition_field` and
       friends), which is what an HTML form does natively with repeated names --
       no JSON in a hidden field, so the rows survive with JavaScript off. A row
       whose field is blank is skipped server-side, which is how the extra empty
@@ -48,19 +48,11 @@
     </legend>
     <div class="ui-form-grid">
       <div class="ui-field">
-        <label for="kind-{{ index }}">匹配方式</label>
-        <select class="ui-select" id="kind-{{ index }}" name="condition_kind" data-row-kind>
-          <option value="condition" {% if not row or row.kind != 'regex' %}selected{% endif %}>比较</option>
-          <option value="regex" {% if row and row.kind == 'regex' %}selected{% endif %}>正则</option>
-        </select>
-      </div>
-      <div class="ui-field">
         <label for="field-{{ index }}">字段</label>
         <select class="ui-select" id="field-{{ index }}" name="condition_field" data-row-field>
           <option value="">（不使用此条件）</option>
           {% for field in vocabulary.fields %}
             <option value="{{ field.code }}"
-                    data-regex-capable="{{ 'true' if field.code in vocabulary.regex_fields else 'false' }}"
                     {% if row and row.field == field.code %}selected{% endif %}>
               {{ field.label }}（{{ field.code }}）
             </option>
@@ -78,11 +70,16 @@
       </div>
     </div>
     <div class="ui-field">
-      <label for="value-{{ index }}">值 / 正则</label>
+      <label for="value-{{ index }}">值</label>
       <input class="ui-input" id="value-{{ index }}" name="condition_value" type="text"
-             data-row-value placeholder="如 chinese 或 (futa|chinpo)"
+             data-row-value placeholder="如 %miku%、chinese，IN 用逗号分隔多个值"
              value="{{ row.value if row else '' }}">
-      <small>正则使用 <code>re.search</code>，区分大小写。忽略大小写写作 <code>(?i)...</code>，整串匹配写作 <code>^...$</code>。EXISTS / NOT_EXISTS 不需要值。</small>
+      <small>
+        <code>LIKE</code> 中 <code>%</code> 匹配任意多个字符、<code>_</code> 匹配单个字符，
+        字面 <code>%</code> / <code>_</code> 用 <code>[%]</code> / <code>[_]</code>。
+        标签集合 <code>{TAG}</code> 的 <code>EXISTS</code> / <code>NOT_EXISTS</code> 填单个标签；
+        普通字段的 <code>EXISTS</code> / <code>NOT_EXISTS</code> 不填值。
+      </small>
     </div>
   </fieldset>
 {%- endmacro %}
@@ -160,8 +157,12 @@
             `.ui-code:empty` takes no space, so the no-JS page has no blank box.
             The authoritative rendering is `render_rule_dsl` on save. -#}
         <pre class="ui-code" data-dsl-preview aria-live="polite"></pre>
-        <p class="ui-hint" data-syntax-error role="alert" hidden></p>
 
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="case_sensitive" type="checkbox"
+                 {% if edit_rule and edit_rule.case_sensitive %}checked{% endif %}>
+          <span>区分大小写</span>
+        </label>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="enabled" type="checkbox"
                  {% if not edit_rule or edit_rule.enabled %}checked{% endif %}>

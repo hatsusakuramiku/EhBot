@@ -2266,6 +2266,7 @@ class Database:
             dsl_snapshot=str(row[6]),
             created_at=str(row[7]),
             updated_at=str(row[8]),
+            case_sensitive=bool(row[9]),
         )
 
     async def list_auto_approval_rules(
@@ -2282,7 +2283,8 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
+                "dsl_snapshot, created_at, updated_at, case_sensitive "
+                "FROM auto_approval_rules "
                 + where_sql
                 + "ORDER BY priority, id"
             ).fetchall()
@@ -2299,7 +2301,8 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at FROM auto_approval_rules "
+                "dsl_snapshot, created_at, updated_at, case_sensitive "
+                "FROM auto_approval_rules "
                 "WHERE id = ?",
                 (rule_id,),
             ).fetchone()
@@ -2314,6 +2317,7 @@ class Database:
         priority: int,
         condition: dict,
         dsl_snapshot: str,
+        case_sensitive: bool = False,
     ) -> AutoApprovalRule:
         return await asyncio.to_thread(
             self._save_auto_approval_rule_sync,
@@ -2323,6 +2327,7 @@ class Database:
             priority,
             condition,
             dsl_snapshot,
+            case_sensitive,
         )
 
     def _save_auto_approval_rule_sync(
@@ -2333,19 +2338,21 @@ class Database:
         priority: int,
         condition: dict,
         dsl_snapshot: str,
+        case_sensitive: bool = False,
     ) -> AutoApprovalRule:
         with self.connection() as connection:
             if rule_id is None:
                 cursor = connection.execute(
                     "INSERT INTO auto_approval_rules "
-                    "(name, enabled, priority, condition_json, dsl_snapshot) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(name, enabled, priority, condition_json, dsl_snapshot, "
+                    "case_sensitive) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         name,
                         int(enabled),
                         priority,
                         json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
                         dsl_snapshot,
+                        int(case_sensitive),
                     ),
                 )
                 rule_id = int(cursor.lastrowid)
@@ -2353,6 +2360,7 @@ class Database:
                 cursor = connection.execute(
                     "UPDATE auto_approval_rules SET name = ?, enabled = ?, "
                     "priority = ?, condition_json = ?, dsl_snapshot = ?, "
+                    "case_sensitive = ?, "
                     "version = version + 1, updated_at = CURRENT_TIMESTAMP "
                     "WHERE id = ?",
                     (
@@ -2361,6 +2369,7 @@ class Database:
                         priority,
                         json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
                         dsl_snapshot,
+                        int(case_sensitive),
                         rule_id,
                     ),
                 )
