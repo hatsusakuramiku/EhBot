@@ -3594,3 +3594,17 @@ Windows 不再依赖系统安装的 7-Zip。托管安装器按架构下载固定
 **前端与 API**：编辑器去掉「匹配方式」下拉，条件行只剩 字段/运算符/值；值输入提示按运算符给出（`%`/`_` 通配、TAG EXISTS 填单个标签、标量 EXISTS 不填、IN 用逗号分隔）；规则级新增「区分大小写」复选，试跑与保存同一表单；DSL 预览由 JS 渲染、保存时后端 `validate_rule_ast` 复核，两者读同一套运算符表。API 词汇表去掉 `regex_fields`，规则 payload 新增 `case_sensitive`。
 
 **验证**：`test_auto_approval.py` 整重写（25 项），覆盖运算符规范化、按角色校验与值形状、全部新运算符语义、`%`/`_`/`[%]`/`[_]`、大小写默认与开关、`Rating = 4` 命中 `4.0`；集成套件改用新运算符，`test_database.py` 新增 `case_sensitive` 往返用例、迁移计数断言升至 16。基线 `--collect-only` 实测 1207 项（R23 1192 → 1207）；全量回归 0 失败 0 错误，12 项真实 7-Zip 按本机跳过。`compileall` 与 `git diff --check` 通过。
+
+## R25 — 归档路径规则：路径设置里按条件匹配的路径模板 (2026-09-19)
+
+把 0.2.14 的自动审批类 SQL 引擎推广到打包路径。默认归档路径模板之外，运营者可在「设置 → 路径」维护一组 `{自动审批 DSL 条件 → 路径模板}` 规则；某部作品打包时取优先级最高（`priority, id` 升序）且条件命中其元数据的第一条规则模板，全部不命中则回落全局默认模板，行为与全局模板一条兜底链（`library_template_unusable` → 默认 `{title}`）。规则按 `enabled=1` 过滤；评估抛 `RuleValidationError` 的损坏/旧版规则跳过并告警，不阻断打包。
+
+**存储**：迁移 `017_archive_path_rules.sql` 新建 `archive_path_rules` 表，为 `auto_approval_rules` 的完整镜像（含 R24 的 `case_sensitive`）+ `path_template NOT NULL`，索引 `idx_archive_path_rules_enabled_priority`；迁移计数断言升至 17。六个 CRUD 方法镜像自动审批一组（`save/list/get/toggle/delete_archive_path_rule`），UPDATE 版本自增、无匹配行抛 `LookupError`。`library_template_for(candidate_id)` 的规则评估用 `effective_metadata`——转换解析器自带的同步元数据读取没有那份优先级排序，必须每次打包多一次单键查询重取。手动 pin（`is_manual=1`）在模板分支之前检查，规则只坐在模板分支里；`planned_library_path` 同步接线，批量重排按当前规则重算。命中规则打 `archive_path_rule_matched` 日志。
+
+**校验与共享表单**：保存时条件走 `validate_rule_ast`，模板走 `validate_library_template`（须含 title 系占位符、非绝对路径、无 `..`、每层 ≤ 120；空模板报「路径模板不能为空」，映射成 `ArchiveSettingsError`）。`parse_rule_condition(form)` 从 `auto_approval.py` 抽到新的 `app/web/rule_forms.py` 供两个路由模块共享，行为逐点对齐（并行列表字段名 + IN 逗号拆列表、TAG EXISTS 保留值、标量 EXISTS 去值、空字段跳过、全空 → None）。编辑器条件行宏抽到 `settings/_rule_row.html` 共用；`settings.js` 按 `[data-rule-editor]` 探测的通用逻辑零改动，路径模板输入框刻意独立于全局模板的 `data-template-input` 避免 token 插入 JS 冲突。
+
+**稳健性修复**：测试时发现损坏的存储条件（如 `operator="BOGUS"`）在原引擎会 `KeyError: 'value'` 崩溃——不只路径规则，自动审批的 `matching_rule`/`dry_run` 同样暴露。`evaluate_rule` 增加运算符词汇表门禁（未知运算符 → `RuleValidationError`），路径解析器以 `except (RuleValidationError, TypeError, KeyError, ValueError)` 跳过并打 `archive_path_rule_unusable` 警告。
+
+**UI 与 API**：路径 tab 在全局模板面板下新增「按规则匹配的路径模板」panel——单条规则编辑器（隐藏 `path_rule_id` 支持编辑、名称/优先级/启用/区分大小写、路径模板输入框、试跑与保存同一表单）、已存规则列表（名称、优先级·版本、启用 badge、模板与 DSL 以 `.ui-code` 展示、编辑/停用/删除带确认）、试跑结果面板复用自动审批序列化。`_paths_section` 新增 `path_rules` 与 `vocabulary` 键；`serializers.archive_path_rule` 镜像 `auto_approval_rule` + `path_template`。版本升至 0.2.15。
+
+**验证**：`test_archive_path_rules.py`（新）四组测试覆盖 CRUD 往返/排序/版本自增/enabled_only/`library_template_for` 命中与回落/`case_sensitive` 开关/损坏规则跳过（caplog 断言 WARNING）/模板校验拒绝集/`parse_rule_condition` 行解析；`test_library_template.py` 追加规则命中打包、手动 pin 赢过匹配规则、`planned_library_path` 跟随规则；`test_settings_web.py` 新增 `TestPathRules`（保存后出现在 tab、编辑回填往返含 `path_template` 与 `case_sensitive`、toggle/delete、试跑命中历史候选、非法模板与无条件规则 400 中文报错、取消链接），paths 端点断言词汇表与 `dry_run_scan_limit`；`test_database.py` 迁移计数断言升至 17。全量回归 0 失败 0 错误，12 项真实 7-Zip 按本机跳过；`compileall` 与 `git diff --check` 通过。

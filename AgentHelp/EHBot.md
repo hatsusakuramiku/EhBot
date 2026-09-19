@@ -136,7 +136,7 @@
 | 改名 | 修改打包输出文件名，随即重命名磁盘上的 CBZ | ✅ R10 |
 | 归档路径（单件） | 详情页直接设定库内目录与文件名：目录不存在自动创建，名称已被占用则拒绝调整（不加 ` (2)`），保存后自动重命名并移动归档文件 | ✅ R11 |
 | 归档路径（批量） | 批量打包前按最新模板为每件重算路径与文件名，逐件钉住后打包 | ✅ R11 |
-| 归档路径模板 | `{category}/{artist}/{title}`，保存前预览渲染结果 | ✅ R8 |
+| 归档路径模板 | `{category}/{artist}/{title}`，保存前预览渲染结果；可按条件匹配的规则选路径模板（命中用规则模板、不命中用默认、手动钉过的路径始终优先） | ✅ R8 R25 |
 
 四条不容含糊的语义：
 
@@ -196,7 +196,7 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 | `archive_settings` 键 | `keep_original`、`auto_pack_after_download`、`image_quality`、`library_path` / `work_path`、`library_template`（归档路径模板）、`library_title_source`、`torrent_*`（qBittorrent 客户端） | R8 |
 | `system_settings` 键 | `poll_interval_ms`、`source_concurrency`、`timezone`、`auto_approval_interval_minutes`、`log_level`（主题与密度**不**入库，存在浏览器 `localStorage`） | R13 |
 
-**约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `016_*`）。`016_` 是唯一例外：自动审批 DSL 重写后旧规则（正则分支、`CONTAINS`/`STARTS_WITH`/`HAS*`）无法等价迁移，迁移在加 `case_sensitive` 列的同时清空规则表——有操作者明确背书。
+**约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `017_*`）。`016_` 是唯一例外：自动审批 DSL 重写后旧规则（正则分支、`CONTAINS`/`STARTS_WITH`/`HAS*`）无法等价迁移，迁移在加 `case_sensitive` 列的同时清空规则表——有操作者明确背书。
 
 ### 5.4 打包任务与下载任务解耦
 

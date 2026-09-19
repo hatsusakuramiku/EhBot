@@ -8,9 +8,12 @@ works.
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+from app.api.serializers import auto_approval_dry_run
 from app.api.status import (
     SETTINGS_ARCHIVE,
     SETTINGS_CONNECTIONS,
@@ -20,6 +23,13 @@ from app.api.status import (
     SETTINGS_SYSTEM,
     SETTINGS_SECTIONS,
 )
+from app.auto_approval.rules import (
+    RuleValidationError,
+    editor_rows,
+    validate_rule_ast,
+)
+from app.auto_approval.service import AutomaticApprovalService
+from app.web.rule_forms import parse_rule_condition
 from app.archive.service import (
     LIMIT_KEYS as ARCHIVE_LIMIT_KEYS,
     TITLE_SOURCE_JAPANESE,
@@ -365,6 +375,191 @@ async def save_library_template(request: Request, csrf_token: str = Form()):
             status_code=400,
         )
     return settings_redirect(request, SETTINGS_PATHS)
+
+
+def _error_text(exc: Exception) -> str:
+    """The operator-facing text for a refused settings change.
+
+    `ArchiveSettingsError` carries its own phrasing; the rule engine raises
+    plain `ValueError` subclasses whose `str` is the message. One helper keeps
+    the two in the same error slot on the page.
+    """
+    if isinstance(exc, ArchiveSettingsError):
+        return exc.public_message
+    return str(exc)
+
+
+@router.post("/archive-settings/paths/rules")
+async def save_archive_path_rule(request: Request):
+    """Create a routing rule, or overwrite the one `path_rule_id` names.
+
+    One endpoint for both because it is one form: the editor renders with the
+    fields filled when editing and blank when creating, and the only difference
+    on the wire is a hidden `path_rule_id`. The condition is the same row-based
+    DSL the auto-approval tab uses (`parse_rule_condition`), validated through
+    the engine's own `validate_rule_ast`; the path template is validated the
+    same way as the global one (`validate_library_template`, inside the service),
+    so a rule that could not render is refused while the operator is watching
+    the page rather than at pack time.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    try:
+        name = str(form.get("name") or "").strip()
+        if not name:
+            raise RuleValidationError("规则名称不能为空")
+        priority = int(str(form.get("priority") or "100"))
+        # Absent means create. An unparsable one is a refusal rather than a
+        # fallback to create: silently inserting a second rule when an edit was
+        # meant is how an operator ends up with two rules routing everything.
+        raw_rule_id = str(form.get("path_rule_id") or "").strip()
+        rule_id = int(raw_rule_id) if raw_rule_id else None
+        condition = parse_rule_condition(form)
+        if condition is None:
+            raise RuleValidationError("请至少填写一个条件")
+        condition = validate_rule_ast(condition)
+        await deps.archive_settings_service(request).save_path_rule(
+            rule_id=rule_id,
+            name=name,
+            enabled=form.get("enabled") == "on",
+            priority=priority,
+            condition=condition,
+            path_template=str(form.get("path_template") or ""),
+            case_sensitive=form.get("case_sensitive") == "on",
+        )
+    except LookupError:
+        # The rule was deleted between the page render and the save. Reported as
+        # a 404 rather than re-created under its old id, which would resurrect a
+        # rule the operator had removed.
+        raise HTTPException(status_code=404, detail="规则不存在") from None
+    except (ArchiveSettingsError, RuleValidationError, ValueError, json.JSONDecodeError) as exc:
+        return await render_settings(
+            request,
+            SETTINGS_PATHS,
+            error=_error_text(exc),
+            status_code=400,
+        )
+    return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/archive-settings/paths/rules/dry-run")
+async def dry_run_archive_path_rule(request: Request):
+    """Report which works the edited rule would route. Writes nothing.
+
+    The same fields the save button submits, sent to a different endpoint by
+    the same form, so what was tried is what gets saved. The condition is
+    validated first: a trial run of an unusable rule would report 「命中 0」 and
+    read as 「这条规则没用」 rather than 「这条规则写错了」.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    try:
+        condition = parse_rule_condition(form)
+        if condition is None:
+            raise RuleValidationError("请至少填写一个条件")
+        condition = validate_rule_ast(condition)
+    except (RuleValidationError, ValueError) as exc:
+        return await render_settings(
+            request,
+            SETTINGS_PATHS,
+            error=str(exc),
+            status_code=400,
+        )
+    result = await AutomaticApprovalService(deps.database(request)).dry_run(
+        condition, case_sensitive=form.get("case_sensitive") == "on"
+    )
+    return await render_settings(
+        request,
+        SETTINGS_PATHS,
+        dry_run=auto_approval_dry_run(result),
+    )
+
+
+@router.get("/archive-settings/paths/rules/{rule_id}/edit")
+async def edit_archive_path_rule(rule_id: int, request: Request):
+    """Render the 路径 tab with this routing rule loaded into the editor.
+
+    A GET, so 编辑 is a link an operator can open in a new tab and the URL says
+    what is being edited. It renders the same tab through `render_settings`
+    rather than a form of its own -- there is one editor, and a second copy
+    filled from a stored rule is how the two would drift.
+
+    `editor_rows` returns None for a nested condition group, which the flat
+    editor cannot represent. That is passed through as `edit_unsupported` rather
+    than as an error: the tab still renders, the rule is still listed, and the
+    page explains that this one has to be replaced rather than edited.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    rule = await deps.database(request).get_archive_path_rule(rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    decomposed = editor_rows(rule.condition)
+    if decomposed is None:
+        return await render_settings(
+            request,
+            SETTINGS_PATHS,
+            edit_rule_id=rule_id,
+            edit_unsupported=True,
+        )
+    group_operator, rows = decomposed
+    return await render_settings(
+        request,
+        SETTINGS_PATHS,
+        edit_rule_id=rule_id,
+        edit_rule={
+            "rule_id": rule.rule_id,
+            "name": rule.name,
+            "priority": rule.priority,
+            "enabled": rule.enabled,
+            "group_operator": group_operator,
+            "case_sensitive": rule.case_sensitive,
+            "path_template": rule.path_template,
+            "rows": list(rows),
+        },
+    )
+
+
+@router.post("/archive-settings/paths/rules/{rule_id}/toggle")
+async def toggle_archive_path_rule(rule_id: int, request: Request):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    await deps.database(request).set_archive_path_rule_enabled(
+        rule_id, form.get("enabled") == "on"
+    )
+    return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/archive-settings/paths/rules/{rule_id}/delete")
+async def delete_archive_path_rule(rule_id: int, request: Request):
+    """Delete a routing rule for good.
+
+    A POST behind `ui.confirm`, because it is the one action on this panel that
+    cannot be undone from the interface -- 停用 is the reversible half and is
+    deliberately still its own button, so an operator parking a rule for an
+    afternoon is never pushed toward deleting it.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    try:
+        await deps.database(request).delete_archive_path_rule(rule_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="规则不存在") from None
+    return settings_redirect(request, SETTINGS_PATHS)
+
 
 #: The 系统 tab's only writer, and the one settings endpoint with no legacy
 #: path to inherit -- its preferences had no page before R8 -- so it

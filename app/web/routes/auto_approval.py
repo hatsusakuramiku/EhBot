@@ -14,88 +14,19 @@ from fastapi.responses import RedirectResponse
 from app.api.serializers import auto_approval_dry_run
 from app.api.status import SETTINGS_AUTO_APPROVAL
 from app.auto_approval.rules import (
-    EXISTENCE_OPS,
-    IN_OPS,
-    COLLECTION_FIELD,
     RuleValidationError,
     editor_rows,
-    normalize_operator,
     render_rule_dsl,
     validate_rule_ast,
 )
 from app.auto_approval.service import AutomaticApprovalService
 from app.web import deps
+# The row -> AST parser is shared with the paths tab's rule editor, so both
+# rule forms mean the same things on the wire.
+from app.web.rule_forms import parse_rule_condition as _parse_rule_condition
 from app.web.settings_view import render_settings, settings_redirect
 
 router = APIRouter()
-
-
-def _parse_rule_condition(form) -> dict:
-    """Build one automatic-approval AST from the editor's submitted rows.
-
-    The editor submits parallel lists -- `condition_field`,
-    `condition_operator`, `condition_value` -- because that is what repeated
-    form field names give natively, so the rows survive with JavaScript off.
-    A row whose field is blank is skipped, which is how the spare empty row
-    the page always renders costs nothing.
-
-    One row becomes that row's node rather than a group of one, matching what
-    `render_rule_dsl` prints and what the browser previews: a simple rule
-    should read simply in the stored DSL.
-
-    The operator is normalised here (`not like` / `Not Like` / `NOT LIKE` ->
-    `NOT_LIKE`) so the parser can decide the value's shape before `validate`
-    runs: a list operator splits the comma-separated input into a list, an
-    EXISTS on the TAG collection keeps its single tag, and a scalar EXISTS drops
-    the value entirely. Whether a comparison needs a value at all is the
-    validator's call, not this one's.
-    """
-    fields = form.getlist("condition_field")
-    operators = form.getlist("condition_operator")
-    values = form.getlist("condition_value")
-
-    def at(items: list, index: int, default: str = "") -> str:
-        """One row's value from a parallel list, or the default.
-
-        The lists can be short of each other: a browser omits an unchecked
-        control, and a hand-built request may send fewer of one name than
-        another. Reading by index with a default keeps that a missing value
-        rather than an IndexError.
-        """
-        return str(items[index]) if index < len(items) else default
-
-    children: list[dict] = []
-    for index, raw_field in enumerate(fields):
-        field = str(raw_field or "").strip()
-        if not field:
-            continue
-        operator = normalize_operator(at(operators, index))
-        node: dict = {
-            "kind": "condition",
-            "field": field,
-            "operator": operator,
-        }
-        if operator in IN_OPS:
-            # A list operator gets a list, split the way `settings.js`
-            # previews it, so 「chinese, futa」 means two values in both places.
-            node["value"] = [
-                item.strip() for item in at(values, index).split(",") if item.strip()
-            ]
-        elif operator in EXISTENCE_OPS:
-            if field == COLLECTION_FIELD:
-                node["value"] = at(values, index).strip()
-        else:
-            node["value"] = at(values, index).strip()
-        children.append(node)
-    if not children:
-        return None
-    if len(children) == 1:
-        return children[0]
-    return {
-        "kind": "group",
-        "operator": normalize_operator(str(form.get("group_operator") or "AND")),
-        "children": children,
-    }
 
 
 @router.get("/auto-approval-rules")

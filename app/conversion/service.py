@@ -230,7 +230,17 @@ class ConversionService:
             return await asyncio.to_thread(
                 unique_library_target, library_path / pinned, reserved=reserved
             )
-        template = await self._settings.library_template()
+        # A routing rule decides the template when its condition matches; the
+        # global template is the "no rule hit" default. Logged so an operator
+        # who sees an unexpected layout can trace which rule chose it.
+        template, matched_rule = await self._settings.library_template_for(
+            candidate_id
+        )
+        if matched_rule is not None:
+            logging.getLogger(__name__).info(
+                "archive_path_rule_matched",
+                extra={"rule_id": matched_rule.rule_id},
+            )
         values = {
             "category": _metadata_lookup(metadata, "Category"),
             "artist": _metadata_lookup(metadata, "Artist"),
@@ -262,7 +272,7 @@ class ConversionService:
     async def planned_library_path(
         self, candidate_id: int, title: str, metadata
     ) -> PurePosixPath:
-        """What the current template gives this book, refusing if unusable.
+        """What the current routing decision gives this book, refusing if unusable.
 
         The strict counterpart of `_library_target`, and the split is deliberate.
         `_library_target` runs inside a job for a book that is already
@@ -275,7 +285,9 @@ class ConversionService:
 
         Raises `LibraryPathError`, which the batch turns into a per-work reason.
         """
-        template = await self._settings.library_template()
+        template, _matched = await self._settings.library_template_for(
+            candidate_id
+        )
         return plan_library_path(
             template,
             {

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from app.archive.service import ArchiveSettingsService
+from app.auto_approval.rules import render_rule_dsl, validate_rule_ast
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
     MAX_RELATIVE_PATH_LENGTH,
@@ -536,4 +537,157 @@ class TestStrictPlanning:
 
     def test_a_legal_name_is_returned_unchanged(self) -> None:
         assert check_library_segment("正常的书名 (2026)") is None
+
+
+class TestRoutingRulesReachThePacker:
+    """Routing rules decide the path before the global template does.
+
+    `library_template_for` is exercised directly in `test_archive_path_rules.py`;
+    here the decision is tested the way an operator sees it -- a rule matching
+    the work's metadata changes where the .cbz lands, and a manual pin still
+    wins over any rule, because the pin is a judgement the operator made about
+    this one book.
+
+    The seed writes `metadata_values` rows as well as the in-memory tuple
+    `_library_target` renders with, because the rule matcher reads the
+    database's `effective_metadata` and the renderer reads the argument -- the
+    two lists disagreeing is the failure mode these tests exist for.
+    """
+
+    @staticmethod
+    def _condition() -> dict:
+        return validate_rule_ast(
+            {"kind": "condition", "field": "Title", "operator": "=", "value": "Miku"}
+        )
+
+    @staticmethod
+    def _metadata(**fields: str) -> tuple[MetadataEntry, ...]:
+        return TestTheTemplateReachesThePacker._metadata(**fields)
+
+    @staticmethod
+    async def _seed_work(
+        database: Database, title: str = "Miku", category: str = "同人志"
+    ) -> None:
+        """The candidate and its metadata rows, as ingest would write them."""
+        import sqlite3
+
+        with sqlite3.connect(database.path) as connection:
+            connection.execute(
+                "INSERT INTO candidates (id, status) VALUES (1, 'PENDING_REVIEW')"
+            )
+            for name, value in (("Title", title), ("Category", category)):
+                connection.execute(
+                    "INSERT INTO metadata_values "
+                    "(candidate_id, field_name, field_value, value_source,"
+                    " confidence, is_manual) VALUES (1, ?, ?, 'EXHENTAI', 0.9, 0)",
+                    (name, value),
+                )
+
+    @staticmethod
+    def _pin(database: Database, relative: str) -> None:
+        """An operator-typed archive path, the shape 作品详情页 produces."""
+        import sqlite3
+
+        with sqlite3.connect(database.path) as connection:
+            connection.execute(
+                "INSERT INTO work_archive_paths "
+                "(candidate_id, relative_path, is_manual, operator_name) "
+                "VALUES (1, ?, 1, 'test')",
+                (relative,),
+            )
+
+    @staticmethod
+    async def _pack(
+        tmp_path: Path,
+        *,
+        rules: tuple[tuple[str, int], ...],
+        template: str = DEFAULT_LIBRARY_TEMPLATE,
+        title: str = "Miku",
+        pin: str | None = None,
+    ) -> tuple[Path, ConversionService]:
+        """Pack candidate 1 under a set of (path_template, priority) rules."""
+        import sqlite3
+
+        database = Database(tmp_path / "ehbot.db")
+        await database.initialize()
+        await TestRoutingRulesReachThePacker._seed_work(database, title=title)
+        library = tmp_path / "library"
+        settings = ArchiveSettingsService(
+            database,
+            tmp_path / "work",
+            default_library_path=library,
+            default_work_path=tmp_path / "work",
+        )
+        await database.save_archive_settings({"library_template": template})
+        for path_template, priority in rules:
+            condition = TestRoutingRulesReachThePacker._condition()
+            await database.save_archive_path_rule(
+                rule_id=None,
+                name=f"route-{priority}",
+                enabled=True,
+                priority=priority,
+                condition=condition,
+                dsl_snapshot=render_rule_dsl(condition),
+                path_template=path_template,
+            )
+        if pin is not None:
+            TestRoutingRulesReachThePacker._pin(database, pin)
+        service = ConversionService(
+            database,
+            tmp_path / "work",
+            library,
+            settings_service=settings,
+        )
+        metadata = TestTheTemplateReachesThePacker._metadata(
+            Title=title, Category="同人志"
+        )
+        target = await service._library_target(  # noqa: SLF001
+            1, library, metadata, title
+        )
+        return target, service
+
+    def test_a_matching_rule_places_the_book_in_its_folder(
+        self, tmp_path: Path
+    ) -> None:
+        target, _ = asyncio.run(
+            self._pack(tmp_path, rules=(("miku/{title}", 10),))
+        )
+
+        assert target == tmp_path / "library" / "miku" / "Miku.cbz"
+
+    def test_no_matching_rule_uses_the_global_template(
+        self, tmp_path: Path
+    ) -> None:
+        target, _ = asyncio.run(
+            self._pack(tmp_path, rules=(("miku/{title}", 10),), title="Other")
+        )
+
+        assert target == tmp_path / "library" / "Other.cbz"
+
+    def test_a_manual_pin_beats_a_matching_rule(self, tmp_path: Path) -> None:
+        """The operator chose where this book lives; a rule must not move it."""
+        target, _ = asyncio.run(
+            self._pack(
+                tmp_path,
+                rules=(("miku/{title}", 10),),
+                pin="同人志/作者/Miku.cbz",
+            )
+        )
+
+        assert target == tmp_path / "library" / "同人志" / "作者" / "Miku.cbz"
+
+    def test_planned_library_path_follows_the_matching_rule(
+        self, tmp_path: Path
+    ) -> None:
+        """The batch re-file preview reads the same routing decision."""
+        _, service = asyncio.run(
+            self._pack(tmp_path, rules=(("miku/{title}", 10),))
+        )
+        metadata = TestTheTemplateReachesThePacker._metadata(
+            Title="Miku", Category="同人志"
+        )
+
+        planned = asyncio.run(service.planned_library_path(1, "Miku", metadata))
+
+        assert planned.as_posix() == "miku/Miku.cbz"
 

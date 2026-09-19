@@ -263,6 +263,15 @@ def evaluate_rule(
         if node["kind"] == "group":
             outcomes = [evaluate(child) for child in node["children"]]
             return all(outcomes) if node["operator"] == "AND" else any(outcomes)
+        # An operator outside the vocabulary means a rule that never passed
+        # `validate_rule_ast` -- a row written by an older build or by hand.
+        # The contract here is "evaluate a validated AST", and the documented
+        # failure is `RuleValidationError`, so a stale row degrades to that
+        # instead of a `KeyError` from inside the comparison dispatcher.
+        if node.get("operator") not in ALL_OPERATORS:
+            raise RuleValidationError(
+                f"rule has unknown operator {node.get('operator')!r}"
+            )
         matched = _evaluate_condition(node, metadata, case_sensitive)
         conditions.append(
             {

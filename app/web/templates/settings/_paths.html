@@ -1,3 +1,4 @@
+{% from "settings/_rule_row.html" import condition_row %}
 {#
   路径 tab: where files live, and how a book's own path inside the library is
   composed.
@@ -112,6 +113,173 @@
         <pre class="ui-code">{{ template_preview.rendered }}</pre>
         {{ ui.kv(template_preview.sample) }}
       {% endif %}
+    </section>
+
+    <section class="ui-panel">
+      <div class="ui-record-head">
+        <h2 class="ui-section-title" style="margin: 0">按规则匹配的路径模板</h2>
+        <span class="ui-record-meta">{{ path_rules|length }} 项</span>
+      </div>
+      <p class="ui-hint">命中规则的作品使用该规则的路径模板；任何规则都不命中时，使用上方「归档路径模板」的默认值。作品详情页里手动指定过归档路径的作品始终优先，不受规则影响。</p>
+
+      {#- One editor, two modes, exactly like the auto-approval tab: the hidden
+          `path_rule_id` is the only thing that differs on the wire, and the
+          condition rows are the same shared `condition_row` macro with the same
+          field names, so one editor means one contract. -#}
+      <h3 class="ui-section-title" style="margin-top: var(--s-4)">{% if edit_rule %}编辑路径规则{% else %}新增路径规则{% endif %}</h3>
+      {% if edit_unsupported %}
+        {{ ui.callout("这条规则无法在此编辑", tone="waiting",
+                      detail="它包含嵌套的条件组，而编辑器只表达一层。可以试跑或删除后重建，避免保存时把规则改成别的意思。") }}
+      {% endif %}
+      <form class="ui-form" method="post" action="{{ url_for('save_archive_path_rule') }}"
+            data-rule-editor style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {#- Present only when editing, so the same endpoint inserts or updates
+            without the page having to choose a different action. -#}
+        {% if edit_rule %}
+        <input type="hidden" name="path_rule_id" value="{{ edit_rule.rule_id }}">
+        {% endif %}
+        <div class="ui-form-grid">
+          <div class="ui-field">
+            <label for="pathrule-name">名称</label>
+            <input class="ui-input" id="pathrule-name" name="name" maxlength="80" required
+                   value="{{ edit_rule.name if edit_rule else '' }}">
+          </div>
+          <div class="ui-field">
+            <label for="pathrule-priority">优先级</label>
+            <input class="ui-input" id="pathrule-priority" name="priority" type="number"
+                   value="{{ edit_rule.priority if edit_rule else 100 }}" required>
+            <small>从小到大执行，先命中先赢。</small>
+          </div>
+          <div class="ui-field">
+            <label for="pathrule-group">条件组合</label>
+            <select class="ui-select" id="pathrule-group" name="group_operator">
+              <option value="AND" {% if not edit_rule or edit_rule.group_operator == 'AND' %}selected{% endif %}>全部满足（AND）</option>
+              <option value="OR" {% if edit_rule and edit_rule.group_operator == 'OR' %}selected{% endif %}>任一满足（OR）</option>
+            </select>
+          </div>
+        </div>
+
+        {#- Always one more row than the rule uses, and never fewer than three,
+            so a fresh rule has room to type and editing an existing one leaves
+            somewhere to add the next condition without a script. -#}
+        {% set edit_rows = edit_rule.rows if edit_rule else [] %}
+        <div data-condition-rows>
+          {% for index in range(1, [edit_rows|length + 1, 3]|max + 1) %}
+            {{ condition_row(index, vocabulary,
+                             row=edit_rows[index - 1] if index <= edit_rows|length else None) }}
+          {% endfor %}
+        </div>
+        {#- Revealed by `settings.js`. Hidden by default because without the
+            script it would be a button that does nothing. -#}
+        <div class="ui-form-actions" data-condition-add-row hidden>
+          <button class="ui-btn" data-size="sm" type="button" data-condition-add>
+            添加条件
+          </button>
+          <span class="ui-hint" data-condition-count role="status" aria-live="polite"></span>
+        </div>
+
+        {#- The rendered DSL, filled by `settings.js`. Empty until then, and
+            `.ui-code:empty` takes no space, so the no-JS page has no blank box.
+            The authoritative rendering is `render_rule_dsl` on save. -#}
+        <pre class="ui-code" data-dsl-preview aria-live="polite"></pre>
+
+        <div class="ui-field">
+          <label for="pathrule-template">路径模板</label>
+          <input class="ui-input" id="pathrule-template" name="path_template" type="text"
+                 value="{{ edit_rule.path_template if edit_rule else '' }}"
+                 placeholder="{{ template.default }}" spellcheck="false" required>
+          <small>与全局模板相同的占位符：必须包含 <code>{title}</code>、<code>{japanese_title}</code>
+            或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。
+            每层最多 {{ template.max_segment_length }} 个字符。</small>
+        </div>
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="case_sensitive" type="checkbox"
+                 {% if edit_rule and edit_rule.case_sensitive %}checked{% endif %}>
+          <span>区分大小写</span>
+        </label>
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="enabled" type="checkbox"
+                 {% if not edit_rule or edit_rule.enabled %}checked{% endif %}>
+          <span>保存后启用</span>
+        </label>
+        <div class="ui-form-actions">
+          {#- Same fields, two destinations. 试跑 is first because it is the one
+              that should be pressed first. -#}
+          <button class="ui-btn" type="submit"
+                  formaction="{{ url_for('dry_run_archive_path_rule') }}">试跑</button>
+          <button class="ui-btn" data-variant="primary" type="submit">{% if edit_rule %}保存修改{% else %}保存规则{% endif %}</button>
+          {#- `section.code` rather than a literal, the way the auto-approval
+              tab names its cancel link: `settings_section` 404s on anything
+              not in `SETTINGS_SECTIONS`. -#}
+          {% if edit_rule %}
+          <a class="ui-btn" href="{{ url_for('settings_section', section=section.code).path }}">取消编辑</a>
+          {% endif %}
+        </div>
+      </form>
+
+      {% if dry_run %}
+        <h3 class="ui-section-title" style="margin-top: var(--s-5)">试跑结果</h3>
+        <p class="ui-hint">
+          在最近 {{ dry_run.scanned }} 个候选中命中 {{ dry_run.matched }} 个{% if dry_run.truncated %}（历史还有更早的候选未纳入本次试跑，上限 {{ dry_run_scan_limit }}）{% endif %}。
+          试跑不写入任何数据，也不会改变打包路径。
+        </p>
+        {% if dry_run.hits %}
+          <ul class="ui-form" style="margin: var(--s-4) 0 0; padding-left: var(--s-5)">
+            {% for hit in dry_run.hits %}
+              <li>
+                <a href="{{ hit.href }}">{{ hit.title or "未命名候选" }}</a>
+                {{ ui.badge(hit.status) }}
+              </li>
+            {% endfor %}
+          </ul>
+          {% if dry_run.matched > dry_run.hits|length %}
+            <p class="ui-hint">以上是前 {{ dry_run.hits|length }} 个样例。</p>
+          {% endif %}
+        {% else %}
+          {{ ui.empty_state("没有命中", "这条规则不会改变任何候选的归档路径。") }}
+        {% endif %}
+      {% endif %}
+
+      {% for rule in path_rules %}
+        {#- `data-selected` marks the rule currently loaded in the editor, so an
+            operator scrolling the list can see which row the form belongs to. -#}
+        <article class="ui-record" style="margin-top: var(--s-4)"
+                 {% if edit_rule_id == rule.rule_id %}data-selected="true"{% endif %}>
+          <div class="ui-record-head">
+            <span class="ui-record-title">{{ rule.name }}</span>
+            <span class="ui-record-meta">优先级 {{ rule.priority }} · 版本 {{ rule.version }}</span>
+            <div class="ui-record-badges">{{ ui.badge(rule.enablement) }}</div>
+          </div>
+          {#- The stored renderings, not ones recomputed here: the browser has no
+              business owning a second DSL writer or a second template renderer. -#}
+          <p class="ui-hint" style="margin: var(--s-2) 0 0">路径模板</p>
+          <pre class="ui-code">{{ rule.path_template }}</pre>
+          <p class="ui-hint" style="margin-top: var(--s-2)">条件</p>
+          <pre class="ui-code">{{ rule.dsl }}</pre>
+          <div class="ui-form-actions">
+            {#- 编辑 is a link because it only loads the form; the two actions
+                that write are forms. -#}
+            <a class="ui-btn" href="{{ url_for('edit_archive_path_rule', rule_id=rule.rule_id).path }}">编辑</a>
+            <form method="post" action="{{ url_for('toggle_archive_path_rule', rule_id=rule.rule_id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="enabled" value="{{ 'off' if rule.enabled else 'on' }}">
+              <button class="ui-btn" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
+            </form>
+            {#- The only irreversible action on this panel, so it is the only one
+                that asks first. 停用 sits beside it precisely so parking a rule
+                never requires deleting it. `key` disambiguates the dialog id. -#}
+            {{ ui.confirm("删除", "删除这条规则",
+                          "规则会被移除，之后的作品不再受它影响。手动指定的归档路径不受影响。",
+                          confirm_label="确认删除",
+                          action=url_for('delete_archive_path_rule', rule_id=rule.rule_id).path,
+                          csrf_token=csrf_token, size="sm", key=rule.rule_id) }}
+          </div>
+        </article>
+      {% else %}
+        {{ ui.empty_state("暂无路径规则", "没有规则时，所有作品都使用上方「归档路径模板」的默认值。") }}
+      {% endfor %}
     </section>
   </div>
 </div>

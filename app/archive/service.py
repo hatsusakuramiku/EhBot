@@ -7,8 +7,14 @@ from pathlib import Path
 
 from app.archive.models import (
     ArchivePasswordEntry,
+    ArchivePathRule,
     SafetyLimits,
     ToolProfile,
+)
+from app.auto_approval.rules import (
+    RuleValidationError,
+    evaluate_rule,
+    render_rule_dsl,
 )
 from app.archive.backends.seven_zip import resolve_seven_zip_executable
 from app.archive.quality import (
@@ -490,6 +496,97 @@ class ArchiveSettingsService:
             {SETTING_LIBRARY_TEMPLATE: template}
         )
         return template
+
+    async def library_template_for(
+        self, candidate_id: int
+    ) -> tuple[str, ArchivePathRule | None]:
+        """The layout template this work's path uses.
+
+        The first enabled routing rule whose condition matches the work's
+        effective metadata wins; a work no rule matches keeps the global
+        `library_template`. Rules evaluate on `effective_metadata` rather than
+        the row list a packing job already holds, because only that query
+        applies the source-precedence ordering -- a rule must see exactly what
+        auto-approval sees, or the two engines would disagree about a gallery
+        with several metadata sources.
+
+        Read tolerantly in the same spirit as `library_template`: a rule whose
+        stored condition has gone stale is skipped and logged rather than
+        failing the job. A work with no metadata rows matches nothing, which is
+        deliberate -- rules describe enriched books, and an unenriched one keeps
+        the default path.
+        """
+        metadata = await self._database.effective_metadata(candidate_id)
+        for rule in await self._database.list_archive_path_rules(
+            enabled_only=True
+        ):
+            try:
+                matched = evaluate_rule(
+                    rule.condition,
+                    metadata,
+                    case_sensitive=rule.case_sensitive,
+                ).matched
+            except (RuleValidationError, TypeError, KeyError, ValueError):
+                # `RuleValidationError` is the engine's documented failure; the
+                # other three are what an arbitrarily corrupt `condition_json`
+                # can still produce (a null value in a comparison, a node with
+                # no `field`). Every one of them means "this rule cannot decide
+                # a path", and deciding a path is never worth failing the pack,
+                # so the rule is skipped and logged the way a stale global
+                # template falls back.
+                logging.getLogger(__name__).warning(
+                    "archive_path_rule_unusable",
+                    extra={
+                        "error_code": "RULE_INVALID",
+                        "rule_id": rule.rule_id,
+                    },
+                )
+                continue
+            if matched:
+                return rule.path_template, rule
+        return await self.library_template(), None
+
+    async def save_path_rule(
+        self,
+        *,
+        rule_id: int | None,
+        name: str,
+        enabled: bool,
+        priority: int,
+        condition: dict,
+        path_template: str,
+        case_sensitive: bool = False,
+    ) -> ArchivePathRule:
+        """Store a routing rule, refusing a template that cannot render safely.
+
+        The template is validated here rather than at packing time for the same
+        reason the global one is: validation happens hours earlier, with the
+        operator watching the page. The condition has already passed
+        `validate_rule_ast` in the route -- the auto-approval editor's gate is
+        shared through `parse_rule_condition`. The stored `dsl_snapshot` is
+        computed from the validated AST, so it is the engine's own rendering and
+        nothing the page typed.
+        """
+        dsl_snapshot = render_rule_dsl(condition)
+        text = (path_template or "").strip()
+        if not text:
+            raise ArchiveSettingsError(
+                "PATH_RULE_TEMPLATE_EMPTY", "路径模板不能为空"
+            )
+        try:
+            cleaned = validate_library_template(text)
+        except LibraryTemplateError as exc:
+            raise ArchiveSettingsError(exc.code, exc.public_message) from exc
+        return await self._database.save_archive_path_rule(
+            rule_id=rule_id,
+            name=name,
+            enabled=enabled,
+            priority=priority,
+            condition=condition,
+            dsl_snapshot=dsl_snapshot,
+            path_template=cleaned,
+            case_sensitive=case_sensitive,
+        )
 
     async def image_quality(self) -> str:
         """The stored re-encode level, defaulting to the lossless original."""

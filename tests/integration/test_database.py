@@ -127,6 +127,12 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
                 "PRAGMA table_info(work_archive_paths)"
             )
         }
+        routing_rule_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(archive_path_rules)"
+            )
+        }
         indexes = {
             row[0]
             for row in connection.execute(
@@ -134,7 +140,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 16
+    assert migration_count == 17
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -201,6 +207,17 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         "error_code",
         "attempt_count",
     } <= thumbnail_columns
+    # Migration 017: archive-path routing rules. A rule pairs an auto-approval
+    # condition with its own layout template, so a work's path can be chosen by
+    # matching instead of every book following one global template.
+    assert "archive_path_rules" in tables
+    assert "idx_archive_path_rules_enabled_priority" in indexes
+    assert {
+        "path_template",
+        "condition_json",
+        "dsl_snapshot",
+        "case_sensitive",
+    } <= routing_rule_columns
 
 
 @pytest.mark.asyncio

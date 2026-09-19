@@ -491,6 +491,30 @@ def auto_approval_rule(rule: Any) -> dict[str, Any]:
     }
 
 
+def archive_path_rule(rule: Any) -> dict[str, Any]:
+    """One archive-path routing rule, with its template and both AST forms.
+
+    `condition` is what the editor rebuilds its groups from; `dsl` is the
+    rendering an operator reads; `path_template` is the layout this rule
+    routes matching works into. `dsl` travels stored rather than recomputed so
+    the browser never acts as a second DSL writer.
+    """
+    return {
+        "rule_id": rule.rule_id,
+        "name": rule.name,
+        "enabled": rule.enabled,
+        "enablement": toggle_view(rule.enabled).to_payload(),
+        "priority": rule.priority,
+        "version": rule.version,
+        "condition": rule.condition,
+        "dsl": rule.dsl_snapshot,
+        "path_template": rule.path_template,
+        "case_sensitive": rule.case_sensitive,
+        "created_at": rule.created_at,
+        "updated_at": rule.updated_at,
+    }
+
+
 def auto_approval_dry_run(result: Any) -> dict[str, Any]:
     """What a trial run found, counts beside the sample it names."""
     return {

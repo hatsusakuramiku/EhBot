@@ -230,14 +230,18 @@ operator navigation).
 - **The event bus drops rather than blocks**, and events carry ids only. A
   browser that stops reading must never stall the download worker; the client
   re-reads authoritative state over REST.
-- **Migrations are append-only.** The existing sixteen are frozen; add `017_*`
-  onward. `016_auto_approval_case_sensitive.sql` is the exception that
+- **Migrations are append-only.** The existing sixteen plus
+  `017_archive_path_rules` are frozen; any new change is `018_*` onward.
+  `016_auto_approval_case_sensitive.sql` is the exception that
   deliberately does *not* freeze old state: it adds the `case_sensitive` column
   and then `DELETE FROM auto_approval_rules`, because the DSL rewrite made every
   old rule (regex branches, `CONTAINS`/`STARTS_WITH`/`HAS*`) unrepresentable.
   Emptying a table in a migration is a last resort that had operator sign-off;
   the R24 rule is: a migration may only wipe that table, and only while its
-  schema also changes in the same file.
+  schema also changes in the same file. `017_archive_path_rules` is the same
+  rule engine pointed at pack paths: it mirrors `auto_approval_rules` (down to
+  the `case_sensitive` flag) plus a `path_template` column, so keep the two
+  tables in lockstep if the rule engine grows.
 - **`GET /api/v1/thumbnails/{hash}` accepts a hash and nothing else.** A URL
   parameter would make it an open proxy for anyone holding a session. The only
   admission point is the scrape path, which writes `candidates.thumb_url` and a
@@ -532,6 +536,14 @@ operator navigation).
   reports a count plus up to five titles. `evaluate_rule` is pure and every
   database call on that path is a read; a test asserts the candidate's status,
   `review_actions` and `auto_approval_rules` are all untouched afterwards.
+- **Path routing rules are the same engine, resolved against effective
+  metadata, with the manual pin ahead of them.** `library_template_for`
+  re-reads `effective_metadata` per candidate because the conversion resolver's
+  own metadata reader lacks that precedence ordering, walks enabled rules in
+  `priority, id` order, and takes the first template whose condition matches; a
+  rule that raises during evaluation is skipped with a warning, never fatal.
+  A manual path pin (`work_archive_paths.is_manual`) is checked before any
+  template branch — a rule is a default, not a decision.
 - **`settings.js` previews; `validate_rule_ast` decides.** The browser renders
   the DSL as a preview, and the server re-validates every condition on save and
   again on dry-run. Since R24 the operator set is closed (twelve tokens: `=`,

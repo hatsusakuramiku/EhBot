@@ -1067,6 +1067,238 @@ class TestRuleSaving:
 
 
 # ---------------------------------------------------------------------------
+#  Paths tab — routing rules
+# ---------------------------------------------------------------------------
+
+#: One valid condition the saves and dry runs below post to the path editor.
+_CONDITION_ONLY_DOUJINSHI = {
+    "condition_field": ["Category"],
+    "condition_operator": ["="],
+    "condition_value": ["同人志"],
+}
+
+
+class TestPathRules:
+    """The paths tab's rule editor: same gate as auto-approval, plus a template.
+
+    The forms submit to `/archive-settings/paths/rules/*` because the paths tab
+    has its own set of endpoints -- mirroring the auto-approval tab's editor but
+    carrying `path_template` as the extra answer each rule makes.
+    """
+
+    def test_a_path_rule_saves_and_appears_on_the_tab(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            saved = client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Doujinshi shelf",
+                    "priority": "50",
+                    "enabled": "on",
+                    "path_template": "同人志/{title}",
+                    **_CONDITION_ONLY_DOUJINSHI,
+                },
+                follow_redirects=False,
+            )
+            page = client.get("/settings/paths")
+
+        assert saved.status_code == 303
+        assert saved.headers["location"] == "/settings/paths"
+        assert "Doujinshi shelf" in page.text
+        assert "同人志/{title}" in page.text
+
+    def test_a_path_rule_can_be_edited_in_place(self, tmp_path: Path) -> None:
+        """编辑 loads every rule field into the editor; 保存 overwrites, never
+        appends -- the same bump-and-rewrite path `_parse_rule_condition` serves."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Doujinshi shelf",
+                    "priority": "50",
+                    "enabled": "on",
+                    "path_template": "同人志/{title}",
+                    "case_sensitive": "on",
+                    **_CONDITION_ONLY_DOUJINSHI,
+                },
+                follow_redirects=False,
+            )
+            rules = asyncio.run(database.list_archive_path_rules())
+            rule_id = rules[0].rule_id
+
+            editing = client.get(f"/archive-settings/paths/rules/{rule_id}/edit")
+            assert editing.status_code == 200
+            assert editing.context["edit_rule"]["name"] == "Doujinshi shelf"
+            assert editing.context["edit_rule"]["path_template"] == "同人志/{title}"
+            assert editing.context["edit_rule"]["case_sensitive"] is True
+            assert editing.context["edit_rule"]["rows"][0]["value"] == "同人志"
+
+            saved = client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": editing.context["csrf_token"],
+                    "path_rule_id": str(rule_id),
+                    "name": "Manga shelf",
+                    "priority": "10",
+                    "enabled": "on",
+                    "path_template": "manga/{title}",
+                    **{
+                        "condition_field": ["Category"],
+                        "condition_operator": ["="],
+                        "condition_value": ["Manga"],
+                    },
+                },
+                follow_redirects=False,
+            )
+            assert saved.status_code == 303
+
+        rules = asyncio.run(database.list_archive_path_rules())
+        assert len(rules) == 1
+        assert rules[0].rule_id == rule_id
+        assert rules[0].name == "Manga shelf"
+        assert rules[0].priority == 10
+        assert rules[0].case_sensitive is False
+        assert rules[0].path_template == "manga/{title}"
+        assert rules[0].condition["value"] == "Manga"
+
+    def test_toggle_and_delete_take_effect(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Shelf",
+                    "priority": "50",
+                    "path_template": "{title}",
+                    **_CONDITION_ONLY_DOUJINSHI,
+                },
+                follow_redirects=False,
+            )
+            rule_id = asyncio.run(database.list_archive_path_rules())[0].rule_id
+
+            client.post(
+                f"/archive-settings/paths/rules/{rule_id}/toggle",
+                data={"csrf_token": csrf, "enabled": "off"},
+            )
+            rule = asyncio.run(database.get_archive_path_rule(rule_id))
+            assert rule is not None and rule.enabled is False
+
+            client.post(
+                f"/archive-settings/paths/rules/{rule_id}/delete",
+                data={"csrf_token": csrf},
+            )
+        assert asyncio.run(database.get_archive_path_rule(rule_id)) is None
+
+    def test_dry_run_reports_which_works_would_match(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        _seed_candidate(database, "A Title")
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/rules/dry-run",
+                data={
+                    "csrf_token": csrf,
+                    "path_template": "x/{title}",
+                    "condition_field": ["Title"],
+                    "condition_operator": ["="],
+                    "condition_value": ["A Title"],
+                },
+            )
+
+        assert page.status_code == 200
+        assert page.context["dry_run"]["matched"] == 1
+
+    def test_an_unsafe_template_is_refused_on_the_page(self, tmp_path: Path) -> None:
+        """A rule whose template could escape the library is the one wrong
+        answer the whole gate exists to stop, and it is refused while the
+        operator is watching -- not at pack time."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Escape",
+                    "priority": "50",
+                    "path_template": "../{title}",
+                    **_CONDITION_ONLY_DOUJINSHI,
+                },
+            )
+
+        assert page.status_code == 400
+        assert page.context["error"]
+        with sqlite3.connect(database.path) as connection:
+            stored = connection.execute(
+                "SELECT COUNT(*) FROM archive_path_rules"
+            ).fetchone()[0]
+        assert stored == 0
+
+    def test_a_rule_without_a_condition_is_refused(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "No condition",
+                    "priority": "50",
+                    "path_template": "{title}",
+                    "condition_field": [""],
+                    "condition_operator": ["="],
+                    "condition_value": [""],
+                },
+            )
+        assert page.status_code == 400
+
+    def test_the_cancel_link_lands_back_on_the_tab(self, tmp_path: Path) -> None:
+        """取消编辑 is a real exit -- the section's own path, not a mistyped one."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            client.post(
+                "/archive-settings/paths/rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Shelf",
+                    "priority": "50",
+                    "path_template": "{title}",
+                    **_CONDITION_ONLY_DOUJINSHI,
+                },
+                follow_redirects=False,
+            )
+            rule_id = asyncio.run(database.list_archive_path_rules())[0].rule_id
+            editing = client.get(f"/archive-settings/paths/rules/{rule_id}/edit")
+
+        # The cancel link points at the paths tab, the section this editor
+        # renders inside -- the mistyped-URL trap the auto-approval tab had.
+        assert 'href="/settings/paths"' in editing.text
+
+
+# ---------------------------------------------------------------------------
 #  JSON API parity
 # ---------------------------------------------------------------------------
 
@@ -1092,3 +1324,20 @@ class TestApiParity:
                 assert page_keys.issuperset(api_keys), (
                     f"{code}: page missing {api_keys - page_keys}"
                 )
+
+    def test_the_paths_endpoint_carries_the_rule_editor_vocabulary(
+        self, tmp_path: Path
+    ) -> None:
+        """The paths tab needs the rule editor's word lists and the empty rule
+        list; the JSON endpoint must report them the same way the page reads
+        them."""
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            payload = client.get("/api/v1/settings/paths").json()
+
+        assert payload["path_rules"] == []
+        assert payload["dry_run_scan_limit"] > 0
+        assert "fields" in payload["vocabulary"]
+        assert "operators" in payload["vocabulary"]
+        assert {"title_sources", "template", "paths"} <= set(payload)

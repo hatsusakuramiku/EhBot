@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.archive.models import ArchivePasswordEntry, ToolProfile
+from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
 from app.auto_approval.models import AutoApprovalRule
 from app.candidates.links import GALLERY_URL_PATTERN
 from app.candidates.models import (
@@ -2424,6 +2424,202 @@ class Database:
             if cursor.rowcount != 1:
                 raise LookupError(
                     f"Automatic approval rule {rule_id} does not exist"
+                )
+
+    @staticmethod
+    def _archive_path_rule_from_row(
+        row: sqlite3.Row | tuple,
+    ) -> ArchivePathRule:
+        condition = json.loads(str(row[5]))
+        if not isinstance(condition, dict):
+            raise ValueError("archive path rule condition must be an object")
+        return ArchivePathRule(
+            rule_id=int(row[0]),
+            name=str(row[1]),
+            enabled=bool(row[2]),
+            priority=int(row[3]),
+            version=int(row[4]),
+            condition=condition,
+            dsl_snapshot=str(row[6]),
+            path_template=str(row[7]),
+            created_at=str(row[8]),
+            updated_at=str(row[9]),
+            case_sensitive=bool(row[10]),
+        )
+
+    async def list_archive_path_rules(
+        self, *, enabled_only: bool = False
+    ) -> tuple[ArchivePathRule, ...]:
+        return await asyncio.to_thread(
+            self._list_archive_path_rules_sync, enabled_only
+        )
+
+    def _list_archive_path_rules_sync(
+        self, enabled_only: bool
+    ) -> tuple[ArchivePathRule, ...]:
+        where_sql = "WHERE enabled = 1 " if enabled_only else ""
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, name, enabled, priority, version, condition_json, "
+                "dsl_snapshot, path_template, created_at, updated_at, "
+                "case_sensitive FROM archive_path_rules "
+                + where_sql
+                + "ORDER BY priority, id"
+            ).fetchall()
+        return tuple(
+            self._archive_path_rule_from_row(row) for row in rows
+        )
+
+    async def get_archive_path_rule(
+        self, rule_id: int
+    ) -> ArchivePathRule | None:
+        return await asyncio.to_thread(
+            self._get_archive_path_rule_sync, rule_id
+        )
+
+    def _get_archive_path_rule_sync(
+        self, rule_id: int
+    ) -> ArchivePathRule | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id, name, enabled, priority, version, condition_json, "
+                "dsl_snapshot, path_template, created_at, updated_at, "
+                "case_sensitive FROM archive_path_rules WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+        return (
+            self._archive_path_rule_from_row(row)
+            if row is not None
+            else None
+        )
+
+    async def save_archive_path_rule(
+        self,
+        *,
+        rule_id: int | None,
+        name: str,
+        enabled: bool,
+        priority: int,
+        condition: dict,
+        dsl_snapshot: str,
+        path_template: str,
+        case_sensitive: bool = False,
+    ) -> ArchivePathRule:
+        return await asyncio.to_thread(
+            self._save_archive_path_rule_sync,
+            rule_id,
+            name,
+            enabled,
+            priority,
+            condition,
+            dsl_snapshot,
+            path_template,
+            case_sensitive,
+        )
+
+    def _save_archive_path_rule_sync(
+        self,
+        rule_id: int | None,
+        name: str,
+        enabled: bool,
+        priority: int,
+        condition: dict,
+        dsl_snapshot: str,
+        path_template: str,
+        case_sensitive: bool = False,
+    ) -> ArchivePathRule:
+        with self.connection() as connection:
+            if rule_id is None:
+                cursor = connection.execute(
+                    "INSERT INTO archive_path_rules "
+                    "(name, enabled, priority, condition_json, dsl_snapshot, "
+                    "path_template, case_sensitive) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        int(enabled),
+                        priority,
+                        json.dumps(
+                            condition, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        dsl_snapshot,
+                        path_template,
+                        int(case_sensitive),
+                    ),
+                )
+                rule_id = int(cursor.lastrowid)
+            else:
+                cursor = connection.execute(
+                    "UPDATE archive_path_rules SET name = ?, enabled = ?, "
+                    "priority = ?, condition_json = ?, dsl_snapshot = ?, "
+                    "path_template = ?, case_sensitive = ?, "
+                    "version = version + 1, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ?",
+                    (
+                        name,
+                        int(enabled),
+                        priority,
+                        json.dumps(
+                            condition, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        dsl_snapshot,
+                        path_template,
+                        int(case_sensitive),
+                        rule_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LookupError(
+                        f"Archive path rule {rule_id} does not exist"
+                    )
+        result = self._get_archive_path_rule_sync(rule_id)
+        if result is None:
+            raise LookupError(f"Archive path rule {rule_id} does not exist")
+        return result
+
+    async def set_archive_path_rule_enabled(
+        self, rule_id: int, enabled: bool
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_archive_path_rule_enabled_sync, rule_id, enabled
+        )
+
+    def _set_archive_path_rule_enabled_sync(
+        self, rule_id: int, enabled: bool
+    ) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE archive_path_rules SET enabled = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (int(enabled), rule_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(
+                    f"Archive path rule {rule_id} does not exist"
+                )
+
+    async def delete_archive_path_rule(self, rule_id: int) -> None:
+        await asyncio.to_thread(self._delete_archive_path_rule_sync, rule_id)
+
+    def _delete_archive_path_rule_sync(self, rule_id: int) -> None:
+        """Remove a routing rule outright.
+
+        A hard delete rather than a disabled flag, for the same reason the
+        auto-approval one is: `enabled` already means 「暂时不要跑这条」, and a
+        second, permanent kind of disabled would leave the list showing rules
+        an operator believes they removed. A rule produces no audit trail of
+        its own -- the pack just computes a path each time -- so deleting it
+        cannot rewrite anything.
+
+        `LookupError` rather than a silent no-op: a delete that hits nothing is
+        a stale page acting on a rule someone else already removed.
+        """
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM archive_path_rules WHERE id = ?", (rule_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(
+                    f"Archive path rule {rule_id} does not exist"
                 )
 
     async def record_review_action(

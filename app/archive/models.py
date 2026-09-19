@@ -148,6 +148,32 @@ class ArchiveTaskSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ArchivePathRule:
+    """A routing rule: a condition that selects a layout template.
+
+    Evaluated at pack time in `priority, id` order; the first enabled rule
+    whose condition matches the work's effective metadata decides its path
+    template, and a work no rule matches keeps the global `library_template`.
+    `condition` is the validated auto-approval AST, `dsl_snapshot` the
+    rendering an operator reads (never recomputed, so the browser has no second
+    DSL writer), and `version` counts edits so a past decision that mentions a
+    rule can say which version it fired under.
+    """
+
+    rule_id: int
+    name: str
+    enabled: bool
+    priority: int
+    version: int
+    condition: dict
+    dsl_snapshot: str
+    path_template: str
+    created_at: str
+    updated_at: str
+    case_sensitive: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ArchiveProcessResult:
     cbz_path: Path
     page_count: int
@@ -165,6 +191,7 @@ __all__ = [
     "ArchiveManifest",
     "ArchiveMember",
     "ArchivePasswordEntry",
+    "ArchivePathRule",
     "ArchiveProcessResult",
     "ArchiveTaskSnapshot",
     "BACKEND_SEVEN_ZIP",

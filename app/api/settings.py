@@ -32,6 +32,7 @@ from app.api.contracts import ApiError
 from app.api.serializers import (
     log_entry_payload,
     archive_password,
+    archive_path_rule,
     auto_approval_rule,
     connection_snapshot,
     safety_limits,
@@ -144,6 +145,26 @@ async def _sources_section(request: Request) -> dict[str, Any]:
     }
 
 
+def _condition_vocabulary() -> dict[str, object]:
+    """Field and operator lists every rule editor renders.
+
+    Built from the engine's own tables, so a field the evaluator does not
+    support can never be offered. Sorted because a frozenset has no order and
+    an editor whose list reshuffles between requests is unusable.
+    """
+    return {
+        "fields": [
+            {"code": field, "label": field_label(field)}
+            for field in sorted(ALLOWED_FIELDS)
+        ],
+        "operators": sorted(ALL_OPERATORS),
+        "text_operators": sorted(TEXT_OPERATORS),
+        "numeric_operators": sorted(NUMERIC_OPERATORS),
+        "collection_operators": sorted(COLLECTION_OPERATORS),
+        "existence_operators": sorted(EXISTENCE_OPS),
+    }
+
+
 async def _auto_approval_section(request: Request) -> dict[str, Any]:
     database = deps.database(request)
     return {
@@ -151,21 +172,7 @@ async def _auto_approval_section(request: Request) -> dict[str, Any]:
             auto_approval_rule(rule)
             for rule in await database.list_auto_approval_rules()
         ],
-        # The editor's dropdowns are filled from the engine's own tables, so a
-        # field the evaluator does not support can never be offered. Sorted
-        # because a frozenset has no order and an editor whose list reshuffles
-        # between requests is unusable.
-        "vocabulary": {
-            "fields": [
-                {"code": field, "label": field_label(field)}
-                for field in sorted(ALLOWED_FIELDS)
-            ],
-            "operators": sorted(ALL_OPERATORS),
-            "text_operators": sorted(TEXT_OPERATORS),
-            "numeric_operators": sorted(NUMERIC_OPERATORS),
-            "collection_operators": sorted(COLLECTION_OPERATORS),
-            "existence_operators": sorted(EXISTENCE_OPS),
-        },
+        "vocabulary": _condition_vocabulary(),
         # How far a trial run reads, so the page can say what 「命中 3」 is out of
         # before the operator asks.
         "dry_run_scan_limit": DRY_RUN_SCAN_LIMIT,
@@ -201,8 +208,17 @@ async def _archive_section(request: Request) -> dict[str, Any]:
 
 async def _paths_section(request: Request) -> dict[str, Any]:
     service = deps.archive_settings_service(request)
+    database = deps.database(request)
     app_settings = request.app.state.settings
     return {
+        "path_rules": [
+            archive_path_rule(rule)
+            for rule in await database.list_archive_path_rules()
+        ],
+        # The same field/operator vocabulary the auto-approval tab offers: the
+        # routing editor is the same engine with one extra answer.
+        "vocabulary": _condition_vocabulary(),
+        "dry_run_scan_limit": DRY_RUN_SCAN_LIMIT,
         "paths": await service.paths(),
         "default_paths": {
             "library": str(app_settings.library_path),

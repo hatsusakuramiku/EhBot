@@ -1,0 +1,65 @@
+{#- One condition row of a rule editor, rendered by both the auto-approval tab
+    and the paths tab. Single source for the form-field contract the editor is
+    built on: the `condition_field` / `condition_operator` / `condition_value`
+    names are what `parse_rule_condition` reads and what `settings.js`
+    previews, so a row at home here means the same thing to every rule editor
+    on the page.
+
+    Rows submit as parallel lists (`condition_field` and friends), which is what
+    an HTML form does natively with repeated names -- no JSON in a hidden field,
+    so the rows survive with JavaScript off. A row whose field is blank is
+    skipped server-side, which is how the extra empty row costs nothing.
+
+    `row` is one of `editor_rows`'s dicts when a stored rule is being edited,
+    and absent when creating. The selected state is written into the markup
+    rather than applied by `settings.js`, so the editor arrives filled on a
+    page with JavaScript off -- an edit form that only populates after a script
+    runs is an edit form that silently discards the rule. -#}
+{% macro condition_row(index, vocabulary, row=None) -%}
+  <fieldset class="ui-fieldset" data-condition-row>
+    <legend>
+      <span data-row-number>条件 {{ index }}</span>
+      {#- Removing a row is 「clear its field」, because a row whose field is blank
+          is already skipped server-side. So this works with JavaScript off too:
+          选「（不使用此条件）」 has always been the way to drop a condition, and
+          `settings.js` additionally takes the row out of the DOM. -#}
+      <button class="ui-btn" data-size="sm" data-variant="ghost" type="button"
+              data-row-remove hidden>移除</button>
+    </legend>
+    <div class="ui-form-grid">
+      <div class="ui-field">
+        <label for="field-{{ index }}">字段</label>
+        <select class="ui-select" id="field-{{ index }}" name="condition_field" data-row-field>
+          <option value="">（不使用此条件）</option>
+          {% for field in vocabulary.fields %}
+            <option value="{{ field.code }}"
+                    {% if row and row.field == field.code %}selected{% endif %}>
+              {{ field.label }}（{{ field.code }}）
+            </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="ui-field">
+        <label for="op-{{ index }}">运算符</label>
+        <select class="ui-select" id="op-{{ index }}" name="condition_operator" data-row-operator>
+          {% for operator in vocabulary.operators %}
+            <option value="{{ operator }}"
+                    {% if row and row.operator == operator %}selected{% endif %}>{{ operator }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="ui-field">
+      <label for="value-{{ index }}">值</label>
+      <input class="ui-input" id="value-{{ index }}" name="condition_value" type="text"
+             data-row-value placeholder="如 %miku%、chinese，IN 用逗号分隔多个值"
+             value="{{ row.value if row else '' }}">
+      <small>
+        <code>LIKE</code> 中 <code>%</code> 匹配任意多个字符、<code>_</code> 匹配单个字符，
+        字面 <code>%</code> / <code>_</code> 用 <code>[%]</code> / <code>[_]</code>。
+        标签集合 <code>{TAG}</code> 的 <code>EXISTS</code> / <code>NOT_EXISTS</code> 填单个标签；
+        普通字段的 <code>EXISTS</code> / <code>NOT_EXISTS</code> 不填值。
+      </small>
+    </div>
+  </fieldset>
+{%- endmacro %}
