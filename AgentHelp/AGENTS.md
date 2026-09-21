@@ -80,15 +80,15 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1207 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1252 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1207 on a machine that has one and 1195 with
+`data/tools/7zip/`, so `passed` is 1252 on a machine that has one and 1240 with
 twelve skips on a machine that does not. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
--> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207. There is no R7 — that number
+-> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207 -> R25 1251 -> R26 1252. There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
@@ -915,6 +915,31 @@ Several are locked by tests. Do not "simplify" them:
   explicitly. Only the `action=` variant may be swapped -- the `form=` variant
   submits a form that already carries its own `hx-post`, and a second one would
   fire two requests per click.
+- **A swap strands the overlays written inside it; `ui.js` settles them.**
+  `settleOverlays` runs on `htmx:afterSettle` and does two things, because the
+  two libraries cannot see each other here. *Removed:* Alpine puts a teleport's
+  target back only when it sees the source go, and its mutation handler destroys
+  a removed node only when that node carries one of its own markers --
+  `removedNodes` are checked, their descendants are not. A swap replaces
+  `#main`'s children, and a content block's top-level nodes are page containers
+  (`<div class="ui-container">`, a section, a batch form), not Alpine roots, so
+  the orphaned clone stayed in `<body>`: a confirmation dialog sat open over the
+  page it had just acted on until 取消 dismissed it by hand. `_x_teleportBack`
+  (the source `<template>` Alpine records on the clone) being disconnected is
+  the whole orphan test, `Alpine.destroyTree` runs before `remove()` to release
+  the document-level listeners `@keydown.escape.window` and `@click.outside`
+  registered, and a clone whose source cannot be identified is left alone -- an
+  Alpine upgrade that renames the field must cost the sweep, not every dialog.
+  *Re-armed:* HTMX processes what it swaps in, and template content is not part
+  of a traversal, so the clone that arrives later from Alpine was never bound --
+  a dialog rendered by a swap submitted natively, reloading the page, and R20's
+  in-place update was silently off from the second gated action on. The
+  survivors are handed to `htmx.process`, which is idempotent (it skips a node
+  whose `initHash` it has already seen). Measured in Chromium against the built
+  app: `wrapper.remove()` cleans up, `main.innerHTML = ...` -- what a swap does
+  -- does not; and a second gated action after a swap went from a native POST
+  plus a page load to `hx-request: true` with the dialog closing and the overlay
+  count back to its baseline.
 - **400 and 422 are swapped; 401 and 5xx are not.** The `htmx-config` meta tag in
   `base.html` overrides HTMX's default of discarding 4xx, because a refused action
   re-renders the page with the reason on it and answers 400 -- the default left

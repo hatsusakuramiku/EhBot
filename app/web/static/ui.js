@@ -325,6 +325,57 @@
     }
   }
 
+  /* Two things an overlay teleported *after* the page loaded needs, both of
+   * them consequences of the same gap between the two libraries: Alpine's
+   * teleport is invisible to HTMX, and a subtree HTMX removes is invisible to
+   * Alpine.
+   *
+   * **An overlay whose markup is gone is removed here.** Alpine puts a
+   * teleport's target back only when it sees the *source* go, and its mutation
+   * handler destroys a removed node only when that node carries an Alpine
+   * marker of its own -- `removedNodes` are checked, their descendants are not.
+   * A swap replaces `#main`'s children and a content block's top-level nodes
+   * are page containers (`<div class="ui-container">`, a section, a batch
+   * form), not Alpine roots, so nothing in the removed subtree is ever
+   * destroyed: an open confirmation dialog stays on screen over the page it
+   * just acted on, until 取消 dismisses it by hand. Measured in Chromium:
+   * `wrapper.remove()` cleans up, `main.innerHTML = ...` -- what an HTMX swap
+   * does -- does not. `_x_teleportBack` is the source `<template>` Alpine
+   * records on the clone, so "its template is no longer in the document" is the
+   * whole orphan test, and it is the only test used: a clone whose source
+   * cannot be identified is left alone rather than removed, so an Alpine
+   * upgrade that renames the field costs the sweep and not the dialogs.
+   * `destroyTree` comes first and is not redundant with `remove()` -- it is
+   * what releases the document-level listeners `@keydown.escape.window` and
+   * `@click.outside` registered, which would otherwise stay on a detached
+   * scope, one more set per swap.
+   *
+   * **The overlays that survive are handed back to HTMX.** HTMX processes what
+   * it swaps in, and template content is not part of a traversal -- the clone
+   * reaches the document later, from Alpine, and HTMX's own mutation observer
+   * does not pick that up. So the confirm button of a dialog the swap rendered
+   * submits natively: the page reloads and the in-place update stops applying
+   * from the second gated action on. `htmx.process` re-arms it, and is
+   * idempotent -- htmx skips a node whose `initHash` it has already seen -- so
+   * running it again on the dialog of an ordinary page load is a no-op. */
+  function settleOverlays() {
+    var overlays = document.querySelectorAll("[data-teleport-target]");
+    for (var i = 0; i < overlays.length; i += 1) {
+      var overlay = overlays[i];
+      var source = overlay._x_teleportBack;
+      if (source && !source.isConnected) {
+        if (window.Alpine && window.Alpine.destroyTree) {
+          window.Alpine.destroyTree(overlay);
+        }
+        overlay.remove();
+        continue;
+      }
+      if (window.htmx) {
+        window.htmx.process(overlay);
+      }
+    }
+  }
+
   /* ------------------------------------------------------------ wiring */
 
   function bind() {
@@ -368,6 +419,7 @@
      * step, and a script that queried for `x-data` roots before that would bind
      * to elements Alpine had not adopted yet. */
     document.body.addEventListener("htmx:afterSettle", runContentCallbacks);
+    document.body.addEventListener("htmx:afterSettle", settleOverlays);
   }
 
   if (document.readyState === "loading") {

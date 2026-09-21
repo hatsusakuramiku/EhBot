@@ -503,6 +503,42 @@ def test_the_skeleton_attribute_is_known_to_the_css_and_the_script(
     assert 'addEventListener("error"' in script
 
 
+def test_a_swap_settles_the_overlays_it_orphaned_and_rendered() -> None:
+    """Two defects one swap apart, neither reachable from rendered HTML.
+
+    An open `ui.confirm` dialog used to stay on screen after the action it
+    confirmed. Alpine puts a teleport's target back only when it sees the
+    *source* removed as a node carrying its own marker, and a swap replaces
+    `#main`'s children -- page containers such as `<div class="ui-container">`
+    or a batch form, not Alpine roots -- so nothing in the removed subtree is
+    ever destroyed and the clone, still in `<body>`, is never put back.
+
+    A dialog the swap *rendered* had the opposite problem: the clone reaches
+    `<body>` from Alpine, after HTMX has finished processing the response, so
+    its confirm button submitted natively -- the page reloaded and R20's
+    in-place update was silently off from the second gated action on.
+
+    `ui.js` answers both in one pass on `htmx:afterSettle`. This test can only
+    read the file, so what it checks is what a mistake here would cost: that
+    each half is armed on the swap event, that HTMX is handed the survivors, and
+    that the removal branch is gated on a source that is *gone* -- an
+    unconditional sweep would turn an Alpine upgrade that renames the field into
+    a deployment whose every confirmation dialog vanishes.
+    """
+    script = (
+        Path(__file__).resolve().parents[2] / "app" / "web" / "static" / "ui.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'addEventListener("htmx:afterSettle", settleOverlays)' in script
+    # Re-armed, not re-bound by hand: HTMX's own process is idempotent.
+    assert "htmx.process(overlay)" in script
+    # The orphan test, and the only thing that authorises removing an overlay.
+    assert "_x_teleportBack" in script
+    assert "source && !source.isConnected" in script
+    # Removing the node is not enough -- these are the document-level listeners.
+    assert "Alpine.destroyTree" in script
+
+
 def test_controls_are_border_box_and_cannot_exceed_their_parent() -> None:
     """The arithmetic every width rule in `ui.css` already assumed.
 

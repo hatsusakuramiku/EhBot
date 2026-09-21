@@ -3608,3 +3608,22 @@ Windows 不再依赖系统安装的 7-Zip。托管安装器按架构下载固定
 **UI 与 API**：路径 tab 在全局模板面板下新增「按规则匹配的路径模板」panel——单条规则编辑器（隐藏 `path_rule_id` 支持编辑、名称/优先级/启用/区分大小写、路径模板输入框、试跑与保存同一表单）、已存规则列表（名称、优先级·版本、启用 badge、模板与 DSL 以 `.ui-code` 展示、编辑/停用/删除带确认）、试跑结果面板复用自动审批序列化。`_paths_section` 新增 `path_rules` 与 `vocabulary` 键；`serializers.archive_path_rule` 镜像 `auto_approval_rule` + `path_template`。版本升至 0.2.15。
 
 **验证**：`test_archive_path_rules.py`（新）四组测试覆盖 CRUD 往返/排序/版本自增/enabled_only/`library_template_for` 命中与回落/`case_sensitive` 开关/损坏规则跳过（caplog 断言 WARNING）/模板校验拒绝集/`parse_rule_condition` 行解析；`test_library_template.py` 追加规则命中打包、手动 pin 赢过匹配规则、`planned_library_path` 跟随规则；`test_settings_web.py` 新增 `TestPathRules`（保存后出现在 tab、编辑回填往返含 `path_template` 与 `case_sensitive`、toggle/delete、试跑命中历史候选、非法模板与无条件规则 400 中文报错、取消链接），paths 端点断言词汇表与 `dry_run_scan_limit`；`test_database.py` 迁移计数断言升至 17。全量回归 0 失败 0 错误，12 项真实 7-Zip 按本机跳过；`compileall` 与 `git diff --check` 通过。
+
+## R26 — 换页后确认弹窗不关闭 (2026-09-21)
+
+运营者报告：确认弹窗出现后，点「确认」不会自动关闭，点「取消」才关。在真实应用上用 headless Chromium 复现并定位到两个缺陷，都在同一次换页（HTMX 就地更新）的两侧。
+
+**一、换页不销毁它移除的子树，Alpine 于是留下孤儿浮层。** Alpine 的 `x-teleport` 只有在「看到源被移除」时才把浮层放回（并 `P(o)` 销毁），而它的 mutation 处理器只检查 `mutations[].removedNodes` 里**自身带 `_x_marker`** 的节点，不检查其子孙。换页替换的是 `#main` 的直接子节点，而内容区顶层是页面容器（`<div class="ui-container">`、section、批量表单），不是 Alpine root，于是整棵被移除的子树从未被销毁，克隆体留在 `<body>` 里：**确认对话框继续盖在它刚操作过的页面上**，直到操作者手动点「取消」。Chromium 实测对照：`wrapper.remove()` 会触发清理，而 `main.innerHTML = ...`（换页的做法）不会。
+
+**二、换页渲染出的弹窗没有被 HTMX 接管。** HTMX 只处理自己换进来的内容，而 `<template>` 里的内容不在遍历范围内；克隆体是 Alpine 稍后放进 `<body>` 的，HTMX 的 mutation observer 不认。于是**换页后新渲染的确认按钮走原生提交**：整页刷新，R20 的「操作就地更新」从第二次需要确认的操作起悄悄失效。真实应用实测：首次操作的 POST 带 `hx-request: true` 且不跳转；先做一次就地更新（要求修订）再点确认，当年是 `hx-request: null` + `NAV /works/1`。
+
+**修复：`ui.js` 新增 `settleOverlays()`，挂在 `htmx:afterSettle` 上**（与 `onContentReady` 同一个生命周期点）：
+
+- **孤儿移除**：遍历 `[data-teleport-target]`，用 Alpine 记在克隆体上的 `_x_teleportBack`（源 `<template>`）判断——源不在文档里就是孤儿。先 `Alpine.destroyTree(node)` 再 `node.remove()`：销毁是**必需**的一步，`@keydown.escape.window` / `@click.outside` 注册在 `document` 上的监听器靠它释放，否则每换一次页就在一个已脱离的 scope 上多留一组。「源无法识别」时**不删**（只跳过）——Alpine 升级改名时应当失去这次清理，而不是失去全部对话框。
+- **重新接管**：存活下来的浮层交给 `htmx.process()`。该调用幂等（htmx 用 `initHash` 跳过已处理节点），所以正常页面加载时对同一个弹窗再跑一次是空操作。
+
+**验证（真实应用 + headless Chromium，非静态断言）**：修复前 `A fresh page: after confirm {overlays: 3, open: 1}`（弹窗仍开着、浮层越积越多）；修复后连续多轮操作均为 `overlays(open) 2/0 -> 2/1 -> 2/0`，POST 一律 `hx-request: true`，无 `NAV`，`取消` 仍即时关闭；`要求修订 → 驳回 → 重新排队 → 驳回` 这条链上第二次、第三次需要确认的操作也都留在原地更新。`test_ui_shell.py` 新增 1 项静态测试，检查两半都挂在换页事件上、存活浮层交给 `htmx.process`、且删除分支以「源已消失」为唯一前提。
+
+**基线校正**：R25 的条目漏记收集数。本轮实测 `--collect-only` 1252 项（R25 之后 1251），AGENTS 的基线链补上 R25 → 1251、R26 → 1252。
+
+**回归**：本机（Debian）全量执行 1252 收集、0 错误、12 项真实 7-Zip 按本机跳过；另有 2 项失败 `test_archive_processing.py::test_resolve_seven_zip_executable_prefers_managed_install` 与 `test_toolchain.py::test_windows_install_verifies_and_downloads_official_portable_pair`——两者都在 Windows 专用工具链解析/安装路径上（用例写死 `7z.exe` 名字、在 Linux 上找不到可执行体），与本次改动无关（diff 只有 `ui.js`、`test_ui_shell.py` 与文档）。测试基线（Windows 主机 0 失败）未因此变动。
