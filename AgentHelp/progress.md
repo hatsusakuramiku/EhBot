@@ -4177,6 +4177,10 @@ dict 的 repr。前端轮询把它直接塞进查询串
 
 **修法**：`snapshot` 的 `"tab"` 改回**字符串键**，解析后的词表另起 `"tab_view"`（与 `/api/v1/candidates`
 的 `tab` 只放键一致）；页面上下文改成 `**snapshot` 在前、页面自己的键在后，`tab` 无论谁写都是那个键。
+另给前端补一道护栏：`downloaded.js` 的轮询遇到 **400** 不再继续——400 是契约在说「这个分区名我不认」，
+再问一百遍也是同一个答案，于是脚本停表并亮出「列表有更新，刷新以查看」（唯一有效的动作是重新加载，
+重新渲染 `data-tab`）。此前是每 2 秒一次 400，把「一个坏属性」放大成一条永不停止的日志流；已经开着
+旧页面的浏览器因此不必记得手动刷新。
 
 **根因（二）：「待打包」同时是两个词。** 分区 `unpacked`（过滤条件是「没有 CBZ **且**没有打包任务」，
 即还没开始打）与行上徽章 `queued`（已入队、worker 还没领）此前都写「待打包」。于是刚点完打包的作品
@@ -4191,7 +4195,8 @@ dict 的 repr。前端轮询把它直接塞进查询串
 `unpacked` 分区与徽章必须同词），并把 `test_the_tab_travels_as_resolved_vocabulary` 改成
 `test_the_tab_travels_as_a_key_beside_its_words`（断言 `tab` 是键、`tab_view` 是词表）；集成测试新增
 `test_the_page_carries_the_tab_key_and_not_the_resolved_view`，在同一页上断言 `data-tab="packed"`、
-`name="tab" value="packed"`、`aria-current="page"` 都在而 `data-tab="{"` 不在。本次新增 3 项，
+`name="tab" value="packed"`、`aria-current="page"` 都在而 `data-tab="{"` 不在；再加一项读
+`downloaded.js`，断言 400 分支里同时有停表与那句提示（沿用仓库读静态资源做断言的既有做法）。本次新增 4 项，
 `--collect-only` 全库 1506 项（R31 记的 1497 没把 R32 的 6 项、R33 的 1 项并进去，一并对齐），`AgentHelp/AGENTS.md`
 基线同步为 1506。
 

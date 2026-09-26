@@ -189,6 +189,21 @@
     return true;
   }
 
+  /* A page the server no longer understands, which R34 produced once for real:
+   * `data-tab` carried the resolved view instead of the key, so every tick
+   * asked `/api/v1/downloaded?tab={'code': ...}` and the contract answered 400.
+   * Retrying is wrong for a 400 -- the answer will never change -- and the two
+   * seconds between ticks is what turned one bad attribute into a permanent
+   * stream of `api_error TAB_UNKNOWN`. Stop, and say the one thing that helps:
+   * reload, which re-renders the attribute. */
+  function stopOnStale(output, host) {
+    stopPolling();
+    if (host) {
+      host.hidden = false;
+      host.textContent = output;
+    }
+  }
+
   function poll() {
     var url = "/api/v1/downloaded?tab=" + encodeURIComponent(tab);
     fetch(url, { headers: { Accept: "application/json" } })
@@ -197,6 +212,12 @@
          * rather than leaving a stale grid updating itself. */
         if (response.status === 401) {
           window.location.reload();
+          return null;
+        }
+        /* 400 is the contract refusing the tab itself: this page is stale, not
+         * early. Asking again cannot help. */
+        if (response.status === 400) {
+          stopOnStale("列表有更新，刷新以查看", notice());
           return null;
         }
         return response.ok ? response.json() : null;
@@ -212,10 +233,7 @@
           host.hidden = false;
           host.textContent = "列表有更新，刷新以查看";
         }
-        if (!payload.live && timer) {
-          window.clearInterval(timer);
-          timer = null;
-        }
+        if (!payload.live) stopPolling();
       })
       .catch(function () {
         /* Swallowed on purpose: a failed poll is a missing update, not an error
