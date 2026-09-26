@@ -4148,4 +4148,7 @@ event=api_error error_code=TAB_UNKNOWN error_message="未知的分区：nope" ht
 `test_logging`、`test_downloaded_api` 全绿。
 
 **文档同步**：`docs/USAGE.md` 的日志字段清单补 `error_message`（R13 起就有，清单一直漏了它）、
-`http_method`、`http_path`，并给出上面那条示例。版本维持 `0.3.0rc1`。
+`http_method`、`http_path`，并给出上面那条示例。版本维持 `0.3.0rc1`；提交 `8273003` 已推送
+`origin/main`，`hsmk/ehbot:latest` 重建推送（index digest
+`sha256:0329f010db72f2bf700f47b06a23ce906e70574ce3df2a6be76da4aebb27b9d2`，amd64 manifest
+`sha256:cf438f0fdeab82d22ecb001b2d645d7ea57e82af5a801117ff767b204e4adb5e`）。
