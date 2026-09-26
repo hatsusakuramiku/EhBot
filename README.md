@@ -20,7 +20,7 @@
 - **安全默认**：解压前校验路径穿越、解压炸弹、图片魔数；凭据加密存储，页面不回显、日志不记录；
   移除记录时**默认不删文件**。
 - **AI 生成归档路径（默认关闭）**：在「设置 → AI 供应商」按 AstrBot 式的两层结构管理模型。上层是
-  多个 **OpenAI 兼容**端点（OpenAI、DeepSeek、OpenRouter，或本地 Ollama / LM Studio），一次可粘贴
+  多个 **OpenAI 兼容**端点（OpenAI、DeepSeek、OpenRouter、MiniMax，或本地 Ollama / LM Studio），一次可粘贴
   多把 API Key 轮询使用（401/403/429 自动冷却换下一把），并可填自定义请求头与供应商级默认参数；
   下层是从端点拉取或手填的模型清单，可批量启用 / 停用、逐模型覆盖请求参数。**请求体默认只发
   `model` 与 `messages`**，参数一律选填、按模型覆盖，因此拒绝 `temperature`、只认

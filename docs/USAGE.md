@@ -264,6 +264,11 @@ AI 模式下：
   如 `http://ollama:11434/v1`）、超时（5–300 秒）、重试次数（0–3）、**自定义请求头**（JSON）与
   **供应商级默认请求参数**（JSON）。地址必须是带主机的 `http://` 或 `https://`，保存时即校验。
   自定义请求头给需要额外头的网关用；密钥请加到 Key 列表（加密存储），不要写在头里。
+  **MiniMax** 填 `https://api.minimax.chat/v1`（国际版 `https://api.minimaxi.com/v1`），Key 用控制台
+  里那串以 `eyJ…` 开头的 API Key，**不是 GroupId**；它的 1004「login fail: Please carry the API
+  secret key in the 'Authorization' field…」对「没带 Key」和「Key 不对」是同一条，所以看到它先核对
+  Key 本身（以及 CN/国际版有没有混用），而不是怀疑本服务没发请求头。MiniMax 的原生接口把错误放在
+  HTTP 200 的 `base_resp` 里，本服务同样能识别并给出与 401 一样的「换一把 Key」语义。
 - **供应商工作台**：左列点选一个供应商，右列可以：
 
   1. **批量添加 API Key**：一个文本域一次粘贴多把，每行 `备注:key` 或裸 key（`#` 开头与空行跳过）。

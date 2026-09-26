@@ -31,12 +31,14 @@ from app.ai.client import (
     AI_AUTH,
     AI_BAD_RESPONSE,
     AI_PARAM_REJECTED,
+    AI_RATE_LIMIT,
     AI_REQUEST_REJECTED,
     AI_TIMEOUT,
     AiClientError,
     OpenAiCompatibleClient,
     _classify_status,
     _content_of,
+    _error_envelope,
 )
 from app.ai.errors import (
     AI_CHAIN_DUPLICATE,
@@ -1250,6 +1252,66 @@ class TestParamRejection:
 
     def test_a_400_without_a_readable_body_is_not_blamed_on_parameters(self) -> None:
         assert _classify_status(400, "").code == AI_REQUEST_REJECTED
+
+
+class TestVendorErrorInSuccessBody:
+    """MiniMax answers 200 with `base_resp.status_code`, not an HTTP status.
+
+    The operator hit exactly this: the OpenAI-compatible route returns 401 with
+    「login fail: Please carry the API secret key in the 'Authorization' field of
+    the request header (1004)」, and the native route returns the same sentence
+    inside a 200. Both must land on the same code -- a credential fault -- or the
+    key never rotates and the page says 「没有 choices」 instead of the vendor's
+    own sentence.
+    """
+
+    BODY = {
+        "base_resp": {
+            "status_code": 1004,
+            "status_msg": (
+                "login fail: Please carry the API secret key in the "
+                "'Authorization' field of the request header"
+            ),
+        }
+    }
+
+    def test_an_auth_code_is_a_key_fault(self) -> None:
+        error = _error_envelope(self.BODY)
+        assert error is not None
+        assert error.code == AI_AUTH
+        assert error.key_fault is True
+        assert "login fail" in error.public_message
+
+    def test_a_zero_code_is_not_an_error(self) -> None:
+        assert _error_envelope({"base_resp": {"status_code": 0}}) is None
+
+    def test_a_body_without_the_envelope_is_left_to_the_reader(self) -> None:
+        assert _error_envelope({"choices": [{"message": {"content": "x"}}]}) is None
+        assert _error_envelope([1, 2, 3]) is None
+
+    def test_an_unknown_code_is_not_guessed_at(self) -> None:
+        error = _error_envelope({"base_resp": {"status_code": 4242}})
+        assert error is not None and error.code == AI_REQUEST_REJECTED
+
+    def test_a_rate_code_rotates_the_key(self) -> None:
+        error = _error_envelope({"base_resp": {"status_code": 1002}})
+        assert error is not None and error.code == AI_RATE_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_the_client_raises_instead_of_misreading_the_body(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=self.BODY)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http:
+            client = OpenAiCompatibleClient(
+                http, base_url="http://local/v1", api_key="k", model="m"
+            )
+            with pytest.raises(AiClientError) as caught:
+                await client.complete([{"role": "user", "content": "hi"}])
+        assert caught.value.code == AI_AUTH
+        assert "login fail" in caught.value.public_message
 
 
 class TestReasoningOutput:

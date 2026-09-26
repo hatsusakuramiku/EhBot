@@ -73,6 +73,67 @@ _PARAM_REJECTION_HINTS: tuple[str, ...] = (
     "not supported",
 )
 
+#: Vendors that answer *200* with an error object instead of an HTTP status.
+#: MiniMax is the one that forced this: its native route
+#: (`/v1/text/chatcompletion_v2`) answers 200 with
+#: `{"base_resp": {"status_code": 1004, "status_msg": "login fail: …"}}` where
+#: its OpenAI-compatible route answers 401 with the same sentence. Without this
+#: the body reads as 「AI 返回里没有 choices」, which names neither the fault nor
+#: the vendor's own words -- and, worse, does not look like a credential fault,
+#: so the key never rotates. Codes are MiniMax's documented set; an unknown
+#: non-zero code falls through to `AI_REQUEST_REJECTED` rather than being
+#: guessed at.
+_HTTP_200_AUTH_CODES = frozenset({1004})
+_HTTP_200_KEY_RATE_CODES = frozenset({1002, 1008, 1039})
+_HTTP_200_SERVER_CODES = frozenset({1000, 1001, 1013, 1027})
+
+
+def _error_envelope(payload: Any) -> AiClientError | None:
+    """A vendor error carried inside a 2xx body, or None when there is none.
+
+    Deliberately narrow: it only fires for the `base_resp` envelope that names
+    itself as one. A 200 body without that key is left to `_content_of`, which
+    is where 「有没有 choices」 belongs.
+    """
+    if not isinstance(payload, dict):
+        return None
+    base = payload.get("base_resp")
+    if not isinstance(base, dict):
+        return None
+    code = base.get("status_code")
+    # `bool` is an `int` in Python; a JSON `true` is not a status code.
+    if not isinstance(code, int) or isinstance(code, bool) or code == 0:
+        return None
+    raw = base.get("status_msg")
+    detail = str(raw)[:300] if isinstance(raw, str) else ""
+    suffix = f"：{detail}" if detail else ""
+    if code in _HTTP_200_AUTH_CODES:
+        return AiClientError(
+            AI_AUTH,
+            f"AI 供应商拒绝了这把 API Key（{code}）{suffix}",
+            key_fault=True,
+        )
+    if code in _HTTP_200_KEY_RATE_CODES:
+        return AiClientError(
+            AI_RATE_LIMIT,
+            f"AI 供应商限流或额度不足（{code}）{suffix}",
+            key_fault=True,
+        )
+    if code in _HTTP_200_SERVER_CODES:
+        return AiClientError(
+            AI_SERVER_ERROR,
+            f"AI 供应商服务出错（{code}）{suffix}",
+            retryable=True,
+        )
+    if _mentions_param(detail):
+        return AiClientError(
+            AI_PARAM_REJECTED, f"AI 供应商不接受这次请求的参数（{code}）{suffix}"
+        )
+    return AiClientError(
+        AI_REQUEST_REJECTED, f"AI 供应商拒绝了这次请求（{code}）{suffix}"
+    )
+
+
 #: Reasoning models like to wrap their thinking in a tag pair before the answer.
 #: The parser wants the answer, so the thinking goes before anything looks for a
 #: `{` -- a brace inside 「让我想想 {…} 应该是…」 would otherwise be read as the
@@ -422,6 +483,9 @@ def _read_json_text(response: httpx.Response) -> str:
         payload = response.json()
     except (ValueError, json.JSONDecodeError) as exc:
         raise AiClientError(AI_BAD_RESPONSE, "AI 返回的不是 JSON") from exc
+    envelope = _error_envelope(payload)
+    if envelope is not None:
+        raise envelope
     return _content_of(payload)
 
 

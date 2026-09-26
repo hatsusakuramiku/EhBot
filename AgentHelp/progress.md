@@ -4077,3 +4077,40 @@ Key 改为 textarea **一次粘贴多把**（`备注:key` 或裸 key，`#` 与�
 只信本地构建**：`docker pull hsmk/ehbot:latest` 取回同一 digest，容器内 `python -c urlopen` 访问
 `/readyz` 得 `{"status":"ready"}`、`/healthz` 得 `{"status":"ok"}`（首启约 50 秒用于拉取 7-Zip 与标签库，
 冒烟容器已清理）。
+
+## R32 — 供应商把错误藏在 HTTP 200 里也能识别（MiniMax，v0.3.0rc1，2026-09-26）
+
+运营者贴出配置 AI 供应商时的失败信息：「login fail: Please carry the API secret key in the
+'Authorization' field of the request header (1004)」，并追问「OpenAI 兼容你确定？」。
+
+**先证明不是请求的问题**：写了一个本地回环 HTTP 服务器，用真实的 `OpenAiCompatibleClient` 发一次
+请求并打印到达的字节 —— `POST /v1/chat/completions`、`Authorization: Bearer <key>`、
+`Content-Type: application/json`、body 恰好 `{"model","messages"}`，GET `/v1/models` 同样带
+Authorization；AI 客户端用的是独立的 `httpx.AsyncClient(follow_redirects=False)`，不存在重定向把
+Authorization 头丢掉的情形。这就是 OpenAI 兼容的形状，没有第二种。
+
+**再定位到供应商**：拿十来个候选端点各发一次不带鉴权的请求比对错误文本，命中
+`https://api.minimax.chat/v1/chat/completions` → 401
+`{"type":"error","error":{"type":"authorized_error","message":"login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)",...}}`，
+与运营者贴出的字符串逐字相同（**MiniMax**）。随后用六种头部形态（不带、裸 key、`Bearer sk-…`、
+`Bearer eyJ…` JWT、`Bearer <GroupId>`、`apikey` 头）各打一次：**MiniMax 对每一种都回同一条 1004**，
+即这句话是它「凭据不可用」的通用文案，不是「你没带请求头」。真正的 401 是 401，MiniMax 没有骗我们；
+所以结论是 Key 本身不可用（最常见是把控制台的 GroupId 当成 Key、CN 与 api.minimaxi.com 国际版的 Key
+混用、或 Key 已失效），服务端的请求形状没有错。
+
+**顺带修掉一个真缺陷**：MiniMax 的**原生**路由（`/v1/text/chatcompletion_v2`）把错误放在
+**HTTP 200** 的 `{"base_resp": {"status_code": 1004, "status_msg": ...}}` 里；本服务此前会把它读成
+「AI 返回里没有 choices」（`AI_BAD_RESPONSE`），既丢掉供应商原话，又不会被当成凭据故障去换下一把
+Key。`app/ai/client.py` 新增 `_error_envelope`：只认 `base_resp` 这个显式信封，按 MiniMax 文档的码表
+映射（1004 → `AI_AUTH`/换 Key；1002/1008/1039 → `AI_RATE_LIMIT`；1000/1001/1013/1027 →
+`AI_SERVER_ERROR` 可重试；其余非零码 → `AI_REQUEST_REJECTED`；错误文本命中参数词 →
+`AI_PARAM_REJECTED`），`status_code == 0` 与没有该键的响应一律不受影响。`_read_json_text` 在读
+`choices` 之前先过这道判定。
+
+**测试**：`tests/unit/test_ai_providers.py` 新增 `TestVendorErrorInSuccessBody`（6 项：1004 判
+`AI_AUTH` 且 `key_fault`、原话保留、`status_code=0` 不算错、无信封的响应交回原逻辑、未知码不猜、
+限流码可轮换，外加一条经由真实 `httpx.MockTransport` 的端到端断言）。单文件 73 项全过。
+
+**文档同步**：`README.md` 供应商例子补 MiniMax；`docs/USAGE.md` 的「新增供应商」写明 MiniMax 的地址
+（CN/国际版）、Key 用 `eyJ…` 那串而不是 GroupId、以及 1004 是通用鉴权失败；`AgentHelp/EHBot.md` §4.6
+新增一行能力。版本维持 `0.3.0rc1`。
