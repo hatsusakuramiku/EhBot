@@ -4113,4 +4113,7 @@ Key。`app/ai/client.py` 新增 `_error_envelope`：只认 `base_resp` 这个显
 
 **文档同步**：`README.md` 供应商例子补 MiniMax；`docs/USAGE.md` 的「新增供应商」写明 MiniMax 的地址
 （CN/国际版）、Key 用 `eyJ…` 那串而不是 GroupId、以及 1004 是通用鉴权失败；`AgentHelp/EHBot.md` §4.6
-新增一行能力。版本维持 `0.3.0rc1`。
+新增一行能力。版本维持 `0.3.0rc1`。修复提交 `cd900a5` 已推送 `origin/main`，并重建
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:d93b03c541bc813ad954997951953f5dbd3ed5a282fda831143281816ee85270`，amd64 manifest
+`sha256:7bf9005c2baf339be2087c8d162836aab7bd31a2eb4c73309f9adf7d5e4c2e0d`）。
