@@ -140,7 +140,7 @@ _DOWNLOADED_SORTS: dict[str, str] = {
 #: a different attempt's error.
 #:
 #: `LEFT JOIN` on both artifacts: a work with no CBZ yet is precisely what the
-#: 待打包 filter is for, so an inner join would hide the rows the page exists to
+#: 未打包 filter is for, so an inner join would hide the rows the page exists to
 #: show.
 _DOWNLOADED_SELECT = (
     "SELECT c.id, dj.id AS job_id, dj.provider, dj.state, "

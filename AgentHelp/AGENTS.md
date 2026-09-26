@@ -80,7 +80,7 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1497 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1506 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1451 on a machine that has one and 1439 with
@@ -89,7 +89,8 @@ case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
 -> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207 -> R25 1251 -> R26 1252 -> R27 1310 ->
-R28 1360 -> R29 1435 -> R30 1465 -> R31 1497. There is no R7 — that number
+R28 1360 -> R29 1435 -> R30 1465 -> R31 1497 -> R34 1506 (R32 与 R33 的新增用例
+此前没有并进这个数，R34 一并算清). There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost

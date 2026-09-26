@@ -317,6 +317,37 @@ def test_an_unknown_tab_is_a_404_not_a_page_titled_with_the_typo(
         client.__exit__(None, None, None)
 
 
+def test_the_page_carries_the_tab_key_and_not_the_resolved_view(
+    tmp_path: Path,
+) -> None:
+    """R34: the page's `tab` was the snapshot's resolved view, not the key.
+
+    `downloaded_snapshot` sends `tab` for the JSON client, and the page spread
+    the same payload into its context, so `data-tab` -- and the hidden `tab`
+    fields the batch forms post back -- arrived as the Python repr of a dict.
+    The poll then asked `/api/v1/downloaded?tab={'code': 'packed', ...}`, got a
+    400 every tick, and the tab strip never marked itself current. Asserted on
+    the rendered bytes because that is where the two consumers meet.
+    """
+    settings, _library, _ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded/packed")
+        # The very URL the fixed `data-tab` makes the poller build.
+        api = client.get("/api/v1/downloaded?tab=packed")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert page.status_code == 200
+    assert 'data-tab="packed"' in page.text
+    assert 'data-tab="{' not in page.text
+    assert 'name="tab" value="packed"' in page.text
+    assert 'aria-current="page"' in page.text
+    assert api.status_code == 200
+    assert api.json()["tab"] == "packed"
+    assert api.json()["tab_view"]["label"] == "已打包"
+
+
 def test_the_page_and_the_endpoint_cannot_disagree(tmp_path: Path) -> None:
     """One snapshot feeds both, so the page context is a superset of the JSON.
 

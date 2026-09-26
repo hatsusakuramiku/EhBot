@@ -9,7 +9,7 @@
 
   Three rules this file follows:
 
-  * No state word is written here. 「已打包」/「待打包」/「需干预」 all arrive as
+  * No state word is written here. 「已打包」/「未打包」/「需干预」 all arrive as
     resolved `StatusView` payloads through `ui.badge`, so this page and
     `GET /api/v1/downloaded` cannot disagree, and a template can never pair one
     state's label with another's colour.

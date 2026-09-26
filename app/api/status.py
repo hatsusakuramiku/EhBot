@@ -381,11 +381,17 @@ ACTOR_STATUS: dict[str, StatusView] = {
 #: literal in the template would be the copy that drifts.
 #:
 #: Tones describe what the operator should feel about the group, not what colour
-#: it is: 待打包 is work queued behind them (`waiting`), 需干预 is blocked on them
+#: it is: 未打包 is work not started yet (`waiting`), 需干预 is blocked on them
 #: specifically (`danger` would overstate it -- nothing failed), 打包失败 did fail.
 DOWNLOADED_TAB_STATUS: dict[str, StatusView] = {
     "all": _view("all", "全部", TONE_NEUTRAL),
-    "unpacked": _view("unpacked", "待打包", TONE_WAITING),
+    # 「未打包」, not 「待打包」. This tab and the `unpacked` badge below answer
+    # the same question -- has a pack been started at all -- so they use the same
+    # word, and that word no longer doubles as the name of a job waiting in the
+    # queue. Renamed in R34: the tab and the queued badge were both 「待打包」 and
+    # meant different things, so a book the operator had just queued wore a badge
+    # naming a list it was not in.
+    "unpacked": _view("unpacked", "未打包", TONE_WAITING),
     "packed": _view("packed", "已打包", TONE_SUCCESS),
     "attention": _view("attention", "需干预", TONE_WAITING),
     "failed": _view("failed", "打包失败", TONE_DANGER),
@@ -402,7 +408,10 @@ DOWNLOADED_PACK_STATUS: dict[str, StatusView] = {
     "unpacked": _view("unpacked", "未打包", TONE_MUTED),
     "packed": _view("packed", "已打包", TONE_SUCCESS),
     "packing": _view("packing", "打包中", TONE_ACTIVE, live=True),
-    "queued": _view("queued", "待打包", TONE_WAITING, live=True),
+    # 「排队中」 rather than「待打包」: this badge describes a *job* in the queue,
+    # and the word has to differ from the tab's or the two read as one claim. See
+    # R34.
+    "queued": _view("queued", "排队中", TONE_WAITING, live=True),
     "attention": _view("attention", "需干预", TONE_WAITING),
     "failed": _view("failed", "打包失败", TONE_DANGER),
 }

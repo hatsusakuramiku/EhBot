@@ -4128,6 +4128,9 @@ Key。`app/ai/client.py` 新增 `_error_envelope`：只认 `base_resp` 这个显
 渲染，默认 `all`），而这两个词表自 R0/R1 与 R10 引入以来没有改过名——所以请求来自 UI 之外（旧书签、
 脚本、监控探针），或手敲的 URL。
 
+> **R34 更正**：这段结论是错的，发起者就是已下载页本身——它把 `tab` 渲染成了 dict（词表取值都对、
+> 类型不对，而这里只比对了取值）。`http_method` / `http_path` 正是靠那次改动留下来，才让 R34 一眼定位。
+
 **修的是「下次不用再问」的那一半**：`api_error_handler` 此前只记 `error_code`，运维拿一个裸码无从判断
 是「旧书签点了已退休的页签」还是「某个页面发错了参数」。现在同一条 JSON 行里还带 `http_method` /
 `http_path` / `error_message`：
@@ -4152,3 +4155,47 @@ event=api_error error_code=TAB_UNKNOWN error_message="未知的分区：nope" ht
 `origin/main`，`hsmk/ehbot:latest` 重建推送（index digest
 `sha256:0329f010db72f2bf700f47b06a23ce906e70574ce3df2a6be76da4aebb27b9d2`，amd64 manifest
 `sha256:cf438f0fdeab82d22ecb001b2d645d7ea57e82af5a801117ff767b204e4adb5e`）。
+
+## R34 — 已下载页把分区参数发成了 dict，并把撞名的「待打包」拆开（v0.3.0rc1，2026-09-26）
+
+运营者报了两件事：日志里每两秒一条 `api_error`，`error_code=TAB_UNKNOWN`、`error_message` 是
+`未知的分区：{'code': 'all', 'label': '全部', 'tone': 'neutral', 'live': False}`；以及「重新打包时界面
+标识均为待打包，但待打包列表里没有」。两件事一个根。
+
+**根因（一）：页面自己把 `tab` 发成了 dict。** `downloaded_snapshot`（页面与 `/api/v1/downloaded` 共用
+的那个装配函数）在 `"tab"` 上放的是 `downloaded_tab_view(tab).to_payload()`，即**解析后的词表对象**；
+`_render_downloaded` 又把这份快照 `**snapshot` 摊进模板上下文并且排在页面自己的 `"tab": tab`
+**之后**，于是后者被覆盖。模板里三处读到的都不是键：`ui.tabs(tabs, tab, …)` 的当前项永远匹配不上
+（页签不再高亮）、`data-downloaded-root` 的 `data-tab` 成了 dict 的 repr、两处隐藏 `name="tab"` 也成了
+dict 的 repr。前端轮询把它直接塞进查询串
+（`/api/v1/downloaded?tab={'code': 'all', …}`）→ 400 `TAB_UNKNOWN`，每 2 秒一条直到关页；批量表单回传
+的 `tab` 落不进白名单，被静默改写成 `all`，操作完跳到「全部」。
+
+> **更正 R33 的结论。** R33 写「页面本身发不出这种请求」是错的——那条请求正是已下载页每 2 秒发的。
+> R33 加的 `http_method` / `http_path` 没白加，它是这次能一眼定位的原因；但它只比对了白名单里的**取值**，
+> 没验证页面把值渲染成了什么类型。
+
+**修法**：`snapshot` 的 `"tab"` 改回**字符串键**，解析后的词表另起 `"tab_view"`（与 `/api/v1/candidates`
+的 `tab` 只放键一致）；页面上下文改成 `**snapshot` 在前、页面自己的键在后，`tab` 无论谁写都是那个键。
+
+**根因（二）：「待打包」同时是两个词。** 分区 `unpacked`（过滤条件是「没有 CBZ **且**没有打包任务」，
+即还没开始打）与行上徽章 `queued`（已入队、worker 还没领）此前都写「待打包」。于是刚点完打包的作品
+顶着一个写着「待打包」的徽章，却不在「待打包」列表里——列表只收还没开始打的，而它已经排进队列。
+已打包作品重新打包更是如此：CBZ 还在，它**留在「已打包」分区**，徽章却先跳回「待打包」。改法是把两个
+词分开：分区 `unpacked` 改叫**「未打包」**（与徽章 `unpacked` 同一个词、同一个事实，一眼能对上），徽章
+`queued` 改叫**「排队中」**。`CONVERSION_STATUS["CONVERSION_PENDING"]` 保持「待打包」——它描述的是队列
+里的任务行，那段词表没动。分区的说明与空状态文案也一并对齐（「还没有打包成 CBZ、也没有打包任务在跑的
+作品」，空状态改为「都已打包，或已在打包队列里」）。
+
+**测试**：单测新增 `test_the_queued_badge_does_not_borrow_a_tab_word`（`queued` 不得复用任何分区名，
+`unpacked` 分区与徽章必须同词），并把 `test_the_tab_travels_as_resolved_vocabulary` 改成
+`test_the_tab_travels_as_a_key_beside_its_words`（断言 `tab` 是键、`tab_view` 是词表）；集成测试新增
+`test_the_page_carries_the_tab_key_and_not_the_resolved_view`，在同一页上断言 `data-tab="packed"`、
+`name="tab" value="packed"`、`aria-current="page"` 都在而 `data-tab="{"` 不在。本次新增 3 项，
+`--collect-only` 全库 1506 项（R31 记的 1497 没把 R32 的 6 项、R33 的 1 项并进去，一并对齐），`AgentHelp/AGENTS.md`
+基线同步为 1506。
+
+**文档同步**：`docs/USAGE.md` 的子页清单与分区表改成「未打包」，新增一段「分区名与行上的徽章是两套词」
+——说明新入队的任务是「排队中」、重新打包的已打包作品徽章会回到「排队中」但不离开「已打包」（CBZ 还在，
+重打是覆盖写同一个文件）；并把此前压在工作区的 `conversion_jobs_reclaimed` 说明（R33 讨论的那条日志）随
+这次一起落进文档。`AgentHelp/EHBot.md` §1.3.1 与状态表同步。版本维持 `0.3.0rc1`。

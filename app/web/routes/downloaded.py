@@ -62,16 +62,16 @@ DOWNLOADED_TABS: tuple[dict[str, str], ...] = (
     {
         "key": "unpacked",
         "href": "/downloaded/unpacked",
-        "description": "已下载但还没有打包成 CBZ 的作品，可在此批量打包",
-        "empty_title": "没有待打包的作品",
-        "empty_hint": "已下载的作品都已打包完成",
+        "description": "还没有打包成 CBZ、也没有打包任务在跑的作品，可在此批量打包",
+        "empty_title": "没有未打包的作品",
+        "empty_hint": "已下载的作品都已打包，或已在打包队列里",
     },
     {
         "key": "packed",
         "href": "/downloaded/packed",
         "description": "已打包并归档的作品，可重新打包、改名或移除",
         "empty_title": "还没有打包好的作品",
-        "empty_hint": "在「待打包」中选择作品并打包后会出现在这里",
+        "empty_hint": "在「未打包」中选择作品并打包后会出现在这里",
     },
     {
         "key": "attention",
@@ -128,9 +128,15 @@ async def _render_downloaded(
         request=request,
         name="downloaded.html",
         context={
+            # The snapshot goes in first so the page's own keys win every name
+            # they share. `tab` is the one that matters: the snapshot carries it
+            # for the JSON client and the page carries the same string for its
+            # strip and its hidden fields, and a spread landing last would let
+            # the payload overwrite the page from underneath it.
+            **snapshot,
             "csrf_token": request.session["csrf_token"],
             "tab": tab,
-            "tab_title": downloaded_tab_view(tab).label,
+            "tab_title": snapshot["tab_view"]["label"],
             "tab_description": current["description"],
             "tab_href": current["href"],
             "tabs": [
@@ -142,10 +148,6 @@ async def _render_downloaded(
                 }
                 for entry in DOWNLOADED_TABS
             ],
-            # The snapshot is spread in rather than nested so the template reads
-            # the same names the JSON body uses, and a test can assert the page
-            # context is a superset of it.
-            **snapshot,
             "total": snapshot["total"],
             "page": page.page,
             "page_size": page.page_size,

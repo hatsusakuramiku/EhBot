@@ -86,7 +86,14 @@ async def downloaded_snapshot(
     items = [serialize_work(work) for work in works]
     counts = await database.downloaded_work_counts()
     return {
-        "tab": downloaded_tab_view(tab).to_payload(),
+        # The *key* travels as a string, and the words travel beside it. They
+        # have to be separate fields: this payload is spread straight into the
+        # page context, and anything reading `tab` -- the poller's `data-tab`,
+        # the hidden batch field, the module the strip is drawn from -- means
+        # the identifier. Sending the resolved view under the same name silently
+        # put a dict where every one of those expected a string.
+        "tab": tab,
+        "tab_view": downloaded_tab_view(tab).to_payload(),
         "works": items,
         "total": total,
         "counts": counts,

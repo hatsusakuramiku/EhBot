@@ -102,6 +102,22 @@ class TestPackVocabulary:
         )
         assert (view.code, view.live) == ("queued", True)
 
+    def test_the_queued_badge_does_not_borrow_a_tab_word(self) -> None:
+        """R34: 「待打包」 named both the tab and the queued badge.
+
+        The tab asks「开始打包了吗」(nothing queued yet) while the badge says
+        「有任务在排队」. Sharing one word meant a book the operator had just
+        queued wore a badge naming a list it could not be in -- 「界面都是待打包，
+        但待打包列表里没有」. The tab and the `unpacked` badge now use the same
+        word for the same fact, and the queued badge uses its own.
+        """
+        tab_words = {view.label for view in DOWNLOADED_TAB_STATUS.values()}
+        assert DOWNLOADED_PACK_STATUS["queued"].label not in tab_words
+        assert (
+            DOWNLOADED_TAB_STATUS["unpacked"].label
+            == DOWNLOADED_PACK_STATUS["unpacked"].label
+        )
+
     @pytest.mark.parametrize(
         "pack_state",
         [CONVERSION_STATE_WAITING_PASSWORD, CONVERSION_STATE_WAITING_VOLUMES],
@@ -183,9 +199,20 @@ class TestSnapshot:
         )
         assert busy["live"] is True
 
-    def test_the_tab_travels_as_resolved_vocabulary(self) -> None:
+    def test_the_tab_travels_as_a_key_beside_its_words(self) -> None:
+        """`tab` is the identifier; `tab_view` carries the vocabulary.
+
+        They were one field until R34, and that field held the resolved view.
+        Because the page spreads this payload into its own context, every
+        consumer of 「which tab is this」 -- the poller's `data-tab`, the hidden
+        `tab` fields the batch forms post back, the tab strip's current key --
+        received the repr of a dict, and each poll became
+        `/api/v1/downloaded?tab={'code': ...}` and a 400. Asserting the shape
+        here is what keeps the identifier a string.
+        """
         payload = snapshot([], tab="failed")
-        assert payload["tab"] == DOWNLOADED_TAB_STATUS["failed"].to_payload()
+        assert payload["tab"] == "failed"
+        assert payload["tab_view"] == DOWNLOADED_TAB_STATUS["failed"].to_payload()
 
     def test_the_query_is_passed_through_untranslated(self) -> None:
         database = FakeDatabase([])
