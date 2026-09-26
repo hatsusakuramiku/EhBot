@@ -4070,5 +4070,10 @@ Key 改为 textarea **一次粘贴多把**（`备注:key` 或裸 key，`#` 与�
 §4.6 标题与表格改到 R31 并新增四行能力与 `019` 的列；`AI_PROVIDER_REWRITE_PROPOSAL.md` 状态行改
 「已按运营者答复实现」并记录偏差；`AGENTS.md` 基线 1465 → 1497、迁移冻结线推到 `019_*`。版本从
 `0.3.0-pre` 升到 **`0.3.0rc1`**（`pyproject.toml`；`uv lock` 同步 `uv.lock`），与 R27–R30 的
-`0.3.0-pre` 一并提交并推送 `origin/main`；镜像按「不打版本号、只供测试」的要求重建并推送
-**`hsmk/ehbot:latest`**。
+`0.3.0-pre` 一并提交并推送 `origin/main`（`2c0fafb`）；镜像按「不打版本号、只供测试」的要求重建
+并推送 **`hsmk/ehbot:latest`**（`linux/amd64`，index digest
+`sha256:1468ae46f651823530e6aa22953f261bb6c5bfc6061700961fd3da153fd43614`，amd64 manifest
+`sha256:3adc087a752aea10e2b542265cc30110cd1dace286c12d30217bbc6af12c246e`）。**从 registry 验证而不是
+只信本地构建**：`docker pull hsmk/ehbot:latest` 取回同一 digest，容器内 `python -c urlopen` 访问
+`/readyz` 得 `{"status":"ready"}`、`/healthz` 得 `{"status":"ok"}`（首启约 50 秒用于拉取 7-Zip 与标签库，
+冒烟容器已清理）。
