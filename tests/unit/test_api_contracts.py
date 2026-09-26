@@ -13,6 +13,7 @@ from app.api.contracts import (
     ApiError,
     Page,
     PageParams,
+    api_error_handler,
 )
 from app.api.events import (
     EVENT_DOWNLOAD,
@@ -55,6 +56,48 @@ class TestApiError:
     def test_details_default_to_an_empty_dict(self) -> None:
         # The interface always reads `details`, so it must never be null.
         assert ApiError("X", "y").to_payload()["error"]["details"] == {}
+
+
+class TestApiErrorLogging:
+    """A rejected request must be triageable from the log line alone.
+
+    The operator hit a bare `TAB_UNKNOWN` in `/logs` and could not tell which
+    endpoint produced it -- which is the whole difference between 「浏览器里
+    有个旧书签」 and 「某个页面发错了参数」. The path and the offending value are
+    therefore part of the line, not a follow-up question.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_line_names_the_endpoint_method_and_message(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        from starlette.requests import Request
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/v1/downloaded",
+                "query_string": b"tab=nope",
+                "headers": [],
+                "scheme": "http",
+                "server": ("testserver", 80),
+            }
+        )
+        error = ApiError(
+            "TAB_UNKNOWN", "未知的分区：nope", details={"allowed": ["all"]}
+        )
+        with caplog.at_level(logging.WARNING, logger="app.api.contracts"):
+            response = await api_error_handler(request, error)
+
+        assert response.status_code == error.status_code
+        record = caplog.records[-1]
+        assert record.error_code == "TAB_UNKNOWN"
+        assert record.error_message == "未知的分区：nope"
+        assert record.http_method == "GET"
+        assert record.http_path == "/api/v1/downloaded"
 
 
 class TestPageParams:

@@ -4117,3 +4117,35 @@ Key。`app/ai/client.py` 新增 `_error_envelope`：只认 `base_resp` 这个显
 `hsmk/ehbot:latest`（`linux/amd64`，index digest
 `sha256:d93b03c541bc813ad954997951953f5dbd3ed5a282fda831143281816ee85270`，amd64 manifest
 `sha256:7bf9005c2baf339be2087c8d162836aab7bd31a2eb4c73309f9adf7d5e4c2e0d`）。
+
+## R33 — 被拒绝的 API 请求现在能一条日志定位（v0.3.0rc1，2026-09-26）
+
+运营者在 `/logs` 里贴出一行 `app.api.contracts api_error TAB_UNKNOWN` 并问这是什么。结论：某个 **API**
+请求带了不在白名单里的 `tab` 参数，服务按契约回了 400（`/api/v1/candidates?tab=<n>` 允许
+`all|pending|needs_info|approved|rejected|failed`；`/api/v1/downloaded?tab=<n>` 允许
+`all|unpacked|packed|attention|failed`），并把它记成一条 `api_error` 警告。页面本身发不出这种请求：
+候选项的页签与 `CANDIDATE_TABS`、已下载的页签与 `DOWNLOADED_PACK_FILTERS` 逐字一致（`data-tab` 由服务端
+渲染，默认 `all`），而这两个词表自 R0/R1 与 R10 引入以来没有改过名——所以请求来自 UI 之外（旧书签、
+脚本、监控探针），或手敲的 URL。
+
+**修的是「下次不用再问」的那一半**：`api_error_handler` 此前只记 `error_code`，运维拿一个裸码无从判断
+是「旧书签点了已退休的页签」还是「某个页面发错了参数」。现在同一条 JSON 行里还带 `http_method` /
+`http_path` / `error_message`：
+
+```
+event=api_error error_code=TAB_UNKNOWN error_message="未知的分区：nope" http_method=GET http_path=/api/v1/downloaded
+```
+
+`http_method` / `http_path` 因此被正式加进 `app/logging.py` 的 `_CONTEXT_FIELDS` 白名单（该白名单是日志
+契约的一部分，加入是有意为之；路径不含查询串，且和其它字符串字段一样过 `redact_sensitive_values`）。
+
+**顺手修掉一处潜伏的漂移**：`GET /api/v1/downloaded` 的守卫检查的是 `DOWNLOADED_PACK_FILTERS`，但 400
+里的 `details.allowed` 引用的是 `DOWNLOADED_TAB_STATUS`——今天两者内容相同，正因如此没人发现；现在
+`allowed` 用的就是守卫实际检查的那一份。`/api/v1/candidates` 没有这个问题。
+
+**测试**：`tests/unit/test_api_contracts.py` 新增 `TestApiErrorLogging`（构造一个请求 + `ApiError`，断言
+记录里 `error_code` / `error_message` / `http_method` / `http_path` 齐全）；`test_api_contracts`、
+`test_logging`、`test_downloaded_api` 全绿。
+
+**文档同步**：`docs/USAGE.md` 的日志字段清单补 `error_message`（R13 起就有，清单一直漏了它）、
+`http_method`、`http_path`，并给出上面那条示例。版本维持 `0.3.0rc1`。

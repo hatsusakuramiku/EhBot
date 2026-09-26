@@ -62,16 +62,29 @@ class ApiError(Exception):
         }
 
 
-async def api_error_handler(_: Request, exc: Exception) -> JSONResponse:
+async def api_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Render an :class:`ApiError` as the standard envelope.
 
     Registered for `ApiError` only. Anything else keeps FastAPI's own
     behaviour, because swallowing unknown exceptions here would hide real bugs
     behind a tidy 400.
+
+    The log line names where and why. A bare `error_code` is not triage: an
+    operator who greps `TAB_UNKNOWN` cannot tell a bookmark pointing at a
+    retired tab from a page sending the wrong parameter, and the request path
+    is the one fact that separates them. The message carries the offending
+    value (`未知的候选分组：nope`), so both halves of the question are answered
+    without a second log line.
     """
     assert isinstance(exc, ApiError)  # noqa: S101 - handler is registered for this type
     logging.getLogger(__name__).warning(
-        "api_error", extra={"error_code": exc.code}
+        "api_error",
+        extra={
+            "error_code": exc.code,
+            "error_message": exc.message,
+            "http_method": request.method,
+            "http_path": request.url.path,
+        },
     )
     return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 

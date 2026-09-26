@@ -88,6 +88,12 @@ _CONTEXT_FIELDS: tuple[str, ...] = (
     "duration_ms",
     "error_code",
     "error_message",
+    # `http_method` / `http_path` are on the list for the same reason
+    # `error_message` is: a rejected API request is triaged by 「哪个接口、什么
+    # 值」, and a code alone answers neither. Paths carry no query string, and
+    # the formatter redacts them like every other string field.
+    "http_method",
+    "http_path",
 )
 
 _UVICORN_LOGGERS: tuple[str, ...] = ("uvicorn", "uvicorn.error", "uvicorn.access")

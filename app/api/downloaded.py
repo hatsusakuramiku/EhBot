@@ -339,7 +339,10 @@ async def downloaded_list(request: Request) -> dict[str, Any]:
         raise ApiError(
             "TAB_UNKNOWN",
             f"未知的分区：{tab}",
-            details={"allowed": sorted(DOWNLOADED_TAB_STATUS)},
+            # The list that was checked, not the tab strip's vocabulary: the two
+            # are equal today, and a message that quotes a set the guard does
+            # not use is how they stop being equal without anybody noticing.
+            details={"allowed": sorted(DOWNLOADED_PACK_FILTERS)},
         )
     page = PageParams.clamp(
         _int(params.get("page")), _int(params.get("page_size"))

@@ -370,7 +370,11 @@ python scripts/verify_docker_linux.py --offline --suite --build
 
 文件输出按 UTC 日切割，落在 `<data>/logs/{yyyy-MM-dd}.log`（错误另有一份 `{yyyy-MM-dd}_error.log`），位于已是绑定卷的数据目录下，随容器重建保留；早期版本的单一文件 `<data>/logs/ehbot.log` 仍被读取作为兜底，但不再写入。Docker 端由 `compose.yaml` 里的 `logging:` 块限制 stdout（10 MB × 3 份），与容器内按日轮转独立：只作一个都会在另一条路上填满磁盘。
 
-以下字段出现在调用点传递，用 `extra=`：`candidate_id` / `work_id` / `job_id` / `source_type` / `provider` / `status` / `attempt` / `duration_ms` / `error_code` / `request_id`。所有字段都是可选，但为了让一个事件可以从一条日志跳到同一次操作的其他行，绕过它们是代价最高的习惯。
+以下字段出现在调用点传递，用 `extra=`：`candidate_id` / `work_id` / `job_id` / `source_type` / `provider` / `status` / `attempt` / `duration_ms` / `error_code` / `error_message` / `request_id` / `http_method` / `http_path`。所有字段都是可选，但为了让一个事件可以从一条日志跳到同一次操作的其他行，绕过它们是代价最高的习惯。
+
+被拒绝的 API 请求用 `api_error` 事件记录，`error_code` 之外还带 `http_method` / `http_path` / `error_message`：例如
+`event=api_error error_code=TAB_UNKNOWN error_message="未知的分区：nope" http_method=GET http_path=/api/v1/downloaded`
+——是哪条 URL、传了什么值，一条日志就够，不用再去比对 uvicorn 的访问日志。
 
 如果文件日志被启用但目录不可写（少见但会发生，比如数据目录被只读挂载），服务会以 `LOG_FILE_UNAVAILABLE` 警告为什么只走 stdout，不会拒绝启动。
 
