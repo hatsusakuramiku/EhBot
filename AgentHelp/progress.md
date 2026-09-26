@@ -4199,3 +4199,11 @@ dict 的 repr。前端轮询把它直接塞进查询串
 ——说明新入队的任务是「排队中」、重新打包的已打包作品徽章会回到「排队中」但不离开「已打包」（CBZ 还在，
 重打是覆盖写同一个文件）；并把此前压在工作区的 `conversion_jobs_reclaimed` 说明（R33 讨论的那条日志）随
 这次一起落进文档。`AgentHelp/EHBot.md` §1.3.1 与状态表同步。版本维持 `0.3.0rc1`。
+
+修复提交 `d50f139`，按要求**只提交、不推送**（`origin/main` 仍停在 `b559740`）；镜像重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:868bec3645702a7085a9913c6d0c82b30cce93f97d4058529e5b0d3b2c04314e`，amd64 manifest
+`sha256:f723f1d643af086ef3a4d6beeb83daaac1c7b1a5dc85aa2c422ac27b985dc352`）。**从 registry 验证而不是
+只信本地构建**：`docker pull hsmk/ehbot:latest` 取回同一 digest，容器内 `python -c urlopen` 访问
+`/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`，首启即生成 64 字节
+`/app/data/private/session_secret_key`（`-rw-------`），冒烟容器已清理。
