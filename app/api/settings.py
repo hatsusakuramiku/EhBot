@@ -1,6 +1,6 @@
 """One snapshot per settings section.
 
-`/settings/{section}` and `GET /api/v1/settings/{section}` render the same seven
+`/settings/{section}` and `GET /api/v1/settings/{section}` render the same eight
 sections, so the assembly happens once here and both layers read the result. The
 page template gets a dict; the endpoint returns the same dict as JSON. Anything
 computed in a template would be invisible to the endpoint, and anything computed
@@ -30,6 +30,10 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError
 from app.api.serializers import (
+    ai_chain_entry,
+    ai_provider,
+    ai_provider_key,
+    ai_provider_model,
     log_entry_payload,
     archive_password,
     archive_path_rule,
@@ -40,6 +44,7 @@ from app.api.serializers import (
     tool_profile,
 )
 from app.api.status import (
+    SETTINGS_AI,
     LOG_LEVELS,
     SETTINGS_ARCHIVE,
     SETTINGS_AUTO_APPROVAL,
@@ -53,7 +58,14 @@ from app.api.status import (
     dependency_view,
     settings_section_view,
 )
+from app.ai.prompt import DEFAULT_AI_PROMPT
 from app.archive.service import (
+    MAX_AI_BATCH_SIZE,
+    MAX_AI_CONCURRENCY,
+    MIN_AI_BATCH_SIZE,
+    MIN_AI_CONCURRENCY,
+    PATH_SOURCE_AI,
+    PATH_SOURCE_TEMPLATE,
     TITLE_SOURCE_ENGLISH,
     TITLE_SOURCE_JAPANESE,
 )
@@ -66,6 +78,16 @@ from app.auto_approval.rules import (
     TEXT_OPERATORS,
 )
 from app.auto_approval.service import DRY_RUN_SCAN_LIMIT
+from app.ai.models import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT_SECONDS,
+    KEY_COOLDOWN_MINUTES,
+    MAX_RETRIES,
+    MAX_TIMEOUT_SECONDS,
+    MIN_TIMEOUT_SECONDS,
+    PROVIDER_CODE_LABELS,
+    SUPPORTED_PROVIDER_CODES,
+)
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
     MAX_SEGMENT_LENGTH,
@@ -210,6 +232,8 @@ async def _paths_section(request: Request) -> dict[str, Any]:
     service = deps.archive_settings_service(request)
     database = deps.database(request)
     app_settings = request.app.state.settings
+    ai_service = deps.optional_service(request, "ai_service")
+    chain = await ai_service.chain() if ai_service is not None else ()
     return {
         "path_rules": [
             archive_path_rule(rule)
@@ -240,6 +264,53 @@ async def _paths_section(request: Request) -> dict[str, Any]:
                 "hint": "优先使用画廊的英文标题，缺失时回退到日文标题。",
             },
         ],
+        # 路径来源 and the AI sub-panel. One payload rather than two so the
+        # template can render the radio set, the prompt and the toggles from the
+        # same values the validator will accept.
+        "path_source": await service.path_source(),
+        "path_sources": [
+            {
+                "code": PATH_SOURCE_TEMPLATE,
+                "label": "模板与规则（现状）",
+                "hint": "用下方模板与按规则匹配的模板决定路径，不使用 AI。",
+            },
+            {
+                "code": PATH_SOURCE_AI,
+                "label": "AI 生成",
+                "hint": "由「设置 → AI 供应商」里配置的模型链读元数据决定路径；下方的模板与规则不生效。",
+            },
+        ],
+        "ai": {
+            "prompt": await service.ai_prompt(),
+            "default_prompt": DEFAULT_AI_PROMPT,
+            "fallback_to_rules": await service.ai_fallback_to_rules(),
+            "batch_size": await service.ai_batch_size(),
+            "concurrency": await service.ai_concurrency(),
+            "stream": await service.ai_stream(),
+            "default_include_current": await service.ai_default_include_current(),
+            "cache_count": await database.ai_path_suggestion_count(),
+            # What the model chain currently holds, so the page can say whether
+            # AI mode is ready instead of letting an operator switch it on and
+            # discover 需干预 entries later.
+            "chain": [
+                {
+                    "position": entry.position,
+                    "label": f"{entry.provider.name} / {entry.model.name}",
+                    "is_primary": entry.is_primary,
+                }
+                for entry in chain
+            ],
+            "bounds": {
+                "batch_size": {
+                    "minimum": MIN_AI_BATCH_SIZE,
+                    "maximum": MAX_AI_BATCH_SIZE,
+                },
+                "concurrency": {
+                    "minimum": MIN_AI_CONCURRENCY,
+                    "maximum": MAX_AI_CONCURRENCY,
+                },
+            },
+        },
         "template": {
             "default": DEFAULT_LIBRARY_TEMPLATE,
             "max_segment_length": MAX_SEGMENT_LENGTH,
@@ -252,6 +323,79 @@ async def _paths_section(request: Request) -> dict[str, Any]:
                 for name in TEMPLATE_PLACEHOLDERS
             ],
         },
+    }
+
+
+async def _ai_section(request: Request) -> dict[str, Any]:
+    """The AI provider tab: catalogue, chain and what may enter it.
+
+    Assembled from the service rather than the database so the page and the
+    JSON body see the same rules the save-time validation enforces -- the
+    「可以加入模型链」 list this builds is the same list `save_chain` accepts.
+    """
+    service = deps.ai_service(request)
+    providers = await service.providers()
+    catalogue: list[dict[str, Any]] = []
+    chain_candidates: list[dict[str, Any]] = []
+    for provider in providers:
+        keys = await service.keys(provider.provider_id)
+        usable_keys = await service.keys(provider.provider_id, usable_only=True)
+        usable_ids = {key.key_id for key in usable_keys}
+        models = await service.models(provider.provider_id)
+        catalogue.append(
+            {
+                **ai_provider(provider),
+                # `api_keys`, not `keys`: Jinja resolves `.keys` on a dict to
+                # the dict's own method before it looks for the key, so
+                # `provider.keys` in a template would render a builtin.
+                "api_keys": [
+                    ai_provider_key(key, usable=key.key_id in usable_ids)
+                    for key in keys
+                ],
+                "models": [ai_provider_model(model) for model in models],
+                "key_count": len(keys),
+                "usable_key_count": len(usable_ids),
+                "model_count": len(models),
+                "verified_model_count": sum(
+                    1 for model in models if model.verified
+                ),
+            }
+        )
+        for model in models:
+            if not model.verified or not model.enabled:
+                continue
+            if not provider.enabled or not usable_ids:
+                continue
+            chain_candidates.append(
+                {
+                    "model_id": model.model_id,
+                    "provider_id": provider.provider_id,
+                    "provider_name": provider.name,
+                    "model_name": model.name,
+                    "label": f"{provider.name} / {model.name}",
+                }
+            )
+    return {
+        "providers": catalogue,
+        "chain": [ai_chain_entry(entry) for entry in await service.chain()],
+        "chain_candidates": chain_candidates,
+        "provider_codes": [
+            {"code": code, "label": PROVIDER_CODE_LABELS.get(code, code)}
+            for code in SUPPORTED_PROVIDER_CODES
+        ],
+        "defaults": {
+            "code": SUPPORTED_PROVIDER_CODES[0],
+            "timeout_seconds": DEFAULT_TIMEOUT_SECONDS,
+            "max_retries": DEFAULT_MAX_RETRIES,
+        },
+        "bounds": {
+            "timeout_seconds": {
+                "minimum": MIN_TIMEOUT_SECONDS,
+                "maximum": MAX_TIMEOUT_SECONDS,
+            },
+            "max_retries": {"minimum": 0, "maximum": MAX_RETRIES},
+        },
+        "key_cooldown_minutes": KEY_COOLDOWN_MINUTES,
     }
 
 
@@ -373,6 +517,7 @@ _SECTION_BUILDERS: dict[
     SETTINGS_AUTO_APPROVAL: _auto_approval_section,
     SETTINGS_ARCHIVE: _archive_section,
     SETTINGS_PATHS: _paths_section,
+    SETTINGS_AI: _ai_section,
     SETTINGS_PASSWORDS: _passwords_section,
     SETTINGS_SYSTEM: _system_section,
 }

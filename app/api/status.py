@@ -254,7 +254,7 @@ WORK_STAGE_STATUS: dict[str, StatusView] = {
     STAGE_ARCHIVED: _view(STAGE_ARCHIVED, "入库期", TONE_SUCCESS),
 }
 
-#: The seven settings sections. Codes are the URL segment of `/settings/{section}`
+#: The eight settings sections. Codes are the URL segment of `/settings/{section}`
 #: as well as the tab label's key, so a tab, its link, its JSON payload and the
 #: nav entry that reaches it all name the same thing once. They are `neutral`
 #: throughout: a section is a place, not a state, and giving one a tone would
@@ -264,6 +264,7 @@ SETTINGS_SOURCES = "sources"
 SETTINGS_AUTO_APPROVAL = "auto-approval"
 SETTINGS_ARCHIVE = "archive"
 SETTINGS_PATHS = "paths"
+SETTINGS_AI = "ai"
 SETTINGS_PASSWORDS = "passwords"
 SETTINGS_SYSTEM = "system"
 
@@ -275,6 +276,7 @@ SETTINGS_SECTION_STATUS: dict[str, StatusView] = {
     ),
     SETTINGS_ARCHIVE: _view(SETTINGS_ARCHIVE, "归档", TONE_NEUTRAL),
     SETTINGS_PATHS: _view(SETTINGS_PATHS, "路径", TONE_NEUTRAL),
+    SETTINGS_AI: _view(SETTINGS_AI, "AI 供应商", TONE_NEUTRAL),
     SETTINGS_PASSWORDS: _view(SETTINGS_PASSWORDS, "密码库", TONE_NEUTRAL),
     SETTINGS_SYSTEM: _view(SETTINGS_SYSTEM, "系统", TONE_NEUTRAL),
 }
@@ -282,6 +284,21 @@ SETTINGS_SECTION_STATUS: dict[str, StatusView] = {
 #: Tab order, derived from the mapping rather than written out again: a second
 #: list would be a second place to forget a section.
 SETTINGS_SECTIONS: tuple[str, ...] = tuple(SETTINGS_SECTION_STATUS)
+
+#: Whether one (供应商, 模型) has passed its connectivity check. Three values and
+#: not two: 「从未验证」 and 「验证失败」 are different facts, and the settings page
+#: says them differently -- the first is a step not taken, the second is one that
+#: was taken and failed. Both block entry into the model chain, which is why
+#: they cannot be collapsed into 「not verified」.
+AI_VERIFY_UNVERIFIED = "UNVERIFIED"
+AI_VERIFY_VERIFIED = "VERIFIED"
+AI_VERIFY_FAILED = "FAILED"
+
+AI_VERIFICATION_STATUS: dict[str, StatusView] = {
+    AI_VERIFY_VERIFIED: _view(AI_VERIFY_VERIFIED, "已验证", TONE_SUCCESS),
+    AI_VERIFY_UNVERIFIED: _view(AI_VERIFY_UNVERIFIED, "未验证", TONE_MUTED),
+    AI_VERIFY_FAILED: _view(AI_VERIFY_FAILED, "验证失败", TONE_DANGER),
+}
 
 #: Whether a stored row is switched on. The settings page shows this for a
 #: Telegram source, an approval rule, a tool profile and a vault password -- four
@@ -393,11 +410,21 @@ DOWNLOADED_PACK_STATUS: dict[str, StatusView] = {
 #: Lookup order for the generic helpers. Candidate statuses come first because
 #: `FAILED` means「候选失败」in the review context, which is the one an
 #: operator sees most often.
+#: Where a book's recorded path came from. Only the AI answer gets a chip:
+#: 「模板算的」 is the default and marking every other row would say nothing. The
+#: code rides in `data-code` like every other state, so a test and an inspector
+#: read the same word the operator sees.
+PATH_ORIGIN_AI = "ai"
+PATH_ORIGIN_STATUS: dict[str, StatusView] = {
+    PATH_ORIGIN_AI: _view(PATH_ORIGIN_AI, "AI 生成", TONE_ACTIVE),
+}
+
 _REGISTRIES: tuple[dict[str, StatusView], ...] = (
     CANDIDATE_STATUS,
     DOWNLOAD_STATUS,
     CONVERSION_STATUS,
     PROVIDER_STATUS,
+    PATH_ORIGIN_STATUS,
 )
 
 
@@ -631,6 +658,15 @@ def log_level_view(level: str | None) -> StatusView:
     )
 
 
+def ai_verification_view(result: bool | None) -> StatusView:
+    """Resolve a model's stored verification into one of three states."""
+    if result is None:
+        return AI_VERIFICATION_STATUS[AI_VERIFY_UNVERIFIED]
+    return AI_VERIFICATION_STATUS[
+        AI_VERIFY_VERIFIED if result else AI_VERIFY_FAILED
+    ]
+
+
 def toggle_view(enabled: bool | int | None) -> StatusView:
     """Resolve whether a stored row is switched on.
 
@@ -699,6 +735,10 @@ __all__ = [
     "ATTACHMENT_ARCHIVE",
     "ATTACHMENT_KIND_STATUS",
     "ATTACHMENT_PHOTO",
+    "AI_VERIFICATION_STATUS",
+    "AI_VERIFY_FAILED",
+    "AI_VERIFY_UNVERIFIED",
+    "AI_VERIFY_VERIFIED",
     "ATTENTION_STATUS",
     "CANDIDATE_STATUS",
     "CANDIDATE_TAB_STATUS",
@@ -710,10 +750,13 @@ __all__ = [
     "DOWNLOAD_STATUS",
     "METADATA_SOURCE_STATUS",
     "NOTE_SEEDING",
+    "PATH_ORIGIN_AI",
+    "PATH_ORIGIN_STATUS",
     "PROVIDER_STATUS",
     "QUEUE_GROUP_STATUS",
     "REVIEW_ACTION_STATUS",
     "ROW_NOTE_STATUS",
+    "SETTINGS_AI",
     "SETTINGS_ARCHIVE",
     "SETTINGS_AUTO_APPROVAL",
     "SETTINGS_CONNECTIONS",
@@ -742,6 +785,7 @@ __all__ = [
     "WORK_STAGE_STATUS",
     "actor_kind",
     "actor_view",
+    "ai_verification_view",
     "attachment_kind_view",
     "attention_view",
     "candidate_tab_view",

@@ -35,6 +35,7 @@ from fastapi import FastAPI, HTTPException
 import httpx
 
 from app.api.events import EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
+from app.ai.service import AiProviderService
 from app.archive.service import ArchiveSettingsService
 from app.bootstrap import (
     format_bootstrap_banner,
@@ -174,6 +175,7 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.telegraph_service = None
     app.state.torrent_service = None
     app.state.thumbnail_service = None
+    app.state.ai_service = None
     app.state.tag_translator = None
     app.state.auto_approval_sweeper = None
     # Fan-out for state transitions. Created eagerly so a worker can publish
@@ -246,6 +248,7 @@ def build_lifespan(
     torrent_client_transport: httpx.AsyncBaseTransport | None = None,
     thumbnail_transport: httpx.AsyncBaseTransport | None = None,
     thumbnail_resolver=None,
+    ai_transport: httpx.AsyncBaseTransport | None = None,
 ):
     """Build the startup/shutdown context manager for one application.
 
@@ -267,6 +270,7 @@ def build_lifespan(
         telegraph_client: httpx.AsyncClient | None = None
         torrent_client: httpx.AsyncClient | None = None
         thumbnail_client: httpx.AsyncClient | None = None
+        ai_client: httpx.AsyncClient | None = None
         try:
             for path in (
                 app_settings.data_path,
@@ -484,6 +488,20 @@ def build_lifespan(
             )
             application.state.download_service = download_service
             application.state.archive_settings_service = archive_settings_service
+            # Always constructed, even with AI mode off: the settings tab has
+            # to be reachable to configure it, and the service is inert until a
+            # chain is saved. One dedicated client with no cookies and no
+            # credentials of its own -- the API key rides per request.
+            ai_client = httpx.AsyncClient(
+                timeout=60,
+                follow_redirects=False,
+                transport=ai_transport,
+            )
+            application.state.ai_service = AiProviderService(
+                database,
+                archive_settings_service,
+                http_client=ai_client,
+            )
             # Linux and Docker images ship no archiver, so fetch the pinned
             # official 7-Zip build once per version if it is missing.
             if app_settings.archive_toolchain_auto_install:
@@ -511,6 +529,27 @@ def build_lifespan(
                 metadata_enricher=(
                     lambda candidate_id: _enrich_candidate_metadata(
                         application, (candidate_id,)
+                    )
+                ),
+                # The path decision's other half. Passed in rather than looked
+                # up through `application.state` per job because AI mode is a
+                # routing choice, not a per-job fact: a book's path must not
+                # change depending on whether the service happened to be
+                # attached when the worker claimed it.
+                ai_service=application.state.ai_service,
+                # The move half of a 「重新计算路径」 job, resolved through
+                # `application.state` because the archive service is built
+                # immediately below this one -- the two depend on each other and
+                # this is the direction that closes the loop without a cycle.
+                refile=(
+                    lambda candidate_id, relative_path: application.state.
+                    archived_work_service.refile_work(
+                        candidate_id,
+                        relative_path,
+                        operator_name="ai",
+                        # The job holds this book's `CONVERSION_RUNNING` row; the
+                        # guard that stops a page racing a pack would refuse it.
+                        allow_while_running=True,
                     )
                 ),
             )
@@ -644,6 +683,8 @@ def build_lifespan(
                 await torrent_client.aclose()
             if thumbnail_client is not None:
                 await thumbnail_client.aclose()
+            if ai_client is not None:
+                await ai_client.aclose()
     return lifespan
 
 

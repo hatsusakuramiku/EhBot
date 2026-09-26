@@ -103,6 +103,25 @@ def _service(request: Request, name: str, detail: str) -> Any:
     return service
 
 
+def optional_service(request: Request, name: str) -> Any | None:
+    """Read a service slot that may legitimately be absent.
+
+    The companion to `_service`, and the difference is what a missing slot means.
+    `_service` answers 503 because a page that *needs* the packer must say so
+    rather than fail in the middle of rendering. Some pages merely get better with
+    one -- the work detail page's 归档路径 fields prefill from the current routing
+    rules, and a deployment without a conversion service should still show the
+    page with the fields as they were. A page must not become unreachable because
+    a convenience above it is missing.
+    """
+    return getattr(request.app.state, name, None)
+
+
+def ai_service(request: Request) -> Any:
+    """The AI provider catalogue. Always present once startup has run."""
+    return _service(request, "ai_service", "AI 供应商")
+
+
 def database(request: Request) -> Any:
     # Never None: constructed in `create_app` before the app object exists.
     return request.app.state.database
@@ -278,6 +297,7 @@ def local_return_to(raw: str | None) -> str | None:
 
 __all__ = [
     "CONTENT_TARGET",
+    "ai_service",
     "archive_settings_service",
     "connection_manager",
     "conversion_service",

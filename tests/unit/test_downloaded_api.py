@@ -306,6 +306,14 @@ class FakeConversion:
     async def metadata_for(self, candidate_id: int):
         return ()
 
+    #: This double models a template-mode deployment, which is the default and
+    #: what every case here is about. The AI branch has its own tests.
+    async def path_source(self) -> str:
+        return "template"
+
+    async def current_ai_path(self, candidate_id, metadata):
+        return None
+
     @staticmethod
     def title_of(metadata, candidate_id: int) -> str:
         return f"Candidate {candidate_id}"

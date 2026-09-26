@@ -41,6 +41,7 @@ from app.archive.vault import (
 # settings page and the packing path cannot disagree about what is legal. The
 # module holds nothing but string handling, so importing it here creates no
 # archive -> conversion dependency worth the name.
+from app.ai.prompt import DEFAULT_AI_PROMPT
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
     LibraryTemplateError,
@@ -76,6 +77,43 @@ SETTING_LIBRARY_TEMPLATE = "library_template"
 #: wrong field is a reader problem. Making the metadata follow this would mean a
 #: setting silently rewrote the archive's contents.
 SETTING_TITLE_SOURCE = "library_title_source"
+
+#: Which layer decides where a book lands. **The two are mutually exclusive**
+#: (proposal §2): 「模板 + 规则」 and the model answer the same question, and
+#: 「AI 命中就用 AI，否则用规则」 would itself be a third rule engine. `template`
+#: is the default so an upgrade moves nothing, and because AI mode needs a
+#: provider and a verified model chain before it can do anything at all.
+SETTING_PATH_SOURCE = "path_source"
+PATH_SOURCE_TEMPLATE = "template"
+PATH_SOURCE_AI = "ai"
+PATH_SOURCES: tuple[str, ...] = (PATH_SOURCE_TEMPLATE, PATH_SOURCE_AI)
+DEFAULT_PATH_SOURCE = PATH_SOURCE_TEMPLATE
+
+#: The operator's prompt, verbatim, and the only input to the model besides the
+#: metadata. Stored as text because it is theirs; the default is the proposal's
+#: §6.1 reference, and an emptied value means 「回到默认」 rather than 「问一个空
+#: 问题」 -- see `ai_prompt`.
+SETTING_AI_PROMPT = "ai_prompt"
+
+#: Whether a model chain that fails completely falls back to the rules. Default
+#: off: a silent substitution would let an operator believe AI chose a path when
+#: the template did, and a path once written is a fact. Off means the book parks
+#: in 需干预, where the failure is on a list instead of behind the operator's back.
+SETTING_AI_FALLBACK_TO_RULES = "ai_fallback_to_rules"
+
+#: Re-archive scheduling for AI mode (proposal §9). Read by R30; stored here
+#: with the rest of the path settings so one page owns them.
+SETTING_AI_BATCH_SIZE = "ai_batch_size"
+SETTING_AI_CONCURRENCY = "ai_concurrency"
+SETTING_AI_STREAM = "ai_stream"
+SETTING_AI_DEFAULT_INCLUDE_CURRENT = "ai_default_include_current"
+
+DEFAULT_AI_BATCH_SIZE = 20
+MIN_AI_BATCH_SIZE = 1
+MAX_AI_BATCH_SIZE = 500
+DEFAULT_AI_CONCURRENCY = 2
+MIN_AI_CONCURRENCY = 1
+MAX_AI_CONCURRENCY = 16
 
 #: `japanese` prefers `JapaneseTitle` and falls back to `Title`; `english` is the
 #: reverse. Two values rather than a free-form field name: these are the only two
@@ -474,6 +512,150 @@ class ArchiveSettingsService:
         )
         return value
 
+    # ------------------------------------------------------------------
+    #  路径来源：模板与规则，或 AI（二者互斥）
+    # ------------------------------------------------------------------
+    async def path_source(self) -> str:
+        """Which layer decides a book's path. Defaults to the template."""
+        stored = await self._database.archive_settings()
+        value = (stored.get(SETTING_PATH_SOURCE) or "").strip().lower()
+        return value if value in PATH_SOURCES else DEFAULT_PATH_SOURCE
+
+    async def save_path_source(self, raw: str) -> str:
+        value = (raw or "").strip().lower()
+        if value not in PATH_SOURCES:
+            raise ArchiveSettingsError(
+                "PATH_SOURCE_INVALID", "归档路径来源取值无效"
+            )
+        await self._database.save_archive_settings(
+            {SETTING_PATH_SOURCE: value}
+        )
+        return value
+
+    async def ai_prompt(self) -> str:
+        """The stored prompt, or the reference one.
+
+        Blank means the default rather than an empty prompt: the page's
+        「恢复默认」 writes blank, and an operator who clears the box has asked
+        for the reference text back, not for a request whose system message is
+        empty. Read without validating -- the text is free-form by design, and a
+        prompt saved by an older version still has to reach the page for editing.
+        """
+        stored = await self._database.archive_settings()
+        text = stored.get(SETTING_AI_PROMPT)
+        if text is None:
+            return DEFAULT_AI_PROMPT
+        return text.strip() or DEFAULT_AI_PROMPT
+
+    async def save_ai_prompt(self, raw: str) -> str:
+        text = str(raw or "").strip()
+        await self._database.save_archive_settings(
+            {SETTING_AI_PROMPT: text}
+        )
+        return text or DEFAULT_AI_PROMPT
+
+    async def ai_fallback_to_rules(self) -> bool:
+        stored = await self._database.archive_settings()
+        return stored.get(SETTING_AI_FALLBACK_TO_RULES, "0") not in {
+            "0",
+            "false",
+            "no",
+        }
+
+    async def save_ai_fallback_to_rules(self, enabled: bool) -> None:
+        await self._database.save_archive_settings(
+            {SETTING_AI_FALLBACK_TO_RULES: "1" if enabled else "0"}
+        )
+
+    async def ai_batch_size(self) -> int:
+        return await self._int_setting(
+            SETTING_AI_BATCH_SIZE, DEFAULT_AI_BATCH_SIZE
+        )
+
+    async def save_ai_batch_size(self, raw: object) -> int:
+        return await self._save_int_setting(
+            raw,
+            key=SETTING_AI_BATCH_SIZE,
+            code="AI_BATCH_SIZE_INVALID",
+            label="每批处理数量",
+            minimum=MIN_AI_BATCH_SIZE,
+            maximum=MAX_AI_BATCH_SIZE,
+        )
+
+    async def ai_concurrency(self) -> int:
+        return await self._int_setting(
+            SETTING_AI_CONCURRENCY, DEFAULT_AI_CONCURRENCY
+        )
+
+    async def save_ai_concurrency(self, raw: object) -> int:
+        return await self._save_int_setting(
+            raw,
+            key=SETTING_AI_CONCURRENCY,
+            code="AI_CONCURRENCY_INVALID",
+            label="并发数",
+            minimum=MIN_AI_CONCURRENCY,
+            maximum=MAX_AI_CONCURRENCY,
+        )
+
+    async def ai_stream(self) -> bool:
+        stored = await self._database.archive_settings()
+        return stored.get(SETTING_AI_STREAM, "0") not in {"0", "false", "no"}
+
+    async def save_ai_stream(self, enabled: bool) -> None:
+        await self._database.save_archive_settings(
+            {SETTING_AI_STREAM: "1" if enabled else "0"}
+        )
+
+    async def ai_default_include_current(self) -> bool:
+        stored = await self._database.archive_settings()
+        return stored.get(SETTING_AI_DEFAULT_INCLUDE_CURRENT, "0") not in {
+            "0",
+            "false",
+            "no",
+        }
+
+    async def save_ai_default_include_current(self, enabled: bool) -> None:
+        await self._database.save_archive_settings(
+            {SETTING_AI_DEFAULT_INCLUDE_CURRENT: "1" if enabled else "0"}
+        )
+
+    async def _int_setting(self, key: str, default: int) -> int:
+        stored = await self._database.archive_settings()
+        try:
+            return int(str(stored.get(key, "")).strip())
+        except (TypeError, ValueError):
+            return default
+
+    async def _save_int_setting(
+        self,
+        raw: object,
+        *,
+        key: str,
+        code: str,
+        label: str,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        """Store one whole number, refusing rather than silently clamping.
+
+        A clamped value is a setting the operator did not choose and the page
+        would show back to them as if they had. The bounds are in the message so
+        the next attempt is a correction rather than a guess.
+        """
+        text = str(raw or "").strip()
+        try:
+            value = int(text)
+        except ValueError as exc:
+            raise ArchiveSettingsError(
+                code, f"{label}必须是整数（{minimum}–{maximum}）"
+            ) from exc
+        if not minimum <= value <= maximum:
+            raise ArchiveSettingsError(
+                code, f"{label}必须在 {minimum} 到 {maximum} 之间"
+            )
+        await self._database.save_archive_settings({key: str(value)})
+        return value
+
     async def save_library_template(self, raw: str) -> str:
         """Store a layout template, refusing one that cannot render safely.
 
@@ -798,7 +980,24 @@ __all__ = [
     "DEFAULT_LIBRARY_TEMPLATE",
     "LIMIT_KEYS",
     "MASTER_KEY_NAME",
+    "DEFAULT_AI_BATCH_SIZE",
+    "DEFAULT_AI_CONCURRENCY",
+    "DEFAULT_PATH_SOURCE",
+    "MAX_AI_BATCH_SIZE",
+    "MAX_AI_CONCURRENCY",
+    "MIN_AI_BATCH_SIZE",
+    "MIN_AI_CONCURRENCY",
     "PATH_SETTING_KEYS",
+    "PATH_SOURCES",
+    "PATH_SOURCE_AI",
+    "PATH_SOURCE_TEMPLATE",
+    "SETTING_AI_BATCH_SIZE",
+    "SETTING_AI_CONCURRENCY",
+    "SETTING_AI_DEFAULT_INCLUDE_CURRENT",
+    "SETTING_AI_FALLBACK_TO_RULES",
+    "SETTING_AI_PROMPT",
+    "SETTING_AI_STREAM",
+    "SETTING_PATH_SOURCE",
     "SETTING_AUTO_PACK_AFTER_DOWNLOAD",
     "SETTING_IMAGE_QUALITY",
     "SETTING_KEEP_ORIGINAL",

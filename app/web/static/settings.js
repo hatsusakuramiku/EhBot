@@ -200,6 +200,26 @@
     render();
   }
 
+  /* ---------------------------------------------------------- AI path mode */
+
+  /* The 归档路径来源 radios. All this does is show or hide the AI sub-panel as
+   * the operator flips the choice; the values inside are submitted either way,
+   * so a hidden prompt is not a discarded one. Without this file the panel is
+   * rendered in whichever state was saved, which is the honest fallback: the
+   * server owns the mode because the server is what applies it. */
+  var aiModes = document.querySelectorAll("[data-ai-mode]");
+  var aiPanel = document.querySelector("[data-ai-panel]");
+  if (aiModes.length && aiPanel) {
+    var syncAiPanel = function () {
+      var selected = document.querySelector("[data-ai-mode]:checked");
+      aiPanel.hidden = !selected || selected.value !== "ai";
+    };
+    for (var m = 0; m < aiModes.length; m += 1) {
+      aiModes[m].addEventListener("change", syncAiPanel);
+    }
+    syncAiPanel();
+  }
+
   /* -------------------------------------------------------- path template */
 
   var templateInput = document.querySelector("[data-template-input]");

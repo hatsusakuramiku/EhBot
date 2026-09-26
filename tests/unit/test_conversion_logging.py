@@ -213,7 +213,7 @@ async def test_handle_job_pinned_path_rejection_keeps_original_traceback(
     with caplog.at_level(logging.DEBUG, logger="app.conversion.service"):
         await service._handle_job({"job_id": job_id, "candidate_id": candidate_id})
 
-    caught = [r for r in caplog.records if r.message == "conversion_pinned_path_rejected"]
+    caught = [r for r in caplog.records if r.message == "conversion_path_rejected"]
     assert caught
     assert caught[0].exc_info is not None
     assert caught[0].exc_info[1].__class__.__name__ == "LibraryPathError"

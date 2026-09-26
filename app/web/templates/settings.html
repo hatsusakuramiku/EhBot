@@ -1,8 +1,8 @@
 {#
-  The unified settings page: seven sections at one URL shape (R8).
+  The unified settings page: eight sections at one URL shape (R8).
 
-  `/settings/{section}` renders 连接 / 来源规则 / 自动审批 / 归档 / 路径 / 密码库 /
-  系统. Five separate pages (`/connections`, `/sources`,
+  `/settings/{section}` renders 连接 / 来源规则 / 自动审批 / 归档 / 路径 /
+  AI 供应商 / 密码库 / 系统. Five separate pages (`/connections`, `/sources`,
   `/auto-approval-rules`, `/archive-settings`, `/change-password`) now redirect
   into their tab, so「设置在哪」has one answer.
 
@@ -18,7 +18,7 @@
   * Every form is a real form posting to the endpoint it always posted to. The
     POST paths did not move in this rewrite -- only the page they render into --
     so an operator's bookmarked action and every existing test still work.
-  * The section body is one include per tab. Seven `{% if %}` branches in one
+  * The section body is one include per tab. Eight `{% if %}` branches in one
     file would make the archive tab's markup something you scroll past to reach
     the system tab's.
   * No credential is ever rendered. A password field is always empty on load;
@@ -64,6 +64,8 @@
   {% include "settings/_archive.html" %}
 {% elif section.code == "paths" %}
   {% include "settings/_paths.html" %}
+{% elif section.code == "ai" %}
+  {% include "settings/_ai.html" %}
 {% elif section.code == "passwords" %}
   {% include "settings/_passwords.html" %}
 {% elif section.code == "system" %}

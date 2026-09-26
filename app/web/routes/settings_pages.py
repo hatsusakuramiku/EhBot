@@ -13,8 +13,11 @@ import json
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+from app.api.events import EVENT_DOWNLOAD
 from app.api.serializers import auto_approval_dry_run
+from app.ai.errors import AiError
 from app.api.status import (
+    SETTINGS_AI,
     SETTINGS_ARCHIVE,
     SETTINGS_CONNECTIONS,
     SETTINGS_PASSWORDS,
@@ -30,6 +33,7 @@ from app.auto_approval.rules import (
 )
 from app.auto_approval.service import AutomaticApprovalService
 from app.web.rule_forms import parse_rule_condition
+from app.archive.rearchive import rearchive_works
 from app.archive.service import (
     LIMIT_KEYS as ARCHIVE_LIMIT_KEYS,
     TITLE_SOURCE_JAPANESE,
@@ -234,6 +238,92 @@ async def save_archive_paths(request: Request, csrf_token: str = Form()):
         )
     return settings_redirect(request, SETTINGS_PATHS)
 
+
+def _rearchive_notice(result: dict) -> str:
+    """One line for the page's notice slot, from the sweep's own counts.
+
+    Built here rather than in the template so the JSON-less page and any later
+    caller describe the same run the same way, and so a zero is never spelled as
+    a count: 「已检查 12 件：移动 0 件」 reads worse than saying what happened.
+
+    A 试跑 says so in its first word. The counts below it are then 「将会」 rather
+    than 「已经」, and a notice that left that out would describe a run that did
+    not happen.
+    """
+    parts: list[str] = []
+    if result["queued"]:
+        parts.append(f"入队打包 {len(result['queued'])} 件")
+    if result.get("refiling"):
+        parts.append(f"入队重算路径 {len(result['refiling'])} 件")
+    if result["moved"]:
+        parts.append(f"移动文件 {len(result['moved'])} 件")
+    if result["unchanged"]:
+        parts.append(f"{len(result['unchanged'])} 件已在正确位置")
+    if result["skipped"]:
+        parts.append(f"跳过 {len(result['skipped'])} 件")
+    prefix = "试跑（未执行）：" if result.get("dry_run") else ""
+    if not parts:
+        return (
+            f"{prefix}已检查 {result['scanned']} 件作品，没有需要重新归档的"
+        )
+    return (
+        f"{prefix}已检查 {result['scanned']} 件作品：" + "、".join(parts)
+    )
+
+
+@router.post("/archive-settings/paths/rearchive")
+async def rearchive_archive_paths(
+    request: Request,
+    csrf_token: str = Form(),
+    force: str | None = Form(default=None),
+    dry_run: str | None = Form(default=None),
+):
+    """一键重新归档: re-file the library onto the current path rules.
+
+    Lives on the tab that owns the template, because the template is the change
+    this action applies -- an operator who edits the layout wants the books that
+    are already in the library to follow it, and the batch repack on
+    `/downloaded` only ever reached a selection they had to pick by hand.
+
+    `force` is a checkbox, hence `str | None`: an unchecked box sends nothing, so
+    the default scope is what absence means -- works that are not archived yet,
+    plus works whose recomputed path differs. It is a checkbox rather than
+    `ui.confirm` because the label it carries is the whole of the decision, and a
+    dialog would say it a second time on a page whose other confirm is reserved
+    for a delete.
+
+    `dry_run` is 试跑: plan, report, and do nothing. In AI mode it is also the
+    cost warning 强制 needs -- 「全库重新询问」 is one press away from a very large
+    bill, and this is how the operator reads the list first.
+
+    Answers by re-rendering this tab with the run's outcome rather than with a 303
+    and a flash line: the per-work reasons are what the operator acts on, and a
+    notice slot is one sentence long. The same shape the rule 试跑 uses.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    result = await rearchive_works(
+        deps.database(request),
+        deps.archived_work_service(request),
+        deps.conversion_service(request),
+        force=force is not None,
+        dry_run=dry_run is not None,
+        operator_name=str(request.session.get("username") or "admin"),
+    )
+    # The event is a signal, not a payload: a page subscribed to `download`
+    # re-reads the snapshot whatever it carries, so this one tells the open
+    # tabs that the library moved without naming a work.
+    request.app.state.event_bus.publish(EVENT_DOWNLOAD)
+    return await render_settings(
+        request,
+        SETTINGS_PATHS,
+        notice=_rearchive_notice(result),
+        rearchive=result,
+    )
+
+
 #: The book a layout template is previewed against. Fixed rather than taken
 #: from the queue, for two reasons: a preview has to be reproducible, and the
 #: interesting half of the answer is what happens to characters a filesystem
@@ -375,6 +465,84 @@ async def save_library_template(request: Request, csrf_token: str = Form()):
             status_code=400,
         )
     return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/archive-settings/paths/ai")
+async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
+    """Store the 路径来源 choice and the AI sub-panel in one write.
+
+    One endpoint because it is one form: the radio says whether the model or the
+    template decides a path, and the prompt and the toggles only mean anything
+    under the AI choice. The numbers are written first because they are the field
+    that realistically fails validation, so a rejected value aborts before the
+    mode is changed -- the same ordering the archive tab uses for its limits.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    service = deps.archive_settings_service(request)
+    try:
+        await service.save_ai_batch_size(form.get("ai_batch_size"))
+        await service.save_ai_concurrency(form.get("ai_concurrency"))
+        await service.save_path_source(str(form.get("path_source") or ""))
+        await service.save_ai_prompt(str(form.get("ai_prompt") or ""))
+        await service.save_ai_fallback_to_rules(
+            form.get("ai_fallback_to_rules") == "on"
+        )
+        await service.save_ai_stream(form.get("ai_stream") == "on")
+        await service.save_ai_default_include_current(
+            form.get("ai_default_include_current") == "on"
+        )
+    except ArchiveSettingsError as exc:
+        return await render_settings(
+            request,
+            SETTINGS_PATHS,
+            error=exc.public_message,
+            status_code=400,
+        )
+    return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/archive-settings/paths/ai/prompt-default")
+async def reset_ai_prompt(request: Request, csrf_token: str = Form()):
+    """Restore the reference prompt. Stores blank, which reads back as default.
+
+    Blank rather than a copy of the text: the default lives in
+    `app.ai.prompt`, and writing a snapshot of it into the database would freeze
+    today's wording for a deployment that upgrades to a better one tomorrow.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    await deps.archive_settings_service(request).save_ai_prompt("")
+    return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/archive-settings/paths/ai/cache/clear")
+async def clear_ai_path_cache(request: Request, csrf_token: str = Form()):
+    """Drop the answer cache and say how much was dropped.
+
+    Renders in place rather than redirecting so the count lands in the notice
+    slot: 「已清除 0 条」 and 「已清除 37 条」 are different facts, and a flash
+    line that always says 「已完成」 would hide which one happened.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    removed = await deps.database(request).clear_ai_path_suggestions()
+    return await render_settings(
+        request,
+        SETTINGS_PATHS,
+        notice=(
+            f"已清除 {removed} 条 AI 路径缓存；再次打包时会重新询问模型。"
+            if removed
+            else "缓存本来就是空的，没有可清除的 AI 路径记录。"
+        ),
+    )
 
 
 def _error_text(exc: Exception) -> str:
@@ -792,3 +960,299 @@ async def delete_archive_password(
     deps.validate_csrf(request, csrf_token)
     await deps.archive_settings_service(request).delete_password(password_id)
     return settings_redirect(request, SETTINGS_PASSWORDS)
+
+
+# ---------------------------------------------------------------------------
+#  AI 供应商 (SETTINGS_AI)
+# ---------------------------------------------------------------------------
+
+def _ai_form_values(form) -> dict[str, object]:
+    """The provider form as the service's validator wants it.
+
+    A thin translation and nothing else: the refusals live in the service so the
+    page, a future JSON client and the chain validator all enforce one set of
+    rules. `enabled` is a checkbox, so absence is 「off」.
+    """
+    return {
+        "provider_id": form.get("provider_id"),
+        "name": form.get("name"),
+        "code": form.get("code"),
+        "base_url": form.get("base_url"),
+        "timeout_seconds": form.get("timeout_seconds"),
+        "max_retries": form.get("max_retries"),
+        "enabled": form.get("enabled") == "on",
+    }
+
+
+async def _ai_refused(request: Request, exc: AiError):
+    return await render_settings(
+        request, SETTINGS_AI, error=exc.public_message, status_code=400
+    )
+
+
+@router.post("/settings/ai/providers")
+async def save_ai_provider(request: Request, csrf_token: str = Form()):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    try:
+        await deps.ai_service(request).save_provider(_ai_form_values(form))
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/providers/{provider_id}/delete")
+async def delete_ai_provider(
+    request: Request, provider_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        await deps.ai_service(request).delete_provider(provider_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/providers/{provider_id}/keys")
+async def add_ai_provider_key(
+    request: Request, provider_id: int, csrf_token: str = Form()
+):
+    """Store one API key. The plaintext is read from the form and encrypted.
+
+    The form field is a `password` input and it is never echoed back: not in the
+    list, not in a value attribute, not in an error message.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    try:
+        await deps.ai_service(request).add_key(
+            provider_id,
+            label=str(form.get("label") or ""),
+            api_key=str(form.get("api_key") or ""),
+        )
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/keys/{key_id}/toggle")
+async def toggle_ai_provider_key(
+    request: Request, key_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    try:
+        await deps.ai_service(request).set_key_enabled(
+            key_id, str(form.get("enabled") or "") == "on"
+        )
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/keys/{key_id}/delete")
+async def delete_ai_provider_key(
+    request: Request, key_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        await deps.ai_service(request).delete_key(key_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/providers/{provider_id}/models")
+async def add_ai_provider_model(
+    request: Request, provider_id: int, csrf_token: str = Form()
+):
+    """Add one or more model names.
+
+    Repeated `model_name` fields because the 「拉取模型」 result arrives as a
+    checkbox list: an operator selecting five models should make one request,
+    not five. Names are de-duplicated here so a double-clicked checkbox cannot
+    produce a duplicate row.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    names: list[str] = []
+    for raw in form.getlist("model_name"):
+        name = str(raw).strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return await render_settings(
+            request, SETTINGS_AI, error="请填写或勾选至少一个模型名称", status_code=400
+        )
+    service = deps.ai_service(request)
+    try:
+        for name in names:
+            await service.add_model(provider_id, name)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/providers/{provider_id}/models/fetch")
+async def fetch_ai_provider_models(
+    request: Request, provider_id: int, csrf_token: str = Form()
+):
+    """`GET /v1/models`, rendered as a checklist for the operator to pick from.
+
+    Fetched names are not added: a listing says a model exists, not that this
+    deployment can talk to it. Every name still has to be added and verified.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        names = await deps.ai_service(request).list_remote_models(provider_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    if not names:
+        return await render_settings(
+            request, SETTINGS_AI, notice="供应商没有返回任何模型名称。"
+        )
+    return await render_settings(
+        request,
+        SETTINGS_AI,
+        notice=f"拉到 {len(names)} 个模型名称，勾选后点「添加所选」。",
+        discovered={"provider_id": provider_id, "names": list(names)},
+    )
+
+
+@router.post("/settings/ai/models/{model_id}/toggle")
+async def toggle_ai_provider_model(
+    request: Request, model_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    try:
+        await deps.ai_service(request).set_model_enabled(
+            model_id, str(form.get("enabled") or "") == "on"
+        )
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/models/{model_id}/delete")
+async def delete_ai_provider_model(
+    request: Request, model_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        await deps.ai_service(request).delete_model(model_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/models/{model_id}/verify")
+async def verify_ai_provider_model(
+    request: Request, model_id: int, csrf_token: str = Form()
+):
+    """Send the minimal chat request and store what came back.
+
+    A failure answers 400 with the provider's own words, the same shape the
+    qBittorrent 连通测试 uses: the operator asked a question, and the answer is
+    「不，原因是 …」 rather than a redirect that hides it.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        verification = await deps.ai_service(request).verify_model(model_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    if not verification.ok:
+        return await render_settings(
+            request,
+            SETTINGS_AI,
+            error=f"验证失败：{verification.message}",
+            status_code=400,
+        )
+    return await render_settings(request, SETTINGS_AI, notice=verification.message)
+
+
+@router.post("/settings/ai/chain/append")
+async def append_ai_chain_model(request: Request, csrf_token: str = Form()):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    raw = str(form.get("model_id") or "").strip()
+    if not raw.isdigit():
+        return await render_settings(
+            request, SETTINGS_AI, error="请选择一个要加入模型链的模型", status_code=400
+        )
+    try:
+        await deps.ai_service(request).append_to_chain(int(raw))
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/chain/{model_id}/shift")
+async def shift_ai_chain_model(
+    request: Request, model_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    raw = str(form.get("delta") or "").strip()
+    try:
+        delta = int(raw)
+    except ValueError:
+        return await render_settings(
+            request, SETTINGS_AI, error="移动方向无效", status_code=400
+        )
+    try:
+        await deps.ai_service(request).shift_chain(model_id, delta)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)
+
+
+@router.post("/settings/ai/chain/{model_id}/remove")
+async def remove_ai_chain_model(
+    request: Request, model_id: int, csrf_token: str = Form()
+):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        await deps.ai_service(request).remove_from_chain(model_id)
+    except AiError as exc:
+        return await _ai_refused(request, exc)
+    return settings_redirect(request, SETTINGS_AI)

@@ -54,6 +54,7 @@ from app.downloads.models import (
     PROVIDER_TELEGRAM_USER,
     PROVIDER_TELEGRAPH,
 )
+from app.conversion.naming import LibraryPathError, LibraryTemplateError
 from app.review.models import (
     REQUEUEABLE_STATUSES,
     REVIEWABLE_STATUSES,
@@ -301,7 +302,9 @@ def _attachment_payload(attachment: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
+def archive_path_view(
+    work, packaged, library_path=None, *, planned=None
+) -> dict[str, Any]:
     """The archive path this work will pack to, split for the form that edits it.
 
     The directory and the filename are separated here rather than in the template
@@ -310,20 +313,34 @@ def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
     is not shown because the operator does not choose it. A template doing this
     with `rsplit` would be the second place that decision lived.
 
-    The value comes from `DownloadedWork.archive_relative_path`, which is the pin
-    if there is one and what the last pack recorded otherwise. Reading the pin
-    first is what lets a path set before the first pack prefill the form;
-    falling back is what makes the form prefill at all for a book packed before
-    anyone pinned anything -- and an operator who edits only the filename against
-    an empty 目录 field would otherwise move the book to the library root.
+    Which value the form prefills depends on what the work has, and the three
+    cases are three different questions:
+
+    * **已归档成功** (`packaged` is not None): the path that was saved for it --
+      the pin if there is one, else what the last pack recorded, else the
+      published file's own location. Reading the pin first is what lets a path
+      set before the first pack prefill the form; the other two fallbacks are
+      what make it prefill at all for a book packed before anyone pinned anything.
+    * **归档失败或尚未归档**: the path the *current* rules render for this book,
+      passed in as `planned`. An empty form here is the defect this closes: the
+      operator changed the template, opened a book to see where it would land,
+      and got a blank box that told them nothing -- or worse, a stale pin from a
+      pack that failed. A manual pin is the exception and keeps the form: it is a
+      decision, and it is also where the next pack will really put the book, so
+      showing the template's answer instead would be the one thing this field
+      must never do -- lie about where the book is going.
+    * **Nothing recorded and nothing planned**: empty, as before.
 
     `pending` is the comparison made once, server-side: a work whose pin no
     longer matches its published file has a move queued behind the next pack, and
     the page says so rather than leaving the operator to compare two paths by eye.
     """
-    relative = work.archive_relative_path if work is not None else None
     published = getattr(packaged, "artifact_cbz_path", None) if packaged else None
-    if not relative and published and library_path is not None:
+    manual = bool(getattr(work, "pinned_is_manual", False))
+    relative = work.archive_relative_path if work is not None else None
+    if planned is not None and packaged is None and not manual:
+        relative = planned
+    elif not relative and published and library_path is not None:
         # A book packed before `library_relative_path` was recorded on every pack
         # has no stored answer, and every existing installation is in that state.
         # Deriving it from the published path is what keeps the 目录 field
@@ -339,6 +356,13 @@ def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
             )
         except (OSError, ValueError):
             relative = None
+    # 「这条路径是 AI 定的吗」 is a pure read of the answer cache (proposal §11):
+    # the row records what the model said, and this asks whether that is the path
+    # on screen. An operator rename makes the two differ, so the badge turns off
+    # by itself -- no column, nothing to keep in sync. `planned` is included
+    # because an unarchived book shows the cached answer it will be packed to.
+    ai_path = getattr(work, "ai_relative_path", None) if work is not None else None
+    is_ai = bool(ai_path and relative and ai_path == relative)
     if not relative:
         return {
             "relative_path": None,
@@ -347,6 +371,7 @@ def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
             "is_manual": False,
             "published_path": published,
             "pending": False,
+            "is_ai": False,
         }
     parts = PurePosixPath(relative).parts
     return {
@@ -354,6 +379,7 @@ def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
         "directory": "/".join(parts[:-1]),
         "filename": PurePosixPath(relative).stem,
         "is_manual": bool(getattr(work, "pinned_is_manual", False)),
+        "is_ai": is_ai,
         "published_path": published,
         # True when the file on disk is not where the path says it belongs, which
         # is exactly the state a repack resolves.
@@ -364,11 +390,44 @@ def archive_path_view(work, packaged, library_path=None) -> dict[str, Any]:
     }
 
 
+async def planned_archive_path(
+    conversion, work, packaged, candidate_id: int
+) -> str | None:
+    """Where the current path rules would put this book, for the form to prefill.
+
+    Read only when there is nothing archived yet: for a book that *has* a CBZ the
+    form shows that recorded path, because that is what the operator came to see
+    and where the file actually is.
+
+    Two ways this answers None, and both fall back to whatever the row already
+    held rather than to an empty form: the deployment may have no conversion
+    service (a half-wired app still has to render), and the work may have no
+    title at all -- in which case the rules genuinely cannot name it, and showing
+    the packer's `candidate-<id>` fallback would present a placeholder as the
+    book's own name.
+
+    Deliberately neither of the packer's two slower habits. It does not enrich:
+    the detail page is a read, and a page load that scrapes ExHentai is a side
+    effect nobody asked for. And it does not raise: an unusable path is a reason
+    to leave the form as it was, not to answer the whole page with an error.
+    """
+    if conversion is None or work is None or packaged is not None:
+        return None
+    if getattr(work, "pinned_is_manual", False) and work.pinned_path:
+        return None
+    try:
+        planned = await conversion.planned_path_for_candidate(candidate_id)
+    except (LibraryPathError, LibraryTemplateError):
+        return None
+    return None if planned is None else planned.as_posix()
+
+
 async def work_snapshot(
     database,
     candidate_id: int,
     *,
     download=None,
+    conversion=None,
     sources: frozenset[str] = frozenset(),
     library_path=None,
 ) -> dict[str, Any] | None:
@@ -400,6 +459,13 @@ async def work_snapshot(
     # book nobody has pinned yet. `None` for a candidate that never downloaded,
     # which is exactly when there is no path to show.
     downloaded = await database.downloaded_work(candidate_id)
+    # Computed here rather than inside `archive_path_view` because it is the one
+    # part of that view that is not a pure function of the row: it reads the
+    # routing rules and this work's metadata, and it is only needed for a work
+    # that has nothing archived yet.
+    planned = await planned_archive_path(
+        conversion, downloaded, packaged, candidate_id
+    )
 
     return {
         "candidate_id": candidate.candidate_id,
@@ -450,7 +516,9 @@ async def work_snapshot(
         # form that changes it. Present at every stage a work has an archive to
         # pack, because 「先设路径，再打包」 has to be possible -- a path is a
         # decision about the book, not about the CBZ that does not exist yet.
-        "archive_path": archive_path_view(downloaded, packaged, library_path),
+        "archive_path": archive_path_view(
+            downloaded, packaged, library_path, planned=planned
+        ),
         # Whether anything here still moves on its own. Read from the job states
         # for the same reason the queue does: the candidate's own status lags a
         # task by one transition.
@@ -485,6 +553,7 @@ async def get_work(request: Request, candidate_id: int) -> dict:
         deps.database(request),
         candidate_id,
         download=deps.optional_service(request, "download_service"),
+        conversion=deps.optional_service(request, "conversion_service"),
         sources=configured_sources(request),
         library_path=await effective_library_path(request),
     )

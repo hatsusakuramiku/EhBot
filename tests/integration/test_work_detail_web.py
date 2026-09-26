@@ -184,14 +184,57 @@ def insert_job(
 
 
 def insert_artifact(
-    database: Database, job_id: int, *, artifact_type: str, path: str
+    database: Database,
+    job_id: int,
+    *,
+    artifact_type: str,
+    path: str,
+    relative_path: str | None = None,
 ) -> None:
     with database._connect() as connection:  # noqa: SLF001
         connection.execute(
-            "INSERT INTO artifacts (job_id, artifact_type, path, size_bytes) "
-            "VALUES (?, ?, ?, 4096)",
-            (job_id, artifact_type, path),
+            "INSERT INTO artifacts (job_id, artifact_type, path, size_bytes, "
+            "library_relative_path) VALUES (?, ?, ?, 4096, ?)",
+            (job_id, artifact_type, path, relative_path),
         )
+
+
+def set_metadata(database: Database, candidate_id: int, **fields: str) -> None:
+    """Title, Category, … as ingest would have written them.
+
+    Written straight to `metadata_values` because the routing rules and the
+    template both read that table, and a test that went through the editing form
+    would be testing the form rather than the prefill.
+    """
+    with database._connect() as connection:  # noqa: SLF001
+        for name, value in fields.items():
+            connection.execute(
+                "INSERT INTO metadata_values (candidate_id, field_name, "
+                "field_value, value_source, confidence, is_manual) "
+                "VALUES (?, ?, ?, 'EXHENTAI', 0.9, 0)",
+                (candidate_id, name, value),
+            )
+
+
+def pin_archive_path(
+    database: Database, candidate_id: int, relative: str, *, manual: bool
+) -> None:
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "INSERT INTO work_archive_paths (candidate_id, relative_path, "
+            "is_manual, operator_name) VALUES (?, ?, ?, 'test')",
+            (candidate_id, relative, 1 if manual else 0),
+        )
+
+
+def seed_downloaded(database: Database, candidate_id: int) -> int:
+    """A completed download with its archive artifact, and nothing packaged."""
+    set_status(database, candidate_id, "DOWNLOADED")
+    download_id = insert_job(database, candidate_id, state="COMPLETED")
+    insert_artifact(
+        database, download_id, artifact_type="ARCHIVE", path="/work/source.zip"
+    )
+    return download_id
 
 
 def record(
@@ -974,3 +1017,215 @@ def test_editing_metadata_on_a_packed_work_requeues_a_repack(
         and job.state == CONVERSION_STATE_PENDING
     ]
     assert repacked, [job.state for job in jobs]
+
+
+# --- the 归档路径 form's prefill (R27) ----------------------------------------
+
+
+def test_an_unarchived_work_prefills_the_rules_path(tmp_path: Path) -> None:
+    """「尚未进行归档操作就默认填充按照最新路径规则生成的路由规则」.
+
+    Before this the box was empty: an operator who had just changed the template
+    opened a downloaded-but-unpacked book to see where it would land, and the
+    field that answers that question said nothing.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    seed_downloaded(database, candidate_id)
+    set_metadata(database, candidate_id, Title="书名", Category="同人志")
+    asyncio.run(
+        database.save_archive_settings(
+            {"library_template": "{category}/{title}"}
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    view = page.context["work"]["archive_path"]
+    assert (view["directory"], view["filename"]) == ("同人志", "书名")
+    assert 'value="同人志"' in page.text
+    assert 'value="书名"' in page.text
+
+
+def test_a_packed_work_prefills_where_the_file_is_not_where_a_rule_would_put_it(
+    tmp_path: Path,
+) -> None:
+    """已归档成功 shows the saved path -- the box is a look, not a decision.
+
+    Prefilling the recomputed path here would tell the operator the book had
+    moved when it had not, and 保存归档路径 would then move it for real.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    seed_downloaded(database, candidate_id)
+    set_metadata(database, candidate_id, Title="书名", Category="同人志")
+    asyncio.run(
+        database.save_archive_settings(
+            {"library_template": "{category}/{title}"}
+        )
+    )
+    pack_id = insert_job(
+        database,
+        candidate_id,
+        state=CONVERSION_STATE_COMPLETED,
+        provider=PROVIDER_CONVERSION,
+        idempotency_key=f"convert:{candidate_id}",
+    )
+    insert_artifact(
+        database,
+        pack_id,
+        artifact_type="CBZ",
+        path="/library/旧/书名.cbz",
+        relative_path="旧/书名.cbz",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    view = page.context["work"]["archive_path"]
+    assert (view["directory"], view["filename"]) == ("旧", "书名")
+
+
+def test_an_unarchived_work_keeps_a_path_the_operator_pinned(
+    tmp_path: Path,
+) -> None:
+    """The form must not show a path the next pack is not going to use.
+
+    A pin set before the first pack is where the book *will* land, so the
+    template's answer is the wrong half of the pair to show even though nothing
+    has been archived yet.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    seed_downloaded(database, candidate_id)
+    set_metadata(database, candidate_id, Title="书名", Category="同人志")
+    asyncio.run(
+        database.save_archive_settings(
+            {"library_template": "{category}/{title}"}
+        )
+    )
+    pin_archive_path(database, candidate_id, "亲手/书名.cbz", manual=True)
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    view = page.context["work"]["archive_path"]
+    assert (view["directory"], view["filename"]) == ("亲手", "书名")
+    assert view["is_manual"] is True
+
+# --- AI paths on the detail page (R29) ---------------------------------------
+
+
+def insert_ai_suggestion(
+    database: Database, candidate_id: int, relative_path: str
+) -> None:
+    """One cached model answer, written straight to the table.
+
+    The fingerprint is irrelevant to the badge -- that is the point of the
+    label, it is a comparison of two paths -- so the test does not compute one.
+    The freshness predicate has its own unit tests.
+    """
+    from pathlib import PurePosixPath
+
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "INSERT INTO ai_path_suggestions (candidate_id, fingerprint, "
+            "prompt_hash, relative_path, directory, filename, provider_id, "
+            "model_name, attempts) VALUES (?, 'fp', 'ph', ?, ?, ?, 1, 'm', 1)",
+            (
+                candidate_id,
+                relative_path,
+                str(PurePosixPath(relative_path).parent)
+                if len(PurePosixPath(relative_path).parts) > 1
+                else "",
+                PurePosixPath(relative_path).stem,
+            ),
+        )
+
+
+def packed_work(
+    database: Database, candidate_id: int, relative: str
+) -> None:
+    """A completed packaging job with its CBZ recorded at `relative`."""
+    seed_downloaded(database, candidate_id)
+    pack_id = insert_job(
+        database,
+        candidate_id,
+        state=CONVERSION_STATE_COMPLETED,
+        provider=PROVIDER_CONVERSION,
+        idempotency_key=f"convert:{candidate_id}",
+    )
+    insert_artifact(
+        database,
+        pack_id,
+        artifact_type="CBZ",
+        path=f"/library/{relative}",
+        relative_path=relative,
+    )
+
+
+class TestAiArchivePath:
+    def test_a_path_the_cache_owns_is_badged(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+        packed_work(database, candidate_id, "同人志/作者/作品.cbz")
+        insert_ai_suggestion(database, candidate_id, "同人志/作者/作品.cbz")
+
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            page = client.get(f"/works/{candidate_id}")
+
+        assert page.context["work"]["archive_path"]["is_ai"] is True
+        assert 'data-code="ai"' in page.text
+
+    def test_a_rename_takes_the_badge_off(self, tmp_path: Path) -> None:
+        """人工改名之后自然不再是 AI 路径 -- the label is a comparison."""
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+        packed_work(database, candidate_id, "同人志/作者/作品.cbz")
+        pin_archive_path(database, candidate_id, "亲手/名字.cbz", manual=True)
+        insert_ai_suggestion(database, candidate_id, "同人志/作者/作品.cbz")
+
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            page = client.get(f"/works/{candidate_id}")
+
+        assert page.context["work"]["archive_path"]["is_ai"] is False
+        assert 'data-code="ai"' not in page.text
+
+    def test_ai_mode_without_a_cache_does_not_show_the_template_answer(
+        self, tmp_path: Path
+    ) -> None:
+        """操作员侧不撒谎: no cache means no prefill, not the fallback template's
+        answer -- the packer has not committed to it and may not."""
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+        seed_downloaded(database, candidate_id)
+        set_metadata(database, candidate_id, Title="书名", Category="同人志")
+        asyncio.run(
+            database.save_archive_settings(
+                {"library_template": "{category}/{title}", "path_source": "ai"}
+            )
+        )
+
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            page = client.get(f"/works/{candidate_id}")
+
+        view = page.context["work"]["archive_path"]
+        assert view["relative_path"] is None
+        assert (view["directory"], view["filename"]) == ("", "")
+        # The archive-path inputs specifically: the metadata editor legitimately
+        # carries the same word in its own fields.
+        assert 'id="archive-directory"' in page.text
+        assert 'value="同人志"' not in page.text.split('id="archive-directory"')[1].split(">")[0]

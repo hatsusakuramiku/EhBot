@@ -55,6 +55,7 @@ def create_app(
     torrent_client_transport: httpx.AsyncBaseTransport | None = None,
     thumbnail_transport: httpx.AsyncBaseTransport | None = None,
     thumbnail_resolver=None,
+    ai_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
     # Idempotent, so an application built in a test suite does not reconfigure
@@ -88,6 +89,7 @@ def create_app(
             torrent_client_transport=torrent_client_transport,
             thumbnail_transport=thumbnail_transport,
             thumbnail_resolver=thumbnail_resolver,
+            ai_transport=ai_transport,
         ),
         root_path=app_settings.app_root_path,
     )

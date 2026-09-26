@@ -8,6 +8,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.ai.models import (
+    AiModelChainEntry,
+    AiPathSuggestion,
+    AiProvider,
+    AiProviderKey,
+    AiProviderModel,
+)
 from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
 from app.auto_approval.models import AutoApprovalRule
 from app.candidates.links import GALLERY_URL_PATTERN
@@ -27,6 +34,7 @@ from app.downloads.models import (
     DOWNLOAD_STATE_COMPLETED,
     PROVIDER_CONVERSION,
     DownloadedWork,
+    ReArchiveCandidate,
 )
 
 from app.review.models import (
@@ -151,7 +159,11 @@ _DOWNLOADED_SELECT = (
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     "c.thumb_url, dj.updated_at, "
-    "pin.relative_path AS pinned_path, pin.is_manual AS pinned_is_manual "
+    "pin.relative_path AS pinned_path, pin.is_manual AS pinned_is_manual, "
+    # The AI answer, joined so the badge is one column rather than a query per
+    # row. Joined on the candidate (its primary key) so it cannot multiply rows;
+    # a candidate with no suggestion simply gets NULL.
+    "sug.relative_path AS ai_relative_path "
     "FROM download_jobs dj "
     "JOIN candidates c ON c.id = dj.candidate_id "
     "LEFT JOIN artifacts arch "
@@ -160,7 +172,8 @@ _DOWNLOADED_SELECT = (
     "  ON pack.idempotency_key = 'convert:' || c.id "
     "LEFT JOIN artifacts cbz "
     "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ' "
-    "LEFT JOIN work_archive_paths pin ON pin.candidate_id = c.id"
+    "LEFT JOIN work_archive_paths pin ON pin.candidate_id = c.id "
+    "LEFT JOIN ai_path_suggestions sug ON sug.candidate_id = c.id"
 )
 
 
@@ -198,6 +211,98 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
         updated_at=str(row[19]) if row[19] is not None else "",
         pinned_path=text(20),
         pinned_is_manual=bool(row[21]) if row[21] is not None else False,
+        ai_relative_path=text(22),
+    )
+
+
+def _ai_provider_from_row(row: Sequence[object]) -> AiProvider:
+    """Map one `ai_providers` row onto its DTO."""
+
+    return AiProvider(
+        provider_id=int(row[0]),
+        name=str(row[1]),
+        code=str(row[2]),
+        base_url=str(row[3]),
+        timeout_seconds=int(row[4]),
+        max_retries=int(row[5]),
+        enabled=bool(row[6]),
+    )
+
+
+def _ai_key_from_row(row: Sequence[object]) -> AiProviderKey:
+    """Map one `ai_provider_keys` row onto its DTO (never the cipher)."""
+
+    return AiProviderKey(
+        key_id=int(row[0]),
+        provider_id=int(row[1]),
+        label=str(row[2] or ""),
+        enabled=bool(row[3]),
+        failures=int(row[4] or 0),
+        cooldown_until=(
+            str(row[5]) if row[5] is not None else None
+        ),
+        last_used_at=str(row[6]) if row[6] is not None else None,
+        created_at=str(row[7]),
+    )
+
+
+def _ai_model_from_row(row: Sequence[object]) -> AiProviderModel:
+    """Map one `ai_provider_models` row onto its DTO.
+
+    `last_verify_ok` stays tri-state: None (never tested) is not False (tested
+    and failed), and the settings page says the two differently.
+    """
+
+    return AiProviderModel(
+        model_id=int(row[0]),
+        provider_id=int(row[1]),
+        name=str(row[2]),
+        enabled=bool(row[3]),
+        last_verified_at=(
+            str(row[4]) if row[4] is not None else None
+        ),
+        last_verify_ok=(
+            None if row[5] is None else bool(row[5])
+        ),
+        last_verify_error=(
+            str(row[6]) if row[6] is not None else None
+        ),
+    )
+
+
+def _ai_path_suggestion(row: Sequence[object]) -> AiPathSuggestion:
+    """Map one `ai_path_suggestions` row onto its DTO."""
+
+    return AiPathSuggestion(
+        candidate_id=int(row[0]),
+        fingerprint=str(row[1]),
+        prompt_hash=str(row[2]),
+        relative_path=str(row[3]),
+        directory=str(row[4]),
+        filename=str(row[5]),
+        provider_id=int(row[6]) if row[6] is not None else None,
+        model_name=str(row[7]),
+        attempts=int(row[8]),
+        created_at=str(row[9]),
+        updated_at=str(row[10]),
+    )
+
+
+def _rearchive_candidate(row: Sequence[object]) -> ReArchiveCandidate:
+    """Map a `_list_rearchive_candidates_sync` row onto its DTO."""
+
+    def text(index: int) -> str | None:
+        value = row[index]
+        return str(value) if value is not None else None
+
+    return ReArchiveCandidate(
+        candidate_id=int(row[0]),
+        title=text(1),
+        pack_state=text(2),
+        cbz_path=text(3),
+        library_relative_path=text(4),
+        pinned_path=text(5),
+        pinned_is_manual=bool(row[6]) if row[6] is not None else False,
     )
 
 
@@ -1578,6 +1683,49 @@ class Database:
                 ),
             )
 
+    async def override_archive_path_pin(
+        self,
+        candidate_id: int,
+        relative_path: str,
+        *,
+        operator_name: str = "admin",
+    ) -> None:
+        """Record a computed path over one the operator typed.
+
+        The one caller is 强制重新归档, whose instruction is 「所有作品按当前
+        规则重算」 -- so the guard in `set_archive_path_pin`, which exists so a
+        *default* never overwrites a decision, is exactly what must not apply.
+        A named method rather than a `force=` flag on that one, because the
+        bypass has to be greppable: nothing else in this codebase should be able
+        to demote a manual pin, and a boolean argument is how that would happen by
+        accident.
+
+        `is_manual` is written as 0 on purpose: after the move the pin is a
+        computed path again, so the next template change may re-file the book.
+        """
+        await asyncio.to_thread(
+            self._override_archive_path_pin_sync,
+            candidate_id,
+            relative_path,
+            operator_name,
+        )
+
+    def _override_archive_path_pin_sync(
+        self, candidate_id: int, relative_path: str, operator_name: str
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO work_archive_paths "
+                "(candidate_id, relative_path, is_manual, operator_name) "
+                "VALUES (?, ?, 0, ?) "
+                "ON CONFLICT(candidate_id) DO UPDATE SET "
+                "  relative_path = excluded.relative_path, "
+                "  is_manual = 0, "
+                "  operator_name = excluded.operator_name, "
+                "  updated_at = CURRENT_TIMESTAMP",
+                (candidate_id, relative_path, operator_name),
+            )
+
     async def clear_archive_path_pin(self, candidate_id: int) -> None:
         """Drop the pin, so the layout template decides again."""
         await asyncio.to_thread(self._clear_archive_path_pin_sync, candidate_id)
@@ -1651,6 +1799,51 @@ class Database:
                 (PROVIDER_CONVERSION, candidate_id),
             ).fetchone()
         return _downloaded_work(row) if row is not None else None
+
+    async def list_rearchive_candidates(self) -> list[ReArchiveCandidate]:
+        """Every work the re-archive sweep may act on: one row per candidate.
+
+        The universe is 「已下载内容」 -- a completed download that produced an
+        ARCHIVE artifact -- because that is exactly what packaging can publish.
+        Written as `EXISTS` over the candidate rather than over the job list so a
+        candidate whose several sources all completed appears once: the sweep acts
+        on *books*, and two rows for one book would be two moves of one file.
+
+        The packing task is joined by `idempotency_key`, the same key
+        `_DOWNLOADED_SELECT` uses and for the same reason -- it is what
+        `ConversionService` guarantees is unique per work. The pin is joined on
+        the candidate because that is where the decision lives now.
+
+        Read in one query rather than by paging `list_downloaded_works`: this is a
+        whole-library pass, and the paged query would either need a second
+        page-size concept or a `.limit` nobody would maintain.
+        """
+        return await asyncio.to_thread(self._list_rearchive_candidates_sync)
+
+    def _list_rearchive_candidates_sync(self) -> list[ReArchiveCandidate]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT c.id, "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "pack.state, cbz.path, cbz.library_relative_path, "
+                "pin.relative_path, pin.is_manual "
+                "FROM candidates c "
+                "LEFT JOIN download_jobs pack "
+                "  ON pack.idempotency_key = 'convert:' || c.id "
+                "LEFT JOIN artifacts cbz "
+                "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ' "
+                "LEFT JOIN work_archive_paths pin ON pin.candidate_id = c.id "
+                "WHERE EXISTS (SELECT 1 FROM download_jobs dj "
+                "  JOIN artifacts arch ON arch.job_id = dj.id "
+                "    AND arch.artifact_type = 'ARCHIVE' "
+                "  WHERE dj.candidate_id = c.id AND dj.state = ? "
+                "    AND dj.provider <> ?) "
+                "ORDER BY c.id",
+                (DOWNLOAD_STATE_COMPLETED, PROVIDER_CONVERSION),
+            ).fetchall()
+        return [_rearchive_candidate(row) for row in rows]
 
     async def candidate_facets(
         self, *, statuses: Sequence[str] | None = None
@@ -3070,6 +3263,503 @@ class Database:
                 )
 
 
+    # -------------------------------------------------------------- AI providers
+
+    async def list_ai_providers(
+        self, *, enabled_only: bool = False
+    ) -> tuple[AiProvider, ...]:
+        return await asyncio.to_thread(self._list_ai_providers_sync, enabled_only)
+
+    def _list_ai_providers_sync(
+        self, enabled_only: bool
+    ) -> tuple[AiProvider, ...]:
+        where_sql = "WHERE enabled = 1 " if enabled_only else ""
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, name, code, base_url, timeout_seconds, "
+                "max_retries, enabled FROM ai_providers "
+                + where_sql
+                + "ORDER BY name, id"
+            ).fetchall()
+        return tuple(_ai_provider_from_row(row) for row in rows)
+
+    async def get_ai_provider(self, provider_id: int) -> AiProvider | None:
+        return await asyncio.to_thread(self._get_ai_provider_sync, provider_id)
+
+    def _get_ai_provider_sync(self, provider_id: int) -> AiProvider | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id, name, code, base_url, timeout_seconds, "
+                "max_retries, enabled FROM ai_providers WHERE id = ?",
+                (provider_id,),
+            ).fetchone()
+        return _ai_provider_from_row(row) if row is not None else None
+
+    async def save_ai_provider(
+        self,
+        *,
+        provider_id: int | None,
+        name: str,
+        code: str,
+        base_url: str,
+        timeout_seconds: int,
+        max_retries: int,
+        enabled: bool,
+    ) -> AiProvider:
+        return await asyncio.to_thread(
+            self._save_ai_provider_sync,
+            provider_id,
+            name,
+            code,
+            base_url,
+            timeout_seconds,
+            max_retries,
+            enabled,
+        )
+
+    def _save_ai_provider_sync(
+        self,
+        provider_id: int | None,
+        name: str,
+        code: str,
+        base_url: str,
+        timeout_seconds: int,
+        max_retries: int,
+        enabled: bool,
+    ) -> AiProvider:
+        """Insert or update one provider, keyed by id when there is one.
+
+        A duplicate *name* is a `LookupError` rather than a second row: two
+        providers an operator cannot tell apart in a dropdown is a
+        configuration bug, not a feature.
+        """
+        with self.connection() as connection:
+            try:
+                if provider_id is None:
+                    cursor = connection.execute(
+                        "INSERT INTO ai_providers (name, code, base_url, "
+                        "timeout_seconds, max_retries, enabled) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            name,
+                            code,
+                            base_url,
+                            timeout_seconds,
+                            max_retries,
+                            1 if enabled else 0,
+                        ),
+                    )
+                    provider_id = int(cursor.lastrowid)
+                else:
+                    cursor = connection.execute(
+                        "UPDATE ai_providers SET name = ?, code = ?, "
+                        "base_url = ?, timeout_seconds = ?, max_retries = ?, "
+                        "enabled = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = ?",
+                        (
+                            name,
+                            code,
+                            base_url,
+                            timeout_seconds,
+                            max_retries,
+                            1 if enabled else 0,
+                            provider_id,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise LookupError(
+                            f"AI provider {provider_id} does not exist"
+                        )
+            except sqlite3.IntegrityError as exc:
+                raise LookupError(f"AI provider name {name!r} is taken") from exc
+            row = connection.execute(
+                "SELECT id, name, code, base_url, timeout_seconds, "
+                "max_retries, enabled FROM ai_providers WHERE id = ?",
+                (provider_id,),
+            ).fetchone()
+        return _ai_provider_from_row(row)
+
+    async def delete_ai_provider(self, provider_id: int) -> None:
+        await asyncio.to_thread(self._delete_ai_provider_sync, provider_id)
+
+    def _delete_ai_provider_sync(self, provider_id: int) -> None:
+        """Remove a provider, its keys and its models (and their chain slots).
+
+        The children go first, in dependency order. `PRAGMA foreign_keys` is on
+        so the cascades would do it, but deleting explicitly keeps the intent
+        readable and does not silently change meaning if that pragma is ever
+        dropped for a bulk import.
+        """
+        with self.connection() as connection:
+            connection.execute(
+                "DELETE FROM ai_model_chain WHERE provider_model_id IN "
+                "(SELECT id FROM ai_provider_models WHERE provider_id = ?)",
+                (provider_id,),
+            )
+            connection.execute(
+                "DELETE FROM ai_provider_models WHERE provider_id = ?",
+                (provider_id,),
+            )
+            connection.execute(
+                "DELETE FROM ai_provider_keys WHERE provider_id = ?",
+                (provider_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM ai_providers WHERE id = ?", (provider_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider {provider_id} does not exist")
+
+    async def list_ai_provider_keys(
+        self, provider_id: int, *, usable_only: bool = False
+    ) -> tuple[AiProviderKey, ...]:
+        return await asyncio.to_thread(
+            self._list_ai_provider_keys_sync, provider_id, usable_only
+        )
+
+    def _list_ai_provider_keys_sync(
+        self, provider_id: int, usable_only: bool
+    ) -> tuple[AiProviderKey, ...]:
+        where_sql = (
+            "AND enabled = 1 "
+            "AND (cooldown_until IS NULL "
+            "     OR cooldown_until <= CURRENT_TIMESTAMP) "
+            if usable_only
+            else ""
+        )
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, provider_id, label, enabled, failures, "
+                "cooldown_until, last_used_at, created_at "
+                "FROM ai_provider_keys WHERE provider_id = ? "
+                + where_sql
+                + "ORDER BY id",
+                (provider_id,),
+            ).fetchall()
+        return tuple(_ai_key_from_row(row) for row in rows)
+
+    async def ai_provider_key_cipher(self, key_id: int) -> str | None:
+        """The encrypted envelope for one key, or None once it is gone.
+
+        The only read that returns a secret, and it returns ciphertext: the
+        caller holds the master key and decrypts for one request. Nothing here
+        logs the value.
+        """
+        return await asyncio.to_thread(self._ai_provider_key_cipher_sync, key_id)
+
+    def _ai_provider_key_cipher_sync(self, key_id: int) -> str | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT cipher FROM ai_provider_keys WHERE id = ?", (key_id,)
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    async def add_ai_provider_key(
+        self, provider_id: int, *, label: str, cipher: str
+    ) -> AiProviderKey:
+        return await asyncio.to_thread(
+            self._add_ai_provider_key_sync, provider_id, label, cipher
+        )
+
+    def _add_ai_provider_key_sync(
+        self, provider_id: int, label: str, cipher: str
+    ) -> AiProviderKey:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO ai_provider_keys (provider_id, label, cipher) "
+                "VALUES (?, ?, ?)",
+                (provider_id, label, cipher),
+            )
+            row = connection.execute(
+                "SELECT id, provider_id, label, enabled, failures, "
+                "cooldown_until, last_used_at, created_at "
+                "FROM ai_provider_keys WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return _ai_key_from_row(row)
+
+    async def set_ai_provider_key_enabled(
+        self, key_id: int, enabled: bool
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_ai_provider_key_enabled_sync, key_id, enabled
+        )
+
+    def _set_ai_provider_key_enabled_sync(
+        self, key_id: int, enabled: bool
+    ) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_provider_keys SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, key_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider key {key_id} does not exist")
+
+    async def delete_ai_provider_key(self, key_id: int) -> None:
+        await asyncio.to_thread(self._delete_ai_provider_key_sync, key_id)
+
+    def _delete_ai_provider_key_sync(self, key_id: int) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM ai_provider_keys WHERE id = ?", (key_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider key {key_id} does not exist")
+
+    async def record_ai_key_failure(
+        self, key_id: int, *, cooldown_minutes: int
+    ) -> None:
+        await asyncio.to_thread(
+            self._record_ai_key_failure_sync, key_id, cooldown_minutes
+        )
+
+    def _record_ai_key_failure_sync(
+        self, key_id: int, cooldown_minutes: int
+    ) -> None:
+        """Count a refusal and park this key for a while.
+
+        The cooldown is computed by SQLite so every writer shares one clock --
+        the process may run in a container whose clock differs from the
+        operator's, and the comparison in `usable_only` is against the
+        database's own `CURRENT_TIMESTAMP`.
+        """
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE ai_provider_keys SET failures = failures + 1, "
+                "cooldown_until = datetime('now', ?), "
+                "last_used_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (f"+{max(0, int(cooldown_minutes))} minutes", key_id),
+            )
+
+    async def mark_ai_key_used(self, key_id: int) -> None:
+        await asyncio.to_thread(self._mark_ai_key_used_sync, key_id)
+
+    def _mark_ai_key_used_sync(self, key_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE ai_provider_keys SET last_used_at = CURRENT_TIMESTAMP, "
+                "cooldown_until = NULL WHERE id = ?",
+                (key_id,),
+            )
+
+    async def list_ai_provider_models(
+        self, provider_id: int
+    ) -> tuple[AiProviderModel, ...]:
+        return await asyncio.to_thread(
+            self._list_ai_provider_models_sync, provider_id
+        )
+
+    def _list_ai_provider_models_sync(
+        self, provider_id: int
+    ) -> tuple[AiProviderModel, ...]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, provider_id, name, enabled, last_verified_at, "
+                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                "WHERE provider_id = ? ORDER BY name, id",
+                (provider_id,),
+            ).fetchall()
+        return tuple(_ai_model_from_row(row) for row in rows)
+
+    async def get_ai_provider_model(
+        self, model_id: int
+    ) -> AiProviderModel | None:
+        return await asyncio.to_thread(
+            self._get_ai_provider_model_sync, model_id
+        )
+
+    def _get_ai_provider_model_sync(
+        self, model_id: int
+    ) -> AiProviderModel | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id, provider_id, name, enabled, last_verified_at, "
+                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                "WHERE id = ?",
+                (model_id,),
+            ).fetchone()
+        return _ai_model_from_row(row) if row is not None else None
+
+    async def add_ai_provider_model(
+        self, provider_id: int, name: str
+    ) -> AiProviderModel:
+        return await asyncio.to_thread(
+            self._add_ai_provider_model_sync, provider_id, name
+        )
+
+    def _add_ai_provider_model_sync(
+        self, provider_id: int, name: str
+    ) -> AiProviderModel:
+        """Re-adding a known model name returns the existing row.
+
+        An operator who types a model twice is not making a second model; and
+        the verification already on that row must survive, so this is an
+        upsert-on-identity rather than a duplicate error.
+        """
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO ai_provider_models (provider_id, name) "
+                "VALUES (?, ?) ON CONFLICT(provider_id, name) DO NOTHING",
+                (provider_id, name),
+            )
+            row = connection.execute(
+                "SELECT id, provider_id, name, enabled, last_verified_at, "
+                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                "WHERE provider_id = ? AND name = ?",
+                (provider_id, name),
+            ).fetchone()
+        return _ai_model_from_row(row)
+
+    async def set_ai_provider_model_enabled(
+        self, model_id: int, enabled: bool
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_ai_provider_model_enabled_sync, model_id, enabled
+        )
+
+    def _set_ai_provider_model_enabled_sync(
+        self, model_id: int, enabled: bool
+    ) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_provider_models SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, model_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider model {model_id} does not exist")
+
+    async def delete_ai_provider_model(self, model_id: int) -> None:
+        await asyncio.to_thread(self._delete_ai_provider_model_sync, model_id)
+
+    def _delete_ai_provider_model_sync(self, model_id: int) -> None:
+        """Delete a model and whatever chain slot it occupies.
+
+        Leaving the slot behind would shift nothing (positions are explicit) but
+        would leave a hole the next save would have to reason about; deleting
+        it makes the chain shorter, which is the honest result of removing a
+        model an operator no longer wants tried.
+        """
+        with self.connection() as connection:
+            connection.execute(
+                "DELETE FROM ai_model_chain WHERE provider_model_id = ?",
+                (model_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM ai_provider_models WHERE id = ?", (model_id,)
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(
+                    f"AI provider model {model_id} does not exist"
+                )
+
+    async def mark_ai_model_verified(
+        self, model_id: int, *, ok: bool, error: str | None
+    ) -> None:
+        await asyncio.to_thread(
+            self._mark_ai_model_verified_sync, model_id, ok, error
+        )
+
+    def _mark_ai_model_verified_sync(
+        self, model_id: int, ok: bool, error: str | None
+    ) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_provider_models SET last_verified_at = "
+                "CURRENT_TIMESTAMP, last_verify_ok = ?, last_verify_error = ? "
+                "WHERE id = ?",
+                (1 if ok else 0, error, model_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(
+                    f"AI provider model {model_id} does not exist"
+                )
+
+    async def list_ai_model_chain(self) -> tuple[AiModelChainEntry, ...]:
+        return await asyncio.to_thread(self._list_ai_model_chain_sync)
+
+    def _list_ai_model_chain_sync(self) -> tuple[AiModelChainEntry, ...]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT ch.position, "
+                "p.id, p.name, p.code, p.base_url, p.timeout_seconds, "
+                "p.max_retries, p.enabled, "
+                "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
+                "m.last_verify_ok, m.last_verify_error "
+                "FROM ai_model_chain ch "
+                "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
+                "JOIN ai_providers p ON p.id = m.provider_id "
+                "ORDER BY ch.position"
+            ).fetchall()
+        return tuple(
+            AiModelChainEntry(
+                position=int(row[0]),
+                provider=_ai_provider_from_row(row[1:8]),
+                model=_ai_model_from_row(row[8:15]),
+            )
+            for row in rows
+        )
+
+    async def save_ai_model_chain(
+        self, model_ids: Sequence[int]
+    ) -> tuple[AiModelChainEntry, ...]:
+        return await asyncio.to_thread(
+            self._save_ai_model_chain_sync, tuple(model_ids)
+        )
+
+    def _save_ai_model_chain_sync(
+        self, model_ids: tuple[int, ...]
+    ) -> tuple[AiModelChainEntry, ...]:
+        """Replace the whole chain with `model_ids`, in that order.
+
+        Whole-chain replacement rather than add/remove/reorder verbs: the
+        order *is* the configuration (position 0 is the primary), and three
+        verbs would each have to renumber the rest anyway. One transaction
+        keeps a failed save from leaving the primary missing.
+        """
+        with self.connection() as connection:
+            if model_ids:
+                placeholders = ", ".join("?" for _ in model_ids)
+                found = {
+                    int(row[0])
+                    for row in connection.execute(
+                        f"SELECT id FROM ai_provider_models "
+                        f"WHERE id IN ({placeholders})",
+                        model_ids,
+                    )
+                }
+                missing = [mid for mid in model_ids if mid not in found]
+                if missing:
+                    raise LookupError(
+                        f"AI provider model {missing[0]} does not exist"
+                    )
+            connection.execute("DELETE FROM ai_model_chain")
+            for position, model_id in enumerate(model_ids):
+                connection.execute(
+                    "INSERT INTO ai_model_chain (position, provider_model_id) "
+                    "VALUES (?, ?)",
+                    (position, model_id),
+                )
+            rows = connection.execute(
+                "SELECT ch.position, "
+                "p.id, p.name, p.code, p.base_url, p.timeout_seconds, "
+                "p.max_retries, p.enabled, "
+                "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
+                "m.last_verify_ok, m.last_verify_error "
+                "FROM ai_model_chain ch "
+                "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
+                "JOIN ai_providers p ON p.id = m.provider_id "
+                "ORDER BY ch.position"
+            ).fetchall()
+        return tuple(
+            AiModelChainEntry(
+                position=int(row[0]),
+                provider=_ai_provider_from_row(row[1:8]),
+                model=_ai_model_from_row(row[8:15]),
+            )
+            for row in rows
+        )
+
     @staticmethod
     def _safe_json(value: str | None) -> dict:
         if not value:
@@ -3079,3 +3769,107 @@ class Database:
         except (TypeError, ValueError):
             return {}
         return decoded if isinstance(decoded, dict) else {}
+
+    # ------------------------------------------------------------------
+    #  AI path suggestions (the answer cache)
+    # ------------------------------------------------------------------
+    #: One row per candidate; the row is *semantics*, not caching. The model is
+    #: not deterministic, so the packer, the detail page and a later re-archive
+    #: sweep have to read the same recorded answer -- and 「路径有变动」 is only
+    #: a meaningful test against something that was recorded earlier.
+    _AI_SUGGESTION_COLUMNS = (
+        "candidate_id, fingerprint, prompt_hash, relative_path, directory, "
+        "filename, provider_id, model_name, attempts, created_at, updated_at"
+    )
+
+    async def get_ai_path_suggestion(
+        self, candidate_id: int
+    ) -> AiPathSuggestion | None:
+        return await asyncio.to_thread(
+            self._get_ai_path_suggestion_sync, candidate_id
+        )
+
+    def _get_ai_path_suggestion_sync(
+        self, candidate_id: int
+    ) -> AiPathSuggestion | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                f"SELECT {self._AI_SUGGESTION_COLUMNS} "
+                "FROM ai_path_suggestions WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        return _ai_path_suggestion(row) if row is not None else None
+
+    async def save_ai_path_suggestion(
+        self, suggestion: AiPathSuggestion
+    ) -> None:
+        """Record one answer, replacing whatever this book had before.
+
+        Replaced rather than appended: the table answers 「这本书现在是什么
+        答案」 and a history of every prompt revision would make the 需干预 view
+        and the predicate both ask 「哪一行」 before they could be answered.
+        """
+        await asyncio.to_thread(
+            self._save_ai_path_suggestion_sync, suggestion
+        )
+
+    def _save_ai_path_suggestion_sync(
+        self, suggestion: AiPathSuggestion
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO ai_path_suggestions "
+                "(candidate_id, fingerprint, prompt_hash, relative_path, "
+                " directory, filename, provider_id, model_name, attempts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(candidate_id) DO UPDATE SET "
+                "  fingerprint = excluded.fingerprint, "
+                "  prompt_hash = excluded.prompt_hash, "
+                "  relative_path = excluded.relative_path, "
+                "  directory = excluded.directory, "
+                "  filename = excluded.filename, "
+                "  provider_id = excluded.provider_id, "
+                "  model_name = excluded.model_name, "
+                "  attempts = excluded.attempts, "
+                # `created_at` is left alone on purpose: it marks when this book
+                # first got an answer, which is what a 「这本书什么时候被 AI 定
+                # 过位」 question reads.
+                "  updated_at = CURRENT_TIMESTAMP",
+                (
+                    suggestion.candidate_id,
+                    suggestion.fingerprint,
+                    suggestion.prompt_hash,
+                    suggestion.relative_path,
+                    suggestion.directory,
+                    suggestion.filename,
+                    suggestion.provider_id,
+                    suggestion.model_name,
+                    suggestion.attempts,
+                ),
+            )
+
+    async def clear_ai_path_suggestions(self) -> int:
+        """Drop every cached answer and report how many there were.
+
+        The whole-library form, because a fingerprint change invalidates the
+        library as a whole: 「改 prompt = 全库需要新答案」 means the only
+        coherent cache-clearing granularity is all of it. Returns the count so
+        the page can say what it did rather than 「已完成」.
+        """
+        return await asyncio.to_thread(self._clear_ai_path_suggestions_sync)
+
+    def _clear_ai_path_suggestions_sync(self) -> int:
+        with self.connection() as connection:
+            before = connection.total_changes
+            connection.execute("DELETE FROM ai_path_suggestions")
+            return connection.total_changes - before
+
+    async def ai_path_suggestion_count(self) -> int:
+        return await asyncio.to_thread(self._ai_path_suggestion_count_sync)
+
+    def _ai_path_suggestion_count_sync(self) -> int:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM ai_path_suggestions"
+            ).fetchone()
+        return int(row[0]) if row is not None else 0

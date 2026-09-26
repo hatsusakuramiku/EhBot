@@ -252,7 +252,10 @@
   <aside class="ui-detail-side">
     {% if work.archive or work.actions.edit_archive_path %}
     <section class="ui-panel">
-      <h2 class="ui-section-title">归档</h2>
+      {#- The `AI 生成` chip answers 「这条路径是谁定的」 at a glance. It is a pure
+          read of the answer cache, so a rename by hand turns it off by itself
+          and the template never decides the fact. -#}
+      <h2 class="ui-section-title">归档{% if work.archive_path.is_ai %} {{ ui.badge_for("ai") }}{% endif %}</h2>
       {#- The path is shown because it is what the operator needs to find the
           file, and this page is behind the session like every other. -#}
       {% if work.archive %}

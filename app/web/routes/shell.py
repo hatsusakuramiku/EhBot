@@ -10,7 +10,7 @@ Why the tree has two levels
 ---------------------------
 The target information architecture is four flat domains, but three of them own
 several pages an operator switches between constantly -- the six candidate tabs,
-the three activity queues, the seven settings sections -- and a flat nav would
+the three activity queues, the eight settings sections -- and a flat nav would
 put those behind a page they had to load first. So a domain carries its sections
 as ``children``, the sidebar renders both levels, and only a leaf ever claims
 ``aria-current="page"``.
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from fastapi import Request
 
 from app.api.status import (
+    SETTINGS_AI,
     SETTINGS_ARCHIVE,
     SETTINGS_AUTO_APPROVAL,
     SETTINGS_CONNECTIONS,
@@ -326,6 +327,13 @@ NAV_ITEMS: tuple[NavItem, ...] = (
                 "路径",
                 f"/settings/{SETTINGS_PATHS}",
                 f"/settings/{SETTINGS_PATHS}",
+            ),
+            NavItem(
+                "ai",
+                settings_section_view(SETTINGS_AI).label,
+                "AI",
+                f"/settings/{SETTINGS_AI}",
+                f"/settings/{SETTINGS_AI}",
             ),
             NavItem(
                 "passwords",

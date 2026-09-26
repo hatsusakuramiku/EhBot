@@ -1279,6 +1279,11 @@ canvas {
    something, and the list is what they scroll to check afterwards. */
 .ui-settings-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--s-6); align-items: start; margin-top: var(--s-5); }
 .ui-settings-col { display: grid; gap: var(--s-5); min-width: 0; }
+/* AI mode is on: the template/rule side of the paths tab still renders (an
+   operator may be preparing the fallback) but is visibly not the live setting.
+   Dimmed rather than disabled -- a control that silently swallows an edit is
+   worse than one that shows it is not in effect. */
+.ui-settings-col[data-ai-inactive] { opacity: .55; }
 
 @media (max-width: 1024px) {
   .ui-settings-layout { grid-template-columns: minmax(0, 1fr); }

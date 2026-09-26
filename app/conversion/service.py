@@ -15,7 +15,18 @@ from app.archive.errors import (
 )
 from app.archive.processor import ArchiveProcessor
 from app.archive.quality import quality_note
-from app.archive.service import ArchiveSettingsService, TITLE_SOURCE_JAPANESE
+from app.ai.errors import (
+    AI_CHAIN_EMPTY,
+    AI_PATH_MISSING,
+    AI_PATH_UNAVAILABLE,
+    AiError,
+)
+from app.ai.paths import AiPathService
+from app.archive.service import (
+    PATH_SOURCE_AI,
+    ArchiveSettingsService,
+    TITLE_SOURCE_JAPANESE,
+)
 from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
 from app.conversion.naming import (
@@ -146,6 +157,8 @@ class ConversionService:
         data_path: Path | None = None,
         notify: Callable[..., object] | None = None,
         metadata_enricher: Callable[[int], object] | None = None,
+        ai_service: object | None = None,
+        refile: Callable[[int, str], object] | None = None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -162,6 +175,22 @@ class ConversionService:
         # to enrich from, and because most tests construct this service directly
         # and do not care where metadata came from.
         self._metadata_enricher = metadata_enricher
+        # Optional in the same spirit, and for one more reason: AI mode is off
+        # by default and needs a provider before it means anything, so a service
+        # built without one still has to serve every template-mode deployment.
+        # When it is absent and the operator has switched AI mode on, the AI
+        # branch refuses with 「没有配置」 rather than silently rendering a
+        # template path that nobody chose.
+        self._ai_paths = (
+            AiPathService(database, ai_service, self._settings)
+            if ai_service is not None
+            else None
+        )
+        # The move half of a 「重新计算路径」 job. Injected for the same reason the
+        # metadata enricher is: this service must not import the archive service
+        # (the two are constructed in dependency order in `wiring`), and a test
+        # of the job needs to watch the move without a filesystem.
+        self._refile = refile
 
     async def _effective_paths(self) -> tuple[Path, Path]:
         """Read the directories per job so an operator change applies at once.
@@ -174,12 +203,157 @@ class ConversionService:
         work = await self._settings.work_path()
         return (library or self._library_path, work or self._work_path)
 
+    async def path_source(self) -> str:
+        """Which layer decides a book's path right now.
+
+        Exposed so a caller that manages pins itself -- the batch repack -- can
+        branch without reading settings, and so a page can label a form with the
+        mode it will actually use.
+        """
+        return await self._settings.path_source()
+
+    async def ai_sweep_settings(self) -> dict[str, object]:
+        """The whole-library re-archive knobs, read in one place.
+
+        Returned as a plain dict rather than four accessors because the sweep
+        reads all four together and nothing else reads any of them: a caller that
+        wants one of these wants the group.
+        """
+        return {
+            #: How many works the sweep prepares before moving on to the next set.
+            "batch_size": await self._settings.ai_batch_size(),
+            #: How many of those may be enriching their metadata at once.
+            "concurrency": await self._settings.ai_concurrency(),
+            #: Whether 「已按当前提示词定好路径」 is in the default scope.
+            "include_current": await self._settings.ai_default_include_current(),
+        }
+
+    async def current_ai_path(
+        self, candidate_id: int, metadata
+    ) -> PurePosixPath | None:
+        """The cached AI path, if it was produced from today's inputs.
+
+        Cache only, by construction: no model is asked, so this is safe to call
+        from a page render, a batch plan or a sweep. None means 「没有 / 已过期」,
+        which callers report rather than paper over -- see `_ai_relative_path`.
+        """
+        if self._ai_paths is None:
+            return None
+        cached = await self._ai_paths.current(candidate_id, metadata)
+        return PurePosixPath(cached.relative_path) if cached is not None else None
+
+    async def _ai_relative_path(
+        self,
+        candidate_id: int,
+        metadata,
+        *,
+        allow_model: bool,
+        refresh: bool = False,
+    ) -> PurePosixPath | None:
+        """The AI's answer for this book, or None to let the rules answer.
+
+        One implementation for both callers, which is the point of the proposal's
+        §3 chain: `_library_target` (inside a job) and `planned_library_path`
+        (answering an operator) differ only in `allow_model`, so they cannot
+        start disagreeing about what the model said.
+
+        * `allow_model=True` -- a packing job, the only place a request is ever
+          made. Cache first, model second, cache written on success.
+        * `allow_model=False` -- an operator is waiting. Cache only. Nothing is
+          invented and nothing is fetched: a missing or stale answer raises
+          `AI_PATH_MISSING`, which the detail page turns into 「不预填」 and the
+          re-archive plan turns into 「需要新答案」.
+
+        Returns None only when the operator turned on 「AI 不可用时回退到规则匹配」
+        and the model chain failed; the caller then renders the template. Without
+        that switch the failure is raised as `AI_PATH_UNAVAILABLE`, which parks
+        the job in 需干预 carrying the reason.
+
+        `refresh` asks the model even when the cache would answer, and is only
+        ever set from a 强制 sweep or a 「重新计算路径」 job -- see
+        `AiPathService.resolve`.
+        """
+        if not allow_model:
+            cached = await self.current_ai_path(candidate_id, metadata)
+            if cached is None:
+                raise LibraryPathError(
+                    AI_PATH_MISSING,
+                    "这本书还没有 AI 路径记录，打包时会向模型询问",
+                )
+            return cached
+        try:
+            if self._ai_paths is None:
+                raise AiError(
+                    AI_CHAIN_EMPTY,
+                    "还没有配置 AI 供应商，请到「设置 → AI 供应商」添加并验证模型",
+                )
+            outcome = await self._ai_paths.resolve(
+                candidate_id, metadata, refresh=refresh
+            )
+        except AiError as exc:
+            if self._ai_paths is not None and await self._ai_paths.fallback_to_rules():
+                logging.getLogger(__name__).info(
+                    "ai_path_fallback",
+                    extra={
+                        "candidate_id": candidate_id,
+                        "error_code": exc.code,
+                        "error_message": exc.public_message,
+                    },
+                )
+                return None
+            message = (
+                exc.public_message
+                if exc.code == AI_PATH_UNAVAILABLE
+                else f"AI 路径不可用：{exc.public_message}"
+            )
+            raise LibraryPathError(AI_PATH_UNAVAILABLE, message) from exc
+        return PurePosixPath(outcome.suggestion.relative_path)
+
+    async def ai_path_for_refile(
+        self, candidate_id: int, *, refresh: bool = True
+    ) -> PurePosixPath:
+        """The path a 「重新计算路径」 job should move this book to.
+
+        Deliberately *not* `_library_target`: that one is right for a pack, where
+        a pin is the operator's decision about where the file must land, but this
+        job exists precisely because the recorded path is about to be replaced.
+        Reading the pin here would answer with the path the book is already on
+        and the job would move nothing.
+
+        So the order is 「AI, then the fallback template only when the operator
+        asked for it」 -- the same decision `_library_target` makes, minus the
+        pin. The move itself is handed to the archive service, which re-validates
+        the path and records it as a computed (non-manual) decision.
+
+        `refresh` comes from the job: a book whose cache is simply missing or
+        stale does not need it (the fingerprint check already sends it to the
+        model), while 强制 and 「重新起个名字」 do.
+
+        Raises `LibraryPathError` when there is no usable path at all, which the
+        job turns into 待定归档路径 with the reason on it.
+        """
+        metadata = await self.metadata_for(candidate_id)
+        title = self.title_of(metadata, candidate_id)
+        if await self._settings.path_source() != PATH_SOURCE_AI:
+            # Only reachable if the operator switched back to template mode
+            # between planning the sweep and running the job. Rendering the
+            # template is the honest answer: it is what the current setting says.
+            return await self.planned_library_path(candidate_id, title, metadata)
+        from_ai = await self._ai_relative_path(
+            candidate_id, metadata, allow_model=True, refresh=refresh
+        )
+        if from_ai is not None:
+            return from_ai
+        return await self.planned_library_path(candidate_id, title, metadata)
+
     async def _library_target(
         self,
         candidate_id: int,
         library_path: Path,
         metadata,
         title: str,
+        *,
+        refresh_ai_path: bool = False,
     ) -> Path:
         """Where this book's CBZ goes, per the operator's layout template.
 
@@ -230,6 +404,25 @@ class ConversionService:
             return await asyncio.to_thread(
                 unique_library_target, library_path / pinned, reserved=reserved
             )
+        # AI mode replaces the template entirely (proposal §2): the two answer
+        # one question and 「两个都开」 would be a third rule engine. The pinned
+        # path above still wins -- 「手动指定优先」 is older than this feature and
+        # this branch does not touch it.
+        if await self._settings.path_source() == PATH_SOURCE_AI:
+            from_ai = await self._ai_relative_path(
+                candidate_id,
+                metadata,
+                allow_model=True,
+                refresh=refresh_ai_path,
+            )
+            if from_ai is not None:
+                return await asyncio.to_thread(
+                    unique_library_target,
+                    library_path / from_ai,
+                    reserved=reserved,
+                )
+            # Fallback to the rules only happens when the operator turned the
+            # switch on (proposal §7); the AI helper logs `ai_path_fallback`.
         # A routing rule decides the template when its condition matches; the
         # global template is the "no rule hit" default. Logged so an operator
         # who sees an unexpected layout can trace which rule chose it.
@@ -285,6 +478,18 @@ class ConversionService:
 
         Raises `LibraryPathError`, which the batch turns into a per-work reason.
         """
+        if await self._settings.path_source() == PATH_SOURCE_AI:
+            # Cache only, never the model: this runs while an operator waits, and
+            # an answer the packer has not committed to must not be shown as one
+            # (proposal §7, 「操作员侧不撒谎」). No cache yet is a normal state for
+            # a book that has never been packed -- it is reported as
+            # `AI_PATH_MISSING`, which the callers turn into 「不预填」 or
+            # 「需要新答案」 rather than into a wrong path.
+            from_ai = await self._ai_relative_path(
+                candidate_id, metadata, allow_model=False
+            )
+            if from_ai is not None:
+                return from_ai
         template, _matched = await self._settings.library_template_for(
             candidate_id
         )
@@ -300,6 +505,40 @@ class ConversionService:
                 ),
             },
             title_fallback=f"candidate-{candidate_id}",
+        )
+
+    async def planned_path_for_candidate(
+        self, candidate_id: int
+    ) -> PurePosixPath | None:
+        """The relative CBZ path the current rules give this work, if it has a name.
+
+        The one-step form of `planned_library_path` for the two callers that hold
+        no metadata: the detail page's prefilled 归档路径 field, and the re-archive
+        sweep that plans a whole library in one pass. Deriving it here rather than
+        at each call site is what keeps those two from disagreeing about what
+        「按最新路径规则生成的路由」 means -- a second copy of the three lookups
+        below is exactly how one of them would start rendering a different path.
+
+        `None` when the work has no title at all, and deliberately *not* the
+        packer's `candidate-<id>` fallback. Both callers are operator-facing: a
+        path built from a placeholder is not a name to show in a form (the
+        operator would read it as the book's own) and not one to pin (a pin
+        outlives the metadata fetch that would have replaced it -- which is how a
+        `Candidate 57.cbz`, once pinned, becomes permanent). Inside a job the
+        fallback stays the right answer, because refusing to publish a book
+        already downloaded is worse than publishing it under a temporary name.
+
+        Raises `LibraryPathError` for a path this filesystem will not take; the
+        caller decides whether that is a refusal, a parked task or an empty form.
+        """
+        metadata = await self.metadata_for(candidate_id)
+        if not (
+            _metadata_lookup(metadata, "Title")
+            or _metadata_lookup(metadata, "JapaneseTitle")
+        ):
+            return None
+        return await self.planned_library_path(
+            candidate_id, self.title_of(metadata, candidate_id), metadata
         )
 
     async def metadata_for(self, candidate_id: int):
@@ -379,12 +618,44 @@ class ConversionService:
             ).fetchall()
         return tuple(str(row[0]) for row in rows if row[0])
 
-    async def enqueue_for_candidate(self, candidate_id: int) -> int:
+    async def enqueue_for_candidate(
+        self,
+        candidate_id: int,
+        *,
+        refile: bool = False,
+        refresh_ai_path: bool = False,
+    ) -> int:
+        """Queue this work for packaging, or for a path-only re-file.
+
+        Two flags, both about AI mode and both carried on the job row rather
+        than inferred:
+
+        * `refile` -- the book is already packed and only its path needs
+          recomputing. The job asks the model and *moves* the CBZ; it never
+          re-derives the pages (proposal §9, 「已打包不再重新打包」).
+        * `refresh_ai_path` -- ask the model even though the cache would answer.
+          Set by a 强制 sweep, whose instruction is 「按当前 prompt 重新询问」.
+
+        Either way the flags ride in `details_json`, which is already the job's
+        free-form column: a new column for two booleans one branch reads would
+        be a schema change for nothing.
+        """
         return await asyncio.to_thread(
-            self._enqueue_sync, candidate_id
+            self._enqueue_sync, candidate_id, refile, refresh_ai_path
         )
 
-    def _enqueue_sync(self, candidate_id: int) -> int:
+    def _enqueue_sync(
+        self,
+        candidate_id: int,
+        refile: bool = False,
+        refresh_ai_path: bool = False,
+    ) -> int:
+        details: dict[str, object] = {}
+        if refile:
+            details["refile"] = True
+        if refresh_ai_path:
+            details["refresh_ai_path"] = True
+        details_json = json.dumps(details, separators=(",", ":"))
         with self._database.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
@@ -416,32 +687,57 @@ class ConversionService:
                     "CANDIDATE_NOT_READY",
                     f"候选状态为 {status}，不能打包",
                 )
-            artifact_row = connection.execute(
-                "SELECT a.path FROM download_jobs dj "
-                "JOIN artifacts a ON a.job_id = dj.id "
-                "WHERE dj.candidate_id = ? AND dj.state = ? "
-                "AND a.artifact_type = 'ARCHIVE' "
-                "ORDER BY dj.id DESC LIMIT 1",
-                (candidate_id, DOWNLOAD_STATE_COMPLETED),
-            ).fetchone()
-            if artifact_row is None:
-                # This is now the readiness gate, so the message has to be the
-                # one an operator reads when 打包 is pressed too early.
-                raise ConversionError(
-                    "ARCHIVE_NOT_READY",
-                    "该作品还没有下载完成的压缩包，无法打包",
-                )
+            # What 「ready」 means depends on what the job will do, and the two
+            # answers are genuinely different:
+            #
+            # * a pack needs the downloaded archive, because that is the input it
+            #   compresses;
+            # * a re-file needs the *published* CBZ instead, and asking it for
+            #   the source archive would refuse the ordinary case -- with
+            #   「保留原始压缩包」 off (the default) the source is deleted the
+            #   moment the pack succeeds, so every book the sweep would re-file
+            #   has no archive left.
+            if refile:
+                packable = connection.execute(
+                    "SELECT a.path FROM download_jobs dj "
+                    "JOIN artifacts a ON a.job_id = dj.id "
+                    "WHERE dj.candidate_id = ? AND a.artifact_type = 'CBZ' "
+                    "ORDER BY a.id DESC LIMIT 1",
+                    (candidate_id,),
+                ).fetchone()
+                if packable is None:
+                    raise ConversionError(
+                        "WORK_NOT_PACKAGED",
+                        "该作品还没有打包产物，无法重算路径",
+                    )
+            else:
+                artifact_row = connection.execute(
+                    "SELECT a.path FROM download_jobs dj "
+                    "JOIN artifacts a ON a.job_id = dj.id "
+                    "WHERE dj.candidate_id = ? AND dj.state = ? "
+                    "AND a.artifact_type = 'ARCHIVE' "
+                    "ORDER BY dj.id DESC LIMIT 1",
+                    (candidate_id, DOWNLOAD_STATE_COMPLETED),
+                ).fetchone()
+                if artifact_row is None:
+                    # This is now the readiness gate, so the message has to be the
+                    # one an operator reads when 打包 is pressed too early.
+                    raise ConversionError(
+                        "ARCHIVE_NOT_READY",
+                        "该作品还没有下载完成的压缩包，无法打包",
+                    )
             before = connection.total_changes
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
-                "details_json) VALUES (?, ?, ?, ?, '{}') "
+                "details_json) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(idempotency_key) DO NOTHING",
                 (
                     candidate_id,
                     f"convert:{candidate_id}",
                     PROVIDER_CONVERSION,
                     CONVERSION_STATE_PENDING,
+                    details_json,
                 ),
             )
             created = connection.total_changes > before
@@ -467,10 +763,12 @@ class ConversionService:
                 # requeue would be overwritten by whatever it writes next.
                 connection.execute(
                     "UPDATE download_jobs SET state = ?, error_code = NULL, "
-                    "error_message = NULL, updated_at = CURRENT_TIMESTAMP "
+                    "error_message = NULL, details_json = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
                     "WHERE idempotency_key = ? AND state IN (?, ?, ?, ?, ?)",
                     (
                         CONVERSION_STATE_PENDING,
+                        details_json,
                         f"convert:{candidate_id}",
                         CONVERSION_STATE_WAITING_VOLUMES,
                         CONVERSION_STATE_WAITING_PASSWORD,
@@ -652,7 +950,7 @@ class ConversionService:
     def _claim_pending_job_sync(self) -> dict | None:
         with self._database.connection() as connection:
             row = connection.execute(
-                "SELECT id, candidate_id FROM download_jobs "
+                "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
                 # Same ordering as the download claim: a promoted packaging job
                 # runs first, and within one priority the queue stays FIFO. The
@@ -669,9 +967,21 @@ class ConversionService:
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (CONVERSION_STATE_RUNNING, int(row[0])),
             )
+            details: dict = {}
+            if row[2]:
+                try:
+                    parsed = json.loads(str(row[2]))
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    details = parsed
             return {
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
+                # `refile` sends the job down the path-only branch below;
+                # `refresh_ai_path` tells the AI branch to ignore its cache.
+                "refile": bool(details.get("refile")),
+                "refresh_ai_path": bool(details.get("refresh_ai_path")),
             }
 
     async def _handle_job(self, job: dict) -> None:
@@ -683,6 +993,12 @@ class ConversionService:
             "job_id": job["job_id"],
             "candidate_id": job["candidate_id"],
         }
+        if job.get("refile"):
+            # Before the archive-artifact check, because this job does not need
+            # one: the book is already published and its source archive may
+            # legitimately be gone.
+            await self._handle_refile_job(job)
+            return
         source_artifact = await asyncio.to_thread(
             self._fetch_source_artifact_sync, job["candidate_id"]
         )
@@ -726,16 +1042,22 @@ class ConversionService:
         library_path, work_path = await self._effective_paths()
         try:
             library_target = await self._library_target(
-                job["candidate_id"], library_path, metadata, title
+                job["candidate_id"],
+                library_path,
+                metadata,
+                title,
+                refresh_ai_path=bool(job.get("refresh_ai_path")),
             )
         except LibraryPathError as exc:
-            # Only a *pinned* path can raise here -- the template branch
-            # sanitises. So this is a path an operator or a batch recorded that
-            # this filesystem will not take, and the book is parked rather than
-            # failed: nothing was attempted, the archive is intact, and the
-            # remedy is an edit on the work detail page followed by a requeue.
+            # Two things raise here, and both park rather than fail. The template
+            # branch sanitises, so the only path it can refuse is a *pinned* one
+            # an operator or a batch recorded that this filesystem will not take.
+            # AI mode adds the other: every model failed and no fallback was
+            # asked for, so there is no path at all. Either way nothing was
+            # attempted and the archive is intact, so the remedy is a settings or
+            # metadata edit followed by a requeue -- the shape 待补分卷 already has.
             logging.getLogger(__name__).exception(
-                "conversion_pinned_path_rejected",
+                "conversion_path_rejected",
                 extra={
                     **job_context,
                     "status": CONVERSION_STATE_WAITING_PATH,
@@ -845,6 +1167,80 @@ class ConversionService:
         )
         if not await self._settings.keep_original():
             await asyncio.to_thread(self._remove_original_sync, source_path)
+
+    async def _handle_refile_job(self, job: dict) -> None:
+        """Recompute one published book's path and move the file there.
+
+        The job R30's sweep queues for a book that already has a CBZ: the file
+        on disk is this book's content, so it is *moved*, never rebuilt. Nothing
+        here touches the packer -- the only expensive step is the model call,
+        and the only filesystem step is the rename the archive service performs
+        (which also re-validates the path and records it as a computed
+        decision).
+
+        Every failure maps onto a state the operator already knows: no usable
+        path parks in 待定归档路径 (the same shape a failed pack takes), and a
+        refused move is a failure with the move's own code on it.
+        """
+        job_context = {
+            "job_id": job["job_id"],
+            "candidate_id": job["candidate_id"],
+        }
+        candidate_id = job["candidate_id"]
+        await self.ensure_metadata(candidate_id)
+        try:
+            relative = await self.ai_path_for_refile(
+                candidate_id, refresh=bool(job.get("refresh_ai_path"))
+            )
+        except LibraryPathError as exc:
+            logging.getLogger(__name__).exception(
+                "conversion_path_rejected",
+                extra={
+                    **job_context,
+                    "status": CONVERSION_STATE_WAITING_PATH,
+                    "error_code": exc.code,
+                },
+            )
+            await asyncio.to_thread(
+                self._mark_waiting_sync,
+                job["job_id"],
+                CONVERSION_STATE_WAITING_PATH,
+                exc.code,
+                exc.public_message,
+                {},
+            )
+            return
+        if self._refile is None:
+            await asyncio.to_thread(
+                self._mark_failed_sync,
+                job["job_id"],
+                "REFILE_UNAVAILABLE",
+                "归档服务不可用，无法移动已打包的作品",
+            )
+            return
+        try:
+            result = await self._refile(candidate_id, relative.as_posix())
+        except Exception as exc:  # noqa: BLE001 - classified below
+            code = str(getattr(exc, "code", None) or "REFILE_FAILED")
+            message = str(getattr(exc, "public_message", None) or exc)
+            logging.getLogger(__name__).exception(
+                "conversion_refile_failed",
+                extra={**job_context, "error_code": code},
+            )
+            await asyncio.to_thread(
+                self._mark_failed_sync, job["job_id"], code, message
+            )
+            return
+        await asyncio.to_thread(
+            self._mark_completed_sync,
+            job["job_id"],
+            {
+                "refiled": True,
+                "moved": bool(result.get("moved")),
+                "relative_path": result.get("relative_path")
+                or relative.as_posix(),
+            },
+        )
 
     async def ensure_metadata(self, candidate_id: int) -> None:
         """Pull the gallery's metadata before packing, if it is still missing.

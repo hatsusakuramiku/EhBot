@@ -220,6 +220,11 @@ async def render_work(
         deps.database(request),
         candidate_id,
         download=deps.download_service(request),
+        # Optional rather than required: unfilled 归档路径 fields are a worse
+        # page, a 503 is no page at all. Same reason `download` is optional here,
+        # and the same accessor the JSON endpoint uses so the two cannot answer
+        # the form differently.
+        conversion=deps.optional_service(request, "conversion_service"),
         sources=configured_sources(request),
         library_path=await effective_library_path(request),
     )

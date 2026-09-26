@@ -849,6 +849,146 @@ class TestRename:
         assert result["relative_path"] != "占用.cbz"
 
 
+class TestRefile:
+    """Moving a packed book to a path the current rules computed.
+
+    The actor half of 一键重新归档. What separates it from `rename_work` is
+    asserted here rather than assumed: it re-validates instead of repairing, and
+    it records the result as computed -- which is also what lets 强制 replace a
+    path the operator typed.
+    """
+
+    def test_a_refile_moves_the_file_and_records_where_it_went(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, _, cbz = fixture.packaged()
+
+        result = asyncio.run(
+            fixture.service.refile_work(candidate_id, "分类/作者/新名字.cbz")
+        )
+
+        assert result["moved"] is True
+        assert result["relative_path"] == "分类/作者/新名字.cbz"
+        moved = fixture.library / "分类" / "作者" / "新名字.cbz"
+        assert moved.exists()
+        assert not cbz.exists()
+        # The emptied directory goes, the way a removal prunes one.
+        assert not cbz.parent.exists()
+        work = asyncio.run(fixture.database.downloaded_work(candidate_id))
+        assert work.cbz_path == str(moved)
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "分类/作者/新名字.cbz"
+        # Computed, not manual: the next template change has to be able to move
+        # this book again, which a manual pin forbids by design.
+        assert pin["is_manual"] is False
+
+    def test_a_refile_onto_the_path_it_already_has_still_records_it(
+        self, fixture: Fixture
+    ) -> None:
+        """Not a no-op: the pin is written, or a stale one survives the move."""
+        candidate_id, _, cbz = fixture.packaged()
+
+        result = asyncio.run(
+            fixture.service.refile_work(candidate_id, "作者/示例作品.cbz")
+        )
+
+        assert result["moved"] is False
+        assert cbz.exists()
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "作者/示例作品.cbz"
+
+    def test_a_refile_replaces_a_path_the_operator_typed(
+        self, fixture: Fixture
+    ) -> None:
+        """What 强制重新归档 asks for, asserted at the layer that does it.
+
+        `set_archive_path_pin` deliberately refuses this demotion, so the move
+        has to go through the named override -- otherwise the file would land in
+        the new place while the pin still pointed at the old one, and the next
+        pack would move it back.
+        """
+        candidate_id, _, cbz = fixture.packaged()
+        asyncio.run(
+            fixture.service.set_archive_path(
+                candidate_id, directory="亲手", filename="命名"
+            )
+        )
+        assert (fixture.library / "亲手" / "命名.cbz").exists()
+        assert not cbz.exists()
+
+        result = asyncio.run(
+            fixture.service.refile_work(candidate_id, "模板/命名.cbz")
+        )
+
+        assert result["relative_path"] == "模板/命名.cbz"
+        assert (fixture.library / "模板" / "命名.cbz").exists()
+        pin = asyncio.run(fixture.database.archive_path_pin(candidate_id))
+        assert pin["relative_path"] == "模板/命名.cbz"
+        assert pin["is_manual"] is False
+
+    def test_an_unpacked_work_has_no_file_to_refile(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id = fixture.candidate()
+        job_id = fixture.job(candidate_id)
+        fixture.artifact(
+            job_id, kind="ARCHIVE", path=fixture.work / "only-source.zip"
+        )
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(fixture.service.refile_work(candidate_id, "书.cbz"))
+
+        assert raised.value.code == "WORK_NOT_PACKAGED"
+
+    def test_a_book_the_packer_holds_is_left_alone(
+        self, fixture: Fixture
+    ) -> None:
+        """The worker is about to write the file this would move."""
+        candidate_id, _, _ = fixture.packaged(pack_state=CONVERSION_STATE_RUNNING)
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(fixture.service.refile_work(candidate_id, "书.cbz"))
+
+        assert raised.value.code == "WORK_PACK_RUNNING"
+
+    @pytest.mark.parametrize(
+        ("relative", "code"),
+        [
+            ("../逃出.cbz", "SEGMENT_TRAVERSAL"),
+            ("作者/../逃出.cbz", "SEGMENT_TRAVERSAL"),
+            ("作者/坏:名字.cbz", "SEGMENT_UNSAFE_CHARACTER"),
+            ("", "PATH_REQUIRED"),
+        ],
+    )
+    def test_a_path_this_filesystem_cannot_take_is_refused(
+        self, fixture: Fixture, relative: str, code: str
+    ) -> None:
+        """Refused, not repaired: a computed path is one an operator never saw,
+        so silently sanitising it would file the book under a name nobody chose."""
+        candidate_id, _, cbz = fixture.packaged()
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(fixture.service.refile_work(candidate_id, relative))
+
+        assert raised.value.code == code
+        assert cbz.exists()
+
+    def test_a_refile_onto_an_occupied_name_does_not_overwrite_it(
+        self, fixture: Fixture
+    ) -> None:
+        """`unique_library_target` reserves this book's own file and nothing else."""
+        candidate_id, _, _ = fixture.packaged()
+        occupied = fixture.library / "占用.cbz"
+        occupied.write_bytes(b"someone else")
+
+        result = asyncio.run(
+            fixture.service.refile_work(candidate_id, "占用.cbz")
+        )
+
+        assert occupied.read_bytes() == b"someone else"
+        assert result["relative_path"] == "占用 (2).cbz"
+
+
 class TestSettingsAreReadPerAction:
     def test_the_roots_come_from_the_settings_service_not_from_startup(
         self, tmp_path: Path

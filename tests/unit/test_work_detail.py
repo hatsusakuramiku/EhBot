@@ -10,6 +10,9 @@ these return.
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import PurePosixPath
+
 from app.api.status import (
     ACTOR_AUTO_RULE,
     ACTOR_OPERATOR,
@@ -22,10 +25,18 @@ from app.api.status import (
     actor_kind,
     attachment_kind_view,
 )
-from app.api.works import work_actions, work_stage, work_timeline
+from app.api.works import (
+    archive_path_view,
+    planned_archive_path,
+    work_actions,
+    work_stage,
+    work_timeline,
+)
 from app.candidates.models import CandidateDetail, CandidateMessage
+from app.conversion.naming import LibraryPathError
 from app.downloads.models import (
     DEFAULT_JOB_PRIORITY,
+    DownloadedWork,
     PROVIDER_CONVERSION,
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
@@ -635,3 +646,241 @@ def test_the_manual_add_page_beats_the_candidate_list_prefix() -> None:
     assert origin["href"] == "/candidates/manual-add"
     assert origin["label"] == "返回手动添加"
 
+
+
+# --- the 归档路径 form's prefill ---------------------------------------------
+
+
+def make_downloaded(**overrides) -> DownloadedWork:
+    """The archive-path fields the form reads, with everything else filled in."""
+    fields = {
+        "candidate_id": 7,
+        "job_id": 3,
+        "provider": PROVIDER_TELEGRAM,
+        "state": "COMPLETED",
+        "title": "Fixture Work",
+        "archive_path": "/work/source.zip",
+        "archive_size": 1024,
+    }
+    fields.update(overrides)
+    return DownloadedWork(**fields)
+
+
+def test_a_packaged_work_prefills_the_path_that_was_saved_for_it() -> None:
+    view = archive_path_view(
+        make_downloaded(pinned_path="作者/书名.cbz"), packaged_job(), None
+    )
+
+    assert view["relative_path"] == "作者/书名.cbz"
+    assert (view["directory"], view["filename"]) == ("作者", "书名")
+
+
+def test_a_packaged_work_keeps_its_own_path_over_a_recomputed_one() -> None:
+    """已归档成功 shows where the book is, not where a rule would put it.
+
+    Showing the recomputed path here would tell the operator the file had moved
+    when it had not -- and the form is also the input to 保存归档路径, so a value
+    from the template would turn a look into a decision.
+    """
+    view = archive_path_view(
+        make_downloaded(library_relative_path="旧/书名.cbz"),
+        packaged_job(),
+        None,
+        planned="新/书名.cbz",
+    )
+
+    assert view["relative_path"] == "旧/书名.cbz"
+
+
+def test_a_packaged_work_with_nothing_recorded_derives_it_from_the_file() -> None:
+    """Books packed before the relative path was recorded still prefill."""
+    view = archive_path_view(
+        make_downloaded(),
+        make_job(
+            provider=PROVIDER_CONVERSION,
+            state="COMPLETED",
+            artifact_cbz_path="/library/作者/书名.cbz",
+        ),
+        "/library",
+    )
+
+    assert (view["directory"], view["filename"]) == ("作者", "书名")
+
+
+def test_an_unarchived_work_prefills_the_path_the_rules_render() -> None:
+    """The defect this closes: an empty box for a book that is not on the shelf."""
+    view = archive_path_view(
+        make_downloaded(), None, None, planned="模板/作者/书名.cbz"
+    )
+
+    assert view["relative_path"] == "模板/作者/书名.cbz"
+    assert (view["directory"], view["filename"]) == ("模板/作者", "书名")
+
+
+def test_an_unarchived_work_replaces_a_stale_computed_pin() -> None:
+    """A computed pin is a derived value, not a decision: the newest rules win."""
+    view = archive_path_view(
+        make_downloaded(
+            pinned_path="旧模板/书名.cbz",
+            library_relative_path="旧模板/书名.cbz",
+        ),
+        None,
+        None,
+        planned="新模板/书名.cbz",
+    )
+
+    assert view["relative_path"] == "新模板/书名.cbz"
+
+
+def test_an_unarchived_work_keeps_a_path_the_operator_typed() -> None:
+    """A manual pin is also where the next pack will really put the book.
+
+    Prefilling the template's answer instead would show a path the packer is not
+    going to use, which is the one thing this field must not do.
+    """
+    view = archive_path_view(
+        make_downloaded(pinned_path="亲手/书名.cbz", pinned_is_manual=True),
+        None,
+        None,
+        planned="模板/书名.cbz",
+    )
+
+    assert view["relative_path"] == "亲手/书名.cbz"
+    assert view["is_manual"] is True
+
+
+def test_an_ai_path_is_badged() -> None:
+    """`AI 生成` is 「缓存里那行就是屏幕上这条路径」, and nothing more (proposal §11)."""
+    view = archive_path_view(
+        make_downloaded(
+            library_relative_path="同人志/作者/作品.cbz",
+            ai_relative_path="同人志/作者/作品.cbz",
+        ),
+        packaged_job(),
+        None,
+    )
+    assert view["is_ai"] is True
+
+
+def test_a_renamed_path_is_not_badged() -> None:
+    """The label is a comparison, so an operator's rename turns it off by itself."""
+    view = archive_path_view(
+        make_downloaded(
+            pinned_path="亲手/名字.cbz",
+            ai_relative_path="同人志/作者/作品.cbz",
+            pinned_is_manual=True,
+        ),
+        packaged_job(),
+        None,
+    )
+    assert view["relative_path"] == "亲手/名字.cbz"
+    assert view["is_ai"] is False
+
+
+def test_a_template_path_is_not_badged() -> None:
+    view = archive_path_view(
+        make_downloaded(library_relative_path="模板/名字.cbz"), packaged_job(), None
+    )
+    assert view["is_ai"] is False
+
+
+def test_an_unarchived_work_badges_the_cached_path_it_prefills() -> None:
+    view = archive_path_view(
+        make_downloaded(ai_relative_path="同人志/作者/作品.cbz"),
+        None,
+        None,
+        planned="同人志/作者/作品.cbz",
+    )
+    assert view["is_ai"] is True
+    assert (view["directory"], view["filename"]) == ("同人志/作者", "作品")
+
+
+def test_an_empty_view_is_not_badged() -> None:
+    assert archive_path_view(None, None, None)["is_ai"] is False
+
+
+def test_nothing_recorded_and_nothing_planned_leaves_the_form_empty() -> None:
+    view = archive_path_view(make_downloaded(), None, None)
+
+    assert (view["directory"], view["filename"]) == ("", "")
+    assert view["relative_path"] is None
+
+
+def test_pending_says_the_saved_path_is_not_where_the_file_is() -> None:
+    view = archive_path_view(
+        make_downloaded(pinned_path="新/书名.cbz"), packaged_job(), None
+    )
+
+    assert view["published_path"] == "/works/7/book.cbz"
+    assert view["pending"] is True
+
+
+class _Planner:
+    """A conversion service reduced to the one call the prefill makes."""
+
+    def __init__(self, relative="模板/书名.cbz", error=None) -> None:
+        self.relative = relative
+        self.error = error
+        self.asked: list[int] = []
+
+    async def planned_path_for_candidate(self, candidate_id: int):
+        self.asked.append(candidate_id)
+        if self.error is not None:
+            raise self.error
+        return None if self.relative is None else PurePosixPath(self.relative)
+
+
+def test_the_prefill_asks_the_conversion_service_for_the_current_path() -> None:
+
+    planner = _Planner()
+    planned = asyncio.run(
+        planned_archive_path(planner, make_downloaded(), None, 7)
+    )
+
+    assert planned == "模板/书名.cbz"
+    assert planner.asked == [7]
+
+
+def test_a_packaged_work_is_not_asked_about_at_all() -> None:
+    """One read fewer per page, and no chance of the two answers disagreeing."""
+
+    planner = _Planner()
+    planned = asyncio.run(
+        planned_archive_path(planner, make_downloaded(), packaged_job(), 7)
+    )
+
+    assert planned is None
+    assert planner.asked == []
+
+
+def test_no_conversion_service_means_no_prefill_and_no_page_error() -> None:
+
+    assert asyncio.run(planned_archive_path(None, make_downloaded(), None, 7)) is None
+
+
+def test_a_work_with_no_title_is_not_shown_a_placeholder_path() -> None:
+
+    planner = _Planner(relative=None)
+    assert asyncio.run(planned_archive_path(planner, make_downloaded(), None, 7)) is None
+
+
+def test_an_unusable_path_leaves_the_form_as_it_was() -> None:
+
+    planner = _Planner(error=LibraryPathError("SEGMENT_TOO_LONG", "标题过长"))
+    assert asyncio.run(planned_archive_path(planner, make_downloaded(), None, 7)) is None
+
+
+def test_a_manual_pin_is_not_even_looked_up() -> None:
+
+    planner = _Planner()
+    planned = asyncio.run(
+        planned_archive_path(
+            planner,
+            make_downloaded(pinned_path="亲手/书名.cbz", pinned_is_manual=True),
+            None,
+            7,
+        )
+    )
+
+    assert planned is None
+    assert planner.asked == []

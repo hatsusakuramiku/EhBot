@@ -102,6 +102,10 @@ def system_settings_service(request: Request) -> Any:
     return _service(request, "system_settings_service", "系统设置")
 
 
+def ai_service(request: Request) -> Any:
+    return _service(request, "ai_service", "AI 供应商")
+
+
 def exhentai_service(request: Request) -> Any:
     return _service(request, "exhentai_service", "ExHentai 服务")
 
@@ -143,6 +147,7 @@ def optional_service(request: Request, name: str) -> Any | None:
 
 __all__ = [
     "CSRF_HEADER",
+    "ai_service",
     "archive_settings_service",
     "connection_manager",
     "conversion_service",

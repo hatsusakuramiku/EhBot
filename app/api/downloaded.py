@@ -27,6 +27,7 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError, PageParams
 from app.api.events import EVENT_DOWNLOAD
+from app.archive.service import PATH_SOURCE_AI
 from app.api.serializers import downloaded_work as serialize_work
 from app.api.status import DOWNLOADED_TAB_STATUS, downloaded_tab_view
 from app.conversion.naming import LibraryPathError
@@ -199,6 +200,18 @@ async def _refile_for_repack(
     # cannot disagree about when metadata is fetched.
     await conversion_service.ensure_metadata(candidate_id)
     metadata = await conversion_service.metadata_for(candidate_id)
+    if await conversion_service.path_source() == PATH_SOURCE_AI:
+        # A batch repack re-files; it does not re-ask. If the cached answer is
+        # still current, pin it so the pack lands exactly where the model said.
+        # If it is not -- never generated, or the prompt/chain/metadata moved --
+        # nothing is pinned, and the packing job asks the model itself, which is
+        # the only place a request is allowed to happen.
+        cached = await conversion_service.current_ai_path(candidate_id, metadata)
+        if cached is not None:
+            await archived_service.pin_computed_path(
+                candidate_id, cached.as_posix(), operator_name=operator_name
+            )
+        return
     title = conversion_service.title_of(metadata, candidate_id)
     try:
         relative = await conversion_service.planned_library_path(

@@ -9,10 +9,13 @@ arguments is exercised rather than assumed.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import sqlite3
 from pathlib import Path
+
+import httpx
 
 from fastapi.testclient import TestClient
 import pytest
@@ -22,6 +25,8 @@ from app.config import Settings
 from app.conversion.naming import DEFAULT_LIBRARY_TEMPLATE
 from app.db.database import Database
 from app.main import create_app
+
+from tests.integration.markup import nested_form_lines
 
 
 def _settings(root: Path) -> Settings:
@@ -1341,3 +1346,959 @@ class TestApiParity:
         assert "fields" in payload["vocabulary"]
         assert "operators" in payload["vocabulary"]
         assert {"title_sources", "template", "paths"} <= set(payload)
+
+
+# ---------------------------------------------------------------------------
+#  一键重新归档
+# ---------------------------------------------------------------------------
+
+
+def _seed_work(
+    settings: Settings,
+    candidate_id: int,
+    *,
+    title: str,
+    pack_state: str | None = None,
+    cbz_relative: str | None = None,
+    pinned_path: str | None = None,
+    pinned_is_manual: bool = False,
+) -> str | None:
+    """One downloaded work, with its files really on disk.
+
+    Seeded rather than downloaded: the download worker does not claim a
+    COMPLETED row, so the fixtures stay put while the re-archive sweep runs over
+    them -- the same trick `test_downloaded_web.py` uses, and for the same
+    reason. Returns the published CBZ's absolute path, when there is one.
+    """
+    database = Database(settings.data_path / "ehbot.db")
+    settings.library_path.mkdir(parents=True, exist_ok=True)
+    settings.work_path.mkdir(parents=True, exist_ok=True)
+    archive = settings.work_path / f"source-{candidate_id}.zip"
+    archive.write_bytes(b"archive payload")
+    published: str | None = None
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            "INSERT INTO candidates (id, status) VALUES (?, 'DOWNLOADED')",
+            (candidate_id,),
+        )
+        connection.execute(
+            "INSERT INTO metadata_values (candidate_id, field_name, field_value,"
+            " value_source, confidence, is_manual) "
+            "VALUES (?, 'Title', ?, 'EXHENTAI', 0.9, 0)",
+            (candidate_id, title),
+        )
+        job_id = int(
+            connection.execute(
+                "INSERT INTO download_jobs (candidate_id, idempotency_key, "
+                "provider, state, details_json) "
+                "VALUES (?, ?, 'TELEGRAM', 'COMPLETED', '{}')",
+                (candidate_id, f"seed:{candidate_id}"),
+            ).lastrowid
+        )
+        connection.execute(
+            "INSERT INTO artifacts (job_id, artifact_type, path, size_bytes) "
+            "VALUES (?, 'ARCHIVE', ?, ?)",
+            (job_id, str(archive), archive.stat().st_size),
+        )
+        if pack_state is not None:
+            pack_id = int(
+                connection.execute(
+                    "INSERT INTO download_jobs (candidate_id, idempotency_key, "
+                    "provider, state, details_json) "
+                    "VALUES (?, ?, 'CONVERSION', ?, '{}')",
+                    (candidate_id, f"convert:{candidate_id}", pack_state),
+                ).lastrowid
+            )
+            if cbz_relative is not None:
+                cbz = settings.library_path / cbz_relative
+                cbz.parent.mkdir(parents=True, exist_ok=True)
+                cbz.write_bytes(b"cbz payload")
+                published = str(cbz)
+                connection.execute(
+                    "INSERT INTO artifacts (job_id, artifact_type, path, "
+                    "size_bytes, page_count, library_relative_path) "
+                    "VALUES (?, 'CBZ', ?, ?, 12, ?)",
+                    (pack_id, published, cbz.stat().st_size, cbz_relative),
+                )
+        if pinned_path is not None:
+            connection.execute(
+                "INSERT INTO work_archive_paths (candidate_id, relative_path, "
+                "is_manual, operator_name) VALUES (?, ?, ?, 'test')",
+                (candidate_id, pinned_path, 1 if pinned_is_manual else 0),
+            )
+    return published
+
+
+class TestReArchive:
+    """一键重新归档, on the tab that owns the path template.
+
+    The button lives here rather than on `/downloaded` because the template is
+    what it applies: an operator who edits the layout wants the books already
+    filed under the old one to follow it.
+    """
+
+    def test_the_button_reports_a_run_that_had_nothing_to_do(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "paths")
+            page = client.post(
+                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+            )
+
+        assert page.status_code == 200
+        assert "没有需要重新归档的" in page.text
+
+    def test_an_unarchived_work_is_pinned_and_queued(self, tmp_path: Path) -> None:
+        """The book was downloaded and never packed; the button files and queues it."""
+        settings = _settings(tmp_path)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            _authenticate(client, settings)
+            _seed_work(settings, 1, title="未打包作品")
+            csrf = _csrf(client, "paths")
+            response = client.post(
+                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+            )
+            assert response.status_code == 200
+        # Read after shutdown: the conversion worker claims PENDING rows, and a
+        # live one would make the state below a race.
+        database = Database(settings.data_path / "ehbot.db")
+
+        assert "入队打包 1 件" in response.text
+        assert asyncio.run(database.archive_path_pin(1))["relative_path"] == (
+            "未打包作品.cbz"
+        )
+        with sqlite3.connect(database.path) as connection:
+            state = connection.execute(
+                "SELECT state FROM download_jobs WHERE idempotency_key = ?",
+                ("convert:1",),
+            ).fetchone()
+        assert state is not None
+
+    def test_a_packed_work_whose_path_changed_is_moved_not_repacked(
+        self, tmp_path: Path
+    ) -> None:
+        """The efficiency rule: a packed book is a file move, never a second pack."""
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            published = _seed_work(
+                settings,
+                1,
+                title="已打包作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="旧/已打包作品.cbz",
+            )
+            csrf = _csrf(client, "paths")
+            response = client.post(
+                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+            )
+
+        assert response.status_code == 200
+        assert "移动文件 1 件" in response.text
+        assert not (settings.library_path / "旧" / "已打包作品.cbz").exists()
+        assert (settings.library_path / "已打包作品.cbz").exists()
+        # Never repacked: the finished packing task is not requeued.
+        database = Database(settings.data_path / "ehbot.db")
+        with sqlite3.connect(database.path) as connection:
+            attempts = connection.execute(
+                "SELECT attempt_count FROM download_jobs "
+                "WHERE idempotency_key = ?",
+                ("convert:1",),
+            ).fetchone()[0]
+        assert attempts == 0
+        assert published is not None
+
+    def test_a_hand_named_path_survives_the_default_run(self, tmp_path: Path) -> None:
+        """「模板是默认值」 -- and the run says so instead of silently skipping."""
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(
+                settings,
+                1,
+                title="手动作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="亲手/手动作品.cbz",
+                pinned_path="亲手/手动作品.cbz",
+                pinned_is_manual=True,
+            )
+            csrf = _csrf(client, "paths")
+            response = client.post(
+                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+            )
+
+        assert "跳过 1 件" in response.text
+        assert (settings.library_path / "亲手" / "手动作品.cbz").exists()
+
+    def test_the_force_option_recomputes_a_hand_named_path(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole difference between the two buttons, in one assertion."""
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(
+                settings,
+                1,
+                title="手动作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="亲手/手动作品.cbz",
+                pinned_path="亲手/手动作品.cbz",
+                pinned_is_manual=True,
+            )
+            csrf = _csrf(client, "paths")
+            response = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": csrf, "force": "on"},
+            )
+
+        assert response.status_code == 200
+        assert "强制" in response.text
+        assert not (settings.library_path / "亲手" / "手动作品.cbz").exists()
+        moved = settings.library_path / "手动作品.cbz"
+        assert moved.exists()
+        database = Database(settings.data_path / "ehbot.db")
+        pin = asyncio.run(database.archive_path_pin(1))
+        assert pin["relative_path"] == "手动作品.cbz"
+        # The override drops the flag, so the next template change may re-file it.
+        assert pin["is_manual"] is False
+
+    def test_an_unauthenticated_caller_is_sent_to_login(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            response = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": "whatever"},
+                follow_redirects=False,
+            )
+        assert response.status_code == 303
+        assert response.headers["location"].endswith("/login")
+
+
+# ---------------------------------------------------------------------------
+#  AI 供应商 tab
+# ---------------------------------------------------------------------------
+
+
+class _AiTransport:
+    """A MockTransport for the AI tab's two endpoints.
+
+    Stateful rather than fixed, because the interesting assertions are about
+    *what was sent*: the verification request must be a real chat completion
+    (not a `GET /v1/models`), and the key must ride in the Authorization header.
+    """
+
+    def __init__(self, *, chat_status: int = 200) -> None:
+        self.chat_status = chat_status
+        self.chat_bodies: list[dict] = []
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200, json={"data": [{"id": "alpha"}, {"id": "beta"}]}
+            )
+        self.chat_bodies.append(json.loads(request.content))
+        if self.chat_status >= 400:
+            return httpx.Response(
+                self.chat_status, json={"error": {"message": "bad key"}}
+            )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": '{"ok": true}'}}]}
+        )
+
+
+def _ai_app(settings: Settings, stub: _AiTransport):
+    return create_app(settings, ai_transport=httpx.MockTransport(stub.handler))
+
+
+def _add_provider(client: TestClient, csrf: str, **overrides: str) -> None:
+    data = {
+        "csrf_token": csrf,
+        "name": "本地",
+        "code": "openai",
+        "base_url": "http://localhost:11434/v1",
+        "timeout_seconds": "30",
+        "max_retries": "1",
+        "enabled": "on",
+    }
+    data.update(overrides)
+    response = client.post("/settings/ai/providers", data=data, follow_redirects=False)
+    assert response.status_code == 303, response.text[:400]
+
+
+class TestAISettings:
+    def test_the_tab_renders(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        stub = _AiTransport()
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/ai")
+        assert page.status_code == 200
+        assert "模型链" in page.text
+        assert "新增供应商" in page.text
+
+    def test_an_unauthenticated_caller_is_sent_to_login(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            response = client.post(
+                "/settings/ai/providers",
+                data={"csrf_token": "whatever", "name": "x"},
+                follow_redirects=False,
+            )
+        assert response.status_code == 303
+        assert response.headers["location"].endswith("/login")
+
+    def test_no_form_is_nested_inside_another(self, tmp_path: Path) -> None:
+        """The browser silently drops a nested form, taking its button with it.
+
+        This tab is the most form-dense page in the app -- a save form, and per
+        provider a key form, a model form and a fetch result -- so the rule the
+        browser enforces rather than Python is asserted here.
+        """
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "m"},
+                follow_redirects=False,
+            )
+            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
+            client.post(
+                "/settings/ai/chain/append",
+                data={"csrf_token": csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+            page = client.get("/settings/ai").text
+        assert nested_form_lines(page) == []
+
+    def test_a_bad_address_renders_the_tab_with_a_reason(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            response = client.post(
+                "/settings/ai/providers",
+                data={
+                    "csrf_token": _csrf(client, "ai"),
+                    "name": "坏",
+                    "code": "openai",
+                    "base_url": "not-a-url",
+                },
+            )
+        assert response.status_code == 400
+        assert "http://" in response.text
+
+    def test_a_duplicate_name_is_refused(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            response = client.post(
+                "/settings/ai/providers",
+                data={
+                    "csrf_token": csrf,
+                    "name": "本地",
+                    "code": "openai",
+                    "base_url": "http://localhost:11434/v1",
+                },
+            )
+        assert response.status_code == 400
+        assert "已被占用" in response.text
+
+    def test_the_full_path_from_empty_tab_to_primary_model(
+        self, tmp_path: Path
+    ) -> None:
+        """Add provider → key → model → verify → chain, through the real forms.
+
+        This is the wiring test: every form's field names have to match the
+        handler's, and the chain must actually accept the model only after the
+        verification has been recorded.
+        """
+        settings = _settings(tmp_path)
+        stub = _AiTransport()
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            response = client.post(
+                "/settings/ai/providers/1/keys",
+                data={
+                    "csrf_token": csrf,
+                    "label": "主",
+                    "api_key": "sk-live-secret-0001",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            response = client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "gpt-4o-mini"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+            # Before verification the chain refuses it, with the reason.
+            response = client.post(
+                "/settings/ai/chain/append",
+                data={"csrf_token": csrf, "model_id": "1"},
+            )
+            assert response.status_code == 400
+            assert "尚未通过" in response.text
+
+            response = client.post(
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            )
+            assert response.status_code == 200
+            assert "验证通过" in response.text
+            # Verification is a real chat request, not just a listing.
+            assert stub.chat_bodies
+            assert stub.chat_bodies[0]["messages"][0]["role"] == "system"
+            assert stub.requests[-1].headers["authorization"] == (
+                "Bearer sk-live-secret-0001"
+            )
+
+            response = client.post(
+                "/settings/ai/chain/append",
+                data={"csrf_token": csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        assert "主力" in page.text
+        assert "gpt-4o-mini" in page.text
+
+    def test_a_key_is_never_rendered_back(self, tmp_path: Path) -> None:
+        """The page may show a label and a state; it must never show the key.
+
+        Checked on a normal render and on a rejected save, because a value
+        echoed back into a re-rendered form is exactly how a credential leaks
+        out of a page that otherwise never prints one.
+        """
+        settings = _settings(tmp_path)
+        secret = "sk-live-secret-abcdef"
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "主", "api_key": secret},
+                follow_redirects=False,
+            )
+            page = client.get("/settings/ai")
+            assert secret not in page.text
+            assert "主" in page.text
+            rejected = client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "空", "api_key": ""},
+            )
+        assert rejected.status_code == 400
+        assert secret not in rejected.text
+
+    def test_an_empty_key_is_refused(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            response = client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "空", "api_key": ""},
+            )
+        assert response.status_code == 400
+        assert "不能为空" in response.text
+
+    def test_a_failed_verification_is_reported_and_stored(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        stub = _AiTransport(chat_status=401)
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "m"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            )
+            assert response.status_code == 400
+            assert "验证失败" in response.text
+            page = client.get("/settings/ai")
+        assert "验证失败" in page.text
+        assert "AI_AUTH" in page.text
+
+    def test_fetching_models_renders_a_checklist_that_adds_selected(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        stub = _AiTransport()
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                follow_redirects=False,
+            )
+            page = client.post(
+                "/settings/ai/providers/1/models/fetch",
+                data={"csrf_token": csrf},
+            )
+            assert page.status_code == 200
+            assert "alpha" in page.text and "beta" in page.text
+            # The list is offered, not auto-added.
+            assert stub.requests[-1].url.path.endswith("/models")
+
+            response = client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": ["alpha", "beta"]},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        assert "alpha" in page.text
+        assert "beta" in page.text
+
+    def test_chain_reorder_and_remove(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                follow_redirects=False,
+            )
+            for name in ("a", "b"):
+                client.post(
+                    "/settings/ai/providers/1/models",
+                    data={"csrf_token": csrf, "model_name": name},
+                    follow_redirects=False,
+                )
+            for model_id in (1, 2):
+                client.post(
+                    f"/settings/ai/models/{model_id}/verify",
+                    data={"csrf_token": csrf},
+                )
+                client.post(
+                    "/settings/ai/chain/append",
+                    data={"csrf_token": csrf, "model_id": str(model_id)},
+                    follow_redirects=False,
+                )
+            page = client.get("/settings/ai")
+            assert "主力 · 本地 / a" in page.text
+
+            response = client.post(
+                "/settings/ai/chain/2/shift",
+                data={"csrf_token": csrf, "delta": "-1"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+            assert "主力 · 本地 / b" in page.text
+
+            response = client.post(
+                "/settings/ai/chain/2/remove",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        # b is gone from the chain, so its label only remains in the 「加入模型链」
+        # dropdown -- the chain entries themselves are what must not name it.
+        assert "主力 · 本地 / a" in page.text
+        assert "主力 · 本地 / b" not in page.text
+        assert "备用 1 · 本地 / b" not in page.text
+
+    def test_deleting_a_provider_removes_its_chain_entry(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "m"},
+                follow_redirects=False,
+            )
+            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
+            client.post(
+                "/settings/ai/chain/append",
+                data={"csrf_token": csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/settings/ai/providers/1/delete",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        assert "还没有 AI 供应商" in page.text
+        assert "模型链为空" in page.text
+
+# ---------------------------------------------------------------------------
+#  Path tab — the 路径来源 switch and the AI sub-panel (R29)
+# ---------------------------------------------------------------------------
+
+
+def _paths_ai_data(**overrides: str) -> dict[str, str]:
+    data = {
+        "path_source": "ai",
+        "ai_prompt": "自定义提示词",
+        "ai_batch_size": "30",
+        "ai_concurrency": "3",
+        "ai_fallback_to_rules": "on",
+        "ai_default_include_current": "on",
+    }
+    data.update(overrides)
+    return data
+
+
+class TestAIPathsSettings:
+    def test_the_tab_renders_the_source_choice_and_the_reference_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/paths")
+        assert page.status_code == 200
+        assert "归档路径来源" in page.text
+        assert "模板与规则" in page.text
+        # The default prompt is the reference text, and the panel is rendered
+        # hidden while the template mode is the stored choice.
+        assert "你是 EhBot 的书库整理助手。" in page.text
+        assert "data-ai-panel hidden" in page.text
+
+    def test_saving_ai_mode_stores_every_field(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            response = client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/paths")
+        assert page.context["path_source"] == "ai"
+        assert 'value="ai"' in page.text
+        assert "自定义提示词" in page.text
+        # The template side is visibly out of effect.
+        assert "data-ai-inactive" in page.text
+        assert "兜底模板" in page.text
+
+        stored = asyncio.run(database.archive_settings())
+        assert stored["path_source"] == "ai"
+        assert stored["ai_prompt"] == "自定义提示词"
+        assert stored["ai_batch_size"] == "30"
+        assert stored["ai_concurrency"] == "3"
+        assert stored["ai_fallback_to_rules"] == "1"
+        assert stored["ai_default_include_current"] == "1"
+
+    def test_an_out_of_range_batch_size_is_refused_before_the_mode_changes(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            response = client.post(
+                "/archive-settings/paths/ai",
+                data={
+                    "csrf_token": _csrf(client, "paths"),
+                    **_paths_ai_data(ai_batch_size="0"),
+                },
+            )
+        assert response.status_code == 400
+        assert "每批处理数量" in response.text
+        stored = asyncio.run(database.archive_settings())
+        # Nothing was written: the numbers are validated first on purpose.
+        assert stored.get("path_source") is None
+
+    def test_resetting_the_prompt_returns_to_the_reference_text(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "paths")
+            client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": csrf, **_paths_ai_data()},
+                follow_redirects=False,
+            )
+            client.post(
+                "/archive-settings/paths/ai/prompt-default",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            page = client.get("/settings/paths")
+        assert "自定义提示词" not in page.text
+        assert "你是 EhBot 的书库整理助手。" in page.text
+
+    def test_clearing_the_cache_reports_how_many_rows_were_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        with sqlite3.connect(database.path) as connection:
+            connection.execute(
+                "INSERT INTO candidates (id, status) VALUES (1, 'APPROVED')"
+            )
+            connection.execute(
+                "INSERT INTO ai_path_suggestions (candidate_id, fingerprint, "
+                "prompt_hash, relative_path, directory, filename, provider_id, "
+                "model_name, attempts) "
+                "VALUES (1, 'fp', 'ph', 'a/b.cbz', 'a', 'b', 1, 'm', 1)"
+            )
+
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/ai/cache/clear",
+                data={"csrf_token": _csrf(client, "paths")},
+            )
+        assert "已清除 1 条" in page.text
+        assert asyncio.run(database.ai_path_suggestion_count()) == 0
+
+    def test_clearing_an_empty_cache_says_so_rather_than_zero(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.post(
+                "/archive-settings/paths/ai/cache/clear",
+                data={"csrf_token": _csrf(client, "paths")},
+            )
+        assert "已清除 0 条" not in page.text
+        assert "没有可清除" in page.text
+
+    def test_no_form_is_nested_inside_another_with_the_ai_panel_shown(
+        self, tmp_path: Path
+    ) -> None:
+        """The paths tab is now two forms side by side; a nested one is dropped."""
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            client.post(
+                "/archive-settings/paths/ai",
+                data={
+                    "csrf_token": _csrf(client, "paths"),
+                    **_paths_ai_data(),
+                },
+                follow_redirects=False,
+            )
+            page = client.get("/settings/paths").text
+        assert nested_form_lines(page) == []
+
+    def test_an_unauthenticated_caller_is_sent_to_login(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            response = client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": "whatever", "path_source": "ai"},
+                follow_redirects=False,
+            )
+        assert response.status_code == 303
+        assert response.headers["location"].endswith("/login")
+
+
+class TestReArchiveDryRun:
+    """试跑: plan and report, change nothing.
+
+    The reason it exists is 强制's cost in AI mode -- 「全库重新询问」 is one press
+    away from a very large bill -- so the assertions below are all 「报告了，但没做」.
+    """
+
+    def test_a_template_dry_run_reports_without_pinning_or_queueing(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(settings, 1, title="未打包作品")
+            response = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": _csrf(client, "paths"), "dry_run": "on"},
+            )
+
+        assert response.status_code == 200
+        assert "试跑结果" in response.text
+        assert "入队打包 1 件" in response.text
+        database = Database(settings.data_path / "ehbot.db")
+        assert asyncio.run(database.archive_path_pin(1)) is None
+        with sqlite3.connect(database.path) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM download_jobs WHERE idempotency_key = ?",
+                ("convert:1",),
+            ).fetchone()
+        assert row is None
+
+    def test_an_ai_dry_run_queues_nothing_and_moves_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(
+                settings,
+                1,
+                title="已打包作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="旧/已打包作品.cbz",
+            )
+            client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
+            )
+            response = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": _csrf(client, "paths"), "dry_run": "on"},
+            )
+
+        assert "试跑结果" in response.text
+        assert "入队重算路径 1 件" in response.text
+        assert (settings.library_path / "旧" / "已打包作品.cbz").exists()
+        # The packed-again question: the finished task keeps its state and its
+        # attempt count, i.e. nothing was requeued for a re-pack.
+        database = Database(settings.data_path / "ehbot.db")
+        with sqlite3.connect(database.path) as connection:
+            row = connection.execute(
+                "SELECT state, attempt_count, details_json FROM download_jobs "
+                "WHERE idempotency_key = ?",
+                ("convert:1",),
+            ).fetchone()
+        assert row[0] == "CONVERSION_COMPLETED"
+        assert row[1] == 0
+
+
+class TestAiReArchiveSweep:
+    """AI 模式的一键重新归档：计划只读缓存，需要新答案的交给打包队列."""
+
+    def test_a_packed_book_without_a_current_answer_is_queued_for_a_recompute(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(
+                settings,
+                1,
+                title="已打包作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="旧/已打包作品.cbz",
+            )
+            client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
+            )
+            response = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": _csrf(client, "paths")},
+            )
+
+        assert response.status_code == 200
+        assert "入队重算路径 1 件" in response.text
+        # Moved by the job, not by the request: 「已打包不再重新打包」 still holds,
+        # and a path-only job cannot repack.
+        assert (settings.library_path / "旧" / "已打包作品.cbz").exists()
+        database = Database(settings.data_path / "ehbot.db")
+        with sqlite3.connect(database.path) as connection:
+            row = connection.execute(
+                "SELECT state, attempt_count FROM download_jobs "
+                "WHERE idempotency_key = ?",
+                ("convert:1",),
+            ).fetchone()
+        # The worker may or may not have claimed it by shutdown, but it never
+        # re-packs: a refile job runs no packer, so the attempt count is what
+        # could move if the sweep had queued a pack.
+        assert row[0] in {
+            "CONVERSION_PENDING",
+            "CONVERSION_RUNNING",
+            "CONVERSION_WAITING_PATH",
+            "CONVERSION_FAILED",
+        }
+
+    def test_force_covers_a_book_the_default_run_leaves_to_a_hand_named_path(
+        self, tmp_path: Path
+    ) -> None:
+        """「手动指定优先」 is the default's rule; 强制 is the operator overriding it.
+
+        The same book under the same settings, run twice: the first run skips it
+        with a reason, the second re-asks the model. That difference is the whole
+        of what 强制 means in AI mode.
+        """
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            _seed_work(
+                settings,
+                1,
+                title="已打包作品",
+                pack_state="CONVERSION_COMPLETED",
+                cbz_relative="旧/已打包作品.cbz",
+                pinned_path="手动/名字.cbz",
+                pinned_is_manual=True,
+            )
+            client.post(
+                "/archive-settings/paths/ai",
+                data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
+            )
+            default_run = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": _csrf(client, "paths")},
+            )
+            forced_run = client.post(
+                "/archive-settings/paths/rearchive",
+                data={"csrf_token": _csrf(client, "paths"), "force": "on"},
+            )
+
+        assert default_run.status_code == 200
+        assert "跳过 1 件" in default_run.text
+        assert "入队重算路径 1 件" not in default_run.text
+        assert forced_run.status_code == 200
+        assert "强制" in forced_run.text
+        assert "入队重算路径 1 件" in forced_run.text

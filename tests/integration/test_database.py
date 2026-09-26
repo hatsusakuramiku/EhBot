@@ -133,6 +133,18 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
                 "PRAGMA table_info(archive_path_rules)"
             )
         }
+        ai_model_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(ai_provider_models)"
+            )
+        }
+        ai_key_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(ai_provider_keys)"
+            )
+        }
         indexes = {
             row[0]
             for row in connection.execute(
@@ -140,7 +152,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 17
+    assert migration_count == 18
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -218,6 +230,29 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         "dsl_snapshot",
         "case_sensitive",
     } <= routing_rule_columns
+    # Migration 018: AI-generated archive paths. Five tables because three of
+    # them are lists an operator edits item by item (providers, keys, models),
+    # the chain is an ordering of (provider, model) pairs, and the suggestions
+    # are the answer cache the detail page and the packer both read.
+    assert {
+        "ai_providers",
+        "ai_provider_keys",
+        "ai_provider_models",
+        "ai_model_chain",
+        "ai_path_suggestions",
+    } <= tables
+    assert "idx_ai_provider_keys_provider" in indexes
+    assert {
+        "cipher",
+        "cooldown_until",
+        "failures",
+        "last_used_at",
+    } <= ai_key_columns
+    assert {
+        "last_verified_at",
+        "last_verify_ok",
+        "last_verify_error",
+    } <= ai_model_columns
 
 
 @pytest.mark.asyncio

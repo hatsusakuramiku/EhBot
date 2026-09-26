@@ -233,6 +233,11 @@ class DownloadedWork:
     #: Whether that path was typed by an operator rather than computed from the
     #: layout template. A computed path may be recomputed; a typed one may not.
     pinned_is_manual: bool = False
+    #: The path the model last answered for this book, from
+    #: `ai_path_suggestions`. Read only to *label* a path (「AI 生成」), never to
+    #: decide one: the comparison against `archive_relative_path` is what says
+    #: whether the path on screen is the AI's, and a rename turns it off.
+    ai_relative_path: str | None = None
     artist: str | None = None
     category: str | None = None
     language: str | None = None
@@ -259,6 +264,46 @@ class DownloadedWork:
         put a new task in flight beside a finished book, so the artifact is the
         only honest evidence -- the same rule `work_stage` follows.
         """
+        return bool(self.cbz_path)
+
+
+@dataclass(frozen=True, slots=True)
+class ReArchiveCandidate:
+    """One work the 一键重新归档 sweep may act on.
+
+    A slimmer read than `DownloadedWork`, because the sweep asks three different
+    questions per work -- 「打包过吗」, 「记录在哪」, 「这个路径是操作员定的吗」 -- and
+    loads each work's metadata separately when it recomputes a path. Carrying the
+    whole downloaded-work join (artist, category, thumbnail, page count) through
+    the whole library to answer those three would be work nobody reads.
+
+    `candidate_id` is the identity: the sweep is one row per book, not per job.
+    """
+
+    candidate_id: int
+    title: str | None
+    #: None when nothing has ever been packed, which is a different question from
+    #: 「打包失败」 -- the two need different remedies, and the sweep treats them
+    #: differently too.
+    pack_state: str | None = None
+    #: The published CBZ, when one exists. Its presence is what makes a work
+    #: 「已打包」: packaging does not change the candidate's status, so the artifact
+    #: is the only honest evidence.
+    cbz_path: str | None = None
+    #: What the last successful pack recorded, and the pin from the detail page's
+    #: form. Read together through `relative_path`, newest first, the way
+    #: `DownloadedWork.archive_relative_path` reads them.
+    library_relative_path: str | None = None
+    pinned_path: str | None = None
+    pinned_is_manual: bool = False
+
+    @property
+    def relative_path(self) -> str | None:
+        """Where this book is recorded to live, the pin taking precedence."""
+        return self.pinned_path or self.library_relative_path
+
+    @property
+    def is_packaged(self) -> bool:
         return bool(self.cbz_path)
 
 

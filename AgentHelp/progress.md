@@ -3627,3 +3627,379 @@ Windows 不再依赖系统安装的 7-Zip。托管安装器按架构下载固定
 **基线校正**：R25 的条目漏记收集数。本轮实测 `--collect-only` 1252 项（R25 之后 1251），AGENTS 的基线链补上 R25 → 1251、R26 → 1252。
 
 **回归**：本机（Debian）全量执行 1252 收集、0 错误、12 项真实 7-Zip 按本机跳过；另有 2 项失败 `test_archive_processing.py::test_resolve_seven_zip_executable_prefers_managed_install` 与 `test_toolchain.py::test_windows_install_verifies_and_downloads_official_portable_pair`——两者都在 Windows 专用工具链解析/安装路径上（用例写死 `7z.exe` 名字、在 Linux 上找不到可执行体），与本次改动无关（diff 只有 `ui.js`、`test_ui_shell.py` 与文档）。测试基线（Windows 主机 0 失败）未因此变动。
+
+## R27 — 归档路径：详情页按最新规则预填 + 一键重新归档 (2026-09-25)
+
+运营者提两条：作品详情页的「归档路径」框要预填——已归档成功填已保存的路径，归档失败或尚未归档
+按**当前**规则现算一个；「设置 → 路径」要有一个一键重新归档按钮，默认重排尚未成功归档的，以及
+按最新规则重算后路径已变动的作品，另给一个**强制**选项连已完成归档的（含手动指定的路径）一起
+重排。硬要求：**已打包的作品不重新打包**，只更新路径与名称（必要时），以降低宿主机压力、提高效率。
+
+**R27-A 详情页预填**。`archive_path_view` 增加 `planned` 参数：已归档成功（有 CBZ 产物）仍读
+`DownloadedWork.archive_relative_path`（pin 优先、其次上次打包记录的落点、再退到从产物路径反推）；
+未归档则改用当前规则渲染出的路径填入。手动指定过路径的（`is_manual`）是例外，保持表单原值——
+打包最终用的就是它，改填模板的答案等于显示一个打包器不会采用的位置，而「这个字段绝不撒谎」是它的
+底线。新增 `ConversionService.planned_path_for_candidate` 作为「当前规则 → 相对路径」的唯一入口，
+详情页与重新归档共用，避免两处各算一份而漂移；没有 `Title`/`JapaneseTitle` 时返回 None，**刻意不用**
+打包器内部的 `candidate-<id>` 兜底——那是占位名，既不能给操作员看，更不能被钉住；因此详情页回落到
+原值，既不是空框也不是占位名。`app/api/works.py` 新增 `planned_archive_path()`，只在需要时才问
+conversion（work 非 None、无产物、非手动 pin）；它**不补元数据**（详情页是只读页，渲染时刮 ExHentai
+是没人要求的副作用），也**不抛异常**（路径不可用就让表单保持原样，而不是整页报错）。新增
+`deps.optional_service`，让缺 conversion 服务的半接线部署照常渲染。JSON 与 HTML 两个
+`/works/{id}` 共用 `work_snapshot`，所以两条路径答案一致。
+
+**R27-B 一键重新归档**。新模块 `app/archive/rearchive.py`。`plan_rearchive` 逐件补元数据（与批量
+重排同一条理由：路径在画廊未读时算出来会被钉成 fallback 名字，而钉住的路径优先于模板），再按当前
+规则（含按条件匹配的模板）算目标路径，产出 `(tasks, skipped)`；`apply_rearchive` 分类执行并汇总
+queued / moved / unchanged / skipped。策略：
+
+- **已打包 → 只移动 + 改名，绝不重新打包**（新增 `ArchivedWorkService.refile_work`）。CBZ 内容没变，
+  为了换个文件名而重跑整条流水线是纯浪费；命令里这一条是降低宿主机压力的核心。
+- **默认范围**＝尚未成功归档（从未打包、打包失败、停在待补分卷/密码/路径需干预）＋重算路径与记录
+  不符的已打包作品。**强制**把其余已完成的也纳入，包括手动指定的路径——「强制」就是运营者这一次
+  允许模板覆盖决定。
+- **跳过各有理由**：手动 pin 且未强制（`PATH_MANUAL`）、打包任务已排队/运行中（`PACK_IN_FLIGHT`：
+  重排不会更快，还会和 worker 抢同一行的 pin）、渲染出的路径不可用（`LibraryPathError`：未打包的
+  顺势落 `CONVERSION_WAITING_PATH` 进「需干预」，已打包的只跳过不搬）、已打包但没有任何标题
+  （`NO_TITLE`）。逐件记理由而不是只报个数——「共跳过 3 件」说不出哪本书还要人工处理。
+- 降级手动 pin 的唯一途径是新增的 `Database.override_archive_path_pin`：显式命名的方法，不是
+  `set_archive_path_pin` 的布尔参数——这个降级决定必须可 grep；写 `is_manual=0`，让之后改模板还能
+  再重排这本书。
+- 单件拒绝不影响其余作品（一件移动失败不放弃剩下九十九件），也正因如此重跑是幂等的。
+- 复用 `<downloaded>` 批量重排那把 `_relocate`/`_record_relocation` 抽成共享实现（`rename_work` 与
+  `refile_work` 的唯一差别是「输入是否已校验」与「是否记为操作员的决定」），并新增
+  `_parse_relative_path` 严格校验已渲染的路径。
+
+**UI**：路径 tab 顶部新增「一键重新归档」面板——说明文字、`force` 复选框（未勾选即默认范围）、提交
+按钮，以及就地渲染的结果块（计数与明细来自同一批元组，摘要不可能报出明细里没有的数字），逐组列出
+「已入队打包 / 已移动 / 位置未变 / 跳过」并链到作品详情。结果就地渲染而非 303 + flash：运营者要处理
+的是逐件理由，一行 notice 装不下（与规则「试跑」同形）。路由 `POST /archive-settings/paths/rearchive`
+复用 settings 渲染器（`rearchive=` 走 `**extra`），并 `publish(EVENT_DOWNLOAD)` 通知已打开的页面刷新
+（事件只是信号，负载为空）。
+
+**验证**：新增 `tests/unit/test_rearchive.py`（25 项，逐件断言策略）、`tests/unit/test_work_detail.py` 的
+`archive_path_view` / `planned_archive_path` 用例（手动 pin 例外、陈旧 computed pin 被最新规则覆盖、
+无标题回落到原值、conversion 抛错不炸页面）、`tests/unit/test_archived_works.py::TestRefile`、
+`tests/integration/test_settings_web.py::TestReArchive`（按钮渲染并真的移动/入队）、
+`tests/integration/test_work_detail_web.py` 的预填用例；`render_check.py` 冒烟渲染通过。全量
+`--collect-only` 实测 **1310** 项（R26 1252 → 1310）；全量执行 0 错误、12 项真实 7-Zip 按本机跳过；
+2 项失败（`test_resolve_seven_zip_executable_prefers_managed_install`、
+`test_windows_install_verifies_and_downloads_official_portable_pair`）是 Linux 上既有的、
+与本次改动无关的失败。`compileall` 与 `git diff --check` 通过。版本升至 0.2.16。
+
+## 方案：AI 生成归档路径（2026-09-26，待确认；同日按运营者答复迭代到 v7）
+
+运营者提出：用 AI 根据元数据决定打包后的存放位置与文件名，并明确 **AI 路径与「按条件匹配的
+路径模板」互斥，同一时间只启用一个**；随后答复了方案里的 8 个问题，要求并入后给出参考 prompt。
+按要求本轮**只写方案，不动代码、不动数据库**。
+
+**新增 `AI_PATH_PROPOSAL.md`**（v2）。要点：
+
+- AI 只替代「模板 + 规则」这一层；审批、元数据刮削/翻译、`ComicInfo.xml`、「手动 pin 优先」
+  一律不动。`path_source` ∈ {`template`(默认), `ai`}；**AI 模式默认关闭**（需先配供应商）。
+- **供应商单独一页**（`SETTINGS_AI`）：多个供应商（名称/编码/基础地址/超时重试），每个供应商
+  **多把轮询 API Key**（加密存储、401/429 冷却后轮转）与可用模型列表；全局一条**主力 + 备用**
+  的模型链（`ai_model_chain`，position 0 为主力）。
+- **缓存即语义**：`ai_path_suggestions`，`指纹 = 元数据 + prompt 全文 + 模型链 + base_url`
+  （**Key 不进指纹**，轮询换 Key 不能让全库路径失效）。渲染路径永不调模型；调用只在打包 job、
+  「重新生成路径」、AI 模式重归档三处。判定「不用动」= 缓存存在 ∧ prompt 未变 ∧ 当前路径即其产出。
+- **全链失败默认进「需干预」**（`CONVERSION_WAITING_PATH` + `AI_PATH_UNAVAILABLE`），可在路径页
+  勾选「AI 不可用时回退到规则匹配」才回落兜底模板；失败**不写缓存**。
+- prompt 由运营者自行配置，默认给一份参考 prompt（含 JSON 契约、非法字符规则、缺失字段处理与
+  两个示例）；安全完全靠 §7 的代码校验门（`strict_library_segment` / 长度 / `_resolve_inside`），
+  不依赖 prompt 措辞。
+- AI 模式重归档：计划阶段绝不调模型；有缓存只比对移动，需要新答案的按 `每批处理数量` 入队
+  （复用现有转换 worker，并发天然为 1），`并发数` 默认 2、`使用流式` 默认关；**强制＝全库处理**
+  （运营者确认，不受任何跳过开关影响），「prompt 未变且路径已是其产出」只约束**默认重排**（默认不纳入，
+  可开关）。界面给 AI 产出的路径打 `AI` 徽标。
+- 默认参考 prompt 按运营者要求覆盖**五类出版形态**：系列（`社团/作者/系列`，卷号留在文件名）、
+  多作者合作本（作者用 ` & ` 连接）、单作者/多作者单行本、合刊/选集（`原作/合同誌`，作者 ≤3 位附在
+  文件名）、杂志（`刊名/年份`，如快楽天）。模型输入改用数组字段（`artists`/`groups`/`parody`），
+  因为「几个人合作」本身就是要判断的信息。
+- 运营者指出这些出版形态**一般都写在标题里**，prompt 因此改成「标题是主要证据」，`artists`/`tags`/
+  `category_raw` 只用于确认。
+- v5 给出**固定的五级目录**：`刊发形式 / 社团 / 作者 / 系列名 / 作品名`（缺层省略）。刊发形式按
+  活动（C108）→ 杂志（快楽天）→ 商业志 → 单行本 / 合作本 / 同人志 判定；社团有则加；作者仅当恰
+  1 位；系列名去掉刊发形式/作者/翻译语言/卷号（`[ぽりうれたん] 隣の喘ぎ声がうるさい2[中文翻譯]`
+  → `隣の喘ぎ声がうるさい`），杂志取「刊名+年月」、特刊再附特刊信息；作品名保留原题，只清非法字符。
+- v7：模型链**以模型为单位、可跨供应商**，且**配置时必须验证服务联通性**（保存即验证：未验证或
+  最近一次验证失败不允许进链；验证用一次最小 chat 请求，不是探活也不是只列 `/v1/models`）；
+  多值（多社团/多作者）整层省略、信息留在元数据与文件名；「需干预」里显示触发的供应商/模型。
+- v6 确认四处细节：杂志第四层去掉重复刊名（第一层已是刊名，第四层只留「年月+特刊信息」）；
+  **社团与作者同一规则，恰有 1 个才成层**；文件名**保留完整原题**（要能独立说明这本书，分享或
+  单独取用时不依赖目录）；活动名一般写在标题里。
+- §7 随之增加**「AI 输出的一次受控清洗」**：非法字符/保留名/超长走 `safe_library_name` 并记
+  `ai_path_sanitized`（模板路径是拒绝、AI 是清洗，因为「把标题变合法」本来就有现成函数），
+  只有 `..`/绝对路径/清洗后文件名空/整条超长才判失败。
+- 数据模型：`018_ai_path.sql` 五张表（providers / provider_keys / provider_models / model_chain /
+  path_suggestions）+ `archive_settings` 七个新键。
+
+**无代码或数据库改动**；测试基线仍为 1310 项（R27）。
+
+## R28 — AI 供应商：多供应商、多 Key 轮询、主力 + 备用模型链、保存即验证 (v0.2.17, 2026-09-26)
+
+按 `AI_PATH_PROPOSAL.md`（v7，运营者已确认）实施第一阶段：**只做「配好供应商」这一层**。AI 仍然
+不参与任何归档路径决策——`path_source`、prompt、指纹缓存与「需干预」在 R29，整库重排在 R30。
+因此本轮**不改变任何用户可见的归档行为**：AI 模式依旧默认关闭，路径仍由模板与规则决定；新增的是一个
+可以真正投入配置、并能在保存前证明「地址通、Key 有效、模型存在且能按要求输出 JSON」的设置页。
+
+**迁移 `018_ai_path.sql`，五张表**。三张是运营者逐条编辑的列表（`ai_providers` / `ai_provider_keys`
+/ `ai_provider_models`），JSON 单列会在每次编辑时整体重写，两个标签页或两次保存就会互相覆盖；
+`ai_model_chain` 单独一张，因为「主力 + 备用」本质是 `(供应商, 模型)` 的一个顺序，position 0 是
+主力，必须可查；`ai_path_suggestions` 是答案缓存而非优化（模型不是确定性函数，详情页、打包器与重排
+必须读同一份已落库的答案），本轮只建表，R29 才写。
+
+**新包 `app/ai/`**：
+
+- `models.py`：五张表的 DTO 与词表。`AiProviderKey` **不携带任何密文**——「设置页永不回显 Key」因此
+  是类型的属性，而不是模板要记住的规矩；`AiProviderModel.verified` 刻意不是「没失败」而是
+  `last_verify_ok is True`，`last_verify_ok is None`（从未验证）与 `False`（验证失败）在页面上是
+  两句话，也不可合并。
+- `errors.py`：`AiError(code, public_message)` + 稳定错误码（配置拒绝、`AI_NO_KEY`、
+  `AI_MODEL_UNVERIFIED`、`AI_PATH_UNAVAILABLE` 等）。
+- `client.py`：`OpenAiCompatibleClient` 只负责一次 `/chat/completions`，并把失败分类成
+  「换 Key」（401/403/429，`key_fault`）、「同一把重试」（超时/5xx，`retryable`）与其余，
+  重试循环因此是「这个请求的事」，与轮询策略解耦；`response_format` 刻意不发（本地 Ollama/LM Studio
+  会拒未知字段），解析改宽（`extract_json_object` 容忍 ``` 围栏与前后文字，仍要求是对象）。
+- `service.py`：供应商 CRUD 校验（名称唯一、编码白名单、地址必须 http(s) 且带 host、超时 5–300、
+  重试 0–3）、Key 加解密（复用 `archive/vault.py` 与归档主密钥）、**内存游标轮询**（重启从第一把
+  开始——冷却状态在库里，不在这个字典里）、全链走查（主力→备用，停用条目静默跳过，任何失败即换下一
+  条）、`verify_model` 与 `list_remote_models`。
+
+**保存即验证，落在两处**（与方案的唯一偏差，写在这里以免下次读到方案时困惑）：
+
+- 供应商保存只校验「地址形状」等能当场判断的字段，**不要求已有 Key**——否则就建不出第一个供应商
+  （先建供应商 → 再加 Key → 再加模型 → 再验证 → 再进链，这是页面唯一可能的操作顺序）。
+- 「必须验证联通性」由 `save_chain` 执行：模型未验证/验证失败 → `AI_MODEL_UNVERIFIED`；模型停用 →
+  `AI_MODEL_DISABLED`；供应商停用 → `AI_PROVIDER_DISABLED`；供应商没有可用 Key → `AI_NO_KEY`；
+  同一模型出现两次 → `AI_CHAIN_DUPLICATE`。整条链整体替换并全量校验，失败不留半条链。
+  `shift` / `append` / `remove` 三个动作也**全部经由 `save_chain`**，所以「界面上看到的顺序一定是
+  能保存的顺序」，拖动排序改成按钮上移/下移/移出，理由与仓库其他设置表单一致：普通 HTML 表单能表达
+  顺序，不必在浏览器里再存一份。
+
+验证请求是一次**最小的 chat 请求**（固定两句、要求回 `{"ok": true}`），不是探活也不是只列
+`/v1/models`：要证明的还有「它确实能按要求产出结构化输出」。结果写
+`last_verified_at/last_verify_ok/last_verify_error`，失败时把 `code: message` 落库并在模型行下显示。
+**验证失败不冷却 Key**（`_ask(park_key_faults=False)`）：冷却是打包路径的轮询规则（「别再撞同一把坏
+Key」），而验证时运营者正盯着答案看——第一次点出「鉴权失败」、第二次变成「没有可用的 Key」会把要读
+的原因藏起来。
+
+**设置页第 8 个分区 `SETTINGS_AI`**（`/settings/ai`，位于「路径」与「密码库」之间；标签、URL、侧边栏
+叶子与 JSON 载荷仍由 `SETTINGS_SECTION_STATUS` 一处生成）。`app/api/settings.py::_ai_section` 组装
+供应商目录、Key 状态（`api_keys` 而非 `keys`——Jinja 会把 `dict.keys` 解析成内建方法）、模型验证状态、
+模型链与「可加入链」的候选（与 `save_chain` 接受的条件同一套判断）；序列化器只输出标签与状态。
+模板 `settings/_ai.html`：模型链（主力/备用徽标、上移下移移出）、新增供应商、每个供应商一个
+`<details>` 折叠的编辑表单 + Key 子列表（添加/启停/删除，`password` 输入且无 `value`）+ 模型子列表
+（手填、`/v1/models` 拉取成勾选清单后批量添加、逐个验证/启停/删除）。13 个 POST 路由全部
+`require_authenticated` + `validate_csrf`，拒绝时以 400 就地重渲染并说明原因。
+
+**接线**：`build_lifespan` 无条件构造 `AiProviderService`（AI 模式关着也要能配置）与专属
+`httpx.AsyncClient`（无 Cookie、无自带凭据，Key 逐请求携带），`seed_state` 预置槽位（启动失败时页面
+503 而不是 500），关闭时 `aclose()`；新增测试缝 `ai_transport`。`deps.ai_service` 同时提供给 HTML 与
+JSON 两层。
+
+**验证**：新增 `tests/unit/test_ai_providers.py`（38 项：`extract_json_object` 的宽容与拒绝、供应商
+校验、Key 密文往返与「先尝试第一把、401 冷却后跳过」、超时不冷却、主力失败回落备用、全链失败时
+报出每个模型名、空链在发请求前就拒绝、五类进链拒绝、重排/移除走同一验证器、验证成功/失败/输出不可
+解析、`/v1/models` 读取与不可达）与 `tests/integration/test_settings_web.py::TestAISettings`
+（12 项：渲染、鉴权门、坏地址 400、重名 400、**从空页到主力的完整表单链路**、Key 永不回显（正常渲染与
+400 重渲染两处都查）、空 Key 400、验证失败落库并显示、拉取清单后勾选添加、上移/移出、删除供应商连带
+移出模型链、无嵌套 form）。全量 `--collect-only` 实测 **1360** 项（R27 1310 → 1360），全量执行
+**2 failed / 1346 passed / 12 skipped / 0 errors**——两项失败仍是
+`test_resolve_seven_zip_executable_prefers_managed_install` 与
+`test_windows_install_verifies_and_downloads_official_portable_pair`，Linux 上既有、与本次改动无关。
+最后一次复跑出现第三项 `test_work_detail_web.py::test_editing_metadata_on_a_packed_work_requeues_a_repack`
+（1345 passed）；它断言重排任务停在 `PENDING`，而转换 worker 会在后台把它取走，是负载下的既有时序
+竞态，单独运行三次均通过、与本次改动无关，因此**未改这条测试**，在此记录以免下次被当成新失败。
+`tests/unit/test_settings_sections.py`、`test_ui_shell.py` 等受「七分区→八分区」影响的断言一并更新。
+版本升至 0.2.17。方案文件状态行同步标注 R28 已实现与上面那处偏差。
+
+## R29 — AI 路径决策接入：路径来源、prompt、指纹缓存、需干预/回退、来源标注 (v0.2.18, 2026-09-26)
+
+按 `AI_PATH_PROPOSAL.md`（v7）实施第二阶段：**让 AI 真正接管归档路径**。R28 只做到「能配好供应商」，
+本轮把 `path_source`、prompt、指纹缓存、失败处理与来源标注接进 `ConversionService` 的决策链，并把
+「设置 → 路径」页补成 AI 的配置面板。**整库重排（批量/并发/流式/`include_current` 的实际行为、
+试跑）仍在 R30**——本轮只把四个设置键存下来并在页面上给出控件。
+
+**决策链（§3）**：`手动 pin（is_manual=1）→ path_source？ai → AI 路径（带缓存）；template → 模板/规则`。
+落点是新增的 `ConversionService._ai_relative_path(candidate_id, metadata, *, allow_model)`，两个调用方
+各接一个分支而不是各写一份：`_library_target`（打包 job 内，`allow_model=True`，唯一会发请求的地方）
+与 `planned_library_path`（运营者侧，`allow_model=False`，只读缓存）。模板分支一行未动。
+
+**新模块 `app/ai/prompt.py`（模型契约，§6）**：`DEFAULT_AI_PROMPT` 逐字取自方案 §6.1（以 `r"""…"""`
+嵌入，写法上就保证与文档同一份），`build_metadata_payload` 把元数据行编译成契约里的 JSON ——
+`artists`/`groups`/`parody` 是**数组**（「一共几个人合作」本身就是判据，拼成字符串就丢了），
+`*Raw` 优先（prompt 要求原文照抄），tags 截断到 `MAX_TAGS_IN_PROMPT`，`page_count` 从噪声值里取数。
+`build_messages`：prompt 里有 `{{metadata}}` 就地替换，没有就作为**用户消息**追加（默认 prompt 用后者）。
+不送路径、候选 id、下载来源或账号。
+
+**新模块 `app/ai/paths.py`（缓存即语义，§4 / §7 / §11）**：
+
+- `fingerprint_of` = SHA-256(元数据载荷 + prompt 全文 + 模型链签名)，`chain_signature` 用
+  **base_url + 模型名**而不是供应商显示名/ID——改个名字是装饰性的，不能作废整个书库；换成别的地址
+  或模型才可能改变答案。**API Key 不进指纹**：轮询换 Key 不能让全库路径失效。
+- `clean_ai_path` 是「清洗 + 拒绝」两条路：非法字符、控制字符、Windows 保留名、首尾点/空格、
+  超长段交给既有的 `safe_library_name`（打包器一直用它）并记 `ai_path_sanitized`；**清洗后为空的层整层
+  省略**（社团/作者缺失就是这种情况）；只有 `..`、`.`、绝对路径、盘符、清洗后文件名为空、整条超过
+  `MAX_RELATIVE_PATH_LENGTH`(240) 才判 `AI_PATH_INVALID`。反斜杠按分隔符处理（模型常照抄 Windows 路径）。
+  `.cbz` 由本服务追加，落地前仍走 `_resolve_inside` 第二道门。
+- `AiPathService.resolve` 是唯一发请求的入口：指纹命中直接返回缓存（`from_cache=True`，**不调模型**）；
+  否则 `complete(..., validate=answer_path)` —— 把「返回的不是合法路径」也变成一次链内失败，交给
+  下一个模型，而不是就地判死。成功写 `ai_path_suggestions`，**失败什么都不写**（一次网络故障不能被
+  固化成书名）。`current` / `is_current` / `badge` 全是纯读。
+- `AiProviderService.complete` 新增 `validate` 形参（默认 None，向后兼容）：链内每个模型答完先过调用方
+  的接受测试，「HTTP 200 但输出是散文」与超时一样走备用模型。
+
+**需要干预与回退（§7）**：`_ai_relative_path` 在链全失败时，若「AI 不可用时回退到规则匹配」开着 →
+记 `ai_path_fallback` 并返回 `None`（调用方走模板分支）；关着（默认）→ 抛
+`LibraryPathError(AI_PATH_UNAVAILABLE, …)`，`_handle_job` 把它落成 `CONVERSION_WAITING_PATH`，
+消息里带每个模型失败的原因。**没有配置 AI 服务**时同理（`AI_CHAIN_EMPTY` → `AI_PATH_UNAVAILABLE`），
+不会静默走模板。运营者侧（`allow_model=False`）没有缓存/缓存过期时抛 `AI_PATH_MISSING`：
+详情页预填因此留空、重新归档的计划阶段因此归入「需要新答案」——**不预填、也不展示兜底模板的答案**
+（§7「操作员侧不撒谎」）。
+
+**来源标注（§11，运营者要求 7）**：`status.py` 新增 `PATH_ORIGIN_STATUS`（`ai` → 「AI 生成」），
+`archive_path_view` 增加 `is_ai`（`work.ai_relative_path == 显示的那条路径`），`downloaded_work` 序列化器
+增加 `is_ai`；`_DOWNLOADED_SELECT` 以 `LEFT JOIN ai_path_suggestions` 带出 `ai_relative_path`（主键
+联接，不会放大行数、也不是每行一次查询）。作品详情页「归档」标题与已下载列表「归档路径」列渲染徽标。
+判定是纯读比较，所以人工改名后徽标自动消失——这正是它要表达的意思。
+
+**`ArchiveSettingsService` 新增 7 个键**：`path_source`（`template` 默认 / `ai`，非法值拒绝）、
+`ai_prompt`（空＝恢复默认，存的是空串而不是当天那版文本的快照，将来换默认文本能跟上）、
+`ai_fallback_to_rules`（默认关）、`ai_batch_size`(默认 20，1–500)、`ai_concurrency`(默认 2，1–16)、
+`ai_stream`(默认关)、`ai_default_include_current`(默认关)。整型越界**拒绝而不是静默夹取**（夹取值是
+运营者没选过的设置，页面还会把它当成他选的显示回来）。
+
+**`_paths_section` 与 `settings/_paths.html`**：页首新增「归档路径来源」面板——模式单选、
+prompt 文本框 + 恢复默认、回退开关、整库重排四项、模型链现状、缓存条数、清除缓存（**独立表单**，
+HTML 不嵌套 form）。AI 模式开启时模板/规则列整体置灰（`data-ai-inactive`，**置灰不禁用**：运营者可能
+正是在准备兜底模板）并把默认模板改题为「兜底模板（仅在勾选回退时使用）」。`settings.js` 只做面板
+显隐（渐进增强，不写任何词表）；三个新 POST 路由
+（`/archive-settings/paths/ai`、`/ai/prompt-default`、`/ai/cache/clear`）沿用
+`require_authenticated` + `validate_csrf`，拒绝时 400 就地重渲染。
+
+**R27 的「一键重新归档」在 AI 模式下不会撒谎，也不会误伤**（`app/archive/rearchive.py` 新增
+`_plan_ai_candidate`）：计划阶段**只读缓存**，于是 —— 尚未归档的作品带缓存路径就钉住、没缓存就
+不钉（留给打包 job 去问模型）；已打包且缓存是当前的作品按缓存路径移动，缓存路径与记录一致则默认
+不纳入（§4 谓词）、强制下报告为「位置未变」；已打包但缓存缺失/过期的作品**跳过并写明
+`AI_PATH_STALE`**，而不是入队——入队会重新打包一本内容没变的书，R27 明令禁止。人工 pin 与
+「打包中/已排队」的跳过规则与模板模式一致。整库级别的 AI 重排（含强制全库重问）按方案 §9/§13
+留在 R30，路径页在 AI 模式下给出对应说明。
+
+**其他接线**：`ConversionService` 新增 `ai_service` 形参（`wiring.py` 注入
+`application.state.ai_service`），并暴露 `path_source()` 与 `current_ai_path()` 给批量重打包——
+`/downloaded` 的「重新打包」在 AI 模式下**先读当前缓存**，命中就钉住让打包落在同一处，未命中就不钉，
+留给打包 job 去问模型（「批量重打包装载不重新询问」）。新增日志事件 `ai_path_suggested` /
+`ai_path_failed` / `ai_path_fallback` / `ai_path_sanitized`；`conversion_pinned_path_rejected`
+改名 `conversion_path_rejected`（现在两种东西会在这里落地：人工 pin 不可用，与 AI 全链失败）。
+
+**与方案的两处说明**（不是偏差，是方案伪代码与散文不同处，按散文实现并在代码注释里写明）：
+
+1. §4 的谓词伪代码写的是 `prompt_hash` 相符，但同一段散文说「换了 prompt / 换了模型链 / 元数据变了」
+   都排除。实现取**全指纹相符**（它蕴含 prompt 相符，并覆盖另外两项），因为要回答的是「重新问一遍
+   只会得到同一个答案」。`prompt_hash` 仍然入库，便于报告与将来的便宜短路。
+2. 试跑按钮与整库重排的实际行为按 §13 留在 R30；本轮只存设置、渲染控件。
+
+**验证**：新增 `tests/unit/test_ai_paths.py`（49 项：载荷与 prompt 契约、`clean_ai_path` 的清洗与七类
+拒绝、`answer_path`、指纹稳定性/敏感性/「换 Key 不变」、缓存命中不调模型、prompt 改变即失效、失败不写
+库、`ai_path_sanitized`、`badge` 与 §4 谓词、`ConversionService` 两个调用点（AI 命中/人工 pin 优先/
+失败拒绝/回退模板/无 AI 服务/运营者侧不调模型/模板模式不碰 AI））；`test_ai_providers.py` 增
+`TestAnswerValidation`（2 项：答案不可用走备用、全部不可用汇总一条）；`test_work_detail.py` 增 5 项
+（徽标三态 + 空视图）；`test_settings_web.py` 增 `TestAIPathsSettings`（8 项：渲染、保存全字段并落库、
+越界拒绝且不改模式、恢复默认、清除缓存计数、空缓存措辞、无嵌套 form、鉴权门）；
+`test_work_detail_web.py` 增 `TestAiArchivePath`（3 项：缓存命中打徽标、改名去徽标、AI 模式无缓存时
+不展示模板答案）；`test_rearchive.py` 增 `TestAiModeScope`（8 项：未归档有/无缓存、已打包移动、
+§4 谓词出范围、强制报告未变、缓存过期跳过且不入队也不 park、人工 pin、在途跳过，并断言 AI 模式
+从不调用模板规划器）。全量 `--collect-only` 实测 **1435** 项（R28 1360 → 1435）
+（+67 项）；`tests/unit` 与 `tests/integration` 全量执行 **2 failed / 1421 passed / 12 skipped / 0 errors**
+—— 两项失败仍是 `test_resolve_seven_zip_executable_prefers_managed_install` 与
+`test_windows_install_verifies_and_downloads_official_portable_pair`（Linux 上既有，与本次无关）。文档同步 `README.md`、`docs/USAGE.md`（新增「路径来源与 AI 路径」一节并改写
+「AI 供应商」一节的「尚未接管路径」）、`AgentHelp/EHBot.md` §4.6 与数据模型行、`AI_PATH_PROPOSAL.md`
+状态行。版本升至 0.2.18。
+
+
+## R30 — AI 模式整库重排：只移动不重打包、强制全库重新询问、试跑、批量/并发/流式 (v0.2.19, 2026-09-26)
+
+按 `AI_PATH_PROPOSAL.md` §9/§13 补齐最后一段：**AI 模式下的一键重新归档**。R29 的扫库在 AI 模式下
+只会「移动缓存已是当前的已打包作品、排队尚未归档的作品」，需要新答案的书一律跳过（`AI_PATH_STALE`）；
+本轮让它们各自入队一个**只重算路径、从不重新打包**的任务，并把强制、试跑与三个执行开关接上。
+
+**「重算路径」任务（`app/conversion/service.py`）**：`enqueue_for_candidate(candidate_id, *,
+refile=False, refresh_ai_path=False)` 把两个布尔写进既有的 `details_json`（为一分支读的两个开关加列
+不值得一次 schema 变更）；`_claim_pending_job_sync` 读回它们，`_handle_job` 在**取源档案之前**分流到
+`_handle_refile_job`——重算路径的书可能已经没有源压缩包，它的内容就在书库里那本 CBZ 上。新方法
+`ai_path_for_refile` 复用 `_ai_relative_path(allow_model=True)`，但**刻意不走 `_library_target`**：
+那条路的第一个分支就是 pin，而 pin 正是这个任务要替换的东西（读它只会得到「书已经在的位置」，
+任务变成空转）。得到路径后交给 `ArchivedWorkService.refile_work`，后者重新校验路径、移动文件、
+把 `artifacts.library_relative_path` 与 pin 一起改写成**计算所得**（`is_manual=0`）。`refile_work`
+为此新增 `allow_while_running`：它原本拒绝 `CONVERSION_RUNNING` 的书（防止页面动作与打包抢同一行），
+而调用它的正是持着那一行的 job 自己。失败映射到既有状态：没有可用路径 → `CONVERSION_WAITING_PATH`
+（`AI_PATH_UNAVAILABLE`），移动被拒 → 带该动作自己的错误码失败。
+
+**`refresh` 是显式指令而不是副产品（`app/ai/paths.py`）**：`AiPathService.resolve(..., refresh=True)`
+跳过缓存短路。只有两种情况下达：**强制**（全库重新询问）与 `include_current` 打开的默认重排
+（「让 AI 再给同一本书起个名字」）。缓存只是缺失或过期的重算路径任务不需要它——指纹对不上时
+`resolve` 本来就会问模型。
+
+**扫库（`app/archive/rearchive.py`）**：模板模式的循环原样提取为 `_plan_template_candidate`；
+AI 模式走 `_plan_ai_library`，按 `ai_batch_size` 分批、批内用信号量把元数据拉取并发限制在
+`ai_concurrency`。默认范围三类：尚未归档 → `queue`；已打包且缓存为当前但记录不同 → `move`（当场移动，
+不调模型）；已打包但缓存缺失/过期 → `refile`。`include_current` 打开时，§4 谓词成立的已打包作品也
+变成 `refile`（`refresh=True`）。**强制**则忽略上述一切：已打包一律 `refile`+refresh（含手动 pin，
+由 `refile_work` 覆盖并写 `is_manual=0`），尚未归档一律 `queue`+refresh 且**先清掉手动 pin**
+（新增 `ArchivedWorkService.clear_path_pin`；不清的话打包 job 会先读到 pin，书落在手写路径上而这一次
+运行还自称强制）。在途（`PENDING`/`RUNNING`）一律跳过——已打包的书也一样，否则会给同一本书排第二个 job。
+`ReArchiveTask` 因此从 `packed: bool` 变成 `mode ∈ {queue, move, refile}`（`packed` 变成派生属性，
+既有断言仍可用）。
+
+**试跑**：`rearchive_works(dry_run=True)` 只计划并**用真实运行的同一形状**报告（`_preview_report`），
+不移动、不入队、不写 pin；模板模式下连「路径不可用就 park」也跳过。强制在 AI 模式下是「全库 N 次
+模型调用（还要乘备用模型重试）」，试跑就是提交前的预估条数与二次确认。
+
+**`ai_stream` 变成真的（`app/ai/client.py` / `service.py`）**：客户端新增 SSE 分支——`stream: true`、
+逐行读 `data:` JSON、拼 `choices[0].delta.content`、`[DONE]` 收尾；供应商忽略该开关回普通 JSON 时按
+普通 JSON 读，空流判 `AI_BAD_RESPONSE`（链上表现为走下一个模型）。`AiProviderService.stream_enabled()`
+从路径设置读开关，`complete()` 每次调用解析一次并贯穿整条链（同一次询问不能中途换传输方式）。
+验证请求与非流式调用不受影响。
+
+**界面与文案**：`settings/_paths.html` 的 AI 面板删掉「整库重排在下一版」的告示，改成实际语义；
+「一键重新归档」新增「试跑」复选框、结果面板新增「入队重算路径」一组与计数、按 `dry_run` 切换标题；
+强制复选框在 AI 模式下写明「全库重新询问、含备用模型重试、会覆盖手动路径」；批量/并发/流式的说明
+改成代码真正做的事（分批准备作品、并发拉元数据、SSE 只改传输）。`_rearchive_notice` 增加重算路径计数
+与「试跑（未执行）：」前缀。
+
+**与方案的说明**：§9 把「满足 §4 谓词」写成一条 `AI_ALREADY_CURRENT` 跳过理由，实现取「不出现」
+（与模板模式对「已在正确位置」的处理一致）：千册书库里刷一屏「已是最新」会淹没真正可操作的行，
+而 `include_current` 正是把它们变成工作项的开关。`每批处理数量` 解释为**一次准备多少作品**——
+一次运行仍覆盖整个范围内书库，分批只是限制峰值内存并让循环在批次之间让出事件循环；`并发数` 只约束
+元数据拉取（模型调用发生在只有一个 worker 的打包队列里，天然逐件）。
+
+**验证**：改写并扩充 `tests/unit/test_rearchive.py`（现 46 项，其中 AI 侧 21 项：`TestAiModeScope`
+12、`TestAiForceScope` 3、`TestAiSweepSettings` 3、`TestDryRun` 3 —— 未归档有/无缓存、缓存变动即
+移动、§4 谓词不出现、`include_current` 变成重算而「已知变动」仍只移动、缓存过期变 `refile` 且当场
+不入队不移动、强制对已当前/已手写作品改为重新询问、未归档的强制先清 pin、在途跳过、整库在任意批次
+大小下都被计划、并发上界、试跑不落任何写、试跑不 park 而真实运行 park）；`tests/unit/test_ai_paths.py`
+新增 `TestRefileJob`（9 项：问模型后移文件、当前缓存不重问、refresh 才重问、失败 park、移动被拒带码
+失败、claim 读回两个标志、**重算路径不需要源压缩包**（保留原始压缩包关闭时源已删除，打包会被
+`ARCHIVE_NOT_READY` 拒绝而重算不会）、未打包的书请求重算被 `WORK_NOT_PACKAGED` 拒绝）；这个用例是
+写这一轮时唯一抓到的真 bug——最初把 `_enqueue_sync` 的「下载完成」前置条件原样套在 refile 上，会让
+默认配置下（打包成功即删源档）所有重算任务都排不进去。`tests/unit/test_ai_providers.py` 新增
+`TestStreamingTransport`（4 项：SSE 拼装且请求体带 `stream:true`、供应商忽略开关仍可读、默认不流式、
+空流判坏响应）；`tests/integration/test_settings_web.py` 新增 `TestReArchiveDryRun`（2 项）与
+`TestAiReArchiveSweep`（3 项，含同一本书默认跳过、强制改为入队重算）。全量实测
+**2 failed / 1451 passed / 12 skipped / 0 errors**（`--collect-only` **1465** 项，R29 1435 → 1465，
++30）；两项失败仍是 `test_resolve_seven_zip_executable_prefers_managed_install` 与
+`test_windows_install_verifies_and_downloads_official_portable_pair`（Linux 上既有，与本次无关）。
+文档同步 `README.md`、`docs/USAGE.md`（路径来源一节改写重排/试跑/三个开关，删除「下一版接入」）、
+`AgentHelp/EHBot.md` §4.6 状态表与三条语义、`AI_PATH_PROPOSAL.md` 状态行。版本升至 0.2.19。
+
+## 版本 0.3.0-pre：R27–R30 合并提交并发布测试镜像 (2026-09-26)
+
+R27（详情页按最新规则预填 + 一键重新归档）、R28（AI 供应商链）、R29（AI 路径决策接入）、
+R30（AI 模式整库重排）四轮此前一直压在工作区，现合并为一次提交。版本号从 0.2.19 升到
+**0.3.0-pre**（`pyproject.toml`；`uv.lock` 由 `uv lock` 同步为等价的 `0.3.0rc0`——此前自
+0.2.15 起一直没同步过，`--frozen` 容忍版本漂移所以没暴露）。文档随代码同批提交：`README.md`、
+`docs/USAGE.md`、`AgentHelp/EHBot.md` §4.6、`AgentHelp/AI_PATH_PROPOSAL.md`、`AgentHelp/AGENTS.md`
+基线（1465）。测试基线维持 **2 failed / 1451 passed / 12 skipped / 0 errors**（两项失败是 Linux
+上既有的 7-Zip 工具链用例）。镜像按「不打版本号、只供测试」的要求构建并推送为
+**`hsmk/ehbot:latest`**（未推送 0.3.0-pre 标签），便于运营者直接 `docker pull` 验证。

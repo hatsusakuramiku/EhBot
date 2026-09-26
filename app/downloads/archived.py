@@ -108,6 +108,41 @@ def _prune_empty_parents(path: Path, root: Path) -> None:
         current = current.parent
 
 
+def _parse_relative_path(raw: str) -> PurePosixPath:
+    """Validate an already-rendered library path into one this service will move to.
+
+    `strict_library_segment` rather than `safe_library_name`: the two callers are
+    the re-archive sweep and this service's own `refile_work`, and both hand over
+    a path that came out of `plan_library_path`, which refuses rather than
+    repairs. Re-checking it is not redundant -- the pin is joined onto a library
+    root that is itself a setting, so a path legal when it was rendered can be
+    unusable by the time it is applied -- and it is what keeps a stored row from
+    reaching `Path.replace` without a second look.
+
+    Refused as `ArchivedWorkError`, which is the error type the operator-facing
+    callers already translate into a message.
+    """
+    segments: list[str] = []
+    try:
+        for token in str(raw or "").replace("\\", "/").split("/"):
+            piece = token.strip()
+            if not piece or piece == ".":
+                continue
+            segments.append(strict_library_segment(piece))
+    except LibraryPathError as exc:
+        raise ArchivedWorkError(exc.code, exc.public_message) from exc
+    if not segments:
+        raise ArchivedWorkError("PATH_REQUIRED", "归档路径不能为空")
+    relative = PurePosixPath(*segments)
+    if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+        raise ArchivedWorkError(
+            "PATH_TOO_LONG",
+            f"归档路径长度 {len(str(relative))} 超过上限 "
+            f"{MAX_RELATIVE_PATH_LENGTH}，请缩短目录或文件名",
+        )
+    return relative
+
+
 class ArchivedWorkService:
     """Actions on a work whose download has already finished."""
 
@@ -445,16 +480,80 @@ class ArchivedWorkService:
             return {
                 "candidate_id": candidate_id,
                 "path": str(source),
+                "relative_path": source.relative_to(
+                    library_root.resolve()
+                ).as_posix(),
                 "moved": False,
             }
+        return await self._relocate(
+            work,
+            source,
+            target,
+            library_root=library_root,
+            is_manual=True,
+            override_manual=False,
+            operator_name=operator_name,
+        )
+
+    async def _relocate(
+        self,
+        work: DownloadedWork,
+        source: Path,
+        target: Path,
+        *,
+        library_root: Path,
+        is_manual: bool,
+        override_manual: bool,
+        operator_name: str,
+    ) -> dict:
+        """Move one published CBZ and record where it went, once, for both callers.
+
+        The half `rename_work` and `refile_work` share. They differ in what they
+        accept and in whether the result is recorded as an operator's decision,
+        so each validates its own input and hands the move here -- one place
+        creates the directory, prunes what the move emptied, and writes both the
+        artifact row and the pin. A second copy per caller is how the two would
+        start disagreeing about what a completed move means.
+
+        `override_manual` is the one thing that cannot be inferred from the rest:
+        `refile_work` is reachable for a book whose path an operator typed only
+        through 强制重新归档, and on that run the move *must* also replace the pin
+        -- leaving it would point the next pack at the path the file was just
+        moved off. Named at the call site rather than left to `is_manual`, so the
+        single place this codebase demotes a decision is greppable.
+        """
         try:
             resolved = unique_library_target(
                 target, reserved=frozenset({str(source)})
             )
         except LibraryTemplateError as exc:
             raise ArchivedWorkError(exc.code, exc.public_message) from exc
-
-        await asyncio.to_thread(resolved.parent.mkdir, parents=True, exist_ok=True)
+        if resolved == source:
+            # `unique_library_target` keeps a name this book already owns, so a
+            # target that resolves back to the file being moved is 「already
+            # there」 rather than a move onto itself. Still recorded: a re-file
+            # that recomputed the path it already had has to (re)pin it, or a pin
+            # left pointing at the previous template sends the next one round
+            # again.
+            await self._record_relocation(
+                work,
+                resolved,
+                library_root,
+                is_manual,
+                override_manual,
+                operator_name,
+            )
+            return {
+                "candidate_id": work.candidate_id,
+                "path": str(resolved),
+                "relative_path": resolved.relative_to(
+                    library_root.resolve()
+                ).as_posix(),
+                "moved": False,
+            }
+        await asyncio.to_thread(
+            resolved.parent.mkdir, parents=True, exist_ok=True
+        )
         try:
             await asyncio.to_thread(source.replace, resolved)
         except OSError as exc:
@@ -462,7 +561,41 @@ class ArchivedWorkService:
                 "FILE_MOVE_FAILED", f"移动文件失败：{exc}"
             ) from exc
         await asyncio.to_thread(_prune_empty_parents, source, library_root)
+        await self._record_relocation(
+            work,
+            resolved,
+            library_root,
+            is_manual,
+            override_manual,
+            operator_name,
+        )
+        return {
+            "candidate_id": work.candidate_id,
+            "path": str(resolved),
+            "relative_path": resolved.relative_to(
+                library_root.resolve()
+            ).as_posix(),
+            "moved": True,
+        }
 
+    async def _record_relocation(
+        self,
+        work: DownloadedWork,
+        resolved: Path,
+        library_root: Path,
+        is_manual: bool,
+        override_manual: bool,
+        operator_name: str,
+    ) -> None:
+        """Write where the file now is, on both the artifact row and the pin.
+
+        Both, because they answer the same question from two directions: the
+        artifact row is what the 已下载内容 list shows for this run, and the pin is
+        what survives the row and decides where the *next* pack lands. A rename
+        made from the list used to write only the first, and the detail page's
+        form -- which reads the pin -- then disagreed with the list about where
+        the book belonged.
+        """
         relative = resolved.relative_to(library_root.resolve())
         await asyncio.to_thread(
             self._record_path_sync,
@@ -470,24 +603,95 @@ class ArchivedWorkService:
             str(resolved),
             relative.as_posix(),
         )
-        # Also pinned in `work_archive_paths`, so a rename made from the list
-        # survives the artifact row and is the same fact the detail page's form
-        # reads and writes. Without this the two surfaces would disagree about
-        # where the book belongs the moment one of them was used.
-        await self._database.set_archive_path_pin(
-            candidate_id,
-            relative.as_posix(),
-            is_manual=True,
-            operator_name=operator_name,
-        )
+        if override_manual:
+            await self._database.override_archive_path_pin(
+                work.candidate_id,
+                relative.as_posix(),
+                operator_name=operator_name,
+            )
+        else:
+            await self._database.set_archive_path_pin(
+                work.candidate_id,
+                relative.as_posix(),
+                is_manual=is_manual,
+                operator_name=operator_name,
+            )
+        if self._notify is not None:
+            self._notify(work.candidate_id)
+
+    async def clear_path_pin(self, candidate_id: int) -> None:
+        """Drop where this book was told to land, so the current mode decides.
+
+        The one caller is a 强制 re-archive of a work that is not packed yet: the
+        sweep's instruction is 「忽略手动指定的路径」, and a pin left in place
+        would be read by the packing job before AI mode gets a turn -- the book
+        would land on the typed path while the run reported itself as forced.
+        Packed works do not need this: `refile_work` replaces the pin as part of
+        the move. Named rather than inlined so the one place a manual decision is
+        dropped stays greppable, beside `override_archive_path_pin`.
+        """
+        await self._database.clear_archive_path_pin(candidate_id)
         if self._notify is not None:
             self._notify(candidate_id)
-        return {
-            "candidate_id": candidate_id,
-            "path": str(resolved),
-            "relative_path": relative.as_posix(),
-            "moved": True,
-        }
+
+    async def refile_work(
+        self,
+        candidate_id: int,
+        relative_path: str,
+        *,
+        operator_name: str = "admin",
+        allow_while_running: bool = False,
+    ) -> dict:
+        """Move a packed book to the path the current rules computed for it.
+
+        The actor half of 一键重新归档, and deliberately not `rename_work`. The two
+        take opposite stances on their input: `rename_work` repairs what an
+        operator typed (`safe_library_name`) and records the result as
+        `is_manual=True`, because an operator decided it; this one is handed a
+        path that already went through `plan_library_path`, so it re-validates
+        rather than repairs, and records `is_manual=False` -- the next template
+        change has to be able to re-file the book again, which a manual pin
+        forbids by design.
+
+        That also means a manual pin is *overwritten* here. The guard against
+        that lives in the caller: the sweep keeps typed paths out of its plan
+        unless the operator asked for 强制, which is a request for exactly this.
+        No other caller should reach this method with a path the operator typed.
+
+        A packed work is moved, never repacked: the CBZ on disk is already this
+        book's content, and the instruction is to 「更新路径与名称」 rather than
+        spend the host's CPU re-deriving bytes that do not change.
+
+        `allow_while_running` exists for exactly one caller: the conversion job
+        that recomputes a path. That job *is* the row in `CONVERSION_RUNNING`, so
+        the guard below -- which is there to stop a page action racing a pack in
+        flight -- would refuse the very job that owns the row. Every other caller
+        leaves it False.
+        """
+        work = await self._require_work(candidate_id)
+        if not work.cbz_path:
+            raise ArchivedWorkError(
+                "WORK_NOT_PACKAGED",
+                "该作品还没有打包产物，请先打包再修改文件名或路径",
+            )
+        if work.pack_state == CONVERSION_STATE_RUNNING and not allow_while_running:
+            raise ArchivedWorkError(
+                "WORK_PACK_RUNNING",
+                "该作品正在打包，请等待打包结束再修改路径",
+            )
+        library_root, _ = await self._roots()
+        relative = _parse_relative_path(relative_path)
+        source = _resolve_inside(library_root, Path(work.cbz_path))
+        target = _resolve_inside(library_root, library_root / relative)
+        return await self._relocate(
+            work,
+            source,
+            target,
+            library_root=library_root,
+            is_manual=False,
+            override_manual=True,
+            operator_name=operator_name,
+        )
 
     async def has_manual_path_pin(self, candidate_id: int) -> bool:
         """Whether this work's archive path was typed by an operator.

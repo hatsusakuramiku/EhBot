@@ -25,6 +25,248 @@
   previewed one without the other would be shown a path the packer does not
   produce.
 #}
+{#
+  一键重新归档: the button that applies the templates below to the books that are
+  already in the library. It belongs on this tab rather than on /downloaded
+  because the layout template is the change it applies -- an operator who edits
+  a template wants the books already filed under the old one to follow, and the
+  batch repack only ever reached a selection they had to pick by hand.
+
+  The checkbox is the whole of 「强制」, and it says what it does: without it the
+  sweep leaves a hand-typed path alone (the standing 「模板是默认值」 policy),
+  with it those paths are recomputed too. A checkbox rather than a confirm
+  dialog because the label carries the decision and this page reserves the
+  dialog for a delete.
+
+  The run's outcome renders in place, like the rule 试跑 below: what an operator
+  acts on is the per-work reasons, and the page-level notice is one sentence
+  long.
+#}
+{#- 归档路径来源: the switch that decides whether everything below applies.
+
+    It sits above the template because it governs it: 「模板与规则」和「AI 生成」
+    answer the same question and only one may be on (proposal §2), so an operator
+    who flips this is changing which half of this page is live. The AI sub-panel
+    carries its own settings, and is hidden rather than removed when the template
+    mode is chosen -- the values are still submitted, so switching back and forth
+    never loses the prompt.
+
+    The template and rule panels below are dimmed (not disabled) in AI mode: an
+    operator may still want to prepare a fallback template, and a control that
+    silently discards an edit is worse than one that is visibly not in effect.
+-#}
+<section class="ui-panel" style="margin-bottom: var(--s-5)">
+  <h2 class="ui-section-title">归档路径来源</h2>
+  <p class="ui-hint">
+    二选一。<strong>模板与规则</strong>是现状；<strong>AI 生成</strong>由「设置 →
+    AI 供应商」里配置的模型链读取作品元数据决定存放位置与文件名，下方的模板与规则不再生效。
+  </p>
+  <form class="ui-form" method="post" action="{{ url_for('save_ai_path_settings') }}"
+        style="margin-top: var(--s-4)">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <fieldset class="ui-fieldset">
+      <legend>使用哪种方式决定归档路径</legend>
+      {% for option in path_sources %}
+        <label class="ui-checkline" data-layout="stack">
+          <input class="ui-radio" type="radio" name="path_source"
+                 value="{{ option.code }}" data-ai-mode
+                 {% if option.code == path_source %}checked{% endif %}>
+          <span>{{ option.label }}<small>{{ option.hint }}</small></span>
+        </label>
+      {% endfor %}
+    </fieldset>
+
+    <div data-ai-panel {% if path_source != "ai" %}hidden{% endif %}>
+      {% if not ai.chain %}
+        {{ ui.callout("模型链还没有配置", tone="waiting",
+                      detail="AI 模式下打包需要一条至少含一个已验证模型的模型链，请先到「设置 → AI 供应商」配置。未配置时作品会在打包时停在「待定归档路径」。") }}
+      {% else %}
+        <p class="ui-hint">当前模型链：{% for entry in ai.chain %}{{ "主力" if entry.is_primary else "备用" }} {{ entry.label }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+      {% endif %}
+
+      <div class="ui-field">
+        <label for="ai-prompt">提示词（prompt）</label>
+        <textarea class="ui-input" id="ai-prompt" name="ai_prompt" rows="14"
+                  spellcheck="false">{{ ai.prompt }}</textarea>
+        <small>
+          全文参与指纹：改动一次，全库作品都会被视为「需要新答案」。用
+          <code>{{ "{{metadata}}" }}</code> 占位符可把元数据 JSON 就地插入；不写时，元数据会作为用户消息追加在提示词之后。
+          作品详情页与已下载列表会给 AI 生成的路径标注「AI 生成」。
+        </small>
+      </div>
+      <div class="ui-form-actions">
+        {#- Same field, a different destination: the reset posts the form but
+            stores blank, which `ai_prompt` reads back as the default. -#}
+        <button class="ui-btn" type="submit"
+                formaction="{{ url_for('reset_ai_prompt') }}">恢复默认提示词</button>
+      </div>
+
+      <label class="ui-checkline" data-layout="stack">
+        <input class="ui-checkbox" name="ai_fallback_to_rules" type="checkbox"
+               {% if ai.fallback_to_rules %}checked{% endif %}>
+        <span>AI 不可用时回退到规则匹配
+          <small>勾选后，模型链全部失败的作品改用下方「兜底模板」入库；不勾选则停在「待定归档路径」等待处理（默认）。</small>
+        </span>
+      </label>
+
+      <fieldset class="ui-fieldset">
+        <legend>整库重排</legend>
+        <div class="ui-field">
+          <label for="ai-batch-size">每批处理数量</label>
+          <input class="ui-input" id="ai-batch-size" name="ai_batch_size" type="number"
+                 min="{{ ai.bounds.batch_size.minimum }}" max="{{ ai.bounds.batch_size.maximum }}"
+                 value="{{ ai.batch_size }}">
+          <small>整库重排时每批准备的作品数；一次运行仍覆盖全部范围内作品，分批只是避免一次性读入整库并让页面保持响应（{{ ai.bounds.batch_size.minimum }}–{{ ai.bounds.batch_size.maximum }}，默认 20）。</small>
+        </div>
+        <div class="ui-field">
+          <label for="ai-concurrency">并发数</label>
+          <input class="ui-input" id="ai-concurrency" name="ai_concurrency" type="number"
+                 min="{{ ai.bounds.concurrency.minimum }}" max="{{ ai.bounds.concurrency.maximum }}"
+                 value="{{ ai.concurrency }}">
+          <small>同一批内并发拉取作品元数据的数量（{{ ai.bounds.concurrency.minimum }}–{{ ai.bounds.concurrency.maximum }}，默认 2）。模型调用发生在打包队列里，始终逐件进行。</small>
+        </div>
+        <label class="ui-checkline" data-layout="stack">
+          <input class="ui-checkbox" name="ai_stream" type="checkbox"
+                 {% if ai.stream %}checked{% endif %}>
+          <span>使用流式输出
+            <small>以流式（SSE）方式请求模型：只改变传输方式，结果完全相同；部分自建端点只支持非流式，默认关闭。</small>
+          </span>
+        </label>
+        <label class="ui-checkline" data-layout="stack">
+          <input class="ui-checkbox" name="ai_default_include_current" type="checkbox"
+                 {% if ai.default_include_current %}checked{% endif %}>
+          <span>默认重排时也重算「已按当前提示词定好路径」的作品
+            <small>只影响默认的「一键重新归档」；<strong>强制</strong>始终处理全库，不受此项影响。默认不纳入。</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <p class="ui-hint" data-field="ai-cache">
+        已缓存 {{ ai.cache_count }} 条路径答案。改提示词或换模型链后缓存即失效，打包时会重新询问模型。
+      </p>
+    </div>
+
+    <div class="ui-form-actions">
+      <button class="ui-btn" data-variant="primary" type="submit">保存路径来源与 AI 设置</button>
+    </div>
+  </form>
+
+  {#- 清除缓存 is its own form: a nested form is ignored by HTML, and this one
+      writes nothing the big form owns -- it only drops the answer cache, and the
+      next pack asks again. -#}
+  <form method="post" action="{{ url_for('clear_ai_path_cache') }}"
+        style="margin-top: var(--s-4)">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="ui-form-actions">
+      <button class="ui-btn" type="submit">清除 AI 路径缓存（{{ ai.cache_count }} 条）</button>
+    </div>
+  </form>
+</section>
+
+<section class="ui-panel" style="margin-bottom: var(--s-5)">
+  <h2 class="ui-section-title">一键重新归档</h2>
+  {% if path_source == "ai" %}
+  <p class="ui-hint">
+    当前是 AI 模式。<strong>计划阶段不会向模型发请求</strong>：已缓存且仍是当前答案的作品当场移动，
+    其余交给打包队列逐件处理（模型调用发生在任务里，复用既有的超时、Key 轮换与备用模型）。
+    还没归档成功的作品排队重算；已打包但答案缺失或过期的作品<strong>只移动、不重新打包</strong>。
+    已按当前提示词定好路径的作品默认不纳入，可在上方打开开关改为一并重算。
+    在作品详情页手动指定过路径的作品默认保持原样，只有<strong>强制</strong>会覆盖。
+  </p>
+  {{ ui.callout("强制 = 全库重新询问（含备用模型重试）", tone="waiting",
+                detail="AI 模式下的强制会为每件已归档作品重新调用模型，按当前提示词重新询问（包括缓存仍是当前答案的作品），并覆盖手动指定的路径。这可能耗时较长并产生费用——可以先试跑，确认范围后再执行。") }}
+  {% else %}
+  <p class="ui-hint">
+    按当前路径规则（下方模板与按规则匹配的模板）为每件作品重算归档路径，把
+    <strong>还没归档成功</strong>的（从未打包、打包失败、或缺分卷/密码停在需干预）
+    与<strong>路径已经变动</strong>的作品重新归档。
+    已经打包好的作品<strong>不会重新打包</strong>：只是把已有的 CBZ 移动到新路径、
+    必要时改名，内容不变，因此不会额外占用宿主机资源。
+    在作品详情页手动指定过路径的作品默认保持原样。
+  </p>
+  {% endif %}
+  <form class="ui-form" method="post"
+        action="{{ url_for('rearchive_archive_paths') }}"
+        style="margin-top: var(--s-4)">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="ui-checkline" data-layout="stack">
+      <input class="ui-checkbox" name="force" value="on" type="checkbox">
+      <span>强制重新归档所有作品
+        {% if path_source == "ai" %}
+        <small>除上述作品外，缓存已是当前答案的作品也一并重新询问模型；手动指定的路径同样会被覆盖。
+          每件已归档作品都会产生一次模型调用（加上备用模型的重试），建议先勾选「试跑」看看范围。</small>
+        {% else %}
+        <small>除上述作品外，已归档且路径未变的作品也一并处理；手动指定的路径同样会被当前规则覆盖。</small>
+        {% endif %}
+      </span>
+    </label>
+    <label class="ui-checkline" data-layout="stack">
+      <input class="ui-checkbox" name="dry_run" value="on" type="checkbox">
+      <span>试跑（只列出会做什么，不移动文件、不入队、不调用模型）
+        <small>计划阶段本来就不会询问模型；勾选后连「入队」与「移动」也一并跳过，
+          因此可以安全地先看一遍范围，尤其是强制全库之前。</small>
+      </span>
+    </label>
+    <div class="ui-form-actions">
+      <button class="ui-btn" data-variant="primary" type="submit">一键重新归档</button>
+    </div>
+  </form>
+
+  {% if rearchive %}
+  <h3 class="ui-section-title" style="margin-top: var(--s-5)">
+    {% if rearchive.dry_run %}试跑结果{% else %}运行结果{% endif %}{% if rearchive.force %}（强制）{% endif %}
+  </h3>
+  {% if not rearchive.queued and not rearchive.refiling and not rearchive.moved and not rearchive.unchanged and not rearchive.skipped %}
+    {{ ui.empty_state("没有需要处理的作品",
+        "所有作品的归档路径都已经是最新答案计算出的结果。" if path_source == "ai"
+        else "所有作品的归档路径都已经是最新规则计算出的结果。") }}
+  {% else %}
+    {#- One definition list for the counts and one list per outcome. The counts
+        come from the same tuples the lists below render, so a summary can never
+        claim a number the detail rows do not show. -#}
+    {{ ui.kv([
+      {"label": "已检查", "value": rearchive.scanned ~ " 件"},
+      {"label": "入队打包", "value": rearchive.queued|length ~ " 件"},
+      {"label": "入队重算路径", "value": rearchive.refiling|length ~ " 件"},
+      {"label": "移动文件", "value": rearchive.moved|length ~ " 件"},
+      {"label": "位置未变", "value": rearchive.unchanged|length ~ " 件"},
+      {"label": "跳过", "value": rearchive.skipped|length ~ " 件"},
+    ]) }}
+    {#- `rows`, not `items`: Jinja resolves `.items` on a dict to the dict's own
+        method before it looks for the key, so `group.items` would render a
+        builtin. -#}
+    {% for group in [
+        {"title": "已入队打包", "key": "target", "rows": rearchive.queued},
+        {"title": "已入队重算路径（打包队列稍后处理）", "key": "from", "rows": rearchive.refiling},
+        {"title": "已移动", "key": "to", "rows": rearchive.moved},
+        {"title": "位置未变", "key": "target", "rows": rearchive.unchanged},
+        {"title": "跳过", "key": "message", "rows": rearchive.skipped},
+    ] %}
+      {% if group.rows %}
+        <p class="ui-hint" style="margin: var(--s-4) 0 0">{{ group.title }}（{{ group.rows|length }}）</p>
+        <ul class="ui-form" style="margin: var(--s-2) 0 0; padding-left: var(--s-5)">
+          {% for item in group.rows %}
+            <li>
+              <a href="/works/{{ item.candidate_id }}">{{ item.title or ("作品 #" ~ item.candidate_id) }}</a>
+              {% set detail = item[group.key] %}
+              {% if detail %}<span class="ui-hint" style="margin: 0">{{ detail }}</span>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endfor %}
+    <p class="ui-hint" style="margin-top: var(--s-4)">
+      {% if rearchive.dry_run %}
+      以上为试跑结果，未做任何改动。去掉「试跑」再提交即可执行。
+      {% else %}
+      入队打包与入队重算路径的作品都由打包队列在后台处理，可到「活动 → 队列」跟踪进度；
+      重算路径的任务只移动已打包的 CBZ，不会重新打包。
+      {% endif %}
+    </p>
+  {% endif %}
+  {% endif %}
+</section>
+
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
@@ -58,9 +300,13 @@
     </section>
   </div>
 
-  <div class="ui-settings-col">
+  <div class="ui-settings-col" {% if path_source == "ai" %}data-ai-inactive{% endif %}>
     <section class="ui-panel">
-      <h2 class="ui-section-title">归档路径模板</h2>
+      <h2 class="ui-section-title">{% if path_source == "ai" %}兜底模板（仅在勾选回退时使用）{% else %}归档路径模板{% endif %}</h2>
+      {% if path_source == "ai" %}
+        {{ ui.callout("AI 模式已启用", tone="waiting",
+                      detail="下面的模板与规则在 AI 模式下不生效；只有在勾选「AI 不可用时回退到规则匹配」且模型链全部失败时，才会用到「兜底模板」。") }}
+      {% endif %}
       <p class="ui-hint">每本书在书库目录内的相对路径。用 <code>/</code> 分层，最后一层是文件名（<code>.cbz</code> 自动追加）。</p>
       <form class="ui-form" method="post" action="{{ url_for('save_library_template') }}"
             style="margin-top: var(--s-4)">

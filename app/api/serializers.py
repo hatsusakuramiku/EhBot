@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.ai.models import PROVIDER_CODE_LABELS
 from app.downloads.models import (
     CONVERSION_STATE_RUNNING,
     OPEN_DOWNLOAD_STATES,
@@ -29,6 +30,7 @@ from app.api.status import (
     status_view,
     toggle_view,
     log_level_view,
+    ai_verification_view,
 )
 from app.review.models import (
     REVIEW_AUTO_APPROVE,
@@ -367,6 +369,13 @@ def downloaded_work(work: Any) -> dict[str, Any]:
         # Present only once the operator has moved the book, and the reason a
         # later repack lands on their path rather than a re-derived one.
         "library_relative_path": work.library_relative_path,
+        # Whether the path on this row was decided by the model. Resolved here,
+        # not in the template, for the same reason every badge is: the grid, the
+        # list and a JSON client must describe a book identically.
+        "is_ai": bool(
+            getattr(work, "ai_relative_path", None)
+            and work.ai_relative_path == work.archive_relative_path
+        ),
         # Where the *next* pack will put this book, which is a different question
         # from `cbz_path` -- where the last one put it. Both are sent so a client
         # can show a pending move before it happens.
@@ -530,6 +539,77 @@ def auto_approval_dry_run(result: Any) -> dict[str, Any]:
             }
             for hit in result.hits
         ],
+    }
+
+
+def ai_provider(provider: Any) -> dict[str, Any]:
+    """One AI vendor endpoint. The base URL is configuration, not a secret."""
+    return {
+        "provider_id": provider.provider_id,
+        "name": provider.name,
+        "code": provider.code,
+        "code_label": PROVIDER_CODE_LABELS.get(provider.code, provider.code),
+        "base_url": provider.base_url,
+        "timeout_seconds": provider.timeout_seconds,
+        "max_retries": provider.max_retries,
+        "enabled": provider.enabled,
+        "enablement": toggle_view(provider.enabled).to_payload(),
+    }
+
+
+def ai_provider_key(key: Any, *, usable: bool) -> dict[str, Any]:
+    """One API key as the page may see it: a label and a state, never the key.
+
+    `AiProviderKey` carries no ciphertext to begin with -- the service holds the
+    only read that returns one and decrypts it for a single request -- so this
+    serializer is a shape, not a filter. `usable` is resolved by the caller from
+    the `usable_only` read, because 「在冷却期内」 is a comparison against the
+    database's clock and computing it here from a timestamp would race that
+    clock.
+    """
+    return {
+        "key_id": key.key_id,
+        "provider_id": key.provider_id,
+        "label": key.label,
+        "enabled": key.enabled,
+        "enablement": toggle_view(key.enabled).to_payload(),
+        "failures": key.failures,
+        "cooldown_until": key.cooldown_until,
+        "usable": usable,
+        "last_used_at": key.last_used_at,
+        "created_at": key.created_at,
+    }
+
+
+def ai_provider_model(model: Any) -> dict[str, Any]:
+    """One model name and its verification state."""
+    return {
+        "model_id": model.model_id,
+        "provider_id": model.provider_id,
+        "name": model.name,
+        "enabled": model.enabled,
+        "enablement": toggle_view(model.enabled).to_payload(),
+        "verification": ai_verification_view(model.last_verify_ok).to_payload(),
+        "verified": model.verified,
+        "last_verified_at": model.last_verified_at,
+        "last_verify_error": model.last_verify_error,
+    }
+
+
+def ai_chain_entry(entry: Any) -> dict[str, Any]:
+    """One position in the primary/fallback chain.
+
+    Position 0 travels as `primary` rather than as a number the template would
+    have to compare: 「第 0 位是主力」 is the rule, and rendering it in one place
+    is what keeps the model-chain editor from inventing its own threshold.
+    """
+    return {
+        "position": entry.position,
+        "primary": entry.is_primary,
+        "provider_id": entry.provider.provider_id,
+        "provider_name": entry.provider.name,
+        "model_id": entry.model.model_id,
+        "model_name": entry.model.name,
     }
 
 
