@@ -34,6 +34,7 @@ from app.api.serializers import (
     ai_provider,
     ai_provider_key,
     ai_provider_model,
+    ai_selectable_model,
     log_entry_payload,
     archive_password,
     archive_path_rule,
@@ -79,6 +80,8 @@ from app.auto_approval.rules import (
 )
 from app.auto_approval.service import DRY_RUN_SCAN_LIMIT
 from app.ai.models import (
+    CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_DEFAULT,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_SECONDS,
     KEY_COOLDOWN_MINUTES,
@@ -87,6 +90,10 @@ from app.ai.models import (
     MIN_TIMEOUT_SECONDS,
     PROVIDER_CODE_LABELS,
     SUPPORTED_PROVIDER_CODES,
+)
+from app.archive.service import (
+    MODEL_SOURCE_DEFAULT,
+    MODEL_SOURCE_CUSTOM,
 )
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
@@ -233,7 +240,26 @@ async def _paths_section(request: Request) -> dict[str, Any]:
     database = deps.database(request)
     app_settings = request.app.state.settings
     ai_service = deps.optional_service(request, "ai_service")
-    chain = await ai_service.chain() if ai_service is not None else ()
+    chain = (
+        await ai_service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        if ai_service is not None
+        else ()
+    )
+    path_chain = (
+        await ai_service.chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        if ai_service is not None
+        else ()
+    )
+    ai_selectable: list[dict[str, Any]] = []
+    if ai_service is not None:
+        in_chain = {entry.model.model_id for entry in path_chain}
+        for provider in await ai_service.providers():
+            for model in await ai_service.models(provider.provider_id):
+                ai_selectable.append(
+                    ai_selectable_model(
+                        provider, model, in_chain=model.model_id in in_chain
+                    )
+                )
     return {
         "path_rules": [
             archive_path_rule(rule)
@@ -289,6 +315,26 @@ async def _paths_section(request: Request) -> dict[str, Any]:
             "stream": await service.ai_stream(),
             "default_include_current": await service.ai_default_include_current(),
             "cache_count": await database.ai_path_suggestion_count(),
+            # Which models this feature asks: the global default, or a list of
+            # its own. `chain` below is the *effective* list (what a pack will
+            # actually use); `path_chain` is the override as configured, so the
+            # editor can show an empty custom list without pretending the
+            # inherited one is what is being edited.
+            "model_source": await service.ai_model_source(),
+            "model_sources": [
+                {
+                    "code": MODEL_SOURCE_DEFAULT,
+                    "label": "跟随全局默认",
+                    "hint": "使用「设置 → AI 供应商」页的全局默认模型。",
+                },
+                {
+                    "code": MODEL_SOURCE_CUSTOM,
+                    "label": "本页单独指定",
+                    "hint": "路径决策用下面这张列表，与全局默认互不影响。",
+                },
+            ],
+            "path_chain": [ai_chain_entry(entry) for entry in path_chain],
+            "selectable_models": ai_selectable,
             # What the model chain currently holds, so the page can say whether
             # AI mode is ready instead of letting an operator switch it on and
             # discover 需干预 entries later.
@@ -327,16 +373,18 @@ async def _paths_section(request: Request) -> dict[str, Any]:
 
 
 async def _ai_section(request: Request) -> dict[str, Any]:
-    """The AI provider tab: catalogue, chain and what may enter it.
+    """The AI tab: the providers, their models, and the global default chain.
 
-    Assembled from the service rather than the database so the page and the
-    JSON body see the same rules the save-time validation enforces -- the
-    「可以加入模型链」 list this builds is the same list `save_chain` accepts.
+    AstrBot's layout, in one server-rendered page: a list of providers on the
+    left, the selected provider's settings/keys/models on the right, and the
+    global default model below. 「哪个页面用哪个模型」 is not answered here --
+    this page owns the default, and a feature that wants its own list (the
+    archive-path page) says so on its own tab.
     """
     service = deps.ai_service(request)
     providers = await service.providers()
     catalogue: list[dict[str, Any]] = []
-    chain_candidates: list[dict[str, Any]] = []
+    selectable: list[dict[str, Any]] = []
     for provider in providers:
         keys = await service.keys(provider.provider_id)
         usable_keys = await service.keys(provider.provider_id, usable_only=True)
@@ -356,29 +404,37 @@ async def _ai_section(request: Request) -> dict[str, Any]:
                 "key_count": len(keys),
                 "usable_key_count": len(usable_ids),
                 "model_count": len(models),
-                "verified_model_count": sum(
-                    1 for model in models if model.verified
-                ),
+                "enabled_model_count": sum(1 for model in models if model.enabled),
             }
         )
-        for model in models:
-            if not model.verified or not model.enabled:
-                continue
-            if not provider.enabled or not usable_ids:
-                continue
-            chain_candidates.append(
-                {
-                    "model_id": model.model_id,
-                    "provider_id": provider.provider_id,
-                    "provider_name": provider.name,
-                    "model_name": model.name,
-                    "label": f"{provider.name} / {model.name}",
-                }
-            )
+        selectable.extend(
+            ai_selectable_model(provider, model, in_chain=False)
+            for model in models
+        )
+
+    selected_id = _selected_provider_id(request, catalogue)
+    selected = next(
+        (entry for entry in catalogue if entry["provider_id"] == selected_id),
+        catalogue[0] if catalogue else None,
+    )
+    default_chain = [
+        ai_chain_entry(entry) for entry in await service.chain(CHAIN_SCOPE_DEFAULT)
+    ]
+    chosen = {entry["model_id"] for entry in default_chain}
+    for entry in selectable:
+        entry["in_chain"] = entry["model_id"] in chosen
+        entry["selected"] = (
+            selected is not None and entry["provider_id"] == selected["provider_id"]
+        )
     return {
         "providers": catalogue,
-        "chain": [ai_chain_entry(entry) for entry in await service.chain()],
-        "chain_candidates": chain_candidates,
+        "selected_provider": selected,
+        # Every model of every provider, for the 「加为主力/备用」 pickers. The
+        # template filters; it never has to ask a second question of the
+        # database to render a dropdown.
+        "selectable_models": selectable,
+        "default_chain": default_chain,
+        "default_chain_ids": sorted(chosen),
         "provider_codes": [
             {"code": code, "label": PROVIDER_CODE_LABELS.get(code, code)}
             for code in SUPPORTED_PROVIDER_CODES
@@ -397,6 +453,21 @@ async def _ai_section(request: Request) -> dict[str, Any]:
         },
         "key_cooldown_minutes": KEY_COOLDOWN_MINUTES,
     }
+
+
+def _selected_provider_id(request: Request, catalogue: list[dict[str, Any]]) -> int:
+    """Which provider the right pane shows: `?provider=` if it names one.
+
+    Falling back to the first row rather than to an empty pane: after 「新增供应
+    商」 the operator wants to see what they just created, and a page that
+    rendered nothing until a second click would look like the save failed.
+    """
+    raw = request.query_params.get("provider")
+    if raw and str(raw).isdigit():
+        wanted = int(raw)
+        if any(entry["provider_id"] == wanted for entry in catalogue):
+            return wanted
+    return catalogue[0]["provider_id"] if catalogue else 0
 
 
 async def _passwords_section(request: Request) -> dict[str, Any]:

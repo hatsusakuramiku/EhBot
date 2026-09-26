@@ -145,6 +145,18 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
                 "PRAGMA table_info(ai_provider_keys)"
             )
         }
+        ai_provider_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(ai_providers)"
+            )
+        }
+        ai_chain_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(ai_model_chain)"
+            )
+        }
         indexes = {
             row[0]
             for row in connection.execute(
@@ -152,7 +164,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             )
         }
 
-    assert migration_count == 18
+    assert migration_count == 19
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -253,6 +265,15 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         "last_verify_ok",
         "last_verify_error",
     } <= ai_model_columns
+    # Migration 019: AstrBot-style provider management. Request headers and
+    # request params are JSON text because they are edited as one box and never
+    # queried by field; the chain gains a `scope` in its primary key so the
+    # archive-path feature can carry its own list while the AI page still owns
+    # the global default (rows from 018 become `scope='default'`).
+    assert {"custom_headers", "default_params"} <= ai_provider_columns
+    assert "params" in ai_model_columns
+    assert {"scope", "position", "provider_model_id"} <= ai_chain_columns
+    assert "idx_ai_model_chain_scope" in indexes
 
 
 @pytest.mark.asyncio

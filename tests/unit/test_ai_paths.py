@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Sequence
@@ -39,6 +40,7 @@ from app.ai.models import (
     AiModelChainEntry,
     AiProvider,
     AiProviderModel,
+    AiRequestParams,
 )
 from app.ai.paths import (
     AiPathService,
@@ -111,16 +113,20 @@ class _FakeAi:
         self.provider_id = 1
         self.model_name = self._chain[0].model.name if self._chain else "m0"
 
-    async def chain(self) -> tuple[AiModelChainEntry, ...]:
+    async def chain(self, scope: str = "default") -> tuple[AiModelChainEntry, ...]:
+        return self._chain if scope == "default" else ()
+
+    async def effective_chain(
+        self, scope: str = "default"
+    ) -> tuple[AiModelChainEntry, ...]:
         return self._chain
 
     async def complete(
         self,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int = 900,
-        temperature: float = 0.2,
         validate=None,
+        stream: bool | None = None,
     ) -> AiAnswer:
         self.calls.append([dict(message) for message in messages])
         if self.failure is not None:
@@ -419,6 +425,45 @@ class TestFingerprint:
         assert chain_signature(_chain(1, base_url="http://a")) != chain_signature(
             _chain(1, base_url="http://b")
         )
+
+    def test_request_params_are_part_of_the_signature(self) -> None:
+        """The body decides the answer, so a tuned knob must invalidate the cache.
+
+        R31 made `{model, messages}` the only guaranteed fields and let every
+        other parameter be opted into per model; a signature that ignored them
+        would keep calling a cached path 「current」 after the request changed.
+        """
+        base = _chain(1)
+        warmer = (
+            replace(
+                base[0],
+                model=replace(
+                    base[0].model,
+                    params=AiRequestParams(temperature=0.9),
+                ),
+            ),
+        )
+        assert chain_signature(base) != chain_signature(warmer)
+
+    def test_param_key_order_does_not_change_the_signature(self) -> None:
+        """`extra_body` is an object an operator types; its spelling is not identity."""
+        first = _chain(1)[0]
+        second = _chain(1)[0]
+        first = replace(
+            first,
+            model=replace(
+                first.model,
+                params=AiRequestParams(extra_body={"a": 1, "b": 2}),
+            ),
+        )
+        second = replace(
+            second,
+            model=replace(
+                second.model,
+                params=AiRequestParams(extra_body={"b": 2, "a": 1}),
+            ),
+        )
+        assert chain_signature((first,)) == chain_signature((second,))
 
     def test_the_prompt_hash_tracks_only_the_prompt(self) -> None:
         assert prompt_hash_of("a") == prompt_hash_of("a")

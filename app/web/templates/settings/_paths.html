@@ -1,4 +1,5 @@
 {% from "settings/_rule_row.html" import condition_row %}
+{% from "settings/_model_chain.html" import model_chain %}
 {#
   路径 tab: where files live, and how a book's own path inside the library is
   composed.
@@ -78,10 +79,13 @@
 
     <div data-ai-panel {% if path_source != "ai" %}hidden{% endif %}>
       {% if not ai.chain %}
-        {{ ui.callout("模型链还没有配置", tone="waiting",
-                      detail="AI 模式下打包需要一条至少含一个已验证模型的模型链，请先到「设置 → AI 供应商」配置。未配置时作品会在打包时停在「待定归档路径」。") }}
+        {{ ui.callout("还没有可用的模型", tone="waiting",
+                      detail="AI 模式下打包需要一个模型。请先到「设置 → AI 供应商」添加供应商与模型并设好全局默认，或在本页下方「路径决策模型」里单独指定一张列表。未配置时作品会在打包时停在「待定归档路径」。") }}
       {% else %}
-        <p class="ui-hint">当前模型链：{% for entry in ai.chain %}{{ "主力" if entry.is_primary else "备用" }} {{ entry.label }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+        <p class="ui-hint">
+          当前用于路径决策的模型：{% for entry in ai.chain %}{{ "主力" if entry.is_primary else "备用" }} {{ entry.label }}{% if not loop.last %} · {% endif %}{% endfor %}
+          （{{ "本页单独指定" if ai.model_source == "custom" else "跟随全局默认" }}，在下方「路径决策模型」里修改）
+        </p>
       {% endif %}
 
       <div class="ui-field">
@@ -150,6 +154,39 @@
       <button class="ui-btn" data-variant="primary" type="submit">保存路径来源与 AI 设置</button>
     </div>
   </form>
+
+  {#- 路径决策模型：AI 页面拥有「全局默认」，这里只决定本页是跟随它还是自建一张。
+      单独一个表单：链编辑器自己带若干 form，嵌在上面的大表单里会被浏览器丢弃。 -#}
+  <section class="ui-panel" style="margin-top: var(--s-5)">
+    <h2 class="ui-section-title">路径决策模型</h2>
+    <p class="ui-hint">
+      默认<strong>跟随全局默认</strong>——在「设置 → AI 供应商」页配置的主力 + 备用列表。
+      想让路径决策用别的模型（例如用一个更便宜/更快的模型专门做路径），选「本页单独指定」并编辑下面的列表。
+    </p>
+    <form class="ui-form" method="post" action="{{ url_for('save_ai_model_source') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <fieldset class="ui-fieldset">
+        <legend>本页使用哪份模型列表</legend>
+        {% for option in ai.model_sources %}
+          <label class="ui-checkline" data-layout="stack">
+            <input class="ui-radio" type="radio" name="ai_model_source"
+                   value="{{ option.code }}"
+                   {% if option.code == ai.model_source %}checked{% endif %}>
+            <span>{{ option.label }}<small>{{ option.hint }}</small></span>
+          </label>
+        {% endfor %}
+      </fieldset>
+      <div class="ui-form-actions">
+        <button class="ui-btn" type="submit">保存模型来源</button>
+      </div>
+    </form>
+
+    <div style="margin-top: var(--s-4)" {% if ai.model_source != "custom" %}data-muted="true"{% endif %}>
+      <h3 class="ui-section-title">本页的模型列表{% if ai.model_source != "custom" %}（未启用）{% endif %}</h3>
+      {{ model_chain(ai.path_chain, ai.selectable_models, "/settings/paths/chain", csrf_token,
+                     "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。") }}
+    </div>
+  </section>
 
   {#- 清除缓存 is its own form: a nested form is ignored by HTML, and this one
       writes nothing the big form owns -- it only drops the answer cache, and the

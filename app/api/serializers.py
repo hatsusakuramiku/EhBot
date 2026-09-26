@@ -9,6 +9,7 @@ one screen and raw on another.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.ai.models import PROVIDER_CODE_LABELS
@@ -543,7 +544,13 @@ def auto_approval_dry_run(result: Any) -> dict[str, Any]:
 
 
 def ai_provider(provider: Any) -> dict[str, Any]:
-    """One AI vendor endpoint. The base URL is configuration, not a secret."""
+    """One AI vendor endpoint. The base URL is configuration, not a secret.
+
+    `custom_headers` and `default_params` travel as the JSON text the form
+    edits rather than as parsed objects: the page has to render exactly what it
+    will accept back, and a round trip through `json.dumps` here would reformat
+    an operator's spacing between load and save.
+    """
     return {
         "provider_id": provider.provider_id,
         "name": provider.name,
@@ -554,7 +561,27 @@ def ai_provider(provider: Any) -> dict[str, Any]:
         "max_retries": provider.max_retries,
         "enabled": provider.enabled,
         "enablement": toggle_view(provider.enabled).to_payload(),
+        "custom_headers": params_document(provider.custom_headers),
+        "default_params": params_document(
+            {
+                "temperature": provider.default_params.temperature,
+                "max_tokens": provider.default_params.max_tokens,
+                **provider.default_params.extra_body,
+            }
+        ),
     }
+
+
+def params_document(document: dict[str, Any]) -> str:
+    """A params/headers dict as the text a form shows.
+
+    `{}` renders as the empty string so a provider without parameters shows an
+    empty box (with its placeholder) instead of a pair of braces an operator
+    would have to delete before typing.
+    """
+    if not document:
+        return ""
+    return json.dumps(document, ensure_ascii=False, indent=2)
 
 
 def ai_provider_key(key: Any, *, usable: bool) -> dict[str, Any]:
@@ -593,6 +620,34 @@ def ai_provider_model(model: Any) -> dict[str, Any]:
         "verified": model.verified,
         "last_verified_at": model.last_verified_at,
         "last_verify_error": model.last_verify_error,
+        "params": params_document(
+            {
+                "temperature": model.params.temperature,
+                "max_tokens": model.params.max_tokens,
+                **model.params.extra_body,
+            }
+        ),
+    }
+
+
+def ai_selectable_model(
+    provider: Any, model: Any, *, in_chain: bool
+) -> dict[str, Any]:
+    """One row of the 「可以选哪个模型」 vocabulary the chain editors offer.
+
+    Both editors (the global default on the AI tab, the archive-path override on
+    the 路径 tab) are built from this shape, so the two lists cannot disagree
+    about what a model is called or which provider it belongs to.
+    """
+    return {
+        "model_id": model.model_id,
+        "provider_id": provider.provider_id,
+        "provider_name": provider.name,
+        "model_name": model.name,
+        "label": f"{provider.name} / {model.name}",
+        "enabled": model.enabled and provider.enabled,
+        "in_chain": in_chain,
+        "verification": ai_verification_view(model.last_verify_ok).to_payload(),
     }
 
 
@@ -606,10 +661,12 @@ def ai_chain_entry(entry: Any) -> dict[str, Any]:
     return {
         "position": entry.position,
         "primary": entry.is_primary,
+        "scope": entry.scope,
         "provider_id": entry.provider.provider_id,
         "provider_name": entry.provider.name,
         "model_id": entry.model.model_id,
         "model_name": entry.model.name,
+        "label": f"{entry.provider.name} / {entry.model.name}",
     }
 
 

@@ -17,13 +17,22 @@ AI_PROVIDER_NOT_FOUND = "AI_PROVIDER_NOT_FOUND"
 AI_KEY_INVALID = "AI_KEY_INVALID"
 AI_MODEL_INVALID = "AI_MODEL_INVALID"
 AI_MODEL_NOT_FOUND = "AI_MODEL_NOT_FOUND"
-#: A chain entry that has not passed a connectivity check, is switched off, or
-#: sits on a provider with no usable key. Refused at save time on purpose: a
-#: configuration that can only fail inside a packing job is worse than a form
-#: that says no.
+#: Chain-entry refusals that R31 no longer raises. The old save-time gate made
+#: an unverified, disabled or key-less model impossible to configure at all,
+#: which also made whole classes of endpoints (reasoning models, gateways that
+#: 400 on any unknown field) unconfigurable; 「能不能用」 is now answered by the
+#: 测试 button, so these three stay only so old logs and stored codes still read
+#: the same.
 AI_MODEL_UNVERIFIED = "AI_MODEL_UNVERIFIED"
 AI_MODEL_DISABLED = "AI_MODEL_DISABLED"
 AI_PROVIDER_DISABLED = "AI_PROVIDER_DISABLED"
+#: The params box on a provider or a model is not a JSON object we can send.
+AI_PARAMS_INVALID = "AI_PARAMS_INVALID"
+#: The provider answered 400 with a complaint about a *parameter* (temperature,
+#: max_tokens, an unknown field). Distinct from 「配置写错了」 because the fix is
+#: 「到这个模型的高级参数里关掉/换掉它」, which is a different page and a different
+#: person's guess than 「地址或 Key 填错了」.
+AI_PARAM_REJECTED = "AI_PARAM_REJECTED"
 AI_NO_KEY = "AI_NO_KEY"
 AI_CHAIN_EMPTY = "AI_CHAIN_EMPTY"
 AI_CHAIN_DUPLICATE = "AI_CHAIN_DUPLICATE"
@@ -64,6 +73,8 @@ __all__ = [
     "AI_MODEL_NOT_FOUND",
     "AI_MODEL_UNVERIFIED",
     "AI_NO_KEY",
+    "AI_PARAMS_INVALID",
+    "AI_PARAM_REJECTED",
     "AI_PATH_INVALID",
     "AI_PATH_MISSING",
     "AI_PATH_UNAVAILABLE",

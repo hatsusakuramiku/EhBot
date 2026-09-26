@@ -1,121 +1,53 @@
 {#
-  AI 供应商 tab: the models that may decide a book's path, and the keys behind
-  them.
+  AI 供应商页（设置 → AI）：AstrBot 式的两层管理。
 
-  This page is where 「配置时必须验证联通性」 is enforced, so three things are
-  deliberately visible rather than tucked away:
-
-  * every (供应商, 模型) carries its verification state and the reason the last
-    check failed, because that is the fact that decides whether it can enter the
-    chain;
-  * the chain's order is the configuration -- position 0 is 主力 -- and it can
-    only be edited through the same validator that refuses an unverified entry,
-    so the list on screen is always a list that would save;
-  * no credential is ever rendered. The key list shows a label, a state and a
-    cooldown, never the ciphertext and never a fragment of the plaintext. That
-    is a property of `AiProviderKey`, which carries no secret at all, and this
-    file must not undo it by echoing the submitted value back into an attribute.
-
-  AI 模式本身在「路径」页开启；本页只管理供应商本身。一个供应商可以只配置 Key
-  和模型而不进链，模型链可以为空 —— 这些都是中间状态，页面照实渲染，不用红色告警
-  催一个还在被填写的表单。
+  * 左边是「供应商」清单，右边是选中那一个的配置、Key 与模型——一个端点配置
+    一次，模型是从它拉取/勾选出来的条目；
+  * 底部是「全局默认模型」：主力 0 位 + 备用若干。**其他页面不配置就用这张
+    列表**（路径页可以选「本页单独指定」覆盖它）；
+  * 每个模型可以单独设参数（`temperature`、`max_tokens`、以及任何额外字段），
+    因为「不填就不发」是默认——请求体只有 `model` 与 `messages`。OpenAI 的推理
+    模型不接受 `temperature`，网关也常对未知字段直接 400，把参数做成逐模型
+    可覆盖、且默认不发，是让这些端点也能用的唯一办法；
+  * 页面上不写任何状态词：启用/停用、已验证/未验证都来自 `toggle_view` 与
+    `ai_verification_view` 的 payload，经 `ui.badge` 渲染；
+  * 任何凭据都不回显。Key 的输入框永远是空的，列表只显示备注、状态与时间。
 #}
-{# --------------------------------------------------------------- 模型链 #}
+{% from "settings/_model_chain.html" import model_chain %}
 
+{# ------------------------------------------------------ 全局默认模型 #}
 <section class="ui-panel" style="margin-bottom: var(--s-5)">
-  <h2 class="ui-section-title">模型链</h2>
+  <h2 class="ui-section-title">全局默认模型</h2>
   <p class="ui-hint">
-    打包请求按下面的顺序尝试：<strong>第 0 位是主力</strong>，其余是备用回退模型。
-    每一项是一个「供应商 + 模型」组合，主力与备用可以来自不同供应商。
-    只有<strong>通过联通性验证</strong>的模型才能加入。
+    打包等用到 AI 的地方按这个顺序调用：<strong>第 0 位是主力</strong>，其余是备用回退。
+    模型可以来自不同供应商；没有单独指定模型的页面<strong>默认就用这张列表</strong>。
+    未验证、已停用的模型也能加入（能不能用由「测试」按钮告诉你）。
   </p>
-
-  {% if chain %}
-    <ol class="ui-form" style="margin: var(--s-4) 0 0; padding-left: 0; list-style: none">
-      {% for entry in chain %}
-        <li class="ui-record" style="margin-top: var(--s-3)">
-          <div class="ui-record-head">
-            {#- One line on purpose: whitespace between the words of a heading
-                is visible in the rendered text, and a test that read it would
-                be asserting on the template's indentation. -#}
-            <span class="ui-record-title">{% if entry.primary %}主力{% else %}备用 {{ entry.position }}{% endif %} · {{ entry.provider_name }} / {{ entry.model_name }}</span>
-            <div class="ui-record-badges">
-              {% if entry.primary %}
-                {{ ui.badge({"code": "PRIMARY", "label": "主力", "tone": "active"}) }}
-              {% else %}
-                {{ ui.badge({"code": "FALLBACK", "label": "备用", "tone": "muted"}) }}
-              {% endif %}
-            </div>
-          </div>
-          <div class="ui-form-actions">
-            {#- Up/down rather than drag-and-drop: an ordered list a plain form
-                can carry needs no second copy of the order in the browser. -#}
-            {% if not loop.first %}
-              <form method="post" action="{{ url_for('shift_ai_chain_model', model_id=entry.model_id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="delta" value="-1">
-                <button class="ui-btn" data-size="sm" type="submit">上移</button>
-              </form>
-            {% endif %}
-            {% if not loop.last %}
-              <form method="post" action="{{ url_for('shift_ai_chain_model', model_id=entry.model_id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="delta" value="1">
-                <button class="ui-btn" data-size="sm" type="submit">下移</button>
-              </form>
-            {% endif %}
-            <form method="post" action="{{ url_for('remove_ai_chain_model', model_id=entry.model_id) }}">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <button class="ui-btn" data-size="sm" type="submit">移出模型链</button>
-            </form>
-          </div>
-        </li>
-      {% endfor %}
-    </ol>
-  {% else %}
-    {{ ui.empty_state("模型链为空", "AI 模式需要一个已验证的模型，先在下面的供应商里添加并验证模型。") }}
-  {% endif %}
-
-  {% if chain_candidates %}
-    <form class="ui-form" method="post" action="{{ url_for('append_ai_chain_model') }}"
-          style="margin-top: var(--s-4)">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <div class="ui-field">
-        <label for="chain-model">添加到模型链</label>
-        <select class="ui-select" id="chain-model" name="model_id">
-          {% for candidate in chain_candidates %}
-            <option value="{{ candidate.model_id }}">{{ candidate.label }}</option>
-          {% endfor %}
-        </select>
-        <small class="ui-hint">只列出已验证、已启用、且其供应商有可用 Key 的模型。</small>
-      </div>
-      <div class="ui-form-actions">
-        <button class="ui-btn" data-variant="primary" type="submit">加入模型链</button>
-      </div>
-    </form>
-  {% else %}
-    <p class="ui-hint" style="margin-top: var(--s-4)">
-      还没有可加入模型链的条目：需要至少一个「已验证」的模型，并且它所属的供应商
-      已启用、有可用的 API Key。
-    </p>
+  {{ model_chain(default_chain, selectable_models, "/settings/ai/chain", csrf_token,
+                 "还没有模型：先在下面添加供应商，再从 /v1/models 拉取或手填模型名，然后用「设为主力」把它放到这里。") }}
+  {% if default_chain %}
+    <div class="ui-form-actions" style="margin-top: var(--s-3)">
+      <form method="post" action="{{ url_for('verify_all_ai_models') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="ui-btn" type="submit">测试全部模型</button>
+      </form>
+    </div>
   {% endif %}
 </section>
 
-{# --------------------------------------------------------------- 供应商 #}
-
+{# ------------------------------------------------------ 新增供应商 #}
 <section class="ui-panel" style="margin-bottom: var(--s-5)">
   <h2 class="ui-section-title">新增供应商</h2>
   <p class="ui-hint">
-    仅支持 OpenAI 兼容端点（<code>/chat/completions</code>）。也支持本地/自托管服务
-    （Ollama、LM Studio 等），使用本地地址时元数据不会离开宿主机。
+    仅支持 OpenAI 兼容端点（<code>/chat/completions</code> 与 <code>/models</code>）。
+    本地/自托管服务（Ollama、LM Studio 等）填本地地址即可，元数据不会离开宿主机。
   </p>
   <form class="ui-form" method="post" action="{{ url_for('save_ai_provider') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
       <div class="ui-field">
         <label for="ai-name">名称</label>
-        <input class="ui-input" id="ai-name" name="name" required maxlength="80"
-               placeholder="例如 主力 OpenAI">
+        <input class="ui-input" id="ai-name" name="name" required maxlength="80" placeholder="例如 OpenAI 主力">
       </div>
       <div class="ui-field">
         <label for="ai-code">供应商编码</label>
@@ -127,9 +59,8 @@
       </div>
       <div class="ui-field">
         <label for="ai-url">基础 API 地址</label>
-        <input class="ui-input" id="ai-url" name="base_url" required
-               placeholder="https://api.openai.com/v1">
-        <small class="ui-hint">填到版本段为止，本服务会自行追加 <code>/chat/completions</code>。</small>
+        <input class="ui-input" id="ai-url" name="base_url" required placeholder="https://api.openai.com/v1">
+        <small class="ui-hint">填到版本段为止，本服务自行追加 <code>/chat/completions</code>。</small>
       </div>
       <div class="ui-field">
         <label for="ai-timeout">超时（秒）</label>
@@ -144,6 +75,20 @@
                value="{{ defaults.max_retries }}">
       </div>
     </div>
+    <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); margin-top: var(--s-3)">
+      <div class="ui-field">
+        <label for="ai-headers">自定义请求头（JSON，可留空）</label>
+        <textarea class="ui-input" id="ai-headers" name="custom_headers" rows="3"
+                  placeholder='{"X-Custom": "value"}'></textarea>
+        <small class="ui-hint">网关要求的额外请求头。密钥请加到 Key 列表（加密存储），不要写在这里。</small>
+      </div>
+      <div class="ui-field">
+        <label for="ai-params">默认请求参数（JSON，可留空）</label>
+        <textarea class="ui-input" id="ai-params" name="default_params" rows="3"
+                  placeholder='{"temperature": 0.2, "max_tokens": 900}'></textarea>
+        <small class="ui-hint">留空＝只发 <code>model</code> 与 <code>messages</code>（最兼容）。</small>
+      </div>
+    </div>
     <label class="ui-checkline">
       <input class="ui-checkbox" name="enabled" type="checkbox" checked>
       <span>启用</span>
@@ -154,229 +99,283 @@
   </form>
 </section>
 
-{% for provider in providers %}
-  <section class="ui-panel" style="margin-bottom: var(--s-5)">
-    <div class="ui-record-head">
-      <h2 class="ui-section-title" style="margin: 0">{{ provider.name }}</h2>
-      <div class="ui-record-badges">
-        {{ ui.badge(provider.enablement) }}
-        <span class="ui-record-meta">
-          {{ provider.code_label }} ·
-          Key {{ provider.usable_key_count }}/{{ provider.key_count }} 可用 ·
-          模型 {{ provider.model_count }}（{{ provider.verified_model_count }} 已验证）
-        </span>
-      </div>
-    </div>
-    <p class="ui-hint">{{ provider.base_url }}</p>
+{# ------------------------------------------------------ 供应商工作台 #}
+{% if providers %}
+  <div class="ui-workbench">
+    <aside class="ui-panel ui-workbench-side">
+      <h2 class="ui-section-title">供应商</h2>
+      <ul class="ui-nav" style="margin-top: 0">
+        {% for provider in providers %}
+          <li>
+            <a class="ui-nav-link{% if selected_provider and provider.provider_id == selected_provider.provider_id %} is-active{% endif %}"
+               href="{{ url_for('settings_section', section='ai') }}?provider={{ provider.provider_id }}"
+               {% if selected_provider and provider.provider_id == selected_provider.provider_id %}aria-current="page"{% endif %}>
+              <span class="ui-nav-label">
+                {{ provider.name }}
+                <small class="ui-hint" style="display: block; margin-top: 2px">
+                  Key {{ provider.usable_key_count }}/{{ provider.key_count }} 可用 ·
+                  模型 {{ provider.enabled_model_count }}/{{ provider.model_count }} 启用
+                </small>
+              </span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    </aside>
 
-    <details style="margin-top: var(--s-3)">
-      <summary>编辑供应商</summary>
-      <form class="ui-form" method="post" action="{{ url_for('save_ai_provider') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <input type="hidden" name="provider_id" value="{{ provider.provider_id }}">
-        <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
-          <div class="ui-field">
-            <label for="ai-name-{{ provider.provider_id }}">名称</label>
-            <input class="ui-input" id="ai-name-{{ provider.provider_id }}" name="name"
-                   value="{{ provider.name }}" required maxlength="80">
+    <div class="ui-workbench-main">
+      {% if selected_provider %}
+        {% set provider = selected_provider %}
+        {% set provider_query = "" if not provider.provider_id else "?provider=" ~ provider.provider_id %}
+        <section class="ui-panel">
+          <div class="ui-record-head">
+            <h2 class="ui-section-title" style="margin: 0">{{ provider.name }}</h2>
+            <div class="ui-record-badges">
+              {{ ui.badge(provider.enablement) }}
+              <span class="ui-record-meta">{{ provider.code_label }}</span>
+            </div>
           </div>
-          <div class="ui-field">
-            <label for="ai-code-{{ provider.provider_id }}">供应商编码</label>
-            <select class="ui-select" id="ai-code-{{ provider.provider_id }}" name="code">
-              {% for choice in provider_codes %}
-                <option value="{{ choice.code }}"{% if choice.code == provider.code %} selected{% endif %}>{{ choice.label }}</option>
-              {% endfor %}
-            </select>
+          <p class="ui-hint">{{ provider.base_url }}</p>
+          <div class="ui-form-actions" style="margin-top: var(--s-3)">
+            <form method="post" action="{{ url_for('verify_ai_provider_models', provider_id=provider.provider_id) }}{{ provider_query }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="ui-btn" type="submit">测试该供应商的全部模型</button>
+            </form>
+            {{ ui.confirm("删除供应商", "删除「" ~ provider.name ~ "」",
+                          "它的 API Key、模型以及它们占据的模型列表位置都会一并移除。",
+                          confirm_label="确认删除",
+                          action=url_for('delete_ai_provider', provider_id=provider.provider_id).path ~ provider_query,
+                          csrf_token=csrf_token, size="sm", key=provider.provider_id) }}
           </div>
-          <div class="ui-field">
-            <label for="ai-url-{{ provider.provider_id }}">基础 API 地址</label>
-            <input class="ui-input" id="ai-url-{{ provider.provider_id }}" name="base_url"
-                   value="{{ provider.base_url }}" required>
-          </div>
-          <div class="ui-field">
-            <label for="ai-timeout-{{ provider.provider_id }}">超时（秒）</label>
-            <input class="ui-input" id="ai-timeout-{{ provider.provider_id }}" name="timeout_seconds"
-                   type="number" min="{{ bounds.timeout_seconds.minimum }}"
-                   max="{{ bounds.timeout_seconds.maximum }}" value="{{ provider.timeout_seconds }}">
-          </div>
-          <div class="ui-field">
-            <label for="ai-retries-{{ provider.provider_id }}">重试次数</label>
-            <input class="ui-input" id="ai-retries-{{ provider.provider_id }}" name="max_retries"
-                   type="number" min="{{ bounds.max_retries.minimum }}"
-                   max="{{ bounds.max_retries.maximum }}" value="{{ provider.max_retries }}">
-          </div>
-        </div>
-        <label class="ui-checkline">
-          <input class="ui-checkbox" name="enabled" type="checkbox"
-                 {% if provider.enabled %}checked{% endif %}>
-          <span>启用</span>
-        </label>
-        <div class="ui-form-actions">
-          <button class="ui-btn" data-variant="primary" type="submit">保存供应商</button>
-        </div>
-      </form>
-    </details>
 
-    <details style="margin-top: var(--s-3)">
-      <summary>API Key（{{ provider.usable_key_count }}/{{ provider.key_count }} 可用）</summary>
-      <p class="ui-hint">
-        多把 Key 之间轮询：遇到 401/403 或 429 的那把会被冷却 {{ key_cooldown_minutes }} 分钟并跳到下一把。
-        Key 加密存储，页面与日志都不会显示原文。
-      </p>
-      {% if provider.api_keys %}
-        <ul class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
-          {% for key in provider.api_keys %}
-            <li class="ui-record" style="margin-top: var(--s-2)">
-              <div class="ui-record-head">
-                <span class="ui-record-title">{{ key.label or "（无备注）" }}</span>
-                <div class="ui-record-badges">
-                  {{ ui.badge(key.enablement) }}
-                  {% if key.enabled and not key.usable %}
-                    {{ ui.badge({"code": "COOLING", "label": "冷却中", "tone": "waiting"}) }}
-                  {% endif %}
-                  {% if key.failures %}
-                    <span class="ui-record-meta">失败 {{ key.failures }} 次</span>
-                  {% endif %}
-                  {% if key.cooldown_until %}
-                    <span class="ui-record-meta">冷却至 {{ key.cooldown_until }}</span>
-                  {% endif %}
+          <details style="margin-top: var(--s-4)">
+            <summary>编辑供应商</summary>
+            <form class="ui-form" method="post" action="{{ url_for('save_ai_provider') }}{{ provider_query }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="provider_id" value="{{ provider.provider_id }}">
+              <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
+                <div class="ui-field">
+                  <label for="ai-name-{{ provider.provider_id }}">名称</label>
+                  <input class="ui-input" id="ai-name-{{ provider.provider_id }}" name="name" value="{{ provider.name }}" required maxlength="80">
+                </div>
+                <div class="ui-field">
+                  <label for="ai-code-{{ provider.provider_id }}">供应商编码</label>
+                  <select class="ui-select" id="ai-code-{{ provider.provider_id }}" name="code">
+                    {% for choice in provider_codes %}
+                      <option value="{{ choice.code }}"{% if choice.code == provider.code %} selected{% endif %}>{{ choice.label }}</option>
+                    {% endfor %}
+                  </select>
+                </div>
+                <div class="ui-field">
+                  <label for="ai-url-{{ provider.provider_id }}">基础 API 地址</label>
+                  <input class="ui-input" id="ai-url-{{ provider.provider_id }}" name="base_url" value="{{ provider.base_url }}" required>
+                </div>
+                <div class="ui-field">
+                  <label for="ai-timeout-{{ provider.provider_id }}">超时（秒）</label>
+                  <input class="ui-input" id="ai-timeout-{{ provider.provider_id }}" name="timeout_seconds" type="number"
+                         min="{{ bounds.timeout_seconds.minimum }}" max="{{ bounds.timeout_seconds.maximum }}"
+                         value="{{ provider.timeout_seconds }}">
+                </div>
+                <div class="ui-field">
+                  <label for="ai-retries-{{ provider.provider_id }}">重试次数</label>
+                  <input class="ui-input" id="ai-retries-{{ provider.provider_id }}" name="max_retries" type="number"
+                         min="{{ bounds.max_retries.minimum }}" max="{{ bounds.max_retries.maximum }}"
+                         value="{{ provider.max_retries }}">
                 </div>
               </div>
-              <div class="ui-form-actions">
-                <form method="post" action="{{ url_for('toggle_ai_provider_key', key_id=key.key_id) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="enabled" value="{{ 'off' if key.enabled else 'on' }}">
-                  <button class="ui-btn" data-size="sm" type="submit">{{ '停用' if key.enabled else '启用' }}</button>
-                </form>
-                {{ ui.confirm("删除", "删除这把 API Key",
-                              "删除后使用它的请求会立即改用下一把 Key；已进入模型链的模型会在下次保存模型链时被要求重新确认。",
-                              confirm_label="确认删除",
-                              action=url_for('delete_ai_provider_key', key_id=key.key_id).path,
-                              csrf_token=csrf_token, size="sm", key=key.key_id) }}
-              </div>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        {{ ui.empty_state("还没有 API Key", "至少添加一把 Key，供应商才可能通过验证。") }}
-      {% endif %}
-      <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_key', provider_id=provider.provider_id) }}"
-            style="margin-top: var(--s-3)">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr))">
-          <div class="ui-field">
-            <label for="ai-key-label-{{ provider.provider_id }}">备注</label>
-            <input class="ui-input" id="ai-key-label-{{ provider.provider_id }}" name="label"
-                   maxlength="60" placeholder="例如 主力账号">
-          </div>
-          <div class="ui-field">
-            <label for="ai-key-{{ provider.provider_id }}">API Key</label>
-            {#- `password` and no value attribute: a rejected save re-renders this
-                page, and echoing the submitted key back into the field would put
-                the credential in the HTML. -#}
-            <input class="ui-input" id="ai-key-{{ provider.provider_id }}" name="api_key"
-                   type="password" autocomplete="new-password" required>
-          </div>
-        </div>
-        <div class="ui-form-actions">
-          <button class="ui-btn" type="submit">添加 Key</button>
-        </div>
-      </form>
-    </details>
-
-    <details style="margin-top: var(--s-3)">
-      <summary>模型（{{ provider.model_count }}）</summary>
-      <p class="ui-hint">
-        验证不是探活：会用这个模型发一次最小的对话请求，要求它回一段 JSON。
-        未验证或最近一次验证失败的模型不能加入模型链。
-      </p>
-      {% if provider.models %}
-        <ul class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
-          {% for model in provider.models %}
-            <li class="ui-record" style="margin-top: var(--s-2)">
-              <div class="ui-record-head">
-                <span class="ui-record-title">{{ model.name }}</span>
-                <div class="ui-record-badges">
-                  {{ ui.badge(model.verification) }}
-                  {{ ui.badge(model.enablement) }}
-                  {% if model.last_verified_at %}
-                    <span class="ui-record-meta">{{ model.last_verified_at }}</span>
-                  {% endif %}
+              <div class="ui-grid" style="display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); margin-top: var(--s-3)">
+                <div class="ui-field">
+                  <label for="ai-headers-{{ provider.provider_id }}">自定义请求头（JSON）</label>
+                  <textarea class="ui-input" id="ai-headers-{{ provider.provider_id }}" name="custom_headers" rows="3">{{ provider.custom_headers }}</textarea>
+                </div>
+                <div class="ui-field">
+                  <label for="ai-params-{{ provider.provider_id }}">默认请求参数（JSON）</label>
+                  <textarea class="ui-input" id="ai-params-{{ provider.provider_id }}" name="default_params" rows="3">{{ provider.default_params }}</textarea>
                 </div>
               </div>
-              {% if model.last_verify_error %}
-                <p class="ui-hint" style="margin: var(--s-2) 0 0">{{ model.last_verify_error }}</p>
-              {% endif %}
-              <div class="ui-form-actions">
-                <form method="post" action="{{ url_for('verify_ai_provider_model', model_id=model.model_id) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <button class="ui-btn" data-size="sm" type="submit">验证联通性</button>
-                </form>
-                <form method="post" action="{{ url_for('toggle_ai_provider_model', model_id=model.model_id) }}">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                  <input type="hidden" name="enabled" value="{{ 'off' if model.enabled else 'on' }}">
-                  <button class="ui-btn" data-size="sm" type="submit">{{ '停用' if model.enabled else '启用' }}</button>
-                </form>
-                {{ ui.confirm("删除", "删除这个模型",
-                              "模型会从供应商列表和模型链中移除。",
-                              confirm_label="确认删除",
-                              action=url_for('delete_ai_provider_model', model_id=model.model_id).path,
-                              csrf_token=csrf_token, size="sm", key=model.model_id) }}
-              </div>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        {{ ui.empty_state("还没有模型", "手填模型名，或从供应商的 /v1/models 拉取。") }}
-      {% endif %}
-
-      <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_model', provider_id=provider.provider_id) }}"
-            style="margin-top: var(--s-3)">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <div class="ui-field">
-          <label for="ai-model-{{ provider.provider_id }}">模型名称</label>
-          <input class="ui-input" id="ai-model-{{ provider.provider_id }}" name="model_name"
-                 maxlength="120" placeholder="例如 gpt-4o-mini">
-        </div>
-        <div class="ui-form-actions">
-          <button class="ui-btn" type="submit">添加模型</button>
-          <button class="ui-btn" type="submit"
-                  formaction="{{ url_for('fetch_ai_provider_models', provider_id=provider.provider_id) }}">
-            从 /v1/models 拉取
-          </button>
-        </div>
-      </form>
-
-      {% if discovered and discovered.provider_id == provider.provider_id %}
-        {#- A second form, never nested: the fetch result needs its own submit
-            and the two forms have different actions. -#}
-        <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_model', provider_id=provider.provider_id) }}"
-              style="margin-top: var(--s-3)">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <p class="ui-hint">供应商返回了 {{ discovered.names|length }} 个模型名称，勾选后添加：</p>
-          <div style="max-height: 16rem; overflow: auto">
-            {% for name in discovered.names %}
               <label class="ui-checkline">
-                <input class="ui-checkbox" type="checkbox" name="model_name" value="{{ name }}">
-                <span>{{ name }}</span>
+                <input class="ui-checkbox" name="enabled" type="checkbox"{% if provider.enabled %} checked{% endif %}>
+                <span>启用</span>
               </label>
-            {% endfor %}
-          </div>
-          <div class="ui-form-actions">
-            <button class="ui-btn" data-variant="primary" type="submit">添加所选</button>
-          </div>
-        </form>
-      {% endif %}
-    </details>
+              <div class="ui-form-actions">
+                <button class="ui-btn" data-variant="primary" type="submit">保存供应商</button>
+              </div>
+            </form>
+          </details>
+        </section>
 
-    <div class="ui-form-actions" style="margin-top: var(--s-4)">
-      {{ ui.confirm("删除供应商", "删除「" ~ provider.name ~ "」",
-                    "它的 API Key、模型名以及它们占据的模型链位置都会一并移除。",
-                    confirm_label="确认删除",
-                    action=url_for('delete_ai_provider', provider_id=provider.provider_id).path,
-                    csrf_token=csrf_token, size="sm", key=provider.provider_id) }}
+        {# ------------------------------------------------ Key 管理 #}
+        <section class="ui-panel" style="margin-top: var(--s-5)">
+          <h2 class="ui-section-title">API Key</h2>
+          <p class="ui-hint">
+            一行一把，可写 <code>备注:密钥</code>；空行与 <code>#</code> 开头的行会被忽略。
+            轮询使用：命中 401/403/429 的那把会冷却 {{ key_cooldown_minutes }} 分钟后自动再试。
+          </p>
+          <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_key', provider_id=provider.provider_id) }}{{ provider_query }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="ui-field">
+              <label for="ai-keys-{{ provider.provider_id }}">粘贴 API Key（每行一把）</label>
+              <textarea class="ui-input" id="ai-keys-{{ provider.provider_id }}" name="api_keys" rows="4"
+                        placeholder="主 Key:sk-...&#10;备用 Key:sk-..."></textarea>
+            </div>
+            <div class="ui-form-actions">
+              <button class="ui-btn" data-variant="primary" type="submit">批量添加</button>
+            </div>
+          </form>
+
+          {% if provider.api_keys %}
+            <ul class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
+              {% for key in provider.api_keys %}
+                <li class="ui-record" style="margin-top: var(--s-2)">
+                  <div class="ui-record-head">
+                    <span class="ui-record-title">{{ key.label or "（无备注）" }}</span>
+                    <div class="ui-record-badges">
+                      {{ ui.badge(key.enablement) }}
+                      {% if key.usable %}
+                        {{ ui.badge({"code": "USABLE", "label": "可用", "tone": "active"}) }}
+                      {% elif key.cooldown_until %}
+                        {{ ui.badge({"code": "COOLDOWN", "label": "冷却至 " ~ key.cooldown_until, "tone": "waiting"}) }}
+                      {% endif %}
+                      {% if key.failures %}
+                        <span class="ui-record-meta">失败 {{ key.failures }} 次</span>
+                      {% endif %}
+                      {% if key.last_used_at %}
+                        <span class="ui-record-meta">最近使用 {{ key.last_used_at }}</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <div class="ui-form-actions">
+                    <form method="post" action="{{ url_for('toggle_ai_provider_key', key_id=key.key_id) }}{{ provider_query }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="enabled" value="{{ 'off' if key.enabled else 'on' }}">
+                      <button class="ui-btn" data-size="sm" type="submit">{{ '停用' if key.enabled else '启用' }}</button>
+                    </form>
+                    {% if key.cooldown_until %}
+                      <form method="post" action="{{ url_for('reset_ai_provider_key', key_id=key.key_id) }}{{ provider_query }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button class="ui-btn" data-size="sm" type="submit">取消冷却</button>
+                      </form>
+                    {% endif %}
+                    {{ ui.confirm("删除", "删除这把 API Key", "删除后该 Key 立即失效。",
+                                  confirm_label="确认删除",
+                                  action=url_for('delete_ai_provider_key', key_id=key.key_id).path ~ provider_query,
+                                  csrf_token=csrf_token, size="sm", key=key.key_id) }}
+                  </div>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            {{ ui.empty_state("还没有 API Key", "粘贴至少一把 Key，模型才能被调用。") }}
+          {% endif %}
+        </section>
+
+        {# ------------------------------------------------ 模型 #}
+        <section class="ui-panel" style="margin-top: var(--s-5)">
+          <h2 class="ui-section-title">模型</h2>
+          <p class="ui-hint">
+            从 <code>{{ provider.base_url }}/models</code> 拉取后勾选，或手填模型名。
+            「测试」发一次真实请求；<strong>未测试的模型也可以使用</strong>，只是列表里会标出来。
+          </p>
+          <form class="ui-form" method="post" action="{{ url_for('fetch_ai_provider_models', provider_id=provider.provider_id) }}{{ provider_query }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="ui-form-actions">
+              <button class="ui-btn" type="submit">从 /models 拉取</button>
+            </div>
+          </form>
+
+          {% if discovered and discovered.provider_id == provider.provider_id %}
+            <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_models', provider_id=provider.provider_id) }}{{ provider_query }}"
+                  style="margin-top: var(--s-3)">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <p class="ui-hint">供应商返回了 {{ discovered.names|length }} 个模型名称，勾选后一次加入：</p>
+              <div style="max-height: 16rem; overflow: auto">
+                {% for name in discovered.names %}
+                  <label class="ui-checkline">
+                    <input class="ui-checkbox" type="checkbox" name="model_name" value="{{ name }}">
+                    <span>{{ name }}</span>
+                  </label>
+                {% endfor %}
+              </div>
+              <div class="ui-form-actions">
+                <button class="ui-btn" data-variant="primary" type="submit">添加所选</button>
+              </div>
+            </form>
+          {% endif %}
+
+          <form class="ui-form" method="post" action="{{ url_for('add_ai_provider_models', provider_id=provider.provider_id) }}{{ provider_query }}"
+                style="margin-top: var(--s-3)">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div class="ui-field">
+              <label for="ai-model-{{ provider.provider_id }}">手动添加模型名</label>
+              <input class="ui-input" id="ai-model-{{ provider.provider_id }}" name="model_name" maxlength="120" placeholder="例如 gpt-4o-mini">
+            </div>
+            <div class="ui-form-actions">
+              <button class="ui-btn" type="submit">添加模型</button>
+            </div>
+          </form>
+
+          {% if provider.models %}
+            <ul class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
+              {% for model in provider.models %}
+                <li class="ui-record" style="margin-top: var(--s-2)">
+                  <div class="ui-record-head">
+                    <span class="ui-record-title">{{ model.name }}</span>
+                    <div class="ui-record-badges">
+                      {{ ui.badge(model.enablement) }}
+                      {{ ui.badge(model.verification) }}
+                      {% if model.last_verified_at %}
+                        <span class="ui-record-meta">{{ model.last_verified_at }}</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  {% if model.last_verify_error %}
+                    <p class="ui-hint" style="margin: var(--s-2) 0 0">{{ model.last_verify_error }}</p>
+                  {% endif %}
+                  <div class="ui-form-actions">
+                    <form method="post" action="{{ url_for('verify_ai_provider_model', model_id=model.model_id) }}{{ provider_query }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button class="ui-btn" data-size="sm" type="submit">测试</button>
+                    </form>
+                    <form method="post" action="{{ url_for('toggle_ai_provider_model', model_id=model.model_id) }}{{ provider_query }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="enabled" value="{{ 'off' if model.enabled else 'on' }}">
+                      <button class="ui-btn" data-size="sm" type="submit">{{ '停用' if model.enabled else '启用' }}</button>
+                    </form>
+                    <form method="post" action="{{ url_for('set_ai_chain_primary') }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <input type="hidden" name="model_id" value="{{ model.model_id }}">
+                      <button class="ui-btn" data-size="sm" type="submit">设为主力</button>
+                    </form>
+                    {{ ui.confirm("删除", "删除这个模型", "模型会从供应商列表与模型列表中移除。",
+                                  confirm_label="确认删除",
+                                  action=url_for('delete_ai_provider_model', model_id=model.model_id).path ~ provider_query,
+                                  csrf_token=csrf_token, size="sm", key=model.model_id) }}
+                  </div>
+                  <details style="margin-top: var(--s-2)">
+                    <summary>请求参数</summary>
+                    <form class="ui-form" method="post" action="{{ url_for('save_ai_provider_model_params', model_id=model.model_id) }}{{ provider_query }}">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <div class="ui-field">
+                        <label for="ai-params-{{ model.model_id }}">该模型的参数（JSON，覆盖供应商默认值）</label>
+                        <textarea class="ui-input" id="ai-params-{{ model.model_id }}" name="params" rows="3"
+                                  placeholder='{"max_completion_tokens": 512}'>{{ model.params }}</textarea>
+                        <small class="ui-hint">例如推理模型写 <code>{"max_completion_tokens": 512}</code>（不要 temperature）。</small>
+                      </div>
+                      <div class="ui-form-actions">
+                        <button class="ui-btn" type="submit">保存参数</button>
+                      </div>
+                    </form>
+                  </details>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            {{ ui.empty_state("还没有模型", "从 /models 拉取，或手填模型名。") }}
+          {% endif %}
+        </section>
+      {% endif %}
     </div>
-  </section>
+  </div>
 {% else %}
-  {{ ui.empty_state("还没有 AI 供应商", "添加一个 OpenAI 兼容端点，再添加 Key 与模型，验证通过后加入模型链。") }}
-{% endfor %}
+  {{ ui.empty_state("还没有 AI 供应商", "先用上面的表单添加一个 OpenAI 兼容端点，再添加 Key 与模型。") }}
+{% endif %}

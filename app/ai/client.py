@@ -11,16 +11,26 @@ OpenAI, DeepSeek, OpenRouter and the local servers (Ollama, LM Studio) an
 operator may prefer precisely because nothing leaves the host. `response_format`
 is deliberately not sent -- several of those servers reject unknown fields, and
 the prompt already asks for JSON; the parser is lenient instead.
+
+The request body is `{"model", "messages"}` and nothing else unless the
+provider or the model says so (see `AiRequestParams`). Sending a fixed
+`temperature`/`max_tokens` is what made one class of model impossible to
+configure: OpenAI's reasoning models reject `temperature` outright and want
+`max_completion_tokens` instead, and a compatible gateway is free to 400 on any
+field it does not know. 「不填就不发」 is the only default that does not lie about
+what the endpoint accepts.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Sequence
 
 import httpx
 
 from app.ai.errors import AiError
+from app.ai.models import AiRequestParams
 
 
 #: The endpoint answered with a key it will not accept.
@@ -39,6 +49,35 @@ AI_SERVER_ERROR = "AI_SERVER_ERROR"
 AI_REQUEST_REJECTED = "AI_REQUEST_REJECTED"
 #: A 200 whose body is not a chat completion we can read.
 AI_BAD_RESPONSE = "AI_BAD_RESPONSE"
+#: 400 that names a request parameter: the endpoint is fine, the body is not.
+#: Its own code because the fix is 「到该模型的高级参数里关掉/替换它」 rather than
+#: 「检查地址、Key 或模型名」, and the page must not send the operator to the wrong
+#: half of the form.
+AI_PARAM_REJECTED = "AI_PARAM_REJECTED"
+
+#: Words a provider uses when what it disliked was the *shape* of the request.
+#: Deliberately narrow: a 400 that merely mentions a model name is a
+#: configuration error and stays `AI_REQUEST_REJECTED`.
+_PARAM_REJECTION_HINTS: tuple[str, ...] = (
+    "temperature",
+    "max_tokens",
+    "max_completion_tokens",
+    "unsupported parameter",
+    "unsupported_parameter",
+    "unknown parameter",
+    "unknown_parameter",
+    "unrecognized",
+    "invalid parameter",
+    "invalid_parameter",
+    "does not support",
+    "not supported",
+)
+
+#: Reasoning models like to wrap their thinking in a tag pair before the answer.
+#: The parser wants the answer, so the thinking goes before anything looks for a
+#: `{` -- a brace inside 「让我想想 {…} 应该是…」 would otherwise be read as the
+#: JSON object.
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
 
 
 class AiClientError(AiError):
@@ -100,7 +139,7 @@ def _content_of(payload: Any) -> str:
     message = first.get("message") if isinstance(first, dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
-        return content
+        return _strip_thinking(content)
     if isinstance(content, list):
         parts = [
             part.get("text")
@@ -108,8 +147,18 @@ def _content_of(payload: Any) -> str:
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         ]
         if parts:
-            return "".join(parts)
+            return _strip_thinking("".join(parts))
     raise AiClientError(AI_BAD_RESPONSE, "AI 返回里没有可读的文本内容")
+
+
+def _strip_thinking(text: str) -> str:
+    """Drop `<think>…</think>` blocks (and its siblings) from an answer.
+
+    Only the outermost tag pairs are removed, and the text outside them is kept
+    -- a model that thinks out loud and then answers is answering, and the
+    answer is what the caller asked for.
+    """
+    return _THINK_BLOCK.sub("", text)
 
 
 def _delta_of(payload: Any) -> str:
@@ -202,11 +251,30 @@ def _classify_status(status: int, detail: str) -> AiClientError:
             retryable=True,
             status=status,
         )
+    if status == 400 and _mentions_param(detail):
+        return AiClientError(
+            AI_PARAM_REJECTED,
+            f"AI 供应商不接受这次请求的参数（HTTP 400）{suffix}",
+            status=status,
+        )
     return AiClientError(
         AI_REQUEST_REJECTED,
         f"AI 供应商拒绝了这次请求（HTTP {status}）{suffix}",
         status=status,
     )
+
+
+def _mentions_param(detail: str) -> bool:
+    """Whether a 400 body is complaining about a field we sent.
+
+    A 400 with no readable body is left as `AI_REQUEST_REJECTED`: guessing
+    「大概是参数」 from an empty string would send an operator to the params box
+    for a problem that is in the address.
+    """
+    text = (detail or "").lower()
+    if not text:
+        return False
+    return any(hint in text for hint in _PARAM_REJECTION_HINTS)
 
 
 class OpenAiCompatibleClient:
@@ -221,6 +289,7 @@ class OpenAiCompatibleClient:
         model: str,
         timeout_seconds: float = 30.0,
         max_retries: int = 1,
+        extra_headers: dict[str, Any] | None = None,
     ) -> None:
         self._http = http_client
         self._base_url = (base_url or "").strip().rstrip("/")
@@ -228,13 +297,17 @@ class OpenAiCompatibleClient:
         self._model = model
         self._timeout = float(timeout_seconds)
         self._max_retries = max(0, int(max_retries))
+        #: Headers the provider's page adds on top of the two we always send.
+        #: Values are non-secret by construction (the page refuses to store a
+        #: key here -- a credential belongs in the key list, where it is
+        #: encrypted and never rendered back).
+        self._extra_headers = dict(extra_headers or {})
 
     async def complete(
         self,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int,
-        temperature: float,
+        params: AiRequestParams | None = None,
         stream: bool = False,
     ) -> str:
         """Ask the model, retrying only what a retry can fix.
@@ -254,18 +327,23 @@ class OpenAiCompatibleClient:
         returned. This module owns 「how to talk to the provider」, and its caller
         wants an answer, not a channel.
         """
-        body = {
+        body: dict[str, Any] = {
             "model": self._model,
             "messages": list(messages),
-            "max_tokens": int(max_tokens),
-            "temperature": float(temperature),
         }
+        if params is not None:
+            if params.temperature is not None:
+                body["temperature"] = float(params.temperature)
+            if params.max_tokens is not None:
+                body["max_tokens"] = int(params.max_tokens)
+            body.update(params.extra_body)
         if stream:
             body["stream"] = True
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
+            **self._extra_headers,
         }
         last: AiClientError | None = None
         for attempt in range(self._max_retries + 1):
@@ -351,6 +429,7 @@ __all__ = [
     "AI_AUTH",
     "AI_BAD_RESPONSE",
     "AI_MODEL_MISSING",
+    "AI_PARAM_REJECTED",
     "AI_RATE_LIMIT",
     "AI_REQUEST_REJECTED",
     "AI_SERVER_ERROR",

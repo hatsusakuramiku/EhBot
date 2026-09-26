@@ -108,6 +108,17 @@ SETTING_AI_CONCURRENCY = "ai_concurrency"
 SETTING_AI_STREAM = "ai_stream"
 SETTING_AI_DEFAULT_INCLUDE_CURRENT = "ai_default_include_current"
 
+#: Which models the *archive-path* feature uses: the global default chain, or a
+#: list of its own. The AI page owns the default (AstrBot's 「全局默认模型」);
+#: every other page inherits it unless it says otherwise, which is why the
+#: default value here is `default` and why an empty custom list is an error
+#: rather than a second inheritance.
+SETTING_AI_MODEL_SOURCE = "ai_model_source"
+MODEL_SOURCE_DEFAULT = "default"
+MODEL_SOURCE_CUSTOM = "custom"
+MODEL_SOURCES: tuple[str, ...] = (MODEL_SOURCE_DEFAULT, MODEL_SOURCE_CUSTOM)
+DEFAULT_AI_MODEL_SOURCE = MODEL_SOURCE_DEFAULT
+
 DEFAULT_AI_BATCH_SIZE = 20
 MIN_AI_BATCH_SIZE = 1
 MAX_AI_BATCH_SIZE = 500
@@ -596,6 +607,22 @@ class ArchiveSettingsService:
             minimum=MIN_AI_CONCURRENCY,
             maximum=MAX_AI_CONCURRENCY,
         )
+
+    async def ai_model_source(self) -> str:
+        stored = await self._database.archive_settings()
+        value = (stored.get(SETTING_AI_MODEL_SOURCE) or "").strip().lower()
+        return value if value in MODEL_SOURCES else DEFAULT_AI_MODEL_SOURCE
+
+    async def save_ai_model_source(self, raw: str) -> str:
+        value = (raw or "").strip().lower()
+        if value not in MODEL_SOURCES:
+            raise ArchiveSettingsError(
+                "AI_MODEL_SOURCE_INVALID", "模型来源取值无效"
+            )
+        await self._database.save_archive_settings(
+            {SETTING_AI_MODEL_SOURCE: value}
+        )
+        return value
 
     async def ai_stream(self) -> bool:
         stored = await self._database.archive_settings()

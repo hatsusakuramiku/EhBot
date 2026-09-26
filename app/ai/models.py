@@ -8,13 +8,24 @@ vault draws.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from typing import Any
 
 
 #: Protocol adapters this build speaks. One today; the column and the vocabulary
 #: exist so a second adapter (a vendor whose API is not OpenAI-shaped) is a value
 #: plus a client class, not a schema change.
 PROVIDER_CODE_OPENAI = "openai"
+
+#: Which feature a chain belongs to. One global default chain (managed next to
+#: the providers) and one optional per-feature override: the archive-path page
+#: either inherits the default or carries its own list. A str column rather
+#: than a second table because 「主力 + 备用」 is the same shape everywhere and
+#: the only difference is who reads it.
+CHAIN_SCOPE_DEFAULT = "default"
+CHAIN_SCOPE_ARCHIVE_PATH = "archive_path"
+CHAIN_SCOPES: tuple[str, ...] = (CHAIN_SCOPE_DEFAULT, CHAIN_SCOPE_ARCHIVE_PATH)
 
 SUPPORTED_PROVIDER_CODES: tuple[str, ...] = (PROVIDER_CODE_OPENAI,)
 
@@ -54,8 +65,109 @@ MAX_KEY_LABEL_LENGTH = 60
 
 
 @dataclass(frozen=True, slots=True)
+class AiRequestParams:
+    """The knobs one chat request may carry, per provider and per model.
+
+    Every field is optional and **absent means 「do not send it」**. That is the
+    whole point: some models reject parameters their neighbours accept (OpenAI's
+    reasoning models refuse `temperature` and want `max_completion_tokens`), and
+    a client that always sends a fixed body cannot talk to them at all. So the
+    default request is `{"model": ..., "messages": ...}` and nothing else, and an
+    operator opts a provider or a single model into whatever it needs -- with
+    `extra_body` as the escape hatch for vendor-specific fields.
+    """
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def empty(self) -> bool:
+        return (
+            self.temperature is None
+            and self.max_tokens is None
+            and not self.extra_body
+        )
+
+    def merged(self, override: "AiRequestParams") -> "AiRequestParams":
+        """This layer with `override` applied; unset fields keep this value."""
+        return AiRequestParams(
+            temperature=(
+                override.temperature
+                if override.temperature is not None
+                else self.temperature
+            ),
+            max_tokens=(
+                override.max_tokens
+                if override.max_tokens is not None
+                else self.max_tokens
+            ),
+            extra_body={**self.extra_body, **override.extra_body},
+        )
+
+
+def parse_request_params(raw: object) -> AiRequestParams:
+    """Read the JSON an operator typed into a params box.
+
+    `None`/empty means 「no parameters」. Anything that is not a JSON object, or
+    carries a field of the wrong type, raises `ValueError` -- the form and the
+    migration both want a refusal with a reason, not a silent drop.
+    """
+    if raw is None:
+        return AiRequestParams()
+    if isinstance(raw, AiRequestParams):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return AiRequestParams()
+        try:
+            decoded = json.loads(text)
+        except ValueError as exc:
+            raise ValueError("参数必须是合法的 JSON 对象") from exc
+    else:
+        decoded = raw
+    if not isinstance(decoded, dict):
+        raise ValueError("参数必须是一个 JSON 对象")
+    # Anything that is not one of the two named knobs rides in `extra_body`:
+    # 「model 不接受 temperature 就换成 max_completion_tokens」 must be one line in
+    # a text box, not a nested object an operator has to know the shape of.
+    reserved = {"model", "messages", "stream"}
+    temperature = decoded.get("temperature")
+    if temperature is not None:
+        try:
+            temperature = float(temperature)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("temperature 必须是数字") from exc
+        if not 0.0 <= temperature <= 2.0:
+            raise ValueError("temperature 必须在 0 到 2 之间")
+    max_tokens = decoded.get("max_tokens")
+    if max_tokens is not None:
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+            if not (isinstance(max_tokens, str) and max_tokens.strip().isdigit()):
+                raise ValueError("max_tokens 必须是正整数")
+            max_tokens = int(str(max_tokens).strip())
+        if max_tokens <= 0:
+            raise ValueError("max_tokens 必须是正整数")
+    extra_body = decoded.get("extra_body") or {}
+    if not isinstance(extra_body, dict):
+        raise ValueError("extra_body 必须是 JSON 对象")
+    for key, value in decoded.items():
+        if key in ("temperature", "max_tokens", "extra_body"):
+            continue
+        if key in reserved:
+            raise ValueError(f"{key} 由本服务自行填写，不能在参数里覆盖")
+        extra_body[key] = value
+    for key in reserved & set(extra_body):
+        raise ValueError(f"{key} 由本服务自行填写，不能在参数里覆盖")
+    return AiRequestParams(
+        temperature=temperature, max_tokens=max_tokens, extra_body=dict(extra_body)
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class AiProvider:
-    """One configured vendor endpoint."""
+    """One configured vendor endpoint (AstrBot's 「供应商来源」)."""
 
     provider_id: int
     name: str
@@ -64,6 +176,12 @@ class AiProvider:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_MAX_RETRIES
     enabled: bool = True
+    #: Extra request headers for a gateway that wants its own field. A proxy is
+    #: deliberately *not* here: `httpx` honours `HTTP(S)_PROXY` from the
+    #: environment, and one proxy setting per provider would be a knob whose
+    #: only correct value is the one the deployment already sets.
+    custom_headers: dict[str, Any] = field(default_factory=dict)
+    default_params: AiRequestParams = field(default_factory=AiRequestParams)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +214,7 @@ class AiProviderModel:
     last_verified_at: str | None = None
     last_verify_ok: bool | None = None
     last_verify_error: str | None = None
+    params: AiRequestParams = field(default_factory=AiRequestParams)
 
     @property
     def verified(self) -> bool:
@@ -120,10 +239,16 @@ class AiModelChainEntry:
     position: int
     provider: AiProvider
     model: AiProviderModel
+    scope: str = CHAIN_SCOPE_DEFAULT
 
     @property
     def is_primary(self) -> bool:
         return self.position == 0
+
+    @property
+    def request_params(self) -> AiRequestParams:
+        """What this entry actually sends: provider default, then model override."""
+        return self.provider.default_params.merged(self.model.params)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +319,9 @@ class AiVerification:
 
 
 __all__ = [
+    "CHAIN_SCOPES",
+    "CHAIN_SCOPE_ARCHIVE_PATH",
+    "CHAIN_SCOPE_DEFAULT",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_PROVIDER_CODE",
     "DEFAULT_TEMPERATURE",
@@ -217,5 +345,7 @@ __all__ = [
     "AiProvider",
     "AiProviderKey",
     "AiProviderModel",
+    "AiRequestParams",
     "AiVerification",
+    "parse_request_params",
 ]

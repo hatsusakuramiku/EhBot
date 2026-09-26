@@ -30,21 +30,31 @@ import pytest
 from app.ai.client import (
     AI_AUTH,
     AI_BAD_RESPONSE,
+    AI_PARAM_REJECTED,
+    AI_REQUEST_REJECTED,
     AI_TIMEOUT,
     AiClientError,
+    OpenAiCompatibleClient,
+    _classify_status,
+    _content_of,
 )
 from app.ai.errors import (
     AI_CHAIN_DUPLICATE,
     AI_CHAIN_EMPTY,
     AI_KEY_INVALID,
-    AI_MODEL_DISABLED,
-    AI_MODEL_UNVERIFIED,
+    AI_MODEL_INVALID,
+    AI_MODEL_NOT_FOUND,
     AI_NO_KEY,
+    AI_PARAMS_INVALID,
     AI_PATH_UNAVAILABLE,
-    AI_PROVIDER_DISABLED,
     AI_PROVIDER_INVALID,
     AI_PROVIDER_NAME_TAKEN,
     AiError,
+)
+from app.ai.models import (
+    CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_DEFAULT,
+    AiRequestParams,
 )
 from app.ai.service import AiProviderService, extract_json_object
 from app.archive.service import ArchiveSettingsService
@@ -107,8 +117,7 @@ class _StubClient:
         self,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int,
-        temperature: float,
+        params=None,
         stream: bool = False,
     ) -> str:
         return self._behavior(self._api_key, self._model, messages)
@@ -129,6 +138,7 @@ def _factory(behavior: Behavior, seen: list[tuple[str, str, str]]):
         model: str,
         timeout_seconds: int,
         max_retries: int,
+        extra_headers: dict[str, str] | None = None,
     ) -> _StubClient:
         seen.append((base_url, api_key, model))
         return _StubClient(behavior, api_key=api_key, model=model)
@@ -593,74 +603,65 @@ class TestAnswerValidation:
 # ---------------------------------------------------------------------------
 
 
-class TestChainValidation:
-    @pytest.mark.asyncio
-    async def test_an_unverified_model_cannot_enter_the_chain(
-        self, tmp_path: Path
-    ) -> None:
-        database, settings = await _seed(tmp_path)
-        service = _service(database, settings)
-        _, _, model_ids = await _catalogue(service)
-        with pytest.raises(AiError) as caught:
-            await service.save_chain(model_ids)
-        assert caught.value.code == AI_MODEL_UNVERIFIED
-        assert await service.chain() == ()
+class TestChainConfiguration:
+    """配置不阻塞：能不能用由「测试」按钮说，而不是由保存时的门禁说。"""
 
     @pytest.mark.asyncio
-    async def test_a_disabled_model_cannot_enter_the_chain(
+    async def test_an_unverified_model_can_enter_the_chain(
         self, tmp_path: Path
     ) -> None:
         database, settings = await _seed(tmp_path)
         service = _service(database, settings)
         _, _, model_ids = await _catalogue(service)
-        await service.verify_model(model_ids[0])
+        chain = await service.save_chain(model_ids)
+        assert [entry.model.model_id for entry in chain] == model_ids
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_model_can_enter_the_chain(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _catalogue(service)
         await service.set_model_enabled(model_ids[0], False)
-        with pytest.raises(AiError) as caught:
-            await service.save_chain(model_ids)
-        assert caught.value.code == AI_MODEL_DISABLED
+        chain = await service.save_chain(model_ids)
+        assert [entry.model.model_id for entry in chain] == model_ids
 
     @pytest.mark.asyncio
-    async def test_a_provider_without_a_usable_key_cannot_enter_the_chain(
+    async def test_a_provider_without_a_usable_key_can_enter_the_chain(
         self, tmp_path: Path
     ) -> None:
+        """保存不再检查 Key：端点临时故障时也要能把配置写完。
+
+        运行时仍然按 Key 轮询/回落（见 `TestRotation`），所以这条只断言
+        「写得进去」，不断言「跑得通」。
+        """
         database, settings = await _seed(tmp_path)
         service = _service(database, settings)
         _, key_ids, model_ids = await _catalogue(service)
-        await service.verify_model(model_ids[0])
         await service.set_key_enabled(key_ids[0], False)
-        with pytest.raises(AiError) as caught:
-            await service.save_chain(model_ids)
-        assert caught.value.code == AI_NO_KEY
-
-    @pytest.mark.asyncio
-    async def test_a_disabled_provider_cannot_enter_the_chain(
-        self, tmp_path: Path
-    ) -> None:
-        database, settings = await _seed(tmp_path)
-        service = _service(database, settings)
-        provider = await service.save_provider(_provider_values())
-        await service.add_key(provider.provider_id, label="", api_key="k")
-        model = await service.add_model(provider.provider_id, "m")
-        await service.verify_model(model.model_id)
-        await service.save_provider(
-            _provider_values(provider_id=provider.provider_id, enabled=False)
-        )
-        with pytest.raises(AiError) as caught:
-            await service.save_chain([model.model_id])
-        assert caught.value.code == AI_PROVIDER_DISABLED
+        chain = await service.save_chain(model_ids)
+        assert [entry.model.model_id for entry in chain] == model_ids
 
     @pytest.mark.asyncio
     async def test_a_duplicate_entry_is_refused(self, tmp_path: Path) -> None:
         database, settings = await _seed(tmp_path)
         service = _service(database, settings)
         _, _, model_ids = await _catalogue(service)
-        await service.verify_model(model_ids[0])
         with pytest.raises(AiError) as caught:
             await service.save_chain([model_ids[0], model_ids[0]])
         assert caught.value.code == AI_CHAIN_DUPLICATE
 
     @pytest.mark.asyncio
-    async def test_reordering_and_removing_go_through_the_validator(
+    async def test_an_unknown_model_is_refused(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        with pytest.raises(AiError) as caught:
+            await service.save_chain([999])
+        assert caught.value.code == AI_MODEL_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_reordering_and_removing_keep_the_order(
         self, tmp_path: Path
     ) -> None:
         database, settings = await _seed(tmp_path)
@@ -683,6 +684,77 @@ class TestChainValidation:
             model_ids[0],
             model_ids[1],
         ]
+
+    @pytest.mark.asyncio
+    async def test_promoting_a_model_makes_it_primary_and_appends_unknown_ones(
+        self, tmp_path: Path
+    ) -> None:
+        """「设为主力」一击生效：不在列表里的模型也会被加进来。"""
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _catalogue(service, model_names=("a", "b"))
+        # 空列表上「设为主力」= 就这一个。
+        chain = await service.set_chain_primary(model_ids[1])
+        assert [entry.model.model_id for entry in chain] == [model_ids[1]]
+        assert chain[0].is_primary
+        # 已经在列表里的模型被提为主力，原来的主力顺位后移。
+        chain = await service.append_to_chain(model_ids[0])
+        chain = await service.set_chain_primary(model_ids[1])
+        assert [entry.model.model_id for entry in chain] == [
+            model_ids[1],
+            model_ids[0],
+        ]
+        assert [entry.is_primary for entry in chain] == [True, False]
+
+
+class TestChainScopes:
+    """一张全局默认列表，各页面按需覆盖；不配置就继承默认。"""
+
+    @pytest.mark.asyncio
+    async def test_the_archive_path_scope_inherits_the_default(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service)
+        effective = await service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        assert [entry.model.model_id for entry in effective] == model_ids
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_custom_list_wins(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service, model_names=("a", "b"))
+        await settings.save_ai_model_source("custom")
+        await service.save_chain([model_ids[1]], CHAIN_SCOPE_ARCHIVE_PATH)
+        effective = await service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        assert [entry.model.model_id for entry in effective] == [model_ids[1]]
+        # 全局默认没被动过：换回跟随即回到原列表。
+        await settings.save_ai_model_source("default")
+        effective = await service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        assert [entry.model.model_id for entry in effective] == model_ids
+
+    @pytest.mark.asyncio
+    async def test_an_empty_custom_list_is_loud_instead_of_silent(
+        self, tmp_path: Path
+    ) -> None:
+        """选了「本页单独指定」却没填：报空，而不是偷偷用回全局默认。"""
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        await _ready_chain(service)
+        await settings.save_ai_model_source("custom")
+        assert await service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH) == ()
+
+    @pytest.mark.asyncio
+    async def test_the_default_scope_never_inherits_anything(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service)
+        await service.save_chain([model_ids[0]], CHAIN_SCOPE_ARCHIVE_PATH)
+        assert await service.effective_chain(CHAIN_SCOPE_DEFAULT) != ()
+        assert await service.chain(CHAIN_SCOPE_ARCHIVE_PATH) != ()
 
 
 # ---------------------------------------------------------------------------
@@ -967,3 +1039,269 @@ class TestStreamingTransport:
             await service.complete([{"role": "user", "content": "hi"}])
         assert caught.value.code == "AI_PATH_UNAVAILABLE"
         assert "没有可读的文本内容" in caught.value.public_message
+
+
+# ---------------------------------------------------------------------------
+#  批量录入：一次粘贴多把 Key、一次勾选多个模型
+# ---------------------------------------------------------------------------
+
+
+class TestBatchEntry:
+    @pytest.mark.asyncio
+    async def test_a_pasted_block_of_keys_becomes_several_rows(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider = await service.save_provider(_provider_values())
+        keys = await service.add_keys(
+            provider.provider_id,
+            """
+            # 这是注释行，会被忽略
+
+            主力:sk-one
+            备用:sk-two
+            sk-three-without-a-label
+            """,
+        )
+        assert [key.label for key in keys] == ["主力", "备用", ""]
+        # 三把都能解密回原文：批量入库没有把某一行的密文写串。
+        plaintexts = [await service._key_plaintext(key.key_id) for key in keys]
+        assert plaintexts == ["sk-one", "sk-two", "sk-three-without-a-label"]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_key_block_is_refused(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider = await service.save_provider(_provider_values())
+        with pytest.raises(AiError) as caught:
+            await service.add_keys(provider.provider_id, "\n  \n")
+        assert caught.value.code == AI_KEY_INVALID
+
+    @pytest.mark.asyncio
+    async def test_a_model_checklist_deduplicates_and_keeps_existing_rows(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider = await service.save_provider(_provider_values())
+        first = await service.add_models(provider.provider_id, ["a", "b"])
+        again = await service.add_models(provider.provider_id, ["b", "c", "b"])
+        assert [model.name for model in again] == ["b", "c"]
+        assert again[0].model_id == first[1].model_id
+        assert [model.name for model in await service.models(provider.provider_id)] == [
+            "a",
+            "b",
+            "c",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_model_checklist_is_refused(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider = await service.save_provider(_provider_values())
+        with pytest.raises(AiError) as caught:
+            await service.add_models(provider.provider_id, ["", "  "])
+        assert caught.value.code == AI_MODEL_INVALID
+
+
+# ---------------------------------------------------------------------------
+#  请求参数：默认不发，逐模型可覆盖
+# ---------------------------------------------------------------------------
+
+
+def _capture_transport(captured: list[dict]) -> httpx.MockTransport:
+    """An httpx transport that records the request body and answers 200."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{}"}}]},
+        )
+
+    return httpx.MockTransport(handle)
+
+
+class TestRequestParams:
+    @pytest.mark.asyncio
+    async def test_the_default_body_is_model_and_messages_only(self) -> None:
+        """「不填就不发」：默认请求体里没有 temperature / max_tokens。
+
+        这条是这次重写的关键回归：写死这两个字段会让 OpenAI 推理模型（不接受
+        temperature、要 max_completion_tokens）永远验证失败。
+        """
+        captured: list[dict] = []
+        async with httpx.AsyncClient(transport=_capture_transport(captured)) as http:
+            client = OpenAiCompatibleClient(
+                http, base_url="http://x/v1", api_key="k", model="m"
+            )
+            await client.complete([{"role": "user", "content": "hi"}])
+        assert captured == [
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_model_override_reaches_the_body(self) -> None:
+        captured: list[dict] = []
+        params = AiRequestParams(
+            temperature=0.3, extra_body={"max_completion_tokens": 512}
+        )
+        async with httpx.AsyncClient(transport=_capture_transport(captured)) as http:
+            client = OpenAiCompatibleClient(
+                http, base_url="http://x/v1", api_key="k", model="m"
+            )
+            await client.complete(
+                [{"role": "user", "content": "hi"}], params=params
+            )
+        assert captured[0]["temperature"] == 0.3
+        assert captured[0]["max_completion_tokens"] == 512
+        assert "max_tokens" not in captured[0]
+
+    @pytest.mark.asyncio
+    async def test_extra_headers_are_sent_but_never_override_the_credential(
+        self,
+    ) -> None:
+        seen: list[httpx.Headers] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers)
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "{}"}}]}
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            client = OpenAiCompatibleClient(
+                http,
+                base_url="http://x/v1",
+                api_key="secret",
+                model="m",
+                extra_headers={"X-Org": "abc"},
+            )
+            await client.complete([{"role": "user", "content": "hi"}])
+        assert seen[0]["x-org"] == "abc"
+        assert seen[0]["authorization"] == "Bearer secret"
+
+    @pytest.mark.asyncio
+    async def test_a_provider_default_and_a_model_override_merge(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider = await service.save_provider(
+            _provider_values(default_params='{"temperature": 0.5, "top_p": 0.9}')
+        )
+        await service.add_key(provider.provider_id, label="", api_key="k")
+        model = await service.add_model(provider.provider_id, "m")
+        await service.save_model_params(model.model_id, '{"temperature": 0.1}')
+        model = await service.model(model.model_id)
+        merged = provider.default_params.merged(model.params)
+        assert merged.temperature == 0.1
+        assert merged.extra_body == {"top_p": 0.9}
+
+    @pytest.mark.asyncio
+    async def test_the_chain_entry_carries_the_merged_params(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service)
+        await service.save_model_params(model_ids[0], '{"max_tokens": 64}')
+        chain = await service.chain()
+        assert chain[0].request_params.max_tokens == 64
+
+    @pytest.mark.asyncio
+    async def test_a_params_box_that_is_not_json_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        with pytest.raises(AiError) as caught:
+            await service.save_provider(_provider_values(default_params="nope"))
+        assert caught.value.code == AI_PARAMS_INVALID
+
+    @pytest.mark.asyncio
+    async def test_a_credential_in_the_headers_box_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """请求头里的 Authorization 会绕过加密的 Key 列表，明文入库。"""
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        with pytest.raises(AiError) as caught:
+            await service.save_provider(
+                _provider_values(custom_headers='{"Authorization": "Bearer x"}')
+            )
+        assert caught.value.code == AI_PARAMS_INVALID
+
+    @pytest.mark.asyncio
+    async def test_a_60000_token_cap_is_accepted_as_an_extra_field(self) -> None:
+        """运营者可以按模型写任意字段（如 max_completion_tokens）。"""
+        params = AiRequestParams(extra_body={"max_completion_tokens": 60000})
+        assert params.extra_body["max_completion_tokens"] == 60000
+
+
+class TestParamRejection:
+    def test_a_400_that_names_a_parameter_gets_its_own_code(self) -> None:
+        error = _classify_status(
+            400, "Unsupported parameter: 'temperature' is not supported with this model."
+        )
+        assert error.code == AI_PARAM_REJECTED
+        assert "参数" in error.public_message
+
+    def test_a_400_without_a_readable_body_is_not_blamed_on_parameters(self) -> None:
+        assert _classify_status(400, "").code == AI_REQUEST_REJECTED
+
+
+class TestReasoningOutput:
+    def test_a_think_block_is_stripped_before_the_json_is_found(self) -> None:
+        text = _content_of(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "<think>{not json}</think>{\"ok\": true}"
+                        }
+                    }
+                ]
+            }
+        )
+        assert text == '{"ok": true}'
+        assert extract_json_object(text) == {"ok": True}
+
+    def test_an_answered_reasoning_field_is_ignored(self) -> None:
+        text = _content_of(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"ok": true}',
+                            "reasoning_content": "thinking about {braces}",
+                        }
+                    }
+                ]
+            }
+        )
+        assert text == '{"ok": true}'
+
+
+class TestVerifyAll:
+    @pytest.mark.asyncio
+    async def test_only_enabled_models_are_tested(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider_id, _, model_ids = await _catalogue(
+            service, model_names=("a", "b")
+        )
+        await service.set_model_enabled(model_ids[1], False)
+        results = await service.verify_all(provider_id)
+        assert len(results) == 1
+        assert results[0].ok
+
+    @pytest.mark.asyncio
+    async def test_a_provider_with_nothing_enabled_reports_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        provider_id, _, _ = await _catalogue(service)
+        assert await service.verify_all(provider_id + 100) == ()

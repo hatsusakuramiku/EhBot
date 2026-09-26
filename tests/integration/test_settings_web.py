@@ -1592,8 +1592,11 @@ class _AiTransport:
     (not a `GET /v1/models`), and the key must ride in the Authorization header.
     """
 
-    def __init__(self, *, chat_status: int = 200) -> None:
+    def __init__(
+        self, *, chat_status: int = 200, chat_error: str = "bad key"
+    ) -> None:
         self.chat_status = chat_status
+        self.chat_error = chat_error
         self.chat_bodies: list[dict] = []
         self.requests: list[httpx.Request] = []
 
@@ -1606,7 +1609,7 @@ class _AiTransport:
         self.chat_bodies.append(json.loads(request.content))
         if self.chat_status >= 400:
             return httpx.Response(
-                self.chat_status, json={"error": {"message": "bad key"}}
+                self.chat_status, json={"error": {"message": self.chat_error}}
             )
         return httpx.Response(
             200, json={"choices": [{"message": {"content": '{"ok": true}'}}]}
@@ -1633,6 +1636,8 @@ def _add_provider(client: TestClient, csrf: str, **overrides: str) -> None:
 
 
 class TestAISettings:
+    """AstrBot 式两层管理：左边供应商、右边配置/Key/模型，下面是全局默认模型。"""
+
     def test_the_tab_renders(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
         stub = _AiTransport()
@@ -1640,7 +1645,7 @@ class TestAISettings:
             _authenticate(client, settings)
             page = client.get("/settings/ai")
         assert page.status_code == 200
-        assert "模型链" in page.text
+        assert "全局默认模型" in page.text
         assert "新增供应商" in page.text
 
     def test_an_unauthenticated_caller_is_sent_to_login(self, tmp_path: Path) -> None:
@@ -1658,8 +1663,8 @@ class TestAISettings:
         """The browser silently drops a nested form, taking its button with it.
 
         This tab is the most form-dense page in the app -- a save form, and per
-        provider a key form, a model form and a fetch result -- so the rule the
-        browser enforces rather than Python is asserted here.
+        provider a key form, a model form, a params form and a fetch result --
+        so the rule the browser enforces rather than Python is asserted here.
         """
         settings = _settings(tmp_path)
         with TestClient(_ai_app(settings, _AiTransport())) as client:
@@ -1668,7 +1673,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             client.post(
@@ -1676,7 +1681,11 @@ class TestAISettings:
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
+            client.post(
+                "/settings/ai/models/1/params",
+                data={"csrf_token": csrf, "params": '{"max_tokens": 64}'},
+                follow_redirects=False,
+            )
             client.post(
                 "/settings/ai/chain/append",
                 data={"csrf_token": csrf, "model_id": "1"},
@@ -1724,11 +1733,12 @@ class TestAISettings:
     def test_the_full_path_from_empty_tab_to_primary_model(
         self, tmp_path: Path
     ) -> None:
-        """Add provider → key → model → verify → chain, through the real forms.
+        """Add provider → key → model → test → 主力, through the real forms.
 
         This is the wiring test: every form's field names have to match the
-        handler's, and the chain must actually accept the model only after the
-        verification has been recorded.
+        handler's, and the model must be usable *without* a prior test -- the
+        gate is gone on purpose (an unreachable endpoint must still be
+        configurable), and 「测试」 is a button rather than a prerequisite.
         """
         settings = _settings(tmp_path)
         stub = _AiTransport()
@@ -1738,11 +1748,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             response = client.post(
                 "/settings/ai/providers/1/keys",
-                data={
-                    "csrf_token": csrf,
-                    "label": "主",
-                    "api_key": "sk-live-secret-0001",
-                },
+                data={"csrf_token": csrf, "api_keys": "主:sk-live-secret-0001"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
@@ -1753,13 +1759,17 @@ class TestAISettings:
             )
             assert response.status_code == 303
 
-            # Before verification the chain refuses it, with the reason.
+            # No test first: saving it as the primary works anyway.
             response = client.post(
-                "/settings/ai/chain/append",
+                "/settings/ai/chain/primary",
                 data={"csrf_token": csrf, "model_id": "1"},
+                follow_redirects=False,
             )
-            assert response.status_code == 400
-            assert "尚未通过" in response.text
+            assert response.status_code == 303
+
+            page = client.get("/settings/ai")
+            assert "未验证" in page.text
+            assert "gpt-4o-mini" in page.text
 
             response = client.post(
                 "/settings/ai/models/1/verify", data={"csrf_token": csrf}
@@ -1772,23 +1782,54 @@ class TestAISettings:
             assert stub.requests[-1].headers["authorization"] == (
                 "Bearer sk-live-secret-0001"
             )
+            # 默认请求体只有 model 与 messages：写死 temperature/max_tokens 会让
+            # 推理模型永远验证失败。
+            assert set(stub.chat_bodies[0]) == {"model", "messages"}
 
+            page = client.get("/settings/ai")
+        assert "主力" in page.text
+        assert "已验证" in page.text
+
+    def test_a_pasted_block_of_keys_and_a_model_checklist_land_in_one_submit(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
             response = client.post(
-                "/settings/ai/chain/append",
-                data={"csrf_token": csrf, "model_id": "1"},
+                "/settings/ai/providers/1/keys",
+                data={
+                    "csrf_token": csrf,
+                    "api_keys": "主:sk-one\n备用:sk-two\n# 注释\nsk-three",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            response = client.post(
+                "/settings/ai/providers/1/models",
+                data={
+                    "csrf_token": csrf,
+                    "model_name": ["alpha", "beta", "alpha"],
+                },
                 follow_redirects=False,
             )
             assert response.status_code == 303
             page = client.get("/settings/ai")
-        assert "主力" in page.text
-        assert "gpt-4o-mini" in page.text
+        assert "Key 3/3 可用" in page.text
+        # alpha 被勾了两次：模型清单去重后是 2 个。
+        assert "模型 2/2 启用" in page.text
+        assert "主" in page.text and "备用" in page.text
+        assert "alpha" in page.text and "beta" in page.text
 
     def test_a_key_is_never_rendered_back(self, tmp_path: Path) -> None:
         """The page may show a label and a state; it must never show the key.
 
         Checked on a normal render and on a rejected save, because a value
         echoed back into a re-rendered form is exactly how a credential leaks
-        out of a page that otherwise never prints one.
+        out of a page that otherwise never prints one. The textarea that keys
+        are pasted into is empty on every render.
         """
         settings = _settings(tmp_path)
         secret = "sk-live-secret-abcdef"
@@ -1798,7 +1839,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "主", "api_key": secret},
+                data={"csrf_token": csrf, "api_keys": f"主:{secret}"},
                 follow_redirects=False,
             )
             page = client.get("/settings/ai")
@@ -1806,7 +1847,8 @@ class TestAISettings:
             assert "主" in page.text
             rejected = client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "空", "api_key": ""},
+                data={"csrf_token": csrf, "api_keys": "",
+                      },
             )
         assert rejected.status_code == 400
         assert secret not in rejected.text
@@ -1819,7 +1861,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             response = client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "空", "api_key": ""},
+                data={"csrf_token": csrf, "api_keys": "  "},
             )
         assert response.status_code == 400
         assert "不能为空" in response.text
@@ -1835,7 +1877,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             client.post(
@@ -1852,6 +1894,68 @@ class TestAISettings:
         assert "验证失败" in page.text
         assert "AI_AUTH" in page.text
 
+    def test_a_parameter_refusal_tells_the_operator_to_change_the_params(
+        self, tmp_path: Path
+    ) -> None:
+        """推理模型的 400 不该被说成「地址或 Key 错了」。"""
+        settings = _settings(tmp_path)
+        stub = _AiTransport(
+            chat_status=400,
+            chat_error="Unsupported parameter: 'temperature' is not supported.",
+        )
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf, default_params='{"temperature": 0.5}')
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "m"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            )
+        assert response.status_code == 400
+        assert "参数" in response.text
+        assert "AI_PARAM_REJECTED" in response.text
+
+    def test_a_models_own_params_are_editable_from_its_row(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        stub = _AiTransport()
+        with TestClient(_ai_app(settings, stub)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": csrf, "model_name": "o3-mini"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/settings/ai/models/1/params",
+                data={
+                    "csrf_token": csrf,
+                    "params": '{"max_completion_tokens": 512}',
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
+        assert stub.chat_bodies[-1]["max_completion_tokens"] == 512
+        assert "temperature" not in stub.chat_bodies[-1]
+
     def test_fetching_models_renders_a_checklist_that_adds_selected(
         self, tmp_path: Path
     ) -> None:
@@ -1863,7 +1967,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             page = client.post(
@@ -1885,7 +1989,27 @@ class TestAISettings:
         assert "alpha" in page.text
         assert "beta" in page.text
 
-    def test_chain_reorder_and_remove(self, tmp_path: Path) -> None:
+    def test_the_selected_provider_survives_a_save(self, tmp_path: Path) -> None:
+        """?provider= 是右侧面板的唯一真相，保存后回到同一个供应商。"""
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            response = client.post(
+                "/settings/ai/providers",
+                data={
+                    "csrf_token": csrf,
+                    "name": "第二个",
+                    "code": "openai",
+                    "base_url": "http://localhost:1234/v1",
+                },
+                follow_redirects=False,
+            )
+        assert response.status_code == 303
+        assert response.headers["location"].endswith("/settings/ai?provider=2")
+
+    def test_chain_reorder_remove_and_promote(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
         with TestClient(_ai_app(settings, _AiTransport())) as client:
             _authenticate(client, settings)
@@ -1893,7 +2017,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             for name in ("a", "b"):
@@ -1904,10 +2028,6 @@ class TestAISettings:
                 )
             for model_id in (1, 2):
                 client.post(
-                    f"/settings/ai/models/{model_id}/verify",
-                    data={"csrf_token": csrf},
-                )
-                client.post(
                     "/settings/ai/chain/append",
                     data={"csrf_token": csrf, "model_id": str(model_id)},
                     follow_redirects=False,
@@ -1916,8 +2036,8 @@ class TestAISettings:
             assert "主力 · 本地 / a" in page.text
 
             response = client.post(
-                "/settings/ai/chain/2/shift",
-                data={"csrf_token": csrf, "delta": "-1"},
+                "/settings/ai/chain/shift",
+                data={"csrf_token": csrf, "model_id": "2", "delta": "-1"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
@@ -1925,17 +2045,61 @@ class TestAISettings:
             assert "主力 · 本地 / b" in page.text
 
             response = client.post(
-                "/settings/ai/chain/2/remove",
-                data={"csrf_token": csrf},
+                "/settings/ai/chain/primary",
+                data={"csrf_token": csrf, "model_id": "1"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
             page = client.get("/settings/ai")
-        # b is gone from the chain, so its label only remains in the 「加入模型链」
-        # dropdown -- the chain entries themselves are what must not name it.
+            assert "主力 · 本地 / a" in page.text
+
+            response = client.post(
+                "/settings/ai/chain/remove",
+                data={"csrf_token": csrf, "model_id": "2"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        # b is gone from the chain; its label survives only in the 「加入备用」
+        # dropdown, which is not a chain entry.
         assert "主力 · 本地 / a" in page.text
         assert "主力 · 本地 / b" not in page.text
         assert "备用 1 · 本地 / b" not in page.text
+
+    def test_a_disabled_key_can_be_re_enabled_and_its_cooldown_reset(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "ai")
+            _add_provider(client, csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/settings/ai/keys/1/toggle",
+                data={"csrf_token": csrf, "enabled": "off"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            assert "Key 0/1 可用" in client.get("/settings/ai").text
+            response = client.post(
+                "/settings/ai/keys/1/reset",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            response = client.post(
+                "/settings/ai/keys/1/toggle",
+                data={"csrf_token": csrf, "enabled": "on"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/ai")
+        assert "Key 1/1 可用" in page.text
 
     def test_deleting_a_provider_removes_its_chain_entry(
         self, tmp_path: Path
@@ -1947,7 +2111,7 @@ class TestAISettings:
             _add_provider(client, csrf)
             client.post(
                 "/settings/ai/providers/1/keys",
-                data={"csrf_token": csrf, "label": "", "api_key": "k"},
+                data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             client.post(
@@ -1955,7 +2119,6 @@ class TestAISettings:
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
             client.post(
                 "/settings/ai/chain/append",
                 data={"csrf_token": csrf, "model_id": "1"},
@@ -1969,7 +2132,8 @@ class TestAISettings:
             assert response.status_code == 303
             page = client.get("/settings/ai")
         assert "还没有 AI 供应商" in page.text
-        assert "模型链为空" in page.text
+        assert "主力 · 本地 / m" not in page.text
+
 
 # ---------------------------------------------------------------------------
 #  Path tab — the 路径来源 switch and the AI sub-panel (R29)
@@ -2032,6 +2196,84 @@ class TestAIPathsSettings:
         assert stored["ai_concurrency"] == "3"
         assert stored["ai_fallback_to_rules"] == "1"
         assert stored["ai_default_include_current"] == "1"
+
+    def test_the_model_source_panel_and_its_editor_render(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/paths")
+        assert page.status_code == 200
+        assert "路径决策模型" in page.text
+        assert "跟随全局默认" in page.text
+        assert "本页单独指定" in page.text
+        # 没有模型时两台编辑器都给出同一句指引（宏是共用的）。
+        assert "还没有模型：先在「设置 → AI 供应商」添加供应商与模型" in page.text
+
+    def test_a_custom_list_is_kept_separate_from_the_global_default(
+        self, tmp_path: Path
+    ) -> None:
+        """路径页自选模型：全局默认不动，本页的列表生效。"""
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            ai_csrf = _csrf(client, "ai")
+            _add_provider(client, ai_csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": ai_csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            for name in ("big", "small"):
+                client.post(
+                    "/settings/ai/providers/1/models",
+                    data={"csrf_token": ai_csrf, "model_name": name},
+                    follow_redirects=False,
+                )
+            client.post(
+                "/settings/ai/chain/primary",
+                data={"csrf_token": ai_csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/chain/append",
+                data={"csrf_token": ai_csrf, "model_id": "2"},
+                follow_redirects=False,
+            )
+
+            paths_csrf = _csrf(client, "paths")
+            response = client.post(
+                "/archive-settings/paths/ai/models",
+                data={"csrf_token": paths_csrf, "ai_model_source": "custom"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            response = client.post(
+                "/settings/paths/chain/primary",
+                data={"csrf_token": paths_csrf, "model_id": "2"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+            page = client.get("/settings/paths")
+            assert "本页单独指定" in page.text
+            assert "主力 本地 / small" in page.text
+            assert "跟随全局默认" in page.text  # 仍是可选的一项
+
+            # 切回跟随：本页列表还在，但生效的是全局默认。
+            client.post(
+                "/archive-settings/paths/ai/models",
+                data={"csrf_token": paths_csrf, "ai_model_source": "default"},
+                follow_redirects=False,
+            )
+            page = client.get("/settings/paths")
+            assert "主力 本地 / big" in page.text
+
+            ai_page = client.get("/settings/ai")
+        # 全局默认从头到尾没被动过。
+        assert "主力 · 本地 / big" in ai_page.text
+        assert "备用 1 · 本地 / small" in ai_page.text
 
     def test_an_out_of_range_batch_size_is_refused_before_the_mode_changes(
         self, tmp_path: Path

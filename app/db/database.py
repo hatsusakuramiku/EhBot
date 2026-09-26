@@ -9,11 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.ai.models import (
+    CHAIN_SCOPE_DEFAULT,
     AiModelChainEntry,
     AiPathSuggestion,
     AiProvider,
     AiProviderKey,
     AiProviderModel,
+    AiRequestParams,
+    parse_request_params,
 )
 from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
 from app.auto_approval.models import AutoApprovalRule
@@ -215,6 +218,22 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
     )
 
 
+#: The column list every `ai_providers` read shares. One constant because a
+#: mapper and its SELECT drifting apart is a bug that only shows up as a wrong
+#: field on a page, and there are four places that read this table.
+_AI_PROVIDER_COLUMNS = (
+    "id, name, code, base_url, timeout_seconds, max_retries, enabled, "
+    "custom_headers, default_params"
+)
+
+#: Same for models. `params` is last on purpose: the chain query reuses the
+#: mapper on a slice, and appending is the change that keeps the slice intact.
+_AI_MODEL_COLUMNS = (
+    "id, provider_id, name, enabled, last_verified_at, last_verify_ok, "
+    "last_verify_error, params"
+)
+
+
 def _ai_provider_from_row(row: Sequence[object]) -> AiProvider:
     """Map one `ai_providers` row onto its DTO."""
 
@@ -226,6 +245,8 @@ def _ai_provider_from_row(row: Sequence[object]) -> AiProvider:
         timeout_seconds=int(row[4]),
         max_retries=int(row[5]),
         enabled=bool(row[6]),
+        custom_headers=_json_object(row[7]),
+        default_params=_params(row[8]),
     )
 
 
@@ -244,6 +265,20 @@ def _ai_key_from_row(row: Sequence[object]) -> AiProviderKey:
         last_used_at=str(row[6]) if row[6] is not None else None,
         created_at=str(row[7]),
     )
+
+
+#: The chain query joins both tables and has to say so with aliases; it is the
+#: one place that cannot reuse the plain column constants, so it gets its own.
+_AI_CHAIN_SELECT = (
+    "SELECT ch.position, "
+    "p.id, p.name, p.code, p.base_url, p.timeout_seconds, p.max_retries, "
+    "p.enabled, p.custom_headers, p.default_params, "
+    "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
+    "m.last_verify_ok, m.last_verify_error, m.params "
+    "FROM ai_model_chain ch "
+    "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
+    "JOIN ai_providers p ON p.id = m.provider_id "
+)
 
 
 def _ai_model_from_row(row: Sequence[object]) -> AiProviderModel:
@@ -267,7 +302,55 @@ def _ai_model_from_row(row: Sequence[object]) -> AiProviderModel:
         last_verify_error=(
             str(row[6]) if row[6] is not None else None
         ),
+        params=_params(row[7]),
     )
+
+
+def _params_document(params: AiRequestParams | None) -> dict[str, object]:
+    """`AiRequestParams` as the JSON object the column stores.
+
+    Only the set fields are written, so 「没填」 round-trips as 「没填」 rather than
+    as an explicit null that a later merge would have to special-case.
+    """
+    document: dict[str, object] = {}
+    if params is None:
+        return document
+    if params.temperature is not None:
+        document["temperature"] = params.temperature
+    if params.max_tokens is not None:
+        document["max_tokens"] = params.max_tokens
+    document.update(params.extra_body)
+    return document
+
+
+def _json_object(value: object) -> dict[str, object]:
+    """A JSON column read as a dict, tolerating anything a human typed.
+
+    The page validates before saving, so a non-object here means a row written
+    by an older build or edited by hand; treating it as 「空」 keeps one bad cell
+    from taking a page down.
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _params(value: object) -> AiRequestParams:
+    """A stored params column as `AiRequestParams`; unreadable means empty.
+
+    Same reasoning as `_json_object`: the write path refuses bad JSON, so the
+    read path only has to survive a value that never went through it.
+    """
+    try:
+        return parse_request_params(value)
+    except ValueError:
+        return AiRequestParams()
 
 
 def _ai_path_suggestion(row: Sequence[object]) -> AiPathSuggestion:
@@ -3276,8 +3359,7 @@ class Database:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT id, name, code, base_url, timeout_seconds, "
-                "max_retries, enabled FROM ai_providers "
+                f"SELECT {_AI_PROVIDER_COLUMNS} FROM ai_providers "
                 + where_sql
                 + "ORDER BY name, id"
             ).fetchall()
@@ -3289,8 +3371,7 @@ class Database:
     def _get_ai_provider_sync(self, provider_id: int) -> AiProvider | None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT id, name, code, base_url, timeout_seconds, "
-                "max_retries, enabled FROM ai_providers WHERE id = ?",
+                f"SELECT {_AI_PROVIDER_COLUMNS} FROM ai_providers WHERE id = ?",
                 (provider_id,),
             ).fetchone()
         return _ai_provider_from_row(row) if row is not None else None
@@ -3305,6 +3386,8 @@ class Database:
         timeout_seconds: int,
         max_retries: int,
         enabled: bool,
+        custom_headers: dict[str, object] | None = None,
+        default_params: AiRequestParams | None = None,
     ) -> AiProvider:
         return await asyncio.to_thread(
             self._save_ai_provider_sync,
@@ -3315,6 +3398,8 @@ class Database:
             timeout_seconds,
             max_retries,
             enabled,
+            json.dumps(custom_headers or {}, ensure_ascii=False),
+            json.dumps(_params_document(default_params), ensure_ascii=False),
         )
 
     def _save_ai_provider_sync(
@@ -3326,6 +3411,8 @@ class Database:
         timeout_seconds: int,
         max_retries: int,
         enabled: bool,
+        custom_headers: str,
+        default_params: str,
     ) -> AiProvider:
         """Insert or update one provider, keyed by id when there is one.
 
@@ -3338,8 +3425,9 @@ class Database:
                 if provider_id is None:
                     cursor = connection.execute(
                         "INSERT INTO ai_providers (name, code, base_url, "
-                        "timeout_seconds, max_retries, enabled) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "timeout_seconds, max_retries, enabled, "
+                        "custom_headers, default_params) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             name,
                             code,
@@ -3347,6 +3435,8 @@ class Database:
                             timeout_seconds,
                             max_retries,
                             1 if enabled else 0,
+                            custom_headers,
+                            default_params,
                         ),
                     )
                     provider_id = int(cursor.lastrowid)
@@ -3354,7 +3444,8 @@ class Database:
                     cursor = connection.execute(
                         "UPDATE ai_providers SET name = ?, code = ?, "
                         "base_url = ?, timeout_seconds = ?, max_retries = ?, "
-                        "enabled = ?, updated_at = CURRENT_TIMESTAMP "
+                        "enabled = ?, custom_headers = ?, default_params = ?, "
+                        "updated_at = CURRENT_TIMESTAMP "
                         "WHERE id = ?",
                         (
                             name,
@@ -3363,6 +3454,8 @@ class Database:
                             timeout_seconds,
                             max_retries,
                             1 if enabled else 0,
+                            custom_headers,
+                            default_params,
                             provider_id,
                         ),
                     )
@@ -3373,8 +3466,7 @@ class Database:
             except sqlite3.IntegrityError as exc:
                 raise LookupError(f"AI provider name {name!r} is taken") from exc
             row = connection.execute(
-                "SELECT id, name, code, base_url, timeout_seconds, "
-                "max_retries, enabled FROM ai_providers WHERE id = ?",
+                f"SELECT {_AI_PROVIDER_COLUMNS} FROM ai_providers WHERE id = ?",
                 (provider_id,),
             ).fetchone()
         return _ai_provider_from_row(row)
@@ -3457,26 +3549,41 @@ class Database:
     async def add_ai_provider_key(
         self, provider_id: int, *, label: str, cipher: str
     ) -> AiProviderKey:
+        rows = await self.add_ai_provider_keys(provider_id, [(label, cipher)])
+        return rows[0]
+
+    async def add_ai_provider_keys(
+        self, provider_id: int, entries: Sequence[tuple[str, str]]
+    ) -> tuple[AiProviderKey, ...]:
+        """Insert several keys in one transaction.
+
+        One transaction rather than a loop of single inserts: the page takes a
+        whole textarea at once, and half of a paste landing in the database
+        because the fifth line failed is a state nobody can reason about.
+        """
         return await asyncio.to_thread(
-            self._add_ai_provider_key_sync, provider_id, label, cipher
+            self._add_ai_provider_keys_sync, provider_id, tuple(entries)
         )
 
-    def _add_ai_provider_key_sync(
-        self, provider_id: int, label: str, cipher: str
-    ) -> AiProviderKey:
+    def _add_ai_provider_keys_sync(
+        self, provider_id: int, entries: tuple[tuple[str, str], ...]
+    ) -> tuple[AiProviderKey, ...]:
+        stored: list[AiProviderKey] = []
         with self.connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO ai_provider_keys (provider_id, label, cipher) "
-                "VALUES (?, ?, ?)",
-                (provider_id, label, cipher),
-            )
-            row = connection.execute(
-                "SELECT id, provider_id, label, enabled, failures, "
-                "cooldown_until, last_used_at, created_at "
-                "FROM ai_provider_keys WHERE id = ?",
-                (int(cursor.lastrowid),),
-            ).fetchone()
-        return _ai_key_from_row(row)
+            for label, cipher in entries:
+                cursor = connection.execute(
+                    "INSERT INTO ai_provider_keys (provider_id, label, cipher) "
+                    "VALUES (?, ?, ?)",
+                    (provider_id, label, cipher),
+                )
+                row = connection.execute(
+                    "SELECT id, provider_id, label, enabled, failures, "
+                    "cooldown_until, last_used_at, created_at "
+                    "FROM ai_provider_keys WHERE id = ?",
+                    (int(cursor.lastrowid),),
+                ).fetchone()
+                stored.append(_ai_key_from_row(row))
+        return tuple(stored)
 
     async def set_ai_provider_key_enabled(
         self, key_id: int, enabled: bool
@@ -3532,6 +3639,18 @@ class Database:
                 (f"+{max(0, int(cooldown_minutes))} minutes", key_id),
             )
 
+    async def reset_ai_key_cooldown(self, key_id: int) -> None:
+        await asyncio.to_thread(self._reset_ai_key_cooldown_sync, key_id)
+
+    def _reset_ai_key_cooldown_sync(self, key_id: int) -> None:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_provider_keys SET cooldown_until = NULL WHERE id = ?",
+                (key_id,),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider key {key_id} does not exist")
+
     async def mark_ai_key_used(self, key_id: int) -> None:
         await asyncio.to_thread(self._mark_ai_key_used_sync, key_id)
 
@@ -3555,8 +3674,7 @@ class Database:
     ) -> tuple[AiProviderModel, ...]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT id, provider_id, name, enabled, last_verified_at, "
-                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                f"SELECT {_AI_MODEL_COLUMNS} FROM ai_provider_models "
                 "WHERE provider_id = ? ORDER BY name, id",
                 (provider_id,),
             ).fetchall()
@@ -3574,8 +3692,7 @@ class Database:
     ) -> AiProviderModel | None:
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT id, provider_id, name, enabled, last_verified_at, "
-                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                f"SELECT {_AI_MODEL_COLUMNS} FROM ai_provider_models "
                 "WHERE id = ?",
                 (model_id,),
             ).fetchone()
@@ -3604,12 +3721,43 @@ class Database:
                 (provider_id, name),
             )
             row = connection.execute(
-                "SELECT id, provider_id, name, enabled, last_verified_at, "
-                "last_verify_ok, last_verify_error FROM ai_provider_models "
+                f"SELECT {_AI_MODEL_COLUMNS} FROM ai_provider_models "
                 "WHERE provider_id = ? AND name = ?",
                 (provider_id, name),
             ).fetchone()
         return _ai_model_from_row(row)
+
+    async def add_ai_provider_models(
+        self, provider_id: int, names: Sequence[str]
+    ) -> tuple[AiProviderModel, ...]:
+        """Register several names at once, keeping any row that already exists.
+
+        The 「拉取模型」 result is a checklist, not a form: ten ticks must be one
+        submit, and a name that is already configured must come back as the same
+        row (with its verification state) rather than as an error.
+        """
+        return await asyncio.to_thread(
+            self._add_ai_provider_models_sync, provider_id, tuple(names)
+        )
+
+    def _add_ai_provider_models_sync(
+        self, provider_id: int, names: tuple[str, ...]
+    ) -> tuple[AiProviderModel, ...]:
+        stored: list[AiProviderModel] = []
+        with self.connection() as connection:
+            for name in names:
+                connection.execute(
+                    "INSERT INTO ai_provider_models (provider_id, name) "
+                    "VALUES (?, ?) ON CONFLICT(provider_id, name) DO NOTHING",
+                    (provider_id, name),
+                )
+                row = connection.execute(
+                    f"SELECT {_AI_MODEL_COLUMNS} FROM ai_provider_models "
+                    "WHERE provider_id = ? AND name = ?",
+                    (provider_id, name),
+                ).fetchone()
+                stored.append(_ai_model_from_row(row))
+        return tuple(stored)
 
     async def set_ai_provider_model_enabled(
         self, model_id: int, enabled: bool
@@ -3617,6 +3765,47 @@ class Database:
         await asyncio.to_thread(
             self._set_ai_provider_model_enabled_sync, model_id, enabled
         )
+
+    async def set_ai_provider_models_enabled(
+        self, model_ids: Sequence[int], enabled: bool
+    ) -> int:
+        """Flip several models in one statement; returns how many changed."""
+        return await asyncio.to_thread(
+            self._set_ai_provider_models_enabled_sync, tuple(model_ids), enabled
+        )
+
+    def _set_ai_provider_models_enabled_sync(
+        self, model_ids: tuple[int, ...], enabled: bool
+    ) -> int:
+        if not model_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in model_ids)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE ai_provider_models SET enabled = ? "
+                f"WHERE id IN ({placeholders})",
+                (1 if enabled else 0, *model_ids),
+            )
+        return int(cursor.rowcount)
+
+    async def set_ai_provider_model_params(
+        self, model_id: int, params: AiRequestParams
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_ai_provider_model_params_sync, model_id, params
+        )
+
+    def _set_ai_provider_model_params_sync(
+        self, model_id: int, params: AiRequestParams
+    ) -> None:
+        document = json.dumps(_params_document(params), ensure_ascii=False)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE ai_provider_models SET params = ? WHERE id = ?",
+                (document, model_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"AI provider model {model_id} does not exist")
 
     def _set_ai_provider_model_enabled_sync(
         self, model_id: int, enabled: bool
@@ -3675,40 +3864,38 @@ class Database:
                     f"AI provider model {model_id} does not exist"
                 )
 
-    async def list_ai_model_chain(self) -> tuple[AiModelChainEntry, ...]:
-        return await asyncio.to_thread(self._list_ai_model_chain_sync)
+    async def list_ai_model_chain(
+        self, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        return await asyncio.to_thread(self._list_ai_model_chain_sync, scope)
 
-    def _list_ai_model_chain_sync(self) -> tuple[AiModelChainEntry, ...]:
+    def _list_ai_model_chain_sync(
+        self, scope: str
+    ) -> tuple[AiModelChainEntry, ...]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT ch.position, "
-                "p.id, p.name, p.code, p.base_url, p.timeout_seconds, "
-                "p.max_retries, p.enabled, "
-                "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
-                "m.last_verify_ok, m.last_verify_error "
-                "FROM ai_model_chain ch "
-                "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
-                "JOIN ai_providers p ON p.id = m.provider_id "
-                "ORDER BY ch.position"
+                _AI_CHAIN_SELECT + "WHERE ch.scope = ? ORDER BY ch.position",
+                (scope,),
             ).fetchall()
         return tuple(
             AiModelChainEntry(
                 position=int(row[0]),
-                provider=_ai_provider_from_row(row[1:8]),
-                model=_ai_model_from_row(row[8:15]),
+                provider=_ai_provider_from_row(row[1:10]),
+                model=_ai_model_from_row(row[10:18]),
+                scope=scope,
             )
             for row in rows
         )
 
     async def save_ai_model_chain(
-        self, model_ids: Sequence[int]
+        self, model_ids: Sequence[int], scope: str = CHAIN_SCOPE_DEFAULT
     ) -> tuple[AiModelChainEntry, ...]:
         return await asyncio.to_thread(
-            self._save_ai_model_chain_sync, tuple(model_ids)
+            self._save_ai_model_chain_sync, tuple(model_ids), scope
         )
 
     def _save_ai_model_chain_sync(
-        self, model_ids: tuple[int, ...]
+        self, model_ids: tuple[int, ...], scope: str
     ) -> tuple[AiModelChainEntry, ...]:
         """Replace the whole chain with `model_ids`, in that order.
 
@@ -3733,29 +3920,25 @@ class Database:
                     raise LookupError(
                         f"AI provider model {missing[0]} does not exist"
                     )
-            connection.execute("DELETE FROM ai_model_chain")
+            connection.execute(
+                "DELETE FROM ai_model_chain WHERE scope = ?", (scope,)
+            )
             for position, model_id in enumerate(model_ids):
                 connection.execute(
-                    "INSERT INTO ai_model_chain (position, provider_model_id) "
-                    "VALUES (?, ?)",
-                    (position, model_id),
+                    "INSERT INTO ai_model_chain "
+                    "(scope, position, provider_model_id) VALUES (?, ?, ?)",
+                    (scope, position, model_id),
                 )
             rows = connection.execute(
-                "SELECT ch.position, "
-                "p.id, p.name, p.code, p.base_url, p.timeout_seconds, "
-                "p.max_retries, p.enabled, "
-                "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
-                "m.last_verify_ok, m.last_verify_error "
-                "FROM ai_model_chain ch "
-                "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
-                "JOIN ai_providers p ON p.id = m.provider_id "
-                "ORDER BY ch.position"
+                _AI_CHAIN_SELECT + "WHERE ch.scope = ? ORDER BY ch.position",
+                (scope,),
             ).fetchall()
         return tuple(
             AiModelChainEntry(
                 position=int(row[0]),
-                provider=_ai_provider_from_row(row[1:8]),
-                model=_ai_model_from_row(row[8:15]),
+                provider=_ai_provider_from_row(row[1:10]),
+                model=_ai_model_from_row(row[10:18]),
+                scope=scope,
             )
             for row in rows
         )

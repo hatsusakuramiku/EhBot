@@ -41,13 +41,11 @@ from app.ai.errors import (
     AI_CHAIN_EMPTY,
     AI_CHAIN_ENTRY_MISSING,
     AI_KEY_INVALID,
-    AI_MODEL_DISABLED,
     AI_MODEL_INVALID,
     AI_MODEL_NOT_FOUND,
-    AI_MODEL_UNVERIFIED,
     AI_NO_KEY,
+    AI_PARAMS_INVALID,
     AI_PATH_UNAVAILABLE,
-    AI_PROVIDER_DISABLED,
     AI_PROVIDER_INVALID,
     AI_PROVIDER_NAME_TAKEN,
     AI_PROVIDER_NOT_FOUND,
@@ -55,14 +53,15 @@ from app.ai.errors import (
     AiError,
 )
 from app.ai.models import (
+    CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_DEFAULT,
+    CHAIN_SCOPES,
     DEFAULT_MAX_RETRIES,
     DEFAULT_PROVIDER_CODE,
-    DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT_SECONDS,
     KEY_COOLDOWN_MINUTES,
     MAX_KEY_LABEL_LENGTH,
     MAX_MODEL_NAME_LENGTH,
-    MAX_OUTPUT_TOKENS,
     MAX_PROVIDER_NAME_LENGTH,
     MAX_RETRIES,
     MAX_TIMEOUT_SECONDS,
@@ -74,14 +73,18 @@ from app.ai.models import (
     AiProvider,
     AiProviderKey,
     AiProviderModel,
+    AiRequestParams,
     AiVerification,
+    parse_request_params,
 )
 from app.archive.vault import VaultError, decrypt_password, encrypt_password
 
 
 #: The verification request. Deliberately tiny: the point is to prove the
 #: address, the key, the model name and structured output all work, and a
-#: longer prompt would only make the check cost more than the decision.
+#: longer prompt would only make the check cost more than the decision. It is
+#: sent with exactly the parameters the chain would send -- verifying with a
+#: different body would prove a request nobody is going to make.
 VERIFY_MESSAGES: tuple[dict[str, str], ...] = (
     {
         "role": "system",
@@ -94,7 +97,6 @@ VERIFY_MESSAGES: tuple[dict[str, str], ...] = (
         "content": 'Reply with exactly {"ok": true} and nothing else.',
     },
 )
-VERIFY_MAX_TOKENS = 64
 
 #: How many model names one 「拉取模型」 call will offer. A provider that lists
 #: hundreds of them would otherwise turn the page into a wall of checkboxes.
@@ -211,6 +213,8 @@ class AiProviderService:
             maximum=MAX_RETRIES,
             label="重试次数",
         )
+        custom_headers = self.parse_headers(values.get("custom_headers"))
+        default_params = self.parse_params(values.get("default_params"))
         try:
             return await self._database.save_ai_provider(
                 provider_id=provider_id,
@@ -220,9 +224,50 @@ class AiProviderService:
                 timeout_seconds=timeout_seconds,
                 max_retries=max_retries,
                 enabled=bool(values.get("enabled")),
+                custom_headers=custom_headers,
+                default_params=default_params,
             )
         except LookupError as exc:
             raise AiError(AI_PROVIDER_NAME_TAKEN, f"供应商名称「{name}」已被占用") from exc
+
+    @staticmethod
+    def parse_headers(raw: Any) -> dict[str, str]:
+        """The 「自定义请求头」 box as a flat string map.
+
+        Values must be strings: a header is a line of text, and accepting a
+        number here would only move the type error to the HTTP client. A key
+        named `authorization` is refused -- a credential typed into this box
+        would bypass the encrypted key list and land in the database in clear.
+        """
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            decoded = json.loads(text)
+        except ValueError as exc:
+            raise AiError(AI_PARAMS_INVALID, "自定义请求头必须是 JSON 对象") from exc
+        if not isinstance(decoded, dict):
+            raise AiError(AI_PARAMS_INVALID, "自定义请求头必须是 JSON 对象")
+        headers: dict[str, str] = {}
+        for key, value in decoded.items():
+            name = str(key).strip()
+            if not name:
+                raise AiError(AI_PARAMS_INVALID, "请求头名称不能为空")
+            if name.lower() in ("authorization", "content-type"):
+                raise AiError(
+                    AI_PARAMS_INVALID,
+                    f"请求头 {name} 由本服务填写，请把密钥加到 Key 列表里",
+                )
+            headers[name] = str(value)
+        return headers
+
+    @staticmethod
+    def parse_params(raw: Any) -> AiRequestParams:
+        """The 「请求参数」 box as `AiRequestParams` (empty means 「都不发」)."""
+        try:
+            return parse_request_params(raw)
+        except ValueError as exc:
+            raise AiError(AI_PARAMS_INVALID, str(exc)) from exc
 
     @staticmethod
     def _int_field(
@@ -284,6 +329,58 @@ class AiProviderService:
         return await self._database.add_ai_provider_key(
             provider_id, label=cleaned_label, cipher=cipher
         )
+
+    async def add_keys(
+        self, provider_id: int, raw: str
+    ) -> tuple[AiProviderKey, ...]:
+        """Store a whole textarea of keys, one per line.
+
+        A line is `key` or `备注:key`; blank lines and `#` comments are
+        skipped, because the box people paste into is usually a provider's key
+        page with its own formatting. Encrypting happens here, once per line,
+        and the plaintext never leaves this method.
+        """
+        await self._require_provider(provider_id)
+        text = str(raw or "")
+        if not text.strip():
+            raise AiError(AI_KEY_INVALID, "API Key 不能为空")
+        master = await self._archive_settings.master_key()
+        entries: list[tuple[str, str]] = []
+        for number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            label, _, secret = stripped.partition(":")
+            if not secret.strip():
+                # No colon: the whole line is the key and the label is empty.
+                label, secret = "", stripped
+            secret = secret.strip()
+            if not secret:
+                raise AiError(
+                    AI_KEY_INVALID, f"第 {number} 行没有可用的 API Key"
+                )
+            cleaned_label = label.strip()
+            if len(cleaned_label) > MAX_KEY_LABEL_LENGTH:
+                raise AiError(
+                    AI_KEY_INVALID,
+                    f"第 {number} 行的备注不能超过 {MAX_KEY_LABEL_LENGTH} 个字符",
+                )
+            cipher = await asyncio.to_thread(encrypt_password, master, secret)
+            entries.append((cleaned_label, cipher))
+        if not entries:
+            raise AiError(AI_KEY_INVALID, "API Key 不能为空")
+        return await self._database.add_ai_provider_keys(provider_id, entries)
+
+    async def reset_key_cooldown(self, key_id: int) -> None:
+        """Make a parked key a candidate again.
+
+        The cooldown is a rotation convenience, not a verdict: an operator who
+        just topped up the account should not have to wait it out.
+        """
+        try:
+            await self._database.reset_ai_key_cooldown(key_id)
+        except LookupError as exc:
+            raise AiError(AI_KEY_INVALID, f"API Key {key_id} 不存在") from exc
 
     async def set_key_enabled(self, key_id: int, enabled: bool) -> None:
         try:
@@ -356,11 +453,70 @@ class AiProviderService:
             )
         return await self._database.add_ai_provider_model(provider_id, cleaned)
 
+    async def add_models(
+        self, provider_id: int, names: Sequence[str]
+    ) -> tuple[AiProviderModel, ...]:
+        """Register a checklist of model names in one submit."""
+        await self._require_provider(provider_id)
+        cleaned: list[str] = []
+        for raw in names:
+            name = str(raw or "").strip()
+            if not name:
+                continue
+            if len(name) > MAX_MODEL_NAME_LENGTH:
+                raise AiError(
+                    AI_MODEL_INVALID,
+                    f"模型名称不能超过 {MAX_MODEL_NAME_LENGTH} 个字符",
+                )
+            if name not in cleaned:
+                cleaned.append(name)
+        if not cleaned:
+            raise AiError(AI_MODEL_INVALID, "没有选择任何模型")
+        return await self._database.add_ai_provider_models(provider_id, cleaned)
+
+    async def set_models_enabled(
+        self, model_ids: Sequence[int], enabled: bool
+    ) -> int:
+        return await self._database.set_ai_provider_models_enabled(
+            [int(model_id) for model_id in model_ids], enabled
+        )
+
     async def set_model_enabled(self, model_id: int, enabled: bool) -> None:
         try:
             await self._database.set_ai_provider_model_enabled(model_id, enabled)
         except LookupError as exc:
             raise AiError(AI_MODEL_NOT_FOUND, f"模型 {model_id} 不存在") from exc
+
+    async def save_model_params(self, model_id: int, raw: Any) -> AiProviderModel:
+        params = self.parse_params(raw)
+        try:
+            await self._database.set_ai_provider_model_params(model_id, params)
+        except LookupError as exc:
+            raise AiError(AI_MODEL_NOT_FOUND, f"模型 {model_id} 不存在") from exc
+        model = await self._database.get_ai_provider_model(model_id)
+        if model is None:
+            raise AiError(AI_MODEL_NOT_FOUND, f"模型 {model_id} 不存在")
+        return model
+
+    async def verify_all(
+        self, provider_id: int | None = None
+    ) -> tuple[AiVerification, ...]:
+        """Test every enabled model of a provider (or of every provider).
+
+        Sequential on purpose: this is a button a human pressed and is watching,
+        and firing forty requests at one endpoint at once is how a rate limit
+        turns into forty failures the operator then has to read.
+        """
+        providers = await self.providers()
+        results: list[AiVerification] = []
+        for provider in providers:
+            if provider_id is not None and provider.provider_id != provider_id:
+                continue
+            for model in await self.models(provider.provider_id):
+                if not model.enabled:
+                    continue
+                results.append(await self.verify_model(model.model_id))
+        return tuple(results)
 
     async def delete_model(self, model_id: int) -> None:
         try:
@@ -431,83 +587,117 @@ class AiProviderService:
     # ------------------------------------------------------------------
     #  Model chain
     # ------------------------------------------------------------------
-    async def chain(self) -> tuple[AiModelChainEntry, ...]:
-        return await self._database.list_ai_model_chain()
+    async def chain(
+        self, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        """One scope's configured list, exactly as stored (may be empty)."""
+        self._require_scope(scope)
+        return await self._database.list_ai_model_chain(scope)
 
-    async def save_chain(self, model_ids: Sequence[int]) -> tuple[AiModelChainEntry, ...]:
-        """Replace the chain, refusing anything that cannot work.
+    async def effective_chain(
+        self, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        """The list a *caller* should use, inheritance included.
 
-        The refusal is the feature the operator asked for: 「配置时需要验证
-        服务联通性」. A model that was never verified, was verified and failed,
-        is switched off, or sits on a provider with no usable key is rejected
-        here with the reason, rather than discovered when a book is packed.
+        One global default chain, and per-feature overrides that are opt-in:
+        the archive-path page either inherits the default or carries its own
+        list (`ai_model_source`). 「其他页面若不配置就默认使用这个模型」 is exactly
+        this function -- a feature that never touched the setting reads the
+        default, and switching it to 「自定义」 without filling the list leaves it
+        empty (a loud, fixable error) rather than silently falling back to a
+        list the operator cannot see.
         """
+        self._require_scope(scope)
+        if scope == CHAIN_SCOPE_DEFAULT:
+            return await self._database.list_ai_model_chain(CHAIN_SCOPE_DEFAULT)
+        if scope == CHAIN_SCOPE_ARCHIVE_PATH:
+            reader = getattr(self._archive_settings, "ai_model_source", None)
+            source = await reader() if reader is not None else "default"
+            if source != "custom":
+                return await self._database.list_ai_model_chain(
+                    CHAIN_SCOPE_DEFAULT
+                )
+        return await self._database.list_ai_model_chain(scope)
+
+    @staticmethod
+    def _require_scope(scope: str) -> None:
+        if scope not in CHAIN_SCOPES:
+            raise AiError(AI_CHAIN_ENTRY_MISSING, f"未知的模型链用途：{scope}")
+
+    async def save_chain(
+        self, model_ids: Sequence[int], scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        """Replace one scope's chain with `model_ids`, in that order.
+
+        No verification gate: a model that is switched off or never tested can
+        be saved, and the page shows its state honestly. The refusal that used
+        to live here made a temporarily unreachable endpoint into a
+        configuration that could not be written at all, and the check it
+        performed (address, key, model name exist) is already what the
+        「测试」 button reports per row.
+        """
+        self._require_scope(scope)
         cleaned: list[int] = []
         for raw in model_ids:
             model_id = int(raw)
             if model_id in cleaned:
                 raise AiError(
-                    AI_CHAIN_DUPLICATE, "模型链里同一个模型只能出现一次"
+                    AI_CHAIN_DUPLICATE, "模型里同一个模型只能出现一次"
                 )
             cleaned.append(model_id)
         for model_id in cleaned:
-            model = await self._database.get_ai_provider_model(model_id)
-            if model is None:
+            if await self._database.get_ai_provider_model(model_id) is None:
                 raise AiError(AI_MODEL_NOT_FOUND, f"模型 {model_id} 不存在")
-            if not model.enabled:
-                raise AiError(
-                    AI_MODEL_DISABLED,
-                    f"模型「{model.name}」已停用，不能加入模型链",
-                )
-            if not model.verified:
-                raise AiError(
-                    AI_MODEL_UNVERIFIED,
-                    f"模型「{model.name}」尚未通过联通性验证，不能加入模型链",
-                )
-            provider = await self._database.get_ai_provider(model.provider_id)
-            if provider is None:
-                raise AiError(AI_PROVIDER_NOT_FOUND, "模型所属的供应商不存在")
-            if not provider.enabled:
-                raise AiError(
-                    AI_PROVIDER_DISABLED,
-                    f"供应商「{provider.name}」已停用，其模型不能加入模型链",
-                )
-            if not await self._database.list_ai_provider_keys(
-                provider.provider_id, usable_only=True
-            ):
-                raise AiError(
-                    AI_NO_KEY,
-                    f"供应商「{provider.name}」没有启用的 API Key",
-                )
-        return await self._database.save_ai_model_chain(cleaned)
+        return await self._database.save_ai_model_chain(cleaned, scope)
 
-    async def append_to_chain(self, model_id: int) -> tuple[AiModelChainEntry, ...]:
-        ids = [entry.model.model_id for entry in await self.chain()]
+    async def append_to_chain(
+        self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        ids = [entry.model.model_id for entry in await self.chain(scope)]
         if model_id not in ids:
             ids.append(model_id)
-        return await self.save_chain(ids)
+        return await self.save_chain(ids, scope)
 
-    async def remove_from_chain(self, model_id: int) -> tuple[AiModelChainEntry, ...]:
-        ids = [entry.model.model_id for entry in await self.chain()]
+    async def remove_from_chain(
+        self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        ids = [entry.model.model_id for entry in await self.chain(scope)]
         if model_id not in ids:
-            raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型链里")
-        return await self.save_chain([mid for mid in ids if mid != model_id])
+            raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型列表里")
+        return await self.save_chain([mid for mid in ids if mid != model_id], scope)
 
-    async def shift_chain(self, model_id: int, delta: int) -> tuple[AiModelChainEntry, ...]:
+    async def set_chain_primary(
+        self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
+        """Make one model the primary, keeping the rest in order behind it.
+
+        The AstrBot-style move: 「设为主力」 on a row, rather than dragging it to
+        the top of a list. Adding a model that is not in the chain yet appends
+        it *and* promotes it, because 「主力」 is the reason it was ticked.
+        """
+        ids = [entry.model.model_id for entry in await self.chain(scope)]
+        if model_id not in ids:
+            ids.append(model_id)
+        ids = [model_id] + [mid for mid in ids if mid != model_id]
+        return await self.save_chain(ids, scope)
+
+    async def shift_chain(
+        self, model_id: int, delta: int, scope: str = CHAIN_SCOPE_DEFAULT
+    ) -> tuple[AiModelChainEntry, ...]:
         """Move one entry by `delta` positions, clamped to the ends.
 
         Buttons rather than drag-and-drop: the repository's settings forms are
         plain HTML posts, and an ordered list is exactly the shape a form can
         carry without a second source of truth in the browser.
         """
-        ids = [entry.model.model_id for entry in await self.chain()]
+        ids = [entry.model.model_id for entry in await self.chain(scope)]
         if model_id not in ids:
-            raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型链里")
+            raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型列表里")
         index = ids.index(model_id)
         target = max(0, min(len(ids) - 1, index + delta))
         if target != index:
             ids.insert(target, ids.pop(index))
-        return await self.save_chain(ids)
+        return await self.save_chain(ids, scope)
 
     # ------------------------------------------------------------------
     #  Verification
@@ -518,8 +708,10 @@ class AiProviderService:
         Answers rather than raises: 「验证失败」 is an outcome the page reports
         next to the model, including for a request that never reached anyone
         (`AI_UNREACHABLE`) or that answered something unparseable
-        (`AI_BAD_RESPONSE`). Both are stored, so the chain editor can refuse an
-        entry whose last check failed without trying again from the page.
+        (`AI_BAD_RESPONSE`). Both are stored so the row can show its state
+        without the page re-running the request; since R31 they no longer block
+        saving a chain, which is what makes an endpoint that is temporarily
+        down configurable.
         """
         model = await self._database.get_ai_provider_model(model_id)
         if model is None:
@@ -532,8 +724,10 @@ class AiProviderService:
                 provider,
                 model,
                 VERIFY_MESSAGES,
-                max_tokens=VERIFY_MAX_TOKENS,
-                temperature=0.0,
+                # The parameters the real request would send, and no others:
+                # a check that forces `temperature` would fail exactly the
+                # models this rewrite exists to support.
+                params=provider.default_params.merged(model.params),
                 # A failed check must not park the key. Parking is a rotation
                 # rule for the packing path -- 「别再撞同一把坏 Key」 -- but here the
                 # operator is looking at the answer, and a cooldown would turn
@@ -582,8 +776,6 @@ class AiProviderService:
         self,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int = MAX_OUTPUT_TOKENS,
-        temperature: float = DEFAULT_TEMPERATURE,
         validate: Callable[[str], object] | None = None,
         stream: bool | None = None,
     ) -> AiAnswer:
@@ -602,11 +794,11 @@ class AiProviderService:
         JSON 也算失败」 (proposal §7) means the *next model* gets the question,
         and only `complete` knows which model is next.
         """
-        chain = await self.chain()
+        chain = await self.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
         if not chain:
             raise AiError(
                 AI_CHAIN_EMPTY,
-                "还没有配置 AI 模型链，请到「设置 → AI 供应商」添加并验证模型",
+                "还没有配置 AI 模型，请到「设置 → AI 供应商」添加一个供应商与模型",
             )
         # Resolved once per call, not once per attempt: the answer must not
         # change shape halfway down the fallback chain, and one settings read per
@@ -622,8 +814,6 @@ class AiProviderService:
                     entry.provider,
                     entry.model,
                     messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
                     stream=stream,
                 )
                 if validate is not None:
@@ -645,7 +835,7 @@ class AiProviderService:
         if not failures:
             raise AiError(
                 AI_CHAIN_EMPTY,
-                "AI 模型链里的模型都已停用，请到「设置 → AI 供应商」启用至少一个",
+                "AI 模型里的模型都已停用，请到「设置 → AI 供应商」启用至少一个",
             )
         raise AiError(
             AI_PATH_UNAVAILABLE, "所有 AI 模型都不可用：" + "；".join(failures[:3])
@@ -657,8 +847,7 @@ class AiProviderService:
         model: AiProviderModel,
         messages: Sequence[dict[str, str]],
         *,
-        max_tokens: int,
-        temperature: float,
+        params: AiRequestParams | None = None,
         stream: bool = False,
         park_key_faults: bool = True,
     ) -> AiAnswer:
@@ -668,6 +857,10 @@ class AiProviderService:
         next key is tried; anything else is handed back to the caller, which
         decides whether that means 「下一把 Key」 (a 429 that was not flagged, a
         timeout) or 「下一个模型」.
+
+        `params` defaults to what this (provider, model) pair configured, so a
+        caller that only wants to ask a question does not have to know that
+        request parameters exist.
         """
         keys = await self._ordered_keys(provider.provider_id)
         if not keys:
@@ -686,12 +879,16 @@ class AiProviderService:
                 model=model.name,
                 timeout_seconds=provider.timeout_seconds,
                 max_retries=provider.max_retries,
+                extra_headers=provider.custom_headers,
             )
             try:
                 text = await client.complete(
                     messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
+                    params=(
+                        params
+                        if params is not None
+                        else provider.default_params.merged(model.params)
+                    ),
                     stream=stream,
                 )
             except AiClientError as exc:
@@ -716,7 +913,6 @@ class AiProviderService:
 
 __all__ = [
     "MAX_DISCOVERED_MODELS",
-    "VERIFY_MAX_TOKENS",
     "VERIFY_MESSAGES",
     "AiProviderService",
     "extract_json_object",

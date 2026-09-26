@@ -1,0 +1,80 @@
+{#-
+  一条「主力 + 备用」模型列表的编辑器，AI 页与路径页共用。
+
+  AstrBot 的做法是「在一行上按『设为主力』」，而不是把顺序藏在拖拽里；这里
+  保留同一个语义，但用服务端渲染能表达的方式：主力永远只有一个（第 0 位），
+  其余按顺序排备用，改顺序用上移/下移。`endpoint` 是这台编辑器的根路径——AI 页
+  传 `/settings/ai/chain`（全局默认），路径页传 `/settings/paths/chain`（该页
+  自己的覆盖列表），两种作用域共用同一套动作，因此不会出现「两处顺序规则不同」。
+
+  `models` 是全部可选模型（含不在列表里的），用来渲染下拉框；`empty_hint` 说明
+  列表为空时该去哪里加模型。页面上不写任何状态词：徽标一律来自 `ui.badge`。
+-#}
+{% import "components/ui.html" as ui %}
+{% macro model_chain(chain, models, endpoint, csrf_token, empty_hint) -%}
+  {% if chain %}
+    <ol class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
+      {% for entry in chain %}
+        <li class="ui-record" style="margin-top: var(--s-2)">
+          <div class="ui-record-head">
+            <span class="ui-record-title">
+              {% if entry.primary %}主力{% else %}备用 {{ entry.position }}{% endif %} · {{ entry.label }}
+            </span>
+            <div class="ui-record-badges">
+              {% if entry.primary %}
+                {{ ui.badge({"code": "PRIMARY", "label": "主力", "tone": "active"}) }}
+              {% else %}
+                {{ ui.badge({"code": "FALLBACK", "label": "备用", "tone": "muted"}) }}
+              {% endif %}
+            </div>
+          </div>
+          <div class="ui-form-actions">
+            {% if not loop.first %}
+              <form method="post" action="{{ endpoint }}/shift">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+                <input type="hidden" name="delta" value="-1">
+                <button class="ui-btn" data-size="sm" type="submit">上移</button>
+              </form>
+            {% endif %}
+            {% if not loop.last %}
+              <form method="post" action="{{ endpoint }}/shift">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+                <input type="hidden" name="delta" value="1">
+                <button class="ui-btn" data-size="sm" type="submit">下移</button>
+              </form>
+            {% endif %}
+            <form method="post" action="{{ endpoint }}/remove">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+              <button class="ui-btn" data-size="sm" type="submit">移出</button>
+            </form>
+          </div>
+        </li>
+      {% endfor %}
+    </ol>
+  {% else %}
+    {{ ui.empty_state("列表为空", empty_hint) }}
+  {% endif %}
+
+  {% set available = models | rejectattr("in_chain") | list %}
+  {% if available %}
+    <form class="ui-form" method="post" action="{{ endpoint }}/append" style="margin-top: var(--s-4)">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="ui-field">
+        <label for="chain-model-{{ endpoint | replace('/', '-') }}">加入备用</label>
+        <select class="ui-select" id="chain-model-{{ endpoint | replace('/', '-') }}" name="model_id">
+          {% for model in available %}
+            <option value="{{ model.model_id }}">{{ model.label }}{% if not model.enabled %}（已停用）{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="ui-form-actions">
+        <button class="ui-btn" type="submit">加入备用</button>
+      </div>
+    </form>
+  {% else %}
+    <p class="ui-hint" style="margin-top: var(--s-3)">可选模型都已在列表里；要换主力，用模型行上的「设为主力」。</p>
+  {% endif %}
+{%- endmacro %}

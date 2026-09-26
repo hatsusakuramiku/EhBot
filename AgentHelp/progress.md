@@ -4003,3 +4003,72 @@ R30（AI 模式整库重排）四轮此前一直压在工作区，现合并为�
 基线（1465）。测试基线维持 **2 failed / 1451 passed / 12 skipped / 0 errors**（两项失败是 Linux
 上既有的 7-Zip 工具链用例）。镜像按「不打版本号、只供测试」的要求构建并推送为
 **`hsmk/ehbot:latest`**（未推送 0.3.0-pre 标签），便于运营者直接 `docker pull` 验证。
+
+## R31 — AI 供应商按 AstrBot 方式重写：两层管理 + 全局默认模型 + 页面级覆盖 (v0.3.0rc1, 2026-09-26)
+
+运营者判定 R28–R30 的 AI 对接「有大问题」并要求**推倒重来**：设置里的 AI 供应商配置照 AstrBot 的
+方式重做，路径页自行选择使用哪些模型，AI 页提供一张**全局默认**，其他页面不配置就继承它。
+
+**根因（不是不好看，是配不上）**：请求体写死 `max_tokens` + `temperature`，OpenAI 推理模型
+（o1/o3/o4-mini/gpt-5 系）明确拒绝 `temperature`、且只认 `max_completion_tokens`，这些模型**永远
+验证不过、永远进不了链**；验证是硬门槛且一次只能测一个；Key 与模型都只能逐条录入；400 不分类，把
+「参数不被接受」和「配置写错了」说成同一句话。
+
+**两层管理（`_ai.html` 整页重写）**：左列供应商、右列该供应商的配置 / Key / 模型。供应商一次配置
+端点与凭据（名称 / 编码 / 基础地址 / 超时 / 重试 / **自定义请求头 JSON** / **供应商级默认参数 JSON**）；
+Key 改为 textarea **一次粘贴多把**（`备注:key` 或裸 key，`#` 与空行跳过，一把提交一次批量加密入库），
+列表可单独重置冷却；模型支持批量手填与 `GET /v1/models` 拉取后勾选，清单里**批量启用/停用**，
+每个模型可展开填一段 JSON **覆盖**供应商默认参数。代理字段**故意不做**：httpx 直接认
+`HTTP(S)_PROXY`，多一个入库字段就多一份要同步的真相。
+
+**请求形状（`app/ai/client.py`）**：请求体默认**只有 `{model, messages}`**，`temperature` /
+`max_tokens` / 任何额外字段一律来自合并后的参数（供应商默认 ⊕ 模型覆盖），`extra_body` 放行任意未知
+字段，只拒绝本服务掌管的 `model` / `messages` / `stream`。400 分类新增 `AI_PARAM_REJECTED`：响应体
+提到参数名（`temperature`、`max_tokens`、`max_completion_tokens`、`unsupported parameter` …）时
+提示「是参数的问题」，空响应体的 400 仍是 `AI_REQUEST_REJECTED`。`_strip_thinking` 去掉
+`<think>`/`<thinking>`/`<reasoning>` 块后再抽 JSON，推理模型的思考不再污染路径。
+
+**验证不再是门槛**：`save_chain` 只拒绝重复 id 与不存在的 id，未验证 / 最近验证失败 / 已停用 /
+供应商无可用 Key 的模型**都能进链**——「测试」变成模型级、供应商级、全链三处按钮，失败原因与时间
+照旧落库显示。`AI_MODEL_UNVERIFIED` / `AI_MODEL_DISABLED` / `AI_PROVIDER_DISABLED` 保留定义但不再
+抛出；方案里设计的 `ai_require_verified` 开关**未实现**（运营者选择不要门槛）。
+
+**指纹把请求参数算进去（`app/ai/paths.py`）**：`chain_signature` 从「position | 基础地址 | 模型名」
+扩成再加一段该条目**实际会发**的参数（供应商默认 ⊕ 模型覆盖，规范 JSON、键排序），兑现模块自述的
+「覆盖一切可能改变答案的东西」——R31 之后请求体与 R30 不同，签名若不跟进就会让旧缓存继续自称
+「当前答案」。代价与升级同类：升级后指纹变一次，第一次默认重排会把书库判为「路径有变动」。
+
+**全局默认 + 页面级覆盖（迁移 `019_ai_provider_sources.sql`）**：`ai_model_chain` 加 `scope` 并进入
+主键，旧行原样成为 `scope='default'`；AI 页顶部「全局默认模型」是 `default` 链，路径页
+「路径决策模型」用新设置键 `ai_settings.ai_model_source ∈ {default, custom}` 在「跟随全局默认」与
+「本页单独指定」之间切换（`effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)`：custom 读自己的
+`archive_path` 链，其余一律读 default）。指纹与 `resolve()` 都改走 `effective_chain`，所以换链会
+正确触发全库重排，缓存语义不变。AI 页新增「测试全部模型」与 `verify_all(provider_id=None)`；
+`ai_providers` 加 `custom_headers` / `default_params`，`ai_provider_models` 加 `params`（均 TEXT 默认
+`{}`，编辑时是一个框、读取时是一个值，从不按字段查询）。
+
+**与方案的偏差（`AI_PROVIDER_REWRITE_PROPOSAL.md` 文首已记录）**：无验证门槛、无代理字段、
+`extra_body` 放行任意字段、**不**给旧供应商预填 `{temperature, max_tokens}`——因此升级后路径指纹会
+变、第一次默认重排把书库判为「路径有变动」，这是运营者知情接受的一次性代价。
+
+**测试**：`tests/unit/test_ai_providers.py` 把 `TestChainValidation` 改写成 `TestChainConfiguration`
+（未验证/已停用/无 Key 的模型**能**进链，只有重复与不存在的 id 被拒），新增 `TestChainScopes`
+（继承、custom 取胜、custom 为空时大声失败、default 永不继承）、`TestBatchEntry`、
+`TestRequestParams`（默认体恰为 `{model, messages}`、覆盖到达请求体、额外头、供应商+模型合并、坏 JSON
+被拒）、`TestParamRejection`、`TestReasoningOutput`、`TestVerifyAll`；`test_ai_paths.py` 的 `_FakeAi`
+补 `chain` / `effective_chain`，`TestFingerprint` 新增「参数变则签名变」「`extra_body` 键序不影响签名」
+两项；`tests/integration/test_settings_web.py` 的 `TestAISettings` 重写为
+15 项（含「不进链也能保存」「批量 Key/模型」「参数被拒时页面同时出现『参数』与 `AI_PARAM_REJECTED`」
+「`?provider=` 在保存后仍选中同一供应商」），`TestAIPathsSettings` 新增模型来源面板与 custom 列表独立
+两项；`test_database.py` 的迁移计数 18 → 19 并断言 `019` 的三个新列与 `idx_ai_model_chain_scope`。
+全量实测 **2 failed / 1483 passed / 12 skipped / 0 errors**（`--collect-only` **1497**，R30 1465 →
+1497，+32）；两项失败仍是 Linux 上既有的 `test_resolve_seven_zip_executable_prefers_managed_install`
+与 `test_windows_install_verifies_and_downloads_official_portable_pair`。
+
+**文档同步**：`README.md` AI 段重写为两层管理 + 全局默认/页面覆盖 + 无验证门槛；`docs/USAGE.md`
+的「AI 供应商」整节重写、「路径来源与 AI 路径」补「路径决策模型」与含参数指纹；`AgentHelp/EHBot.md`
+§4.6 标题与表格改到 R31 并新增四行能力与 `019` 的列；`AI_PROVIDER_REWRITE_PROPOSAL.md` 状态行改
+「已按运营者答复实现」并记录偏差；`AGENTS.md` 基线 1465 → 1497、迁移冻结线推到 `019_*`。版本从
+`0.3.0-pre` 升到 **`0.3.0rc1`**（`pyproject.toml`；`uv lock` 同步 `uv.lock`），与 R27–R30 的
+`0.3.0-pre` 一并提交并推送 `origin/main`；镜像按「不打版本号、只供测试」的要求重建并推送
+**`hsmk/ehbot:latest`**。

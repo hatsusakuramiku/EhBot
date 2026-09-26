@@ -11,9 +11,10 @@ Three ideas carry the file:
 * **The answer is cached, and the cache is semantics.** The model is not
   deterministic and one decision walks 供应商 → Key → 模型, so asking again for
   every page render, pack and re-file would make those three disagree. The
-  fingerprint covers the metadata, the prompt, the model chain and each
-  provider's base URL -- **not** the API keys, because rotating a key must not
-  invalidate the library.
+  fingerprint covers the metadata, the prompt, the model chain (each provider's
+  base URL, the model name and the request parameters that entry actually
+  sends) -- **not** the API keys, because rotating a key must not invalidate the
+  library.
 * **The model's answer is cleaned, and cleaning is not refusal.** Illegal
   punctuation goes through `safe_library_name` (the function the packer has
   always used); only `..`, an absolute path, an empty filename or a path past
@@ -34,9 +35,11 @@ from typing import Any, Sequence
 
 from app.ai.errors import AI_PATH_INVALID, AiError
 from app.ai.models import (
+    CHAIN_SCOPE_ARCHIVE_PATH,
     AiModelChainEntry,
     AiPathOutcome,
     AiPathSuggestion,
+    AiRequestParams,
 )
 from app.ai.prompt import build_messages, metadata_payload
 from app.ai.service import extract_json_object
@@ -64,17 +67,38 @@ def prompt_hash_of(prompt: str) -> str:
     return hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()
 
 
+def _params_signature(params: AiRequestParams) -> str:
+    """The request parameters of one chain entry, canonicalised.
+
+    Canonical JSON (sorted keys, no spaces) so that retyping a box with the same
+    fields in a different order is not a change, and absent fields stay absent
+    rather than being spelled as `null` -- 「不填就不发」 is part of the identity.
+    """
+    document: dict[str, Any] = {}
+    if params.temperature is not None:
+        document["temperature"] = params.temperature
+    if params.max_tokens is not None:
+        document["max_tokens"] = params.max_tokens
+    if params.extra_body:
+        document["extra_body"] = params.extra_body
+    return json.dumps(
+        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+
 def chain_signature(chain: Sequence[AiModelChainEntry]) -> str:
     """The model chain as one string for the fingerprint.
 
     Ordered, because 「主力 + 备用」 is an ordering and swapping two entries can
-    change which model answers. Deliberately built from the base URL and the
-    model name rather than the provider's display name or id: renaming a
-    provider in the settings page is cosmetic and must not invalidate the whole
-    library, while pointing it at a different address or model genuinely might.
+    change which model answers. Deliberately built from the base URL, the model
+    name and the merged request parameters rather than the provider's display
+    name or id: renaming a provider in the settings page is cosmetic and must not
+    invalidate the whole library, while pointing it at a different address,
+    model, temperature or `extra_body` genuinely might.
     """
     return "\n".join(
         f"{entry.position}|{entry.provider.base_url}|{entry.model.name}"
+        f"|{_params_signature(entry.request_params)}"
         for entry in chain
     )
 
@@ -209,7 +233,7 @@ class AiPathService:
     async def fingerprint(self, metadata: Sequence[Any]) -> str:
         """The current fingerprint for this book, without calling anything."""
         prompt = await self.prompt()
-        chain = await self._ai.chain()
+        chain = await self._ai.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
         return fingerprint_of(
             metadata_payload(metadata), prompt, chain_signature(chain)
         )
@@ -293,7 +317,7 @@ class AiPathService:
         """
         prompt = await self.prompt()
         payload = metadata_payload(metadata)
-        chain = await self._ai.chain()
+        chain = await self._ai.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
         fingerprint = fingerprint_of(
             payload, prompt, chain_signature(chain)
         )

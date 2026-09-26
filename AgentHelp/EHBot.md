@@ -149,22 +149,26 @@
 
 **不做**（与恢复前一致）：阅读器、书架/合集分组、导入扫描（只认本服务下载的内容）、从 CBZ 抽取封面、跨作品批量改名模板（归档路径模板已经是这件事）。
 
-### 4.6 AI 供应商与模型链（2026-09-26，R28/R29/R30）
+### 4.6 AI 供应商与模型链（2026-09-26，R28/R29/R30/R31）
 
 运营者要求「用 AI 根据元数据决定打包后的存储位置与文件名」，并明确 **AI 路径与「按条件匹配的路径
 模板」互斥，同一时间只启用一个**。设计记录在 `AI_PATH_PROPOSAL.md`；R28 落地「配好供应商」这一层，
 R29 把 AI 接进路径决策（`path_source` + prompt + 指纹缓存 + 需干预/回退 + 来源标注），R30 补齐
 AI 模式下的**整库重排**（计划只读缓存、需要新答案的交给「只移动不重打包」的重算路径任务、强制全库
-重新询问、试跑、批量/并发/流式开关）。
+重新询问、试跑、批量/并发/流式开关）。R31 **按 AstrBot 的管理方式重写这一层**：供应商 → 模型两层、
+Key/模型批量录入、逐模型请求参数（默认不发任何参数）、配置不再有验证门槛；并引入「**全局默认模型**」
+与**页面级覆盖**——AI 页拥有全局默认链，路径页可选跟随或单独指定（迁移 `019`）。
 
 | 能力 | 要求 | 状态 |
 |------|------|------|
-| 供应商目录 | 单独一页；多个**OpenAI 兼容**端点（名称唯一 / 编码 / 基础地址 / 超时 / 重试 / 启用） | ✅ R28 |
-| 多 Key 轮询 | 每个供应商多把 Key，加密存储、页面永不回显；轮询取用，401/403/429 的那把冷却 10 分钟后跳过，冷却状态落库 | ✅ R28 |
-| 可用模型 | 每个供应商一组模型名（手填，或 `GET /v1/models` 拉取后勾选） | ✅ R28 |
-| 主力 + 备用模型链 | 全局一条有序链，第 0 位为主力；每一项是 `(供应商, 模型)`，**可以跨供应商** | ✅ R28 |
-| 保存即验证 | 用该 `(供应商, 模型)` 发一次**最小的真实 chat 请求**并要求回 JSON；未验证或最近一次验证失败的条目不允许进链，失败原因与时间落库并显示 | ✅ R28 |
-| AI 决定路径 | `path_source ∈ {template(默认), ai}`；AI 输出目录 + 文件名两段，`.cbz` 由本服务追加；缓存即语义（指纹 = 元数据 + prompt + 模型链 + base_url，**Key 不进指纹**）；全链失败默认进「需干预」 | ✅ R29 |
+| 供应商目录 | 单独一页、左列表右配置；多个**OpenAI 兼容**端点（名称唯一 / 编码 / 基础地址 / 超时 / 重试 / 自定义请求头 / 供应商级默认参数 / 启用） | ✅ R28/R31 |
+| 多 Key 轮询 | 每个供应商多把 Key，一次粘贴批量添加（`备注:key` 或裸 key），加密存储、页面永不回显；轮询取用，401/403/429 的那把冷却 10 分钟后跳过，冷却状态落库、可手动重置 | ✅ R28/R31 |
+| 可用模型 | 每个供应商一组模型名；批量手填或 `GET /v1/models` 拉取后勾选，清单里批量启用/停用 | ✅ R28/R31 |
+| 逐模型请求参数 | 模型级 JSON 覆盖供应商默认值；**默认请求体只有 `model` 与 `messages`**，参数一律选填——推理模型（拒绝 `temperature`、只认 `max_completion_tokens`）与严格网关因此也能接入 | ✅ R31 |
+| 配置不做验证门槛 | 未验证 / 最近验证失败 / 已停用 / 供应商无可用 Key 的模型**都能进链**；「测试」是对某个模型或整条链的按钮，失败原因与时间落库并显示，但不阻塞保存 | ✅ R31 |
+| 全局默认模型 | AI 页顶部一张可跨供应商的有序链，第 0 位主力 + 备用；**其他页面不单独指定就用它** | ✅ R31 |
+| 页面级模型覆盖 | 路径页「路径决策模型」二选一：跟随全局默认，或本页单独指定一条链（`ai_settings.ai_model_source`）；两张列表互不影响，链按 `scope` 分行存储 | ✅ R31 |
+| AI 决定路径 | `path_source ∈ {template(默认), ai}`；AI 输出目录 + 文件名两段，`.cbz` 由本服务追加；缓存即语义（指纹 = 元数据 + prompt + 模型链 + 基础地址与请求参数，**Key 不进指纹**）；全链失败默认进「需干预」 | ✅ R29 |
 | AI 路径的来源标注 | 作品详情页「归档」面板与已下载列表给 AI 产出的路径打 `AI 生成` 徽标；判定＝缓存行存在且 `relative_path` == 当前记录在案的路径（纯读、不加列，人工改名后自动消失） | ✅ R29 |
 | AI 模式重排 | 计划阶段不调模型；需要新答案的按 `每批处理数量` 分批准备并入队，复用转换 worker（并发数只用于并发拉取元数据；模型调用发生在 job 内，逐件进行）；**强制＝全库重新询问**（含缓存已是当前答案的作品，并覆盖手动 pin）；已打包只移动、改名；同页提供只计划不执行的「试跑」 | ✅ R30 |
 | 重算路径任务 | AI 模式下需要新答案的**已打包**作品入队为 `refile` 任务（`details_json`）：向模型（或兜底模板）问一个新路径，再把已有 CBZ 移动并改写记录，从不重新压缩；没有可用路径则停在「待定归档路径」 | ✅ R30 |
@@ -231,10 +235,11 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 | `metadata_values.is_locked` | 字段锁定标记 | ✅ R2 |
 | `download_jobs.priority` | 队列优先级（`ORDER BY priority, id`，同优先级内保持 FIFO） | ✅ R2 |
 | `artifacts.page_count` | 打包页数（原先被错写进 `size_bytes`，R2 修正） | ✅ R2 |
-| `archive_settings` 键 | `keep_original`、`auto_pack_after_download`、`image_quality`、`library_path` / `work_path`、`library_template`（归档路径模板）、`library_title_source`、`path_source`（`template`/`ai`）、`ai_prompt`、`ai_fallback_to_rules`、`ai_batch_size` / `ai_concurrency` / `ai_stream` / `ai_default_include_current`（整库重排）、`torrent_*`（qBittorrent 客户端） | R8 / R29 |
+| `archive_settings` 键 | `keep_original`、`auto_pack_after_download`、`image_quality`、`library_path` / `work_path`、`library_template`（归档路径模板）、`library_title_source`、`path_source`（`template`/`ai`）、`ai_prompt`、`ai_fallback_to_rules`、`ai_model_source`（路径页跟随全局默认 / 单独指定）、`ai_batch_size` / `ai_concurrency` / `ai_stream` / `ai_default_include_current`（整库重排）、`torrent_*`（qBittorrent 客户端） | R8 / R29 |
 | `system_settings` 键 | `poll_interval_ms`、`source_concurrency`、`timezone`、`auto_approval_interval_minutes`、`log_level`（主题与密度**不**入库，存在浏览器 `localStorage`） | R13 |
 | `ai_providers` / `ai_provider_keys` / `ai_provider_models` | AI 供应商、其轮询 API Key（`cipher` 密文 + 冷却/失败计数）与可用模型名（含验证时间/结果/原因） | ✅ R28 |
-| `ai_model_chain` | 主力 + 备用模型链，一行一个 position，position 0 是主力 | ✅ R28 |
+| `ai_providers.custom_headers` / `.default_params`、`ai_provider_models.params` | 供应商级请求头与默认参数、模型级参数覆盖（迁移 `019`，JSON 文本，默认 `{}`） | ✅ R31 |
+| `ai_model_chain` | 主力 + 备用模型链，一行一个 `scope`（`default` 全局 / `archive_path` 路径专用）+ position，position 0 是主力；迁移 `019` 把旧链作为 `scope='default'` | ✅ R28/R31 |
 | `ai_path_suggestions` | AI 路径答案缓存（指纹 / prompt 哈希 / 目录 / 文件名 / 由谁回答） | ✅ R29 |
 
 **约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `017_*`）。`016_` 是唯一例外：自动审批 DSL 重写后旧规则（正则分支、`CONTAINS`/`STARTS_WITH`/`HAS*`）无法等价迁移，迁移在加 `case_sensitive` 列的同时清空规则表——有操作者明确背书。

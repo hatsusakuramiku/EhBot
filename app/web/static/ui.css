@@ -1521,3 +1521,19 @@ canvas {
 
 .ui-demo-row { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
 .ui-demo-grid { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+
+/* AI 供应商工作台：左列供应商、右侧详情。
+   AstrBot 的同一个骨架，用服务端渲染表达——两侧都是普通链接与表单，不依赖
+   任何脚本；窄屏时上下堆叠，左列变成横向滚动的一行。 */
+.ui-workbench {
+  display: grid;
+  grid-template-columns: minmax(15rem, 20rem) minmax(0, 1fr);
+  gap: var(--s-5);
+  align-items: start;
+}
+.ui-workbench-side { position: sticky; top: var(--s-5); }
+.ui-workbench-main { min-width: 0; display: grid; }
+@media (max-width: 900px) {
+  .ui-workbench { grid-template-columns: minmax(0, 1fr); }
+  .ui-workbench-side { position: static; }
+}
