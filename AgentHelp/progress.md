@@ -4297,3 +4297,12 @@ R35 收尾时把两个失败写成「本机没有真实 7-Zip 工具链」，运
 
 **文档同步**：`AgentHelp/AGENTS.md` 的测试段补上「POSIX 主机怎么装这份工具链」的一行命令，
 基线链加入 R36（用例数不变）。`docs/USAGE.md` 关于托管安装的描述仍然成立，无改动。
+
+提交 `92ffd96`，按要求**只提交、不推送**（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:c6f3ecf1aa29843a413c2d903d93033326b5de409d3c5a9a5c06db770302bd6a`，amd64 manifest
+`sha256:bc04a4713778b5e649f8fc20f026b1d468945d365968e38cc98354df03cde791`）。**从 registry 验证而不是只信
+本地构建**：`docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得
+`{"status":"ready"}`；在容器里用**相对** `Path("data/tools")` 调 `resolve_seven_zip_executable` 得到绝对路径
+`/app/data/tools/7zip/26.02/7zzs`，并以 `cwd=/tmp` 真的把它跑起来（`rc 0`，`7-Zip (z) 26.02 (x64)`），
+即 R36 修的那个 ENOENT 已经不再复现；冒烟容器已清理。
