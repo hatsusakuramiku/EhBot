@@ -9,7 +9,10 @@ from app.archive.formats import detect_source_format
 from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
 from app.conversion.comicinfo import build_comicinfo_xml
-from app.conversion.naming import safe_library_name
+from app.conversion.naming import (
+    FALLBACK_NAME_MAX,
+    safe_library_name,
+)
 from app.conversion.service import _metadata_tags
 
 from tests.unit.archive_fixtures import (
@@ -130,4 +133,9 @@ def test_safe_library_name_sanitises_segments() -> None:
     assert safe_library_name("a/b:c*d", fallback="x") == "a b c d"
     assert safe_library_name("   ", fallback="candidate-7") == "candidate-7"
     assert safe_library_name("con", fallback="x") == "con-archive"
-    assert len(safe_library_name("z" * 400, fallback="x")) == 120
+    # The default is the fallback ceiling for a filesystem that will not say --
+    # production callers pass what their own mount reported.
+    assert (
+        len(safe_library_name("z" * 400, fallback="x")) == FALLBACK_NAME_MAX
+    )
+    assert safe_library_name("z" * 400, fallback="x", name_max=10) == "z" * 10

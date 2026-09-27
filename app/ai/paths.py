@@ -44,7 +44,11 @@ from app.ai.models import (
 from app.ai.prompt import build_messages, metadata_payload
 from app.ai.service import extract_json_object
 from app.conversion.naming import (
-    MAX_RELATIVE_PATH_LENGTH,
+    CBZ_SUFFIX,
+    FALLBACK_LIMITS,
+    LibraryLimits,
+    detect_library_limits,
+    file_name_max,
     safe_library_name,
 )
 
@@ -121,7 +125,12 @@ def fingerprint_of(
     return hashlib.sha256(document.encode("utf-8")).hexdigest()
 
 
-def clean_ai_path(directory: str, filename: str) -> tuple[PurePosixPath, list[str]]:
+def clean_ai_path(
+    directory: str,
+    filename: str,
+    *,
+    limits: LibraryLimits = FALLBACK_LIMITS,
+) -> tuple[PurePosixPath, list[str]]:
     """The model's two strings as a checked, sanitised library-relative path.
 
     Returns the path *with* `.cbz` appended and the list of segment values that
@@ -132,9 +141,9 @@ def clean_ai_path(directory: str, filename: str) -> tuple[PurePosixPath, list[st
     punctuation problems: an absolute path or drive, a `.`/`..` segment, an
     empty filename after cleaning, and a whole path past the ceiling. Everything
     else -- `<>:"/\\|?*`, control characters, a Windows reserved name, a
-    leading/trailing dot or space, an over-long segment -- is repaired by
-    `safe_library_name`, because 「把这个题目变成合法段」 is a solved problem and
-    failing a book over a colon helps nobody.
+    leading/trailing dot or space, a name too long for the filesystem -- is
+    repaired by `safe_library_name`, because 「把这个题目变成合法段」 is a solved
+    problem and failing a book over a colon helps nobody.
     """
     def refuse(reason: str) -> AiError:
         return AiError(AI_PATH_INVALID, f"AI 返回的路径不可用：{reason}")
@@ -168,7 +177,7 @@ def clean_ai_path(directory: str, filename: str) -> tuple[PurePosixPath, list[st
             # `社团//作者` because it had no name for the middle, which is
             # exactly the 「缺失就整层省略」 instruction. Omit it.
             continue
-        cleaned = safe_library_name(segment, fallback="")
+        cleaned = safe_library_name(segment, fallback="", name_max=limits.name_max)
         if not cleaned:
             # Sanitising left nothing (a segment of nothing but illegal
             # characters). The level has no name, so it is omitted rather than
@@ -181,21 +190,27 @@ def clean_ai_path(directory: str, filename: str) -> tuple[PurePosixPath, list[st
     name = text_filename.strip()
     if not name:
         raise refuse("文件名为空")
-    cleaned_name = safe_library_name(name, fallback="")
+    cleaned_name = safe_library_name(
+        name, fallback="", name_max=file_name_max(limits)
+    )
     if not cleaned_name:
         raise refuse("文件名清洗后为空")
     if cleaned_name != name:
         sanitised.append(name)
 
-    relative = PurePosixPath(*levels, f"{cleaned_name}.cbz")
-    if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+    relative = PurePosixPath(*levels, f"{cleaned_name}{CBZ_SUFFIX}")
+    encoded = len(str(relative).encode("utf-8"))
+    if encoded > limits.relative_max:
         raise refuse(
-            f"路径长度 {len(str(relative))} 超过上限 {MAX_RELATIVE_PATH_LENGTH}"
+            f"路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
+            f"{limits.relative_max} 字节"
         )
     return relative, sanitised
 
 
-def answer_path(text: str) -> tuple[PurePosixPath, list[str]]:
+def answer_path(
+    text: str, *, limits: LibraryLimits = FALLBACK_LIMITS
+) -> tuple[PurePosixPath, list[str]]:
     """Parse one assistant message into a checked path.
 
     JSON first, then the two fields, then `clean_ai_path`. A message that is not
@@ -207,7 +222,7 @@ def answer_path(text: str) -> tuple[PurePosixPath, list[str]]:
     filename = payload.get(_FIELD_FILENAME, "")
     if not isinstance(directory, str) or not isinstance(filename, str):
         raise AiError(AI_PATH_INVALID, "AI 返回的路径字段不是字符串")
-    return clean_ai_path(directory, filename)
+    return clean_ai_path(directory, filename, limits=limits)
 
 
 class AiPathService:
@@ -317,6 +332,12 @@ class AiPathService:
         """
         prompt = await self.prompt()
         payload = metadata_payload(metadata)
+        # The ceiling the answer has to fit is the one belonging to the library
+        # this deployment writes into, so it is read here rather than declared in
+        # the prompt: a model told "255 bytes" would be guessing about somebody
+        # else's disk.
+        library_path = await self._settings.library_path()
+        limits = detect_library_limits(library_path)
         chain = await self._ai.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
         fingerprint = fingerprint_of(
             payload, prompt, chain_signature(chain)
@@ -334,9 +355,10 @@ class AiPathService:
             # any other failure: the primary may return prose while a fallback
             # answers properly, and that is the whole point of a fallback.
             answer = await self._ai.complete(
-                build_messages(prompt, payload), validate=answer_path
+                build_messages(prompt, payload),
+                validate=lambda text: answer_path(text, limits=limits),
             )
-            relative, sanitised = answer_path(answer.text)
+            relative, sanitised = answer_path(answer.text, limits=limits)
         except AiError as exc:
             _LOG.warning(
                 "ai_path_failed",

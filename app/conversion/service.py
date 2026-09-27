@@ -30,11 +30,13 @@ from app.archive.service import (
 from app.conversion.comicinfo import build_comicinfo_xml
 from app.conversion.convert import ConversionError
 from app.conversion.naming import (
+    CBZ_SUFFIX,
     DEFAULT_LIBRARY_TEMPLATE,
-    MAX_RELATIVE_PATH_LENGTH,
     LibraryPathError,
     LibraryTemplateError,
     check_library_segment,
+    detect_library_limits,
+    file_name_max,
     plan_library_path,
     render_library_path,
     unique_library_target,
@@ -379,27 +381,38 @@ class ConversionService:
             self._pinned_library_path_sync, candidate_id
         )
         if pinned is not None:
-            # Re-checked here rather than trusted from the write. The write did
-            # validate, but the ceiling is on the *whole* path and the library
-            # root is a setting: moving the library deeper can push a path that
-            # was legal when it was pinned past what the filesystem takes. The
-            # refusal parks the job with the reason on it, which is the only way
-            # the operator finds out at all.
+            # Re-checked here rather than trusted from the write. The limits
+            # belong to the *filesystem*, and the library root is a setting:
+            # moving the library onto a different disk (or deeper into one) can
+            # put a path that was legal when it was pinned past what the new one
+            # takes. The refusal parks the job with the reason on it, which is
+            # the only way the operator finds out at all.
+            limits = detect_library_limits(library_path)
+            ceilings = [
+                (part, limits.name_max) for part in pinned.parent.parts
+            ]
+            # The stem is fitted without the suffix; the published component
+            # has it, so `file_name_max` is the allowance to compare against.
+            ceilings.append((pinned.stem, file_name_max(limits)))
             refusal = next(
                 (
-                    check_library_segment(segment)
-                    for segment in (*pinned.parent.parts, pinned.stem)
-                    if check_library_segment(segment) is not None
+                    found
+                    for segment, ceiling in ceilings
+                    if (found := check_library_segment(
+                        segment, name_max=ceiling
+                    ))
+                    is not None
                 ),
                 None,
             )
             if refusal is not None:
                 raise LibraryPathError(*refusal)
-            if len(str(pinned)) > MAX_RELATIVE_PATH_LENGTH:
+            encoded = len(str(pinned).encode("utf-8"))
+            if encoded > limits.relative_max:
                 raise LibraryPathError(
                     "PATH_TOO_LONG",
-                    f"归档路径长度 {len(str(pinned))} 超过上限 "
-                    f"{MAX_RELATIVE_PATH_LENGTH}，请在作品详情页改短归档路径",
+                    f"归档路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
+                    f"{limits.relative_max} 字节，请在作品详情页改短归档路径",
                 )
             return await asyncio.to_thread(
                 unique_library_target, library_path / pinned, reserved=reserved
@@ -443,9 +456,10 @@ class ConversionService:
                 display_title=title,
             ),
         }
+        limits = detect_library_limits(library_path)
         try:
             relative = render_library_path(
-                template, values, title_fallback=fallback
+                template, values, title_fallback=fallback, limits=limits
             )
         except LibraryTemplateError:
             logging.getLogger(__name__).warning(
@@ -453,11 +467,14 @@ class ConversionService:
                 extra={"error_code": "TEMPLATE_INVALID"},
             )
             relative = render_library_path(
-                DEFAULT_LIBRARY_TEMPLATE, values, title_fallback=fallback
+                DEFAULT_LIBRARY_TEMPLATE,
+                values,
+                title_fallback=fallback,
+                limits=limits,
             )
         # Appended rather than `with_suffix`, which would read 「Vol. 1」 as a
         # name with a `. 1` extension and publish the book as `Vol.cbz`.
-        target = library_path / relative.parent / f"{relative.name}.cbz"
+        target = library_path / relative.parent / f"{relative.name}{CBZ_SUFFIX}"
         return await asyncio.to_thread(
             unique_library_target, target, reserved=reserved
         )
@@ -493,6 +510,7 @@ class ConversionService:
         template, _matched = await self._settings.library_template_for(
             candidate_id
         )
+        library_path = await self._settings.library_path()
         return plan_library_path(
             template,
             {
@@ -505,6 +523,7 @@ class ConversionService:
                 ),
             },
             title_fallback=f"candidate-{candidate_id}",
+            limits=detect_library_limits(library_path),
         )
 
     async def planned_path_for_candidate(

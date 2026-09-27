@@ -29,9 +29,12 @@ import logging
 from pathlib import Path, PurePosixPath
 
 from app.conversion.naming import (
-    MAX_RELATIVE_PATH_LENGTH,
+    CBZ_SUFFIX,
+    LibraryLimits,
     LibraryPathError,
     LibraryTemplateError,
+    detect_library_limits,
+    file_name_max,
     safe_library_name,
     strict_library_segment,
     unique_library_target,
@@ -108,8 +111,11 @@ def _prune_empty_parents(path: Path, root: Path) -> None:
         current = current.parent
 
 
-def _parse_relative_path(raw: str) -> PurePosixPath:
+def _parse_relative_path(raw: str, limits: LibraryLimits) -> PurePosixPath:
     """Validate an already-rendered library path into one this service will move to.
+
+    `limits` is passed in rather than looked up here: this function is pure, and
+    the caller has already resolved the library root it is about to join onto.
 
     `strict_library_segment` rather than `safe_library_name`: the two callers are
     the re-archive sweep and this service's own `refile_work`, and both hand over
@@ -122,23 +128,28 @@ def _parse_relative_path(raw: str) -> PurePosixPath:
     Refused as `ArchivedWorkError`, which is the error type the operator-facing
     callers already translate into a message.
     """
+    pieces = [
+        token.strip()
+        for token in str(raw or "").replace("\\", "/").split("/")
+        if token.strip() and token.strip() != "."
+    ]
     segments: list[str] = []
     try:
-        for token in str(raw or "").replace("\\", "/").split("/"):
-            piece = token.strip()
-            if not piece or piece == ".":
-                continue
-            segments.append(strict_library_segment(piece))
+        for piece in pieces:
+            segments.append(
+                strict_library_segment(piece, name_max=limits.name_max)
+            )
     except LibraryPathError as exc:
         raise ArchivedWorkError(exc.code, exc.public_message) from exc
     if not segments:
         raise ArchivedWorkError("PATH_REQUIRED", "归档路径不能为空")
     relative = PurePosixPath(*segments)
-    if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+    encoded = len(str(relative).encode("utf-8"))
+    if encoded > limits.relative_max:
         raise ArchivedWorkError(
             "PATH_TOO_LONG",
-            f"归档路径长度 {len(str(relative))} 超过上限 "
-            f"{MAX_RELATIVE_PATH_LENGTH}，请缩短目录或文件名",
+            f"归档路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
+            f"{limits.relative_max} 字节，请缩短目录或文件名",
         )
     return relative
 
@@ -439,13 +450,16 @@ class ArchivedWorkService:
                 "该作品正在打包，请等待打包结束再修改路径",
             )
         library_root, _ = await self._roots()
+        limits = detect_library_limits(library_root)
         source = _resolve_inside(library_root, Path(work.cbz_path))
 
         stem = (filename or "").strip()
         if stem:
-            if stem.lower().endswith(".cbz"):
-                stem = stem[:-4]
-            cleaned = safe_library_name(stem, fallback="")
+            if stem.lower().endswith(CBZ_SUFFIX):
+                stem = stem[: -len(CBZ_SUFFIX)]
+            cleaned = safe_library_name(
+                stem, fallback="", name_max=file_name_max(limits)
+            )
             if not cleaned:
                 raise ArchivedWorkError(
                     "FILENAME_INVALID",
@@ -465,7 +479,9 @@ class ArchivedWorkService:
                         "DIRECTORY_INVALID",
                         "目录不能包含 ..，请使用库根目录下的相对路径",
                     )
-                safe_segment = safe_library_name(token, fallback="")
+                safe_segment = safe_library_name(
+                    token, fallback="", name_max=limits.name_max
+                )
                 if not safe_segment:
                     raise ArchivedWorkError(
                         "DIRECTORY_INVALID",
@@ -473,7 +489,7 @@ class ArchivedWorkService:
                     )
                 target_dir = target_dir / safe_segment
 
-        target = _resolve_inside(library_root, target_dir / f"{cleaned}.cbz")
+        target = _resolve_inside(library_root, target_dir / f"{cleaned}{CBZ_SUFFIX}")
         if target == source:
             # Not an error: the operator submitted the name it already has, and
             # refusing would read as the rename being broken.
@@ -680,7 +696,9 @@ class ArchivedWorkService:
                 "该作品正在打包，请等待打包结束再修改路径",
             )
         library_root, _ = await self._roots()
-        relative = _parse_relative_path(relative_path)
+        relative = _parse_relative_path(
+            relative_path, detect_library_limits(library_root)
+        )
         source = _resolve_inside(library_root, Path(work.cbz_path))
         target = _resolve_inside(library_root, library_root / relative)
         return await self._relocate(
@@ -814,7 +832,12 @@ class ArchivedWorkService:
             )
         library_root, _ = await self._roots()
 
-        relative = self._plan_explicit_path(work, directory, filename)
+        relative = self._plan_explicit_path(
+            work,
+            directory,
+            filename,
+            detect_library_limits(library_root),
+        )
         current = work.archive_relative_path
         if current == relative.as_posix() and work.cbz_path:
             # The submitted path is the one it already has. Not an error:
@@ -872,7 +895,10 @@ class ArchivedWorkService:
 
     @staticmethod
     def _plan_explicit_path(
-        work: DownloadedWork, directory: str, filename: str
+        work: DownloadedWork,
+        directory: str,
+        filename: str,
+        limits: LibraryLimits,
     ) -> PurePosixPath:
         """Validate the operator's directory and filename into one path.
 
@@ -881,8 +907,8 @@ class ArchivedWorkService:
         is what makes it a refusal rather than a repair.
         """
         stem = (filename or "").strip()
-        if stem.lower().endswith(".cbz"):
-            stem = stem[:-4]
+        if stem.lower().endswith(CBZ_SUFFIX):
+            stem = stem[: -len(CBZ_SUFFIX)]
         if not stem:
             # Falling back to the current name keeps 「只改目录」 a one-field
             # edit instead of making the operator retype the filename.
@@ -908,17 +934,22 @@ class ArchivedWorkService:
                 token = raw.strip()
                 if not token or token == ".":
                     continue
-                segments.append(strict_library_segment(token))
-            segments.append(strict_library_segment(stem))
+                segments.append(
+                    strict_library_segment(token, name_max=limits.name_max)
+                )
+            segments.append(
+                strict_library_segment(stem, name_max=file_name_max(limits))
+            )
         except LibraryPathError as exc:
             raise ArchivedWorkError(exc.code, exc.public_message) from exc
 
-        relative = PurePosixPath(*segments[:-1], f"{segments[-1]}.cbz")
-        if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+        relative = PurePosixPath(*segments[:-1], f"{segments[-1]}{CBZ_SUFFIX}")
+        encoded = len(str(relative).encode("utf-8"))
+        if encoded > limits.relative_max:
             raise ArchivedWorkError(
                 "PATH_TOO_LONG",
-                f"归档路径长度 {len(str(relative))} 超过上限 "
-                f"{MAX_RELATIVE_PATH_LENGTH}，请缩短目录或文件名",
+                f"归档路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
+                f"{limits.relative_max} 字节，请缩短目录或文件名",
             )
         return relative
 

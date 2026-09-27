@@ -4213,3 +4213,48 @@ dict 的 repr。前端轮询把它直接塞进查询串
 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`，并确认容器里吐出的
 `/static/downloaded.js` 含新护栏（`stopOnStale(`），首启即生成 64 字节
 `/app/data/private/session_secret_key`（`-rw-------`），冒烟容器已清理。
+
+## R35 — 路径长度上限改由运行环境的文件系统决定（v0.3.0rc1，2026-09-27）
+
+运营者先问「文件名长度限制是多少」，答案是最初写死的 120（目录与文件名共用一个数）；要求放宽后，回复是
+「项目不做强限制，根据运行环境的配置限制」。于是这一轮把两版硬编码常量全部删掉，改成**问文件系统**。
+
+**探测**：新增 `LibraryLimits`（`name_max` / `relative_max`，单位都是**字节**）与
+`detect_library_limits(root)`：从书库根目录（不存在时向上找到最近的已存在祖先，`os.pathconf` 需要一个
+stat 得到的目录）取 `PC_NAME_MAX` 与 `PC_PATH_MAX`，相对路径的预算 = `PATH_MAX` − 书库根目录的绝对路径
+字节数 − 1。`os.pathconf` 在 Windows 上不存在、在个别挂载上也答不出来，此时回落到 `FALLBACK_LIMITS`
+（255 / 4096 字节）——取常见文件系统里最小的那组，落在这个上限内到哪儿都成立。
+
+**为什么是字节**：`NAME_MAX` 在 ext4 / btrfs / xfs 上是 255 **字节**，在 NTFS 上是 255 **字符**。写死字符数
+在 ext4 上会把文件名截短（120 个中文 = 360 字节，原样根本放不下），写死字节数在 NTFS 上又会拒绝它本可以
+接受的名字。POSIX 调用报的是字节，比较就用字节。文件名连同 `.cbz` 一起算：主干的预算是
+`name_max − len(".cbz")`，否则一个刚好卡满的名字会在后缀落上去之后变成文件系统拒绝的组件。
+
+**两类行为的分工没变**：打包路径（`render_library_path`、`safe_library_name`）继续**修**——书已经下好，必须
+落在某个名字上，超长按字节截断且只在字符边界切（半个「名」不是更短的名字，是乱码）；面向操作者的路径
+（详情页 `_plan_explicit_path`、批量重排 `plan_library_path`、AI 路径 `clean_ai_path`、已渲染路径复核
+`_parse_relative_path`、钉住路径的复核）继续**拒绝**，消息里报出的是这台机器的数字：「占 N 字节，超过本机
+文件系统允许的每个名字 M 字节」。
+
+**设置页跟着环境走**：`/api/v1/settings/paths` 的 `template` 不再有 `max_segment_length` /
+`max_filename_length` 两个写死的数，改为 `limits: {name_max_bytes, relative_max_bytes, source}`（`source`
+是探测用的目录），`_paths.html` 两处提示写明「长度上限由运行这台服务的文件系统决定，本机每个名字最多 N
+字节……」。模板预览的渲染也带上探测到的上限，与真实打包同一条规则。
+
+**调用点各自探测一次**：`ConversionService`（模板渲染、`planned_library_path`、钉住路径复核）、
+`ArchivedWorkService`（`_parse_relative_path`、`rename_work`、`_plan_explicit_path`）、`AiPathService`
+（`clean_ai_path` / `answer_path`，含 `validate=` 的 lambda）都在拿到库根目录的那一刻探测，再把 `limits`
+传给纯函数——纯函数仍然不碰文件系统，所以测试可以喂一个小上限，断言不依赖宿主机的文件系统。
+
+**测试**：`test_library_template.py` 的截断与超长用例改为显式传 `LibraryLimits(name_max=8,
+relative_max=24)`（顺带断言多字节字符不会被切半个），新增
+`test_the_ceiling_is_detected_from_the_filesystem`；`test_ai_paths.py` 的越界用例改传小上限；
+`test_conversion.py` 里「400 个字符截断到 120」改为断言回落的 255 字节与显式 `name_max=10`；
+`test_archived_works.py` 的超长用例改成远超任何真实 `NAME_MAX` 的 5000 字符（现在写不出那个数）；
+`test_settings_web.py` 的路径接口用例改为断言 `limits` 三个字段有值、且页面渲染出这个数字。单测
+（`library_template` / `ai_paths` / `conversion` / `archived_works` / `work_detail` / `downloaded_api` /
+`rearchive` / `archive_path_rules`）与集成（`settings_web` / `work_detail_web` / `downloaded_web` /
+`archive_workflow`）全绿；`--collect-only` 1508（净增 0：新增一项、删掉一项）。
+
+**文档同步**：`docs/USAGE.md` 的「设置 → 路径」段与「改归档路径」改成「上限取自运行环境的文件系统」并说明
+按字节；`AgentHelp/EHBot.md` §1.3.1 的归档路径模板行同步。版本维持 `0.3.0rc1`。

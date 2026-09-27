@@ -97,9 +97,9 @@ from app.archive.service import (
 )
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
-    MAX_SEGMENT_LENGTH,
     PLACEHOLDER_LABELS,
     TEMPLATE_PLACEHOLDERS,
+    detect_library_limits,
 )
 from app.logs.reader import MAX_LIMIT, clamp_limit, read_log_tail
 from app.review.models import field_label
@@ -239,6 +239,8 @@ async def _paths_section(request: Request) -> dict[str, Any]:
     service = deps.archive_settings_service(request)
     database = deps.database(request)
     app_settings = request.app.state.settings
+    library_path = await service.library_path() or app_settings.library_path
+    limits = detect_library_limits(library_path)
     ai_service = deps.optional_service(request, "ai_service")
     chain = (
         await ai_service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
@@ -359,7 +361,14 @@ async def _paths_section(request: Request) -> dict[str, Any]:
         },
         "template": {
             "default": DEFAULT_LIBRARY_TEMPLATE,
-            "max_segment_length": MAX_SEGMENT_LENGTH,
+            # Not a policy number: what the filesystem under the library root
+            # says it takes, in bytes, so the hint under the box states the same
+            # ceiling the validator applies (R35).
+            "limits": {
+                "name_max_bytes": limits.name_max,
+                "relative_max_bytes": limits.relative_max,
+                "source": str(library_path),
+            },
             "placeholders": [
                 {
                     "code": name,

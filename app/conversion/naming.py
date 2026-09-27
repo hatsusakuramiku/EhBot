@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 
@@ -18,18 +20,120 @@ _WINDOWS_RESERVED: frozenset[str] = frozenset(
     }
 )
 
-MAX_SEGMENT_LENGTH = 120
+#: The suffix appended after the name has been fitted, so every ceiling here is
+#: measured on the name itself and never on the published string.
+CBZ_SUFFIX = ".cbz"
+
+#: What a filesystem that will not answer is assumed to take. The numbers are the
+#: smallest in common use (ext4 / btrfs / xfs `NAME_MAX`, and a path budget no
+#: shorter than any of them), so a name fitted to these works wherever the
+#: library ends up. They are a floor for the *fallback*, not a project policy:
+#: every real decision comes from `detect_library_limits`.
+FALLBACK_NAME_MAX = 255
+FALLBACK_PATH_MAX = 4096
 
 
-def safe_library_name(value: str, *, fallback: str) -> str:
-    """Normalize a metadata value into one safe library path segment."""
+@dataclass(frozen=True)
+class LibraryLimits:
+    """What the filesystem under the library root will take, in **bytes**.
+
+    Detected rather than declared (R35): `NAME_MAX` is 255 *bytes* on ext4 /
+    btrfs / xfs and 255 *characters* on NTFS, and any number this project picked
+    would be wrong on one of them -- a character ceiling silently shortened
+    names the disk would have taken, and one measured in bytes would refuse
+    names a Windows share accepts. Bytes are what the POSIX call reports, and
+    bytes are what the comparison uses.
+    """
+
+    #: Bytes for one path component -- a file name or a directory name, alike.
+    name_max: int
+    #: Bytes available for the library-*relative* part: `PATH_MAX` minus the
+    #: absolute path of the library root and its separator.
+    relative_max: int
+
+
+#: What the pure functions use when nobody told them where the book is going.
+#: Production paths pass a detected one; tests pass a small one on purpose.
+FALLBACK_LIMITS = LibraryLimits(
+    name_max=FALLBACK_NAME_MAX, relative_max=FALLBACK_PATH_MAX
+)
+
+
+def _pathconf(directory: Path, key: str, fallback: int) -> int:
+    """One `os.pathconf` value, or the fallback when the platform has none.
+
+    `os.pathconf` does not exist on Windows and raises on a filesystem that
+    cannot answer, so this is a lookup with a floor rather than a check.
+    """
+    try:
+        value = os.pathconf(directory, key)
+    except (AttributeError, OSError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
+def detect_library_limits(root: Path | None) -> LibraryLimits:
+    """Ask the filesystem that holds `root` what it accepts.
+
+    The nearest *existing* ancestor answers -- `os.pathconf` needs a directory it
+    can stat, and the library root may not have been created yet -- while the
+    budget is computed from where the root is going to be, so a not-yet-created
+    tree cannot buy itself a bigger allowance than it will have.
+
+    `None` means no library directory is configured at all, which cannot pack
+    anything either way; the probe falls back to the process's own directory so
+    the answer is still *a* filesystem's rather than an exception.
+    """
+    base = Path(root) if root else Path.cwd()
+    probe = base
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    name_max = _pathconf(probe, "PC_NAME_MAX", FALLBACK_NAME_MAX)
+    path_max = _pathconf(probe, "PC_PATH_MAX", FALLBACK_PATH_MAX)
+    root_bytes = len(str(base.resolve()).encode("utf-8"))
+    return LibraryLimits(
+        name_max=name_max,
+        relative_max=max(path_max - root_bytes - 1, 0),
+    )
+
+
+def file_name_max(limits: LibraryLimits) -> int:
+    """Bytes available to a file *stem*: what the filesystem measures is the
+    published component, and that includes the suffix appended afterwards.
+
+    Without this, a stem fitted to the whole allowance becomes an over-long
+    component the moment `.cbz` lands on it -- a refusal our own check would not
+    have predicted.
+    """
+    return max(limits.name_max - len(CBZ_SUFFIX.encode("utf-8")), 1)
+
+
+def _fitted(value: str, name_max: int) -> str:
+    """The longest prefix of `value` that fits in `name_max` bytes.
+
+    Cut on a character boundary: half of a 「名」 is not a shorter name, it is
+    mojibake in the library.
+    """
+    if len(value.encode("utf-8")) <= name_max:
+        return value
+    return value.encode("utf-8")[:name_max].decode("utf-8", "ignore")
+
+
+def safe_library_name(
+    value: str, *, fallback: str, name_max: int = FALLBACK_NAME_MAX
+) -> str:
+    """Normalize a metadata value into one safe library path segment.
+
+    Repairs rather than refuses -- the book is already downloaded and has to land
+    somewhere -- and `name_max` is the caller's, because only the caller knows
+    which filesystem the name is about to land on.
+    """
     normalized = unicodedata.normalize("NFC", value or "").strip()
     cleaned = _UNSAFE_CHARACTERS.sub(" ", normalized)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     if cleaned.lower() in _WINDOWS_RESERVED:
         cleaned = f"{cleaned}-archive"
-    if len(cleaned) > MAX_SEGMENT_LENGTH:
-        cleaned = cleaned[:MAX_SEGMENT_LENGTH].rstrip(" .")
+    cleaned = _fitted(cleaned, name_max).rstrip(" .")
     return cleaned or fallback
 
 
@@ -157,6 +261,7 @@ def render_library_path(
     values: dict[str, str | None],
     *,
     title_fallback: str,
+    limits: LibraryLimits = FALLBACK_LIMITS,
 ) -> Path:
     """Render one book's relative library path, sanitising every segment.
 
@@ -166,8 +271,9 @@ def render_library_path(
     tree. That is the difference between an odd folder name and a metadata value
     choosing where a file lands.
     """
+    segments = validate_library_template(template).split("/")
     rendered: list[str] = []
-    for segment in validate_library_template(template).split("/"):
+    for index, segment in enumerate(segments):
         def substitute(match: re.Match[str]) -> str:
             name = match.group(1)
             value = (values.get(name) or "").strip()
@@ -178,17 +284,21 @@ def render_library_path(
             return PLACEHOLDER_FALLBACKS.get(name, "")
 
         filled = _PLACEHOLDER_PATTERN.sub(substitute, segment)
-        rendered.append(safe_library_name(filled, fallback=title_fallback))
+        rendered.append(
+            safe_library_name(
+                filled,
+                fallback=title_fallback,
+                # The last segment is the file name, so it answers to the stem's
+                # allowance (the suffix takes four bytes of the component); the
+                # ones before it are directories, which get all of it.
+                name_max=(
+                    file_name_max(limits)
+                    if index == len(segments) - 1
+                    else limits.name_max
+                ),
+            )
+        )
     return Path(*rendered)
-
-
-#: Ceiling on the whole library-relative path, not just one segment. Every
-#: segment can be inside `MAX_SEGMENT_LENGTH` while the join is still longer than
-#: a filesystem accepts -- Windows stops at 260 characters for the *absolute*
-#: path, so a relative path near that is unusable the moment the library sits
-#: anywhere but a drive root. Refusing at 240 leaves room for the root and fails
-#: while the operator is still looking at the form.
-MAX_RELATIVE_PATH_LENGTH = 240
 
 
 class LibraryPathError(ValueError):
@@ -209,7 +319,9 @@ class LibraryPathError(ValueError):
         self.public_message = message
 
 
-def check_library_segment(value: str) -> tuple[str, str] | None:
+def check_library_segment(
+    value: str, *, name_max: int = FALLBACK_NAME_MAX
+) -> tuple[str, str] | None:
     """Why this path segment is unusable verbatim, or None if it is fine.
 
     The counterpart to `safe_library_name`, and deliberately not a variant of
@@ -224,6 +336,9 @@ def check_library_segment(value: str) -> tuple[str, str] | None:
 
     Returns `(code, message)` rather than raising so a batch can collect one
     reason per work without exception handling per segment.
+
+    `name_max` is the caller's, for the reason `safe_library_name`'s is: only the
+    caller knows which filesystem the segment is going to land on.
     """
     normalized = unicodedata.normalize("NFC", value or "")
     if not normalized.strip():
@@ -245,11 +360,12 @@ def check_library_segment(value: str) -> tuple[str, str] | None:
             "SEGMENT_UNSAFE_CHARACTER",
             f"「{normalized}」含有不能用于路径的字符：{shown}",
         )
-    if len(normalized) > MAX_SEGMENT_LENGTH:
+    encoded = len(normalized.encode("utf-8"))
+    if encoded > name_max:
         return (
             "SEGMENT_TOO_LONG",
-            f"「{normalized[:20]}…」长度 {len(normalized)} 超过上限 "
-            f"{MAX_SEGMENT_LENGTH}，请缩短",
+            f"「{normalized[:20]}…」占 {encoded} 字节，超过本机文件系统允许的"
+            f"每个名字 {name_max} 字节，请缩短",
         )
     # A trailing dot or space is accepted by the API and then silently dropped
     # by Windows, which produces a file the database can no longer find.
@@ -266,9 +382,14 @@ def check_library_segment(value: str) -> tuple[str, str] | None:
     return None
 
 
-def strict_library_segment(value: str) -> str:
-    """One path segment, unchanged, or a refusal explaining why not."""
-    refusal = check_library_segment(value)
+def strict_library_segment(
+    value: str, *, name_max: int = FALLBACK_NAME_MAX
+) -> str:
+    """One path segment, unchanged, or a refusal explaining why not.
+
+    `name_max` is the caller's, for the reason `safe_library_name`'s is.
+    """
+    refusal = check_library_segment(value, name_max=name_max)
     if refusal is not None:
         raise LibraryPathError(*refusal)
     return unicodedata.normalize("NFC", value)
@@ -279,6 +400,7 @@ def plan_library_path(
     values: dict[str, str | None],
     *,
     title_fallback: str,
+    limits: LibraryLimits = FALLBACK_LIMITS,
 ) -> PurePosixPath:
     """The relative CBZ path the current template gives this book, or a refusal.
 
@@ -293,8 +415,9 @@ def plan_library_path(
     otherwise be read as a stem of `Vol` with a `. 1` extension and the book
     would be published as `Vol.cbz`.
     """
+    segments = validate_library_template(template).split("/")
     rendered: list[str] = []
-    for segment in validate_library_template(template).split("/"):
+    for index, segment in enumerate(segments):
 
         def substitute(match: re.Match[str]) -> str:
             name = match.group(1)
@@ -305,13 +428,26 @@ def plan_library_path(
                 return title_fallback
             return PLACEHOLDER_FALLBACKS.get(name, "")
 
-        rendered.append(strict_library_segment(_PLACEHOLDER_PATTERN.sub(substitute, segment)))
-    relative = PurePosixPath(*rendered[:-1], f"{rendered[-1]}.cbz")
-    if len(str(relative)) > MAX_RELATIVE_PATH_LENGTH:
+        rendered.append(
+            strict_library_segment(
+                _PLACEHOLDER_PATTERN.sub(substitute, segment),
+                # The last segment becomes the file name, so it answers to the
+                # stem's allowance; the ones before it are directories.
+                name_max=(
+                    file_name_max(limits)
+                    if index == len(segments) - 1
+                    else limits.name_max
+                ),
+            )
+        )
+    relative = PurePosixPath(*rendered[:-1], f"{rendered[-1]}{CBZ_SUFFIX}")
+    encoded = len(str(relative).encode("utf-8"))
+    if encoded > limits.relative_max:
         raise LibraryPathError(
             "PATH_TOO_LONG",
-            f"归档路径长度 {len(str(relative))} 超过上限 "
-            f"{MAX_RELATIVE_PATH_LENGTH}，请缩短标题或改用更短的路径模板",
+            f"归档路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
+            f"{limits.relative_max} 字节（书库根目录之外的全部余量），"
+            f"请缩短标题或改用更短的路径模板",
         )
     return relative
 
@@ -348,16 +484,20 @@ def unique_library_target(
 
 
 __all__ = [
+    "CBZ_SUFFIX",
     "DEFAULT_LIBRARY_TEMPLATE",
-    "MAX_RELATIVE_PATH_LENGTH",
-    "MAX_SEGMENT_LENGTH",
+    "FALLBACK_LIMITS",
+    "FALLBACK_NAME_MAX",
     "PLACEHOLDER_FALLBACKS",
     "PLACEHOLDER_LABELS",
     "TEMPLATE_PLACEHOLDERS",
     "TITLE_PLACEHOLDERS",
+    "LibraryLimits",
     "LibraryPathError",
     "LibraryTemplateError",
     "check_library_segment",
+    "detect_library_limits",
+    "file_name_max",
     "plan_library_path",
     "render_library_path",
     "safe_library_name",

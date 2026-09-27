@@ -63,7 +63,10 @@ from app.archive.service import (
     ArchiveSettingsService,
 )
 from app.conversion.convert import ConversionError
-from app.conversion.naming import LibraryPathError
+from app.conversion.naming import LibraryLimits, LibraryPathError
+
+#: Small enough to cross by hand; the real ceiling is the filesystem's.
+SMALL = LibraryLimits(name_max=16, relative_max=40)
 from app.conversion.service import ConversionService
 from app.db.database import Database
 from app.downloads.archived import ArchivedWorkError
@@ -361,11 +364,12 @@ class TestCleanAiPath:
         assert caught.value.code == AI_PATH_INVALID
 
     def test_a_path_past_the_ceiling_is_refused(self) -> None:
-        # Each level is truncated to 120, so it takes several to pass 240 -- and
-        # 「整条太长」 is a refusal rather than another truncation because a path
-        # shortened at two levels is a name nobody chose.
+        # Each level is truncated to the component ceiling, so it takes a few to
+        # pass the whole-path one -- and 「整条太长」 is a refusal rather than
+        # another truncation, because a path shortened at two levels is a name
+        # nobody chose.
         with pytest.raises(AiError) as caught:
-            clean_ai_path("x" * 120 + "/" + "y" * 120, "z")
+            clean_ai_path("/".join(["x" * 12] * 4), "y" * 40, limits=SMALL)
         assert caught.value.code == AI_PATH_INVALID
 
 

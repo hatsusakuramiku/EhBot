@@ -353,7 +353,10 @@
           <input class="ui-input" id="library-template" name="library_template"
                  value="{{ library_template }}" placeholder="{{ template.default }}"
                  spellcheck="false" data-template-input required>
-          <small>必须包含 <code>{title}</code>、<code>{japanese_title}</code> 或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。每层最多 {{ template.max_segment_length }} 个字符。</small>
+          <small>必须包含 <code>{title}</code>、<code>{japanese_title}</code> 或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。长度上限由运行这台服务的文件系统决定，不在
+            本服务里写死：本机每个名字（目录或文件名，含 <code>.cbz</code>）最多
+            {{ template.limits.name_max_bytes }} 字节，整条相对路径最多
+            {{ template.limits.relative_max_bytes }} 字节。</small>
         </div>
         <fieldset class="ui-fieldset">
           <legend>{{ '{title}' }} 使用的标题</legend>
@@ -474,7 +477,9 @@
                  placeholder="{{ template.default }}" spellcheck="false" required>
           <small>与全局模板相同的占位符：必须包含 <code>{title}</code>、<code>{japanese_title}</code>
             或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。
-            每层最多 {{ template.max_segment_length }} 个字符。</small>
+            与上方同一个上限，取自运行这台服务的文件系统：每个名字（含 <code>.cbz</code>）
+            最多 {{ template.limits.name_max_bytes }} 字节，整条相对路径最多
+            {{ template.limits.relative_max_bytes }} 字节。</small>
         </div>
 
         <label class="ui-checkline">

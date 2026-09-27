@@ -21,11 +21,12 @@ from app.archive.service import ArchiveSettingsService
 from app.auto_approval.rules import render_rule_dsl, validate_rule_ast
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
-    MAX_RELATIVE_PATH_LENGTH,
-    MAX_SEGMENT_LENGTH,
+    FALLBACK_LIMITS,
+    LibraryLimits,
     LibraryPathError,
     LibraryTemplateError,
     check_library_segment,
+    detect_library_limits,
     plan_library_path,
     render_library_path,
     unique_library_target,
@@ -36,10 +37,18 @@ from app.db.database import Database
 from app.review.models import MetadataEntry
 
 
-def render(template: str, **values: str) -> str:
+#: A ceiling small enough to assert on by hand. The real ones come off the
+#: filesystem (`detect_library_limits`), which is exactly why the tests that are
+#: about the ceiling pass their own.
+SMALL = LibraryLimits(name_max=8, relative_max=24)
+
+
+def render(
+    template: str, *, limits: LibraryLimits = FALLBACK_LIMITS, **values: str
+) -> str:
     """One book's rendered path as POSIX text, for readable assertions."""
     return render_library_path(
-        template, dict(values), title_fallback="candidate-1"
+        template, dict(values), title_fallback="candidate-1", limits=limits
     ).as_posix()
 
 
@@ -156,9 +165,21 @@ class TestRendering:
             "nul-archive/A"
         )
 
-    def test_a_long_value_is_truncated_to_a_storable_segment(self) -> None:
-        rendered = render("{title}", title="标" * 400)
-        assert len(rendered) == MAX_SEGMENT_LENGTH
+    def test_a_long_value_is_truncated_to_what_the_filesystem_takes(self) -> None:
+        """One ceiling per component, measured in bytes (R35).
+
+        `NAME_MAX` does not care whether the component is a directory or a file,
+        so neither does the truncation; the file name's *stem* gets four bytes
+        less because `.cbz` lands on it afterwards.
+        """
+        # 8 bytes per component, 4 of them for the suffix: the stem gets 4.
+        assert render("{title}", limits=SMALL, title="abcdefghij") == "abcd"
+        assert (
+            render("{artist}/{title}", limits=SMALL, artist="abcdefghij", title="A")
+            == "abcdefgh/A"
+        )
+        # A 3-byte character never gets cut in half: 4 bytes is one of them.
+        assert render("{title}", limits=SMALL, title="標標") == "標"
 
     def test_a_value_that_sanitises_to_nothing_uses_the_fallback(self) -> None:
         """`...` strips to an empty segment, which is not a directory name."""
@@ -462,36 +483,65 @@ class TestStrictPlanning:
         # The message names the character, because the operator has to find it.
         assert "?" in raised.value.public_message
 
-    def test_a_title_over_the_segment_ceiling_is_refused(self) -> None:
+    def test_a_name_over_the_filesystem_ceiling_is_refused(self) -> None:
+        """Refused, not truncated, and the message quotes the machine's number.
+
+        The number is the filesystem's -- 「本机文件系统允许的每个名字 N 字节」 --
+        so that an operator reading it knows the ceiling is their mount's, not
+        something this project chose.
+        """
         with pytest.raises(LibraryPathError) as raised:
             plan_library_path(
                 "{title}",
-                {"title": "長" * (MAX_SEGMENT_LENGTH + 1)},
+                {"title": "長" * 100},
                 title_fallback="candidate-1",
+                limits=SMALL,
             )
 
         assert raised.value.code == "SEGMENT_TOO_LONG"
+        assert "4" in raised.value.public_message  # the stem's allowance
+        assert "字节" in raised.value.public_message
+        # A directory is held to the same ceiling as a file name.
+        with pytest.raises(LibraryPathError) as raised:
+            plan_library_path(
+                "{artist}/{title}",
+                {"artist": "長" * 100, "title": "标题"},
+                title_fallback="candidate-1",
+                limits=SMALL,
+            )
+        assert raised.value.code == "SEGMENT_TOO_LONG"
+
+    def test_the_ceiling_is_detected_from_the_filesystem(self) -> None:
+        """Not a constant: `os.pathconf` on the library root, in bytes.
+
+        The probe walks up to the nearest directory that exists -- the library
+        root may not have been created yet -- and the budget it reports is the
+        whole-path limit minus where the root will be.
+        """
+        limits = detect_library_limits(Path.cwd())
+
+        assert limits.name_max >= 14  # every real filesystem allows at least this
+        assert 0 < limits.relative_max <= FALLBACK_LIMITS.relative_max
 
     def test_the_whole_path_has_a_ceiling_of_its_own(self) -> None:
         """Every segment can be legal while the join is not.
 
-        Windows stops at 260 characters for the *absolute* path, so a relative
-        path near that is unusable the moment the library sits anywhere but a
-        drive root -- and the failure would land inside a packing job rather than
-        on the form.
+        `PATH_MAX` is per *path*, not per component, so two legal names can still
+        add up past what the filesystem takes. The refusal says how many bytes
+        the library has left rather than quoting a project constant.
         """
-        segment = "長" * (MAX_SEGMENT_LENGTH - 1)
-        assert check_library_segment(segment) is None
+        assert check_library_segment("abcdefgh", name_max=SMALL.name_max) is None
 
         with pytest.raises(LibraryPathError) as raised:
             plan_library_path(
                 "{category}/{artist}/{title}",
-                {"category": segment, "artist": segment, "title": segment},
+                {"category": "abcdefgh", "artist": "abcdefgh", "title": "abcd"},
                 title_fallback="candidate-1",
+                limits=SMALL,
             )
 
         assert raised.value.code == "PATH_TOO_LONG"
-        assert str(MAX_RELATIVE_PATH_LENGTH) in raised.value.public_message
+        assert str(SMALL.relative_max) in raised.value.public_message
 
     def test_the_extension_is_appended_here_too(self) -> None:
         """The `Vol. 1` trap, which both renderers have to avoid identically."""

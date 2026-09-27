@@ -538,7 +538,9 @@ class TestExplicitArchivePath:
             ("带有?非法字符", "SEGMENT_UNSAFE_CHARACTER"),
             ("以点结尾.", "SEGMENT_TRAILING_DOT"),
             ("con", "SEGMENT_RESERVED"),
-            ("長" * 200, "SEGMENT_TOO_LONG"),
+            # Well past any real NAME_MAX, whatever the host's is: the ceiling
+            # comes off the filesystem now (R35), so the test cannot name it.
+            ("長" * 5000, "SEGMENT_TOO_LONG"),
         ],
     )
     def test_an_illegal_name_is_refused_rather_than_cleaned(

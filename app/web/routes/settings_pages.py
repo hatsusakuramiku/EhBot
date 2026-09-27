@@ -42,7 +42,10 @@ from app.archive.service import (
     ArchiveSettingsError,
 )
 from app.conversion.naming import (
+    CBZ_SUFFIX,
+    LibraryLimits,
     LibraryTemplateError,
+    detect_library_limits,
     render_library_path,
     validate_library_template,
 )
@@ -341,9 +344,15 @@ LIBRARY_TEMPLATE_SAMPLE: dict[str, str] = {
 
 
 def _render_template_preview(
-    template: str, title_source: str
+    template: str,
+    title_source: str,
+    limits: LibraryLimits,
 ) -> dict[str, object]:
     """Render the sample book's path, exactly as the packer would.
+
+    `limits` is threaded in for the same reason `title_source` is: the preview
+    has to answer the way the packer will, and the packer fits the name to the
+    filesystem the library sits on.
 
     `title_source` is threaded in rather than defaulted because the preview's
     whole job is to be the packer's answer: `{title}` resolves through the same
@@ -366,8 +375,9 @@ def _render_template_preview(
         template,
         {**values, "title": preferred},
         title_fallback="candidate-1",
+        limits=limits,
     )
-    rendered = (relative.parent / f"{relative.name}.cbz").as_posix()
+    rendered = (relative.parent / f"{relative.name}{CBZ_SUFFIX}").as_posix()
     return {
         "template": template,
         "rendered": rendered,
@@ -419,18 +429,26 @@ async def preview_library_template(request: Request, csrf_token: str = Form()):
             error=exc.public_message,
             status_code=400,
         )
+    service = deps.archive_settings_service(request)
+    # The filesystem the preview has to fit is the one the *stored* library path
+    # points at -- the form being previewed is the template, not the root.
+    library_path = (
+        await service.library_path() or request.app.state.settings.library_path
+    )
     # The radio as submitted, falling back to what is stored, so previewing a
     # preference change shows its effect before it is saved.
     submitted = str(form.get("title_source") or "").strip().lower()
     title_source = (
         submitted
         if submitted in TITLE_SOURCES
-        else await deps.archive_settings_service(request).title_source()
+        else await service.title_source()
     )
     return await render_settings(
         request,
         SETTINGS_PATHS,
-        template_preview=_render_template_preview(template, title_source),
+        template_preview=_render_template_preview(
+            template, title_source, detect_library_limits(library_path)
+        ),
     )
 
 

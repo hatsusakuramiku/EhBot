@@ -1340,12 +1340,26 @@ class TestApiParity:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             payload = client.get("/api/v1/settings/paths").json()
+            page = client.get("/settings/paths").text
 
         assert payload["path_rules"] == []
         assert payload["dry_run_scan_limit"] > 0
         assert "fields" in payload["vocabulary"]
         assert "operators" in payload["vocabulary"]
         assert {"title_sources", "template", "paths"} <= set(payload)
+        # The ceilings are the *filesystem's*, in bytes, and the form is told
+        # both of them so the hint under the box cannot state a number the
+        # validator does not apply (R35). Asserted as "some positive number"
+        # rather than 255: which number it is belongs to the machine running the
+        # test, and pinning it here would turn a portable test into a host check.
+        limits = payload["template"]["limits"]
+        assert limits["name_max_bytes"] > 0
+        assert limits["relative_max_bytes"] > 0
+        assert limits["source"]
+        # ...and the hint renders those numbers, from the same payload, rather
+        # than a third copy typed into the HTML.
+        assert str(limits["name_max_bytes"]) in page
+        assert "由运行这台服务的文件系统决定" in page
 
 
 # ---------------------------------------------------------------------------
