@@ -163,6 +163,15 @@ def install_root(tools_path: Path) -> Path:
 def installed_executable(
     tools_path: Path, *, system: str | None = None
 ) -> Path | None:
+    """The managed 7-Zip binary under `tools_path`, or None if it is not there.
+
+    The returned path is absolute even when `tools_path` is relative
+    (`DATA_PATH=data` is the default): the backend hands it to `subprocess.run`
+    with the *extraction directory* as `cwd`, so a relative path resolves
+    against the wrong directory and the spawn fails with ENOENT. `abspath`, not
+    `resolve`, so a symlinked tools directory keeps the path the operator
+    configured.
+    """
     root = install_root(tools_path)
     resolved_system = (system or platform.system()).strip().lower()
     names = (
@@ -176,7 +185,7 @@ def installed_executable(
             resolved_system != "windows" or (root / WINDOWS_LIBRARY).is_file()
         )
         if candidate.is_file() and has_runtime and os.access(candidate, os.X_OK):
-            return candidate
+            return Path(os.path.abspath(candidate))
     return None
 
 

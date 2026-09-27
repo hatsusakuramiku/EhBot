@@ -82,7 +82,12 @@ def install_with(tools_path: Path, payload: bytes, **kwargs) -> Path:
 def windows_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     output = Path(next(part[2:] for part in command if part.startswith("-o")))
     output.mkdir(parents=True, exist_ok=True)
-    (output / WINDOWS_EXECUTABLE).write_bytes(b"portable exe")
+    executable = output / WINDOWS_EXECUTABLE
+    executable.write_bytes(b"portable exe")
+    # `installed_executable` requires the executable bit: Windows reads that
+    # from the `.exe` extension, POSIX hosts from the mode. Without it this
+    # installation test passes only on Windows.
+    executable.chmod(0o755)
     (output / WINDOWS_LIBRARY).write_bytes(b"portable dll")
     (output / "Uninstall.exe").write_bytes(b"not published")
     return subprocess.CompletedProcess(command, 0)

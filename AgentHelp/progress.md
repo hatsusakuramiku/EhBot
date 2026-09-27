@@ -4267,3 +4267,33 @@ relative_max=24)`（顺带断言多字节字符不会被切半个），新增
 `{"status":"ready"}`，并确认容器里 `detect_library_limits(Path('/library'))` 返回
 `LibraryLimits(name_max=255, relative_max=4087)`、`app.conversion.naming` 已没有 `MAX_SEGMENT_LENGTH`，
 `/app/app/web/templates/settings/_paths.html` 含新提示文案；冒烟容器已清理。
+
+## R36 — 把 7-Zip 工具链真装上，顺带修好两个只在 Windows 上能过的用例（v0.3.0rc1，2026-09-27）
+
+R35 收尾时把两个失败写成「本机没有真实 7-Zip 工具链」，运营者反问「没有工具链不会装吗」。查清后：
+那两条**与有没有工具链无关**，而装上工具链之后，真正的失败是**另一个** bug。
+
+**装上工具链**：`install(Path("data/tools"))` 拉 `7z2602-linux-x64.tar.xz`（digest 由
+`RELEASE_ASSETS` 钉住）解出 `7zz` / `7zzs`；`data/` 在 `.gitignore` 里，所以每个宿主机各装一份。
+12 条 `test_seven_zip_real.py` 用例从 skip 变成实跑，`passed` 1439 → 1451、`skipped` 归零。
+
+**实跑暴露的 bug**：`installed_executable` 返回的是 `tools_path` 拼出来的原样路径，而 `DATA_PATH`
+默认就是相对值 `data`，于是它给出 `data/tools/7zip/26.02/7zzs`。后端把这个路径交给
+`subprocess.run(..., cwd=<解包用的临时目录>)`，相对路径按临时目录解析 → `ENOENT`，打包失败。
+换句话说是「默认配置 + 自动装好工具链 + 真去打包」在修复前根本跑不起来——容器里
+`DATA_PATH=/app/data` 是绝对路径，所以线上没撞到；测试里的 `tools_path` 是相对的才把它揪出来。
+修法：`installed_executable` 里返回 `Path(os.path.abspath(candidate))`。用 `abspath` 而不是
+`resolve`，免得把运维配置的符号链接路径改写成真实路径。
+
+**两条用例本身**：`test_resolve_seven_zip_executable_prefers_managed_install` 写的是
+`7z.exe` + `7z.dll` 却期待在 Linux 上被找到——POSIX 找的是 `7zz`/`7zzs`（`7z.exe` 是 Windows
+布局），而且 `installed_executable` 要求可执行位，`write_bytes` 出来的是 0644。两条都只在 Windows
+上成立（Windows 的 `os.access(X_OK)` 只看扩展名，不看 mode）。改成按 `platform.system()` 写这台
+机器会找的那一对，POSIX 上 `chmod 0o755`；`test_toolchain.py` 里的假解包器 `windows_runner`
+同样补上 `chmod`。现在这两条在两种平台上都真的在验证托管安装，而不是在 Linux 上永远红。
+
+**验证**：`--junitxml` 全量 **1508 tests / 0 failures / 0 errors / 0 skipped**（1159 s）——
+这是 Linux 主机上第一次真正的全绿（此前 `passed`/`skipped` 里那 12 条是跳过的）。
+
+**文档同步**：`AgentHelp/AGENTS.md` 的测试段补上「POSIX 主机怎么装这份工具链」的一行命令，
+基线链加入 R36（用例数不变）。`docs/USAGE.md` 关于托管安装的描述仍然成立，无改动。

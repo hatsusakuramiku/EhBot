@@ -84,12 +84,17 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1451 on a machine that has one and 1439 with
-twelve skips on a machine that does not. (An older note gave 927 for the second
+twelve skips on a machine that does not. Install it on a POSIX host with
+`.venv/bin/python -c "from pathlib import Path; from app.archive.toolchain import install; install(Path('data/tools'))"`
+(`data/` is ignored, so every host installs its own; the download is digest-pinned
+by `RELEASE_ASSETS`). R36 fixed the two toolchain tests that used to pass only on
+Windows, so 0 failed is now true on Linux as well. (An older note gave 927 for the second
 case, which was simply wrong. Baseline moves per phase:
 R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
 -> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207 -> R25 1251 -> R26 1252 -> R27 1310 ->
-R28 1360 -> R29 1435 -> R30 1465 -> R31 1497 -> R34 1506 -> R35 1508 (R32 与 R33 的新增用例
+R28 1360 -> R29 1435 -> R30 1465 -> R31 1497 -> R34 1506 -> R35 1508 -> R36 1508
+(用例数不变：R36 只修好两个此前在 Linux 上必红的工具链用例。R32 与 R33 的新增用例
 此前没有并进这个数，R34 一并算清). There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 

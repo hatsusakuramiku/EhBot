@@ -1,6 +1,7 @@
 from dataclasses import replace
 import io
 from pathlib import Path
+import platform
 import zipfile
 
 import pytest
@@ -31,7 +32,12 @@ from app.archive.models import (
     SafetyLimits,
 )
 from app.archive.processor import ArchiveProcessor
-from app.archive.toolchain import install_root
+from app.archive.toolchain import (
+    PREFERRED_BINARIES,
+    WINDOWS_EXECUTABLE,
+    WINDOWS_LIBRARY,
+    install_root,
+)
 from app.archive.safety import (
     detected_image_extension,
     effective_page_extension,
@@ -477,11 +483,24 @@ def test_seven_zip_backend_rejects_missing_absolute_executable(
 def test_resolve_seven_zip_executable_prefers_managed_install(
     tmp_path: Path,
 ) -> None:
-    """A managed install under the data directory is the only lookup."""
-    managed = install_root(tmp_path / "tools") / "7z.exe"
-    managed.parent.mkdir(parents=True, exist_ok=True)
-    managed.write_bytes(b"managed executable")
-    (managed.parent / "7z.dll").write_bytes(b"managed runtime")
+    """A managed install under the data directory is the only lookup.
+
+    The managed layout is per platform -- `7z.exe` beside `7z.dll` on Windows,
+    the standalone `7zz`/`7zzs` elsewhere -- and `installed_executable` also
+    requires the executable bit, which a POSIX host takes from the mode and
+    Windows from the `.exe` extension. Write the pair this host looks for, or
+    the test only passes on Windows.
+    """
+    root = install_root(tmp_path / "tools")
+    root.mkdir(parents=True, exist_ok=True)
+    if platform.system().strip().lower() == "windows":
+        managed = root / WINDOWS_EXECUTABLE
+        managed.write_bytes(b"managed executable")
+        (root / WINDOWS_LIBRARY).write_bytes(b"managed runtime")
+    else:
+        managed = root / PREFERRED_BINARIES[0]
+        managed.write_bytes(b"managed executable")
+        managed.chmod(0o755)
 
     resolved = resolve_seven_zip_executable("7zz", tmp_path / "tools")
 
