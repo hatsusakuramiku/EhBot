@@ -4258,3 +4258,12 @@ relative_max=24)`（顺带断言多字节字符不会被切半个），新增
 
 **文档同步**：`docs/USAGE.md` 的「设置 → 路径」段与「改归档路径」改成「上限取自运行环境的文件系统」并说明
 按字节；`AgentHelp/EHBot.md` §1.3.1 的归档路径模板行同步。版本维持 `0.3.0rc1`。
+
+提交 `ffd92c6`，按要求**只提交、不推送**（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:67d28591e28621106892e2bc078843f4ef16654b466b47124940006be6990d76`，amd64 manifest
+`sha256:c59927c854efcb177d45c62e0d6cd8e3c56baa5439144ec727d12cfb7cf8e9f6`）。**从 registry 验证而不是只信
+本地构建**：`docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得
+`{"status":"ready"}`，并确认容器里 `detect_library_limits(Path('/library'))` 返回
+`LibraryLimits(name_max=255, relative_max=4087)`、`app.conversion.naming` 已没有 `MAX_SEGMENT_LENGTH`，
+`/app/app/web/templates/settings/_paths.html` 含新提示文案；冒烟容器已清理。
