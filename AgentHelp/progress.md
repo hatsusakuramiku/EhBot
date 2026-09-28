@@ -4350,3 +4350,12 @@ R35 收尾时把两个失败写成「本机没有真实 7-Zip 工具链」，运
 `test_exhentai_download.py` 四例、`test_exhentai_api.py` / `test_exhentai_metadata.py` /
 `test_candidate_ingestion.py` 全绿；`compileall` 与 `git diff --check` 通过。运营者给的
 `tests/gallery-3893499.zip` 只作证据，未入库（仓库里仍是未跟踪状态）。
+
+提交 `bfb0687`，按要求**只提交、不推送**（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:2d3442c9cd8628dbc6e210a86426d2876fe2c0a4740a82513a52ee9192022688`，amd64 manifest
+`sha256:ed018c741a176d5a0513798bf9bd28a058eaca9b474c1c528e1d0c7195d494d7`）。**从 registry 验证而不是只信
+本地构建**：`docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得
+`{"status":"ready"}`；在容器里喂运营者那张页面的片段给 `_find_archive_link`：标签链接在前、原档链接在后时
+返回 `https://exhentai.org/archiver.php?gid=3893499&token=4f732d0bde&or=1`（`&amp;` 已反转义），
+只有标签链接时返回 `None`，即 R37 修的两点都在镜像里生效；冒烟容器已清理。
