@@ -68,8 +68,20 @@ repo root fails partway. Scope recursive listings to `app`, `tests`, etc.
 
 ## Tests
 
-Full suite is ~150-320 s. There is **no `pytest-timeout` plugin**, and a PTY
-swallows pytest's summary line, so run it as a job and read the JUnit XML:
+**Run only what the change touches.** A full sweep is ~20 minutes on Linux
+(1500+ cases, almost all of it argon2 password hashing), which is far too slow
+to sit inside an edit loop. Default to the specific files -- the unit test for
+the module you changed plus any integration test that exercises it -- and run
+the whole suite **only when the operator asks for it**, or before a release the
+operator has asked you to cut. Say which files you ran in the delivery note
+instead of quietly running everything.
+
+Two corollaries: a red test in a file you did not touch is a pre-existing fact
+worth reporting, not something to re-run the world for; and the baseline below
+is a *release gate*, not a per-edit requirement.
+
+There is **no `pytest-timeout` plugin**, and a PTY swallows pytest's summary
+line, so when you do run a wide sweep, run it as a job and read the JUnit XML:
 
 ```powershell
 $job = Start-Job -ScriptBlock { Set-Location 'E:\Workshop\VSCode\EhBot'
