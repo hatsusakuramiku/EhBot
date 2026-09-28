@@ -4306,3 +4306,47 @@ R35 收尾时把两个失败写成「本机没有真实 7-Zip 工具链」，运
 `{"status":"ready"}`；在容器里用**相对** `Path("data/tools")` 调 `resolve_seven_zip_executable` 得到绝对路径
 `/app/data/tools/7zip/26.02/7zzs`，并以 `cwd=/tmp` 真的把它跑起来（`rc 0`，`7-Zip (z) 26.02 (x64)`），
 即 R36 修的那个 ENOENT 已经不再复现；冒烟容器已清理。
+
+## R37 — EH 原档下载偶发存下网页：链接认错 + 不验真身（v0.3.0rc1，2026-09-28）
+
+运营者报「使用 EH 归档会偶发失败，归档的文件不是正常的压缩包」，并把例子放在
+`tests/gallery-3893499.zip`（对应 https://exhentai.org/g/3893499/4f732d0bde/ ，发生在预览页图源缺失、
+改用 EH 原档时）。打开那个「压缩包」：里面是一张 **ExHentai 搜索结果页**，标题正好是 `parody:original`。
+
+**根因一（主因）：原档链接按按钮文字认，认成了标签链接。** `request_archive_url` 用
+`<a href="...">(?:Download|Archive|Original)` 做前缀匹配——而画廊页把**每个标签都做成链接**，
+`parody:original` 又几乎每本同人志都有，它的 `<a href="https://exhentai.org/?f_search=parody%3Aoriginal">original</a>`
+文字恰好是 `original`，于是被当成「Original 原档」按钮。下载器去 GET 这个地址，拿回的自然是一张
+搜索结果页并原样存成 `gallery-<gid>.zip`。这解释了「偶发」：只有 EH 对 `dl=yes` 的响应里恰好没有真正的
+原档链接（原档未生成、页面结构变动等）时，标签链接才会成为唯一命中。
+
+改成 **href 优先、文字其次**：先找指向 `archiver.php` / `archiver?` / `/archive/` 的 href（唯一无歧义），
+找不到才看按钮文字且要求**精确**等于 download / archive / archive download / original / original archive，
+同时排除 `f_search=`、`/tag/`、`/favorites`、`/watched`、`/popular`、`/torrents`、`/settings`、`/u/`
+这些站点导航与标签链接，相对 href 按站点源解析成绝对地址。两者都没有时如实抛
+`EXHENTAI_ARCHIVE_LINK`（「原档可能尚未生成，请稍后重试」），绝不把页面里随便什么链接拿来下。
+
+**根因二（顺带）：href 里的 `&amp;` 没有反转义。** 归档地址在页面里写作
+`...?gid=3893499&amp;token=...&amp;or=...`，旧代码把实体原样拼进请求 URL，第一个 `&` 之后的参数
+全部变成 `amp;token=...` 这样的垃圾，请求打歪也是「下载回来不是原档」的一种。现在 `html.unescape`
+后再 `urljoin` 解析。
+
+**兜底：下载先验真身。** `download_archive` 以前只管把响应字节写进 `gallery-<gid>.zip`，从不看内容——正是
+这一点让上面那张网页一路活到打包阶段，最后以「无法读取 ZIP 压缩包」或 7-Zip 报错的形式炸出来，把登录/
+上游问题伪装成归档问题（也解释了运营者为什么把它描述成「7-Zip 问题」）。现在落盘前看文件头：不是
+`PK\x03\x04` / `PK\x05\x06` / `PK\x07\x08` 就整份删除、不登记 artifact，抛
+`EXHENTAI_ARCHIVE_NOT_ZIP`（像 HTML 时提示「多半是 Cookie 失效或被拦截」）。
+
+**测试**：新增 `tests/unit/test_exhentai_download.py` 四例——①标签链接在前、原档链接在后时必须选原档；
+②页面只有标签链接时必须抛 `EXHENTAI_ARCHIVE_LINK` 而不是把 `f_search` 地址交出去；③响应是登录页时
+抛 `EXHENTAI_ARCHIVE_NOT_ZIP` 且不留文件；④真 ZIP 正常落盘并返回字节数。旧实现在②上会把
+`https://exhentai.org/?f_search=parody%3Aoriginal` 当链接返回，正是运营者看到的那个网页。
+
+**文档同步**：`docs/USAGE.md` 的选路小节新增两条（链接按 href 认、下载先验真身），并顺手改掉两处过时的
+7-Zip 说明——「Windows 不发布托管二进制、不会尝试下载」（R22 之后就不成立了）与「Windows 上无法验证
+托管安装」。`AgentHelp/AGENTS.md` 基线 1508 → 1512。
+
+**验证**：`--junitxml` 全量 **1512 tests / 0 failures / 0 errors / 0 skipped**（1242 s）。定向：
+`test_exhentai_download.py` 四例、`test_exhentai_api.py` / `test_exhentai_metadata.py` /
+`test_candidate_ingestion.py` 全绿；`compileall` 与 `git diff --check` 通过。运营者给的
+`tests/gallery-3893499.zip` 只作证据，未入库（仓库里仍是未跟踪状态）。

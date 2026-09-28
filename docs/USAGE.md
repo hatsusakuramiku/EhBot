@@ -129,6 +129,8 @@
 - **小文件仍走 Bot**：即使登录了用户账户也不接管 20 MB 以内的附件——Bot 本来就在收消息，不需要额外凭据。
 - **种子是没有用户账户时超限本子的原档来源**：内容是上传者的原始压缩包，不消耗 GP，也不受 20 MB 限制。
 - **ExHentai Archive Download 不参与自动选路**：它消耗 GP，属于操作者决策，只在审核详情页提供「用 Archive Download 取原档」按钮。四条来源都不可用时，审核会直接报「没有可用的下载来源」而不静默花 GP。
+- **原档链接按 href 认，不按按钮文字认**：画廊页把每个标签都做成链接，`parody:original` 在绝大多数同人志上都有，它的 `<a href="...?f_search=parody%3Aoriginal">original</a>` 和「Original 原档」按钮的文字长得一模一样。旧实现按文字前缀匹配，于是偶发地把**标签搜索链接**当成原档链接，下载回来一个搜索结果网页存成 `gallery-<gid>.zip`；现在优先认指向 `archiver.php` / `/archive/` 的 href，其次才看精确按钮文字，并把 href 里的 `&amp;` 反转义后再请求（不反转义会让第一个 `&` 之后的参数全部变成垃圾）。两条都识别不出时如实报 `EXHENTAI_ARCHIVE_LINK`，而不是随便下点什么。
+- **原档下载先验真身**：ExHentai 的原档经 H@H 节点分发，Cookie 失效、被限流或节点拒绝时返回的仍可能是 **HTTP 200 的网页**。下载器因此先看文件头：不是 ZIP 就整份丢弃、不登记 artifact，并报 `EXHENTAI_ARCHIVE_NOT_ZIP`（识别为网页时提示多半是 Cookie 需要更新）。否则那个网页会被存成 `gallery-<gid>.zip`，一直留到打包阶段才以「无法读取 ZIP 压缩包」或 7-Zip 报错的形式炸出来，把登录问题伪装成归档问题。
 - **预览页是兜底，不是默认**。页数完整（实测 22/22、15/15、78/78）且免 Cookie，但成品是统一缩到宽 1280 的重编码版本，只作阅读级替代。
 - 预览页链接通常是超链接，URL 只存在于消息的 `text_link` entity 里；只带预览链接的消息也会被纳入候选。
 - 抓到的张数与画廊 `filecount` 不一致时**不发布残本**：任务以 `TELEGRAPH_PAGE_COUNT_MISMATCH` 失败，候选退回「需要补充信息」并显示「预览页只有 N/M 页」，补齐链接后重试复用同一任务。设 `TELEGRAPH_REQUIRE_FILECOUNT_MATCH=false` 可关闭该门禁。
@@ -177,9 +179,9 @@ Bot API 的 20 MB 下载上限在协议里，换 Token 或加代理都没用；�
 
 - ZIP/CBZ 使用内置 `zipfile-default` profile，成员直接流式写入 CBZ，不需要先全量解压；图片以 `ZIP_STORED` 写入，不重复压缩。
 - RAR、7Z、分卷包和 `zipfile` 无法打开的加密 ZIP 使用 `7zz-default` profile，通过受控子进程调用；主进程不加载第三方 DLL。
-- 7-Zip 不依赖发行版包：服务首次启动时从 `ip7z/7zip` 官方 GitHub Release 拉取固定版本的 `.tar.xz`，校验 SHA-256 后解包到 `data/tools/7zip/<版本>/`，优先使用静态链接的 `7zzs`，因此 slim 镜像无需额外运行库。存档只用 Python 内建 `tarfile` 解开，不存在「解压工具需要解压工具」的自举问题。
+- 7-Zip 不依赖发行版包：服务首次启动时从 `ip7z/7zip` 官方 GitHub Release 拉取固定版本（Linux / macOS 是 `.tar.xz`，Windows 是官方安装包加单文件 `7zr.exe`），校验 SHA-256 后解包到 `data/tools/7zip/<版本>/`——Linux 上优先用静态链接的 `7zzs`，Windows 只发布便携的 `7z.exe` 与同目录 `7z.dll`，不运行安装程序、不读 `PATH`、注册表或 `Program Files`，因此 slim 镜像无需额外运行库。存档只用 Python 内建 `tarfile` 解开，不存在「解压工具需要解压工具」的自举问题。
 - 安装目录按版号隔离且幂等：已有可用二进制时直接复用，校验失败的下载会被丢弃且不影响现有安装。设置 `ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false` 可关闭自动拉取（离线部署），此时可用「设置 → 归档」页的下载按钮、预先运行 `python -m scripts.install_seven_zip --data-path /app/data`，或直接填写宿主自带的 `7zz`/`7z` 路径（PATH 和 Windows 默认安装目录作为回退）。
-- 官方未发布二进制的平台（例如 Windows 开发机）不会尝试下载，页面会说明需要手动填写路径；归档功能在 Linux/Docker 上不受影响。
+- 官方没有对应资产的平台（例如 `linux/riscv64`、Windows ARM32）不会尝试下载，页面会说明需要手动填写路径；Linux、macOS 与 Windows（x86 / x64 / ARM64）都走托管安装。
 - 全量解压前先校验路径穿越、绝对路径、符号链接、嵌套压缩包、成员数、解压大小、异常压缩率、目录层级和图片魔数，任何超限直接失败。
 - **文件头与后缀不一致时按文件头修正，不再让整本失败**：上游用批量转换工具留下的 `.png` 里装着 JPEG 是常见情况，以前一页不符就导致整个压缩包报 `ARCHIVE_MEMBER_FAKE_IMAGE`、两百页一起打不出来。现在只要文件头能被确认是图片（JPEG / PNG / GIF / BMP / WebP），这一页就按**真实格式**的后缀发布。CBZ 里的页名一律由本服务重新生成、从不沿用包内原名，所以这是一次改名而不是转码——为了迁就一个谁都看不到的文件名去重编码只会白掉画质。反过来，**文件头压根不是可识别图片时依旧整包拒绝**（例如 `page.jpg` 里装着可执行文件），魔数门禁没有被放宽。
 - **没有后缀但文件头是图片的成员也算页**：有些上传者把页命名成 `001`、`002`，以前这种包会以「不包含可发布的图片页」失败——明明整包都是图。
@@ -327,7 +329,7 @@ python -m uv run pytest
 docker compose config
 ```
 
-Windows 上无法验证托管的 7-Zip 安装（官方只为 Linux/macOS 发布该形式的二进制），这部分用 Docker 验证（需已启动的 Docker 引擎）：
+托管 7-Zip 的完整验证要在一台**不带 7-Zip 的干净 Linux 容器**里做——下面的脚本会现拉现装；Windows 上的托管安装由测试套件里的安装用例覆盖（注入官方资产，不碰网络），不必另起容器：
 
 ```powershell
 python scripts/verify_docker_linux.py --offline --suite --build
