@@ -4455,4 +4455,10 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 `tests/integration/test_torrent_workflow.py`、`test_downloaded_web.py`、`tests/unit/test_downloaded_api.py`
 （全绿）——即改动涉及的服务与五条路由的全部宿主文件；`compileall` 与 `git diff --check` 通过。
 
-提交 `7d44018`，只提交、不推送（`origin/main` 仍停在 `b559740`）。
+提交 `7d44018`（fix）与 `4cf3016`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:5df0de4a0647371ea5e13fda88acbedba13cd197fe09244b3c5cc3a049f7d24a`，amd64 manifest
+`sha256:2a314c1522ea28db5caf8649eaa63c697bed8482a3e05a95e9aa6730f6011e96`）。**从 registry 验证而不是只信本地构建**：
+`docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；
+在容器里 `inspect.getsource` 确认 `DownloadService` 有 `redownload` 开关、`revive_states` 会把 COMPLETED 一并复活、
+`app/web/routes/candidates.py` 里五个来源路由都传了 `redownload=True`，即 R39 的修复都在镜像里；冒烟容器已清理。
