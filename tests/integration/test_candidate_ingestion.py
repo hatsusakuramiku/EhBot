@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from app.ai.models import AiPathSuggestion
 from app.candidates.ingestor import CandidateIngestor
 from app.db.database import Database
 
@@ -267,6 +268,112 @@ async def test_same_exhentai_gallery_reference_merges_across_chats(
     assert candidates[0].message_count == 2
     assert candidates[0].ex_gid == 67890
     assert candidates[0].title == "Gallery Title"
+
+
+@pytest.mark.asyncio
+async def test_merging_candidates_carries_the_ai_path_suggestion_over(
+    tmp_path: Path,
+) -> None:
+    """The merge deletes the absorbed candidate -- and must not fall over.
+
+    A candidate with an AI path cached used to make that delete raise
+    `FOREIGN KEY constraint failed` (the table had no ON DELETE CASCADE and the
+    merge did not move the row). Because the merge runs inside
+    `save_candidate_message`, which startup calls before it serves anything, the
+    symptom was a service that refused to start. The suggestion now moves to
+    the survivor, so a generation already paid for is kept rather than dropped.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await allow_sources(database, 600)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 301,
+                "message": {
+                    "message_id": 10,
+                    "date": 1_700_003_000,
+                    "chat": {"id": 600, "username": "u"},
+                    "from": {"id": 600},
+                    "caption": "First\nhttps://exhentai.org/g/11111/tokA/",
+                    "photo": [
+                        {
+                            "file_id": "p1",
+                            "file_unique_id": "u1",
+                            "width": 800,
+                            "height": 1200,
+                        }
+                    ],
+                },
+            },
+            {
+                "update_id": 302,
+                "message": {
+                    "message_id": 11,
+                    "date": 1_700_003_010,
+                    "chat": {"id": 600, "username": "u"},
+                    "from": {"id": 600},
+                    "caption": "Second\nhttps://exhentai.org/g/22222/tokB/",
+                    "photo": [
+                        {
+                            "file_id": "p2",
+                            "file_unique_id": "u2",
+                            "width": 800,
+                            "height": 1200,
+                        }
+                    ],
+                },
+            },
+        ]
+    )
+    await CandidateIngestor(database).process_pending_updates()
+    with database.connection() as connection:
+        absorbed = int(
+            connection.execute(
+                "SELECT id FROM candidates WHERE ex_gid = 22222"
+            ).fetchone()[0]
+        )
+    await database.save_ai_path_suggestion(
+        AiPathSuggestion(
+            candidate_id=absorbed,
+            fingerprint="fp",
+            prompt_hash="ph",
+            relative_path="series/book.cbz",
+            directory="series",
+            filename="book",
+            provider_id=None,
+            model_name="m",
+        )
+    )
+    # A reply that joins the first candidate while carrying the second's gallery
+    # id is what makes the two merge into one.
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 303,
+                "message": {
+                    "message_id": 12,
+                    "date": 1_700_003_020,
+                    "chat": {"id": 600, "username": "u"},
+                    "from": {"id": 600},
+                    "text": "extra\nhttps://exhentai.org/g/22222/tokB/",
+                    "reply_to_message": {"message_id": 10},
+                },
+            }
+        ]
+    )
+
+    summary = await CandidateIngestor(database).process_pending_updates()
+
+    assert summary.processed_updates == 1
+    assert summary.failed_updates == 0
+    candidates = await database.list_candidates()
+    assert len(candidates) == 1
+    survivor = candidates[0].candidate_id
+    suggestion = await database.get_ai_path_suggestion(survivor)
+    assert suggestion is not None
+    assert suggestion.relative_path == "series/book.cbz"
+    assert await database.get_ai_path_suggestion(absorbed) is None
 
 
 @pytest.mark.asyncio

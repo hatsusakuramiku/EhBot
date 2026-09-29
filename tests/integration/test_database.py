@@ -167,7 +167,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(telegram_sources)")
         }
 
-    assert migration_count == 20
+    assert migration_count == 21
     assert "last_message_id" in telegram_source_columns
     assert "auto_approval_rules" in tables
     assert {
@@ -389,3 +389,65 @@ async def test_connection_helper_rolls_back_and_still_closes(
             "SELECT COUNT(*) FROM admin_users WHERE username = 'rolled-back'"
         ).fetchone()[0]
     assert stored == 0
+
+
+@pytest.mark.asyncio
+async def test_ai_path_suggestion_cascades_and_survives_its_migration(
+    tmp_path: Path,
+) -> None:
+    """Migration 021 rebuilds `ai_path_suggestions` with ON DELETE CASCADE.
+
+    The old definition had a plain `REFERENCES candidates(id)`, so deleting a
+    candidate that had an AI path cached -- which the ingest merge and the
+    edit-removal path both do -- failed with `FOREIGN KEY constraint failed`.
+    The assertion that matters is the last one: the upgrade keeps the rows it
+    found, because an operator who already paid for an AI path must not lose it
+    to a schema fix.
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with database.connection() as connection:
+        candidate_id = int(
+            connection.execute(
+                "INSERT INTO candidates (status) VALUES ('PENDING_REVIEW')"
+            ).lastrowid
+        )
+        # Rebuild the table the way migration 018 defined it, so this exercises
+        # the upgrade rather than a fresh install, and forget 021 ran.
+        connection.execute("ALTER TABLE ai_path_suggestions RENAME TO sug_new")
+        connection.execute(
+            "CREATE TABLE ai_path_suggestions ("
+            "candidate_id INTEGER PRIMARY KEY REFERENCES candidates(id), "
+            "fingerprint TEXT NOT NULL, prompt_hash TEXT NOT NULL, "
+            "relative_path TEXT NOT NULL, directory TEXT NOT NULL, "
+            "filename TEXT NOT NULL, provider_id INTEGER, "
+            "model_name TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1, "
+            "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO ai_path_suggestions "
+            "(candidate_id, fingerprint, prompt_hash, relative_path, directory, "
+            " filename, model_name) VALUES (?, 'fp', 'ph', 'a/b.cbz', 'a', "
+            "'b', 'm')",
+            (candidate_id,),
+        )
+        connection.execute("DROP TABLE sug_new")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 21")
+
+    await database.initialize()
+
+    with database.connection() as connection:
+        kept = connection.execute(
+            "SELECT fingerprint FROM ai_path_suggestions WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()
+        assert kept == ("fp",)
+        # The cascade is the whole point: this delete used to raise.
+        connection.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM ai_path_suggestions"
+        ).fetchone()[0]
+    assert remaining == 0

@@ -1358,6 +1358,27 @@ class Database:
                         "DELETE FROM metadata_values WHERE candidate_id = ?",
                         (ex_candidate_id,),
                     )
+                    # The AI path cache is keyed by candidate too. Moving it
+                    # keeps a generation that was already paid for when the
+                    # survivor has none of its own; the stored fingerprint is
+                    # what tells a later read whether that suggestion still
+                    # matches the merged metadata, so a stale one is regenerated
+                    # rather than trusted.
+                    connection.execute(
+                        "INSERT OR IGNORE INTO ai_path_suggestions "
+                        "(candidate_id, fingerprint, prompt_hash, relative_path, "
+                        "directory, filename, provider_id, model_name, attempts, "
+                        "created_at, updated_at) "
+                        "SELECT ?, fingerprint, prompt_hash, relative_path, "
+                        "directory, filename, provider_id, model_name, attempts, "
+                        "created_at, updated_at FROM ai_path_suggestions "
+                        "WHERE candidate_id = ?",
+                        (candidate_id, ex_candidate_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM ai_path_suggestions WHERE candidate_id = ?",
+                        (ex_candidate_id,),
+                    )
                     connection.execute(
                         "UPDATE review_actions SET candidate_id = ? "
                         "WHERE candidate_id = ?",

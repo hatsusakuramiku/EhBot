@@ -4532,3 +4532,50 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 `app/candidates/mtproto.parse_user_message` 存在、`ConnectionManager.telegram_available` /
 `_ensure_user_ingest_task` 存在、`schema_migrations` 计到 20、`telegram_sources` 有 `last_message_id` 列；
 冒烟容器与临时数据目录已清理。
+
+## R41 — 合并候选时删除被吸收候选撞外键，导致服务起不来（v0.3.0rc1，2026-09-30）
+
+运营者报「更新后无法启动」：`/` 只回 `{"detail":"Downloads are unavailable"}`，日志里 `application_startup_failed`
+的栈指向 `start() → _ingest_pending() → process_pending_updates() → save_candidate_message()`，
+`sqlite3.IntegrityError: FOREIGN KEY constraint failed`（`database.py` 的 `DELETE FROM candidates WHERE id = ?`）。
+
+**根因：`ai_path_suggestions` 是 `candidates` 的子表里唯一没有 `ON DELETE CASCADE` 的。** 迁移 018 建表时
+写的是 `candidate_id INTEGER PRIMARY KEY REFERENCES candidates(id)`，而 R33 之后启动时用的候选合并路径
+（`_save_candidate_message_sync`：一条消息按回复/媒体组归到候选 A，其画廊 id 又命中候选 B 时，把 B 并进 A）
+在删除被吸收的 B 之前只搬走了 `candidate_messages` / `metadata_values` / `review_actions` / `download_jobs`，
+没有搬 `ai_path_suggestions`。于是只要被吸收的候选**缓存过 AI 路径**，删除就报外键错；这条路径在
+`_ingest_pending()` 里，而它在服务接受第一个请求之前运行，所以症状不是「某个请求 500」而是**整个服务拒绝启动**。
+（同类缺陷还有一处：编辑让某候选的最后一条消息失效时会删除该候选，同样撞这个外键。）
+
+**修法（两层，都是根因而不是绕过）。**
+- 迁移 `021_ai_path_suggestion_cascade.sql`：按 019 的先例重建表，`candidate_id` 改成
+  `REFERENCES candidates(id) ON DELETE CASCADE`，与 `candidate_messages` / `metadata_values` /
+  `work_archive_paths` 一致。SQLite 不能原地改外键，所以是「建新表 → 显式列名搬数据 → 删旧表 → 改名」；
+  数据保留（运营者已经付过费的 AI 路径不能因为一次 schema 修复而丢）。
+- 合并路径里比照 `metadata_values` 的做法把建议行 `INSERT OR IGNORE ... SELECT` 搬到存活候选、再删旧行：
+  cascade 只保证「删得掉」，搬迁保证「合并后还在」。存活候选自己有建议时保留自己的（`OR IGNORE`）；
+  `fingerprint` 决定这条建议是否还匹配合并后的元数据，不匹配会被重新生成，所以搬迁不会把过期答案当权威。
+
+**测试**：`tests/integration/test_candidate_ingestion.py` 新增
+`test_merging_candidates_carries_the_ai_path_suggestion_over`（先给将被吸收的候选塞一条建议，再让回复消息触发合并；
+修前这一步直接抛 IntegrityError）。`tests/integration/test_database.py` 新增
+`test_ai_path_suggestion_cascades_and_survives_its_migration`——把表还原成 018 的旧定义、插一行、删掉
+schema_migrations 里的 21 再 `initialize()`，断言升级后数据还在、且删除候选会级联删除建议；迁移数断言 20 → 21。
+
+**考虑过但没有做**：顺手在 `process_pending_updates` 里按更新粒度吞掉 `sqlite3.Error`，让单条坏更新不至于拖垮启动。
+放弃了——`tests/integration/test_connection_manager.py::test_candidate_storage_failure_sets_visible_connection_error`
+把「存储层出错 → Bot 显示『消息处理失败，将自动重试』」定为契约（`_poll_telegram` 捕 `sqlite3.Error`），
+按更新吞掉会把这条可见的失败信号变成静默；而把更新标成 ERROR 又等于永久跳过它。存储层坏了应当吵，
+这次的问题是数据模型和代码不一致，修在那里才对。
+
+**文档同步**：无用户可见行为变更（`README.md` / `docs/USAGE.md` 不变）；`AgentHelp/AGENTS.md` 基线
+1535 → 1537，`passed` 两个数各 +2 并补 R41 一环。
+
+**验证**（定向，按新规不全量）：`tests/integration/test_database.py`、`tests/integration/test_candidate_ingestion.py`
+（29 passed）、`tests/unit/test_ai_paths.py`、`tests/integration/test_connection_manager.py`、
+`tests/integration/test_candidates_web.py`、`tests/integration/test_review_actions.py`、
+`tests/integration/test_downloads.py`、`tests/unit/test_rearchive.py`、`tests/unit/test_archived_works.py` 全绿。
+另用一段独立脚本复现了修前的崩溃（同样 `database.py:1371` → `FOREIGN KEY constraint failed`），修后同一脚本
+合并成功且建议行搬到存活候选。`compileall` 与 `git diff --check` 通过。**注意**：这一批里
+`test_candidates_web.py::test_quick_approve_returns_to_the_tab_it_was_fired_from` 曾在一次合并运行中偶发失败，
+单独跑与随后两次同样组合连跑都通过，判定为既有 flake（涉及下载 worker 的时序），与本改动无关，未做处理。
