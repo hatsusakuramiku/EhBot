@@ -4571,6 +4571,18 @@ schema_migrations 里的 21 再 `initialize()`，断言升级后数据还在、�
 **文档同步**：无用户可见行为变更（`README.md` / `docs/USAGE.md` 不变）；`AgentHelp/AGENTS.md` 基线
 1535 → 1537，`passed` 两个数各 +2 并补 R41 一环。
 
+提交 `e25f256`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。服务在运营者那边处于
+`{"detail":"Downloads are unavailable"}` 的不可用状态，因此这次**没有再等确认**，修完直接重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:309d34913f7f92b4a68a19abd1eb2d4e1693eadb16f6e6bd6f9b79951bb5ae7b`，amd64 manifest
+`sha256:6cd0ca8798c56aec10ee7f79f6996f49b28b7335d6e0bbca9d16527f28528988`）；`docker pull` 取回同一
+index digest，如不希望直接发版请告知，下次仍走「先问再推」。冒烟容器（`--user 0:0`，可写数据目录）启动成功
+（日志 `Application startup complete`），容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得
+`{"status":"ready"}`；`schema_migrations` 计到 21，`PRAGMA foreign_key_list(ai_path_suggestions)` 的
+`on_delete` 为 `CASCADE`；并在容器内重跑崩溃场景（把建议挂在将被吸收的候选上，再用回复消息触发合并）——
+修前会抛 `FOREIGN KEY constraint failed` 的那一步返回 `processed_updates=1 / failed_updates=0`，建议行落在
+存活候选上；冒烟容器与临时目录已清理。
+
 **验证**（定向，按新规不全量）：`tests/integration/test_database.py`、`tests/integration/test_candidate_ingestion.py`
 （29 passed）、`tests/unit/test_ai_paths.py`、`tests/integration/test_connection_manager.py`、
 `tests/integration/test_candidates_web.py`、`tests/integration/test_review_actions.py`、
