@@ -4397,5 +4397,10 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 **验证**（定向，按新规不全量）：`tests/unit/test_telegram_user.py` +
 `tests/integration/test_telegram_user_web.py` 共 **31 passed**；`compileall` 与 `git diff --check` 通过。
 
-提交 `fe8ff9d`，只提交、不推送（`origin/main` 仍停在 `b559740`）。本轮运营者未要求重建镜像，
-`hsmk/ehbot:latest` 仍是 R37 的 digest，需要时再构建推送。
+提交 `fe8ff9d`（fix）与 `05d3554`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:7133cec000e8f211858db10589e7e2cb4a025e6045dc091fa19fd645eb274d37`，amd64 manifest
+`sha256:a2cbb2bf7f6005b7ec48c34108a693a4769eba0a6cf9c6293dbcf3ce6c72bb6e`）。**从 registry 验证而不是只信本地构建**：
+`docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；
+在容器里 `inspect.getsource(app.connections.telegram_user)` 确认三处修复都在镜像里——`LoginChallenge` 的
+`session` 字段、`sign_in` 的 `session=challenge.session`、`send_code` 的 `client.session.save()`；冒烟容器已清理。
