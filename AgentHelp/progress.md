@@ -4404,3 +4404,55 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 `docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；
 在容器里 `inspect.getsource(app.connections.telegram_user)` 确认三处修复都在镜像里——`LoginChallenge` 的
 `session` 字段、`sign_in` 的 `session=challenge.session`、`send_code` 的 `client.session.save()`；冒烟容器已清理。
+
+## R39 — 旧 EH 失败作品重试仍不成功：来源按钮对已完成的下载是空操作（v0.3.0rc1，2026-09-29）
+
+运营者报「之前修复更新后，旧的 EH 归档失败作品再尝试归档还是无法成功」，并自己给了两个候选解释：
+解析问题，还是「检测到已存在就不重新下载了」。先把解析侧排除：R37 的修复（href 优先、排除标签链接、
+`html.unescape`、`_require_zip`）在 R37 交付时已经从镜像内验证过，本轮再读一遍路径也确认
+`request_archive_url` 只在页面里根本没有原档链接时才抛 `EXHENTAI_ARCHIVE_LINK`——运营者那件作品早就留下过
+下载产物，所以**不是解析问题**。答案落在后一半，而且有两处「已存在就不再下载」：
+
+**一、失败作品的任务行是 COMPLETED，不是 FAILED。** 旧下载器把 ExHentai 的搜索结果页原样写进
+`gallery-<gid>.zip` 后**正常返回**：`download_archive_for_candidate` 登记产物、`_run_delegated_provider`
+把任务标成 COMPLETED、候选进 DOWNLOADED。失败发生在之后的打包阶段（`detect_source_format` 认不出
+那份「ZIP」）。于是这个作品在两个维度上分叉：任务行是「下载完成」，作品却是「打包失败」。
+
+**二、两条重试路径都不会重新下载。**
+- **「重新打包」** 只重排 `convert:{id}` 任务，打包读的仍是 `artifacts` 里那条 ARCHIVE 记录——也就是那份网页。
+  每次重打都在读同一个坏文件，因此错误一模一样。
+- **「用 Archive Download 取原档」** 走 `DownloadService._enqueue`，而它的去重 upsert 只在
+  **FAILED / CANCELLED** 时把旧行退回 `PENDING`；COMPLETED 被**故意**留着（注释写明这是
+  `redownload_work` 的活），于是这次按下去什么都没排：303 回详情页，队列没动、GP 也没花，页面看起来
+  「按了没反应」。这正是运营者猜的「检测到已存在就不重新下载」。
+- 注：`/downloaded` 页的「重新下载」走的是 `redownload_work`，它会重置 COMPLETED 行，是当时唯一能救的入口；
+  但作品详情页——也就是「重新打包」所在的页——没有任何重抓按钮，失败作品的自然重试位置是个死胡同。
+- R37 那句「链接认错」只修了「下一次下载怎么认」，改不了「这一次压根不会再有下一次下载」。
+
+**修法：来源按钮表达的是「再取一次这个来源」，`redownload=True`。**
+- `DownloadService._enqueue` / `_enqueue_sync` 增加 `redownload` 开关：为真时把 `COMPLETED` 也加入可复活状态，
+  旧行退回 `PENDING`（同一个 `idempotency_key`，一次任务一条历史）；默认仍只复活 FAILED / CANCELLED。
+  进行中的状态（PENDING / DOWNLOADING / WAITING_TORRENT）保持不动——worker 正持有它们，重排会把同一份传输发两次。
+- 五个 `enqueue_*_download` 全部透传该参数；`app/web/routes/candidates.py` 里五个**操作者按钮路由**
+  （telegram / telegram-user / exhentai-archive / telegraph / torrent）传 `redownload=True`。
+- 自动选路（`review/orchestration.py`、`switch_source`）**保持默认**：无人值守时不会悄悄再花 GP 或再下一次；
+  `switch_source` 本来就先 cancel（→ CANCELLED）再入队，行为不变。
+- 重抓成功后同一条 artifacts 记录被 upsert 成新文件与新 sha256，自动打包（若开启）随即重排 `convert:{id}`，
+  失败的打包任务本来就会被重排回 `PENDING`，于是「按一次来源按钮 → 重抓 → 重打包」闭环。
+
+**测试**：`tests/integration/test_downloads.py` 新增
+`test_an_explicit_source_press_refetches_a_completed_job`（服务层：默认入队保持 COMPLETED，`redownload=True`
+退回 PENDING 且不新建任务行）；`tests/integration/test_work_detail_web.py` 新增
+`test_pressing_the_archive_button_refetches_a_completed_download`（路由层：给作品插一条 COMPLETED 的
+`exhentai:{id}` 任务行，POST `/candidates/{id}/exhentai-archive` 后该行不再是 COMPLETED——worker 可能抢先领取，
+那是重试真的发生了，不是空操作）。
+
+**文档同步**：`docs/USAGE.md` 「下载来源与降级链路」新增一条（来源按钮按下去就是再取一次、自动选路不做、
+以及它正是旧失败作品的修复入口）；`AgentHelp/AGENTS.md` 基线 1513 → 1515，`passed` 两个数同步 +2。
+
+**验证**（定向，按新规不全量）：`tests/integration/test_downloads.py`、`test_work_detail_web.py`、
+`tests/unit/test_work_detail.py`、`test_telegraph_workflow.py`（130 passed）与
+`tests/integration/test_torrent_workflow.py`、`test_downloaded_web.py`、`tests/unit/test_downloaded_api.py`
+（全绿）——即改动涉及的服务与五条路由的全部宿主文件；`compileall` 与 `git diff --check` 通过。
+
+提交 `7d44018`，只提交、不推送（`origin/main` 仍停在 `b559740`）。
