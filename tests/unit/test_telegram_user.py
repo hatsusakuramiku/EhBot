@@ -189,6 +189,38 @@ class TestLogin:
         assert fake.disconnected
 
     @pytest.mark.asyncio
+    async def test_the_code_is_completed_on_the_session_that_requested_it(
+        self,
+    ) -> None:
+        """Telegram issues the code against an auth key, so sign-in must reuse it.
+
+        Opening a fresh session for the second half of the exchange is what
+        makes a correct, seconds-old code come back as 「验证码已过期」.
+        """
+        fake = FakeClient()
+        sessions: list[str | None] = []
+
+        def factory(api_id: int, api_hash: str, session: str | None):
+            sessions.append(session)
+            return fake
+
+        client = TelegramUserClient(
+            TelegramUserCredentials(api_id=1234567, api_hash="a" * 32),
+            None,
+            client_factory=factory,
+        )
+        challenge = await client.send_code("+8613800138000")
+
+        assert challenge.session == "stored-session-string"
+        # The socket is still dropped between steps; only the auth key is kept.
+        assert fake.disconnected
+
+        await client.sign_in(challenge, code="12345")
+
+        assert sessions[0] is None
+        assert sessions[-1] == "stored-session-string"
+
+    @pytest.mark.asyncio
     async def test_sign_in_returns_the_session_and_the_identity(self) -> None:
         fake = FakeClient()
         challenge = LoginChallenge(phone="+8613800138000", phone_code_hash="h")

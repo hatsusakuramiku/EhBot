@@ -69,11 +69,19 @@ class LoginChallenge:
     `phone_code_hash` is Telegram's handle for the code it just sent. It is
     carried in memory rather than persisted: a challenge that outlives the
     process is one an operator cannot complete anyway, because the code expires.
+
+    `session` is the string session -- the auth key -- the code was requested
+    through, and the sign-in has to happen on it. Telegram issues the code
+    against that key, so completing the login on a fresh one comes back as
+    `PHONE_CODE_EXPIRED` even when the code is correct and seconds old, which
+    reads as "the code expired" and sends the operator to fetch a new code that
+    fails the same way.
     """
 
     phone: str
     phone_code_hash: str
     requires_password: bool = False
+    session: str | None = None
 
 
 class TelegramUserError(ProviderConnectionError):
@@ -167,15 +175,15 @@ class TelegramUserClient:
         self._session = session
         self._client_factory = client_factory or _client_factory_default
 
-    def _build(self) -> Any:
+    def _build(self, session: str | None = None) -> Any:
         return self._client_factory(
             self._credentials.api_id,
             self._credentials.api_hash,
-            self._session,
+            self._session if session is None else session,
         )
 
-    async def _connect(self) -> Any:
-        client = self._build()
+    async def _connect(self, session: str | None = None) -> Any:
+        client = self._build(session)
         try:
             await client.connect()
         except Exception as exc:  # noqa: BLE001 - provider boundary
@@ -208,12 +216,18 @@ class TelegramUserClient:
         client = await self._connect()
         try:
             sent = await client.send_code_request(cleaned)
+            # Kept before the socket closes: closing is fine, but the auth key
+            # the code belongs to has to outlive it, or the sign-in is a
+            # different session and Telegram reports the code as expired.
+            session = client.session.save() or None
         except Exception as exc:  # noqa: BLE001 - provider boundary
             raise _translate(exc) from exc
         finally:
             await self._close(client)
         return LoginChallenge(
-            phone=cleaned, phone_code_hash=str(sent.phone_code_hash)
+            phone=cleaned,
+            phone_code_hash=str(sent.phone_code_hash),
+            session=session,
         )
 
     async def sign_in(
@@ -228,8 +242,13 @@ class TelegramUserClient:
         The session string is returned rather than stored: this class has no
         access to the credential store on purpose, so the only place a session
         is written is the connection manager, next to every other secret.
+
+        The challenge's session is reused rather than opened fresh: the code
+        belongs to the auth key that requested it, so a new one turns a correct
+        code into `PHONE_CODE_EXPIRED`. The 2FA password step needs the same
+        session, which is why the challenge keeps it across both submissions.
         """
-        client = await self._connect()
+        client = await self._connect(session=challenge.session)
         try:
             if password:
                 await client.sign_in(password=password)
