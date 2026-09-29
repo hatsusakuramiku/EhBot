@@ -55,7 +55,11 @@ from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.logging import apply_runtime_log_level
 from app.review.orchestration import ReviewOrchestrator
 from app.secrets import SecretStore
-from app.settings.service import DEFAULT_TIMEZONE, SystemSettingsService
+from app.settings.service import (
+    DEFAULT_DOWNLOAD_SOURCE_PRIORITY,
+    DEFAULT_TIMEZONE,
+    SystemSettingsService,
+)
 from app.storage.readiness import ensure_writable_directory
 from app.telegraph.fetcher import FetchLimits
 from app.telegraph.guard import check_image_url
@@ -86,6 +90,21 @@ def _required(application: FastAPI, name: str, detail: str):
     if service is None:
         raise HTTPException(status_code=503, detail=detail)
     return service
+
+
+def _source_priority(application: FastAPI) -> tuple[str, ...]:
+    """The operator's download-source order, or the default.
+
+    Synchronous because the router reads it inside a routing decision, so the
+    stored value is cached on `application.state` -- seeded here, replaced once
+    the database is open, and refreshed whenever the 系统 form saves it. Any
+    value that is missing or empty falls back to the default order: a fresh
+    install, or a state that never got that far, must still route somewhere.
+    """
+    cached = getattr(application.state, "download_source_priority", None)
+    if not cached:
+        return DEFAULT_DOWNLOAD_SOURCE_PRIORITY
+    return tuple(cached)
 
 
 async def _telegram_context(secret_store, default_client):
@@ -165,6 +184,9 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     # after a startup that failed -- still has a zone to format in. The stored
     # value replaces it once the database is open.
     app.state.display_timezone = DEFAULT_TIMEZONE
+    # Seeded like the timezone above, for the same reason: a routing decision can
+    # be made before the lifespan reads the stored order.
+    app.state.download_source_priority = DEFAULT_DOWNLOAD_SOURCE_PRIORITY
     app.state.startup_errors = []
     app.state.connection_manager = None
     app.state.download_service = None
@@ -200,6 +222,16 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
             app.state.connection_manager is not None
             and app.state.connection_manager.user_download_available()
         ),
+        # Whether the Bot API may be handed a job. Read per routing decision
+        # like the others: a token revoked an hour ago has to stop new jobs
+        # from being queued at a bot that will only refuse them.
+        telegram_available=lambda: bool(
+            app.state.connection_manager is not None
+            and app.state.connection_manager.telegram_available()
+        ),
+        # The operator's order, read per decision so a save applies to the next
+        # approval without a restart.
+        download_source_priority=lambda: _source_priority(app),
     )
 
 
@@ -287,6 +319,9 @@ def build_lifespan(
             # refreshed whenever the 系统 form saves it.
             application.state.display_timezone = (
                 await application.state.system_settings_service.timezone()
+            )
+            application.state.download_source_priority = (
+                await application.state.system_settings_service.download_source_priority()
             )
             admin_auth = await database.get_admin_auth("admin")
             if admin_auth is None or not admin_auth[1]:

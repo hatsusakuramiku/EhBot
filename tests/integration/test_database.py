@@ -163,8 +163,12 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
                 "SELECT name FROM sqlite_master WHERE type = 'index'"
             )
         }
+        telegram_source_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(telegram_sources)")
+        }
 
-    assert migration_count == 19
+    assert migration_count == 20
+    assert "last_message_id" in telegram_source_columns
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",

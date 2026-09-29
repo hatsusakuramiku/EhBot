@@ -45,6 +45,7 @@ from app.api.serializers import (
     tool_profile,
 )
 from app.api.status import (
+    PROVIDER_STATUS,
     SETTINGS_AI,
     LOG_LEVELS,
     SETTINGS_ARCHIVE,
@@ -60,6 +61,7 @@ from app.api.status import (
     settings_section_view,
 )
 from app.ai.prompt import DEFAULT_AI_PROMPT
+from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 from app.archive.service import (
     MAX_AI_BATCH_SIZE,
     MAX_AI_CONCURRENCY,
@@ -499,6 +501,20 @@ async def _system_section(request: Request) -> dict[str, Any]:
     system = await service.snapshot()
     return {
         "system": system,
+        # One row per source the router may use, with the rank it currently
+        # holds. Rendered from the service's own order rather than from a list
+        # written in the template, so a source added to the vocabulary shows up
+        # here without a second edit -- and `PROVIDER_STATUS` supplies the label
+        # so the page cannot drift from what the queue calls the same provider.
+        "download_sources": [
+            {
+                "code": code,
+                "label": PROVIDER_STATUS[code].label,
+                "rank": index + 1,
+            }
+            for index, code in enumerate(system["download_source_priority"])
+        ],
+        "download_source_ranks": list(range(1, len(AUTO_DOWNLOAD_PROVIDERS) + 1)),
         "bounds": {
             "poll_interval_ms": {
                 "minimum": MIN_POLL_INTERVAL_MS,

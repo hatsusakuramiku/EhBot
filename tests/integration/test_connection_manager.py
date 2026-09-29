@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 
@@ -6,7 +7,12 @@ import httpx
 import pytest
 
 from app.candidates.ingestor import CandidateIngestor
-from app.connections.manager import ConnectionManager
+from app.connections.manager import (
+    TELEGRAM_USER_API_SECRET,
+    TELEGRAM_USER_SESSION_SECRET,
+    ConnectionManager,
+)
+from app.connections.models import TelegramUserAccount
 from app.connections.exhentai import ExHentaiCredentials
 from app.db.database import Database
 from app.secrets import SecretStore
@@ -387,3 +393,188 @@ async def test_candidate_storage_failure_sets_visible_connection_error(
 
     assert snapshot.telegram.state == "error"
     assert snapshot.telegram.error == "消息处理失败，将自动重试"
+
+
+class FakeUserDocument:
+    def __init__(self, *, id: int = 7, size: int = 4096) -> None:
+        self.id = id
+        self.size = size
+        self.mime_type = "application/zip"
+
+
+class FakeUserMessageFile:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.size = 4096
+
+
+class FakeUserMessage:
+    """A Telethon message, reduced to the fields the translator reads."""
+
+    def __init__(self, *, id: int, chat_id: int = -100123, caption: str = "A Book") -> None:
+        self.id = id
+        self.chat_id = chat_id
+        self.message = caption
+        self.entities: list = []
+        self.document = FakeUserDocument()
+        self.photo = None
+        self.file = FakeUserMessageFile("book.zip")
+        self.grouped_id = None
+        self.reply_to_msg_id = None
+        self.sender_id = 55
+        self.date = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+        self.chat = None
+
+
+class FakeUserClient:
+    """A Telethon client, reduced to the calls the ingester makes.
+
+    Faked at the Telethon seam rather than at `TelegramUserClient`: the client
+    methods under test (`fetch_channel_messages`, `latest_message_id`) are the
+    translation layer, and a fake above them would skip the code being tested.
+    """
+
+    def __init__(self, messages: list[FakeUserMessage]) -> None:
+        self.messages = sorted(messages, key=lambda item: item.id)
+        self.latest_calls: list[int] = []
+
+    async def connect(self) -> None:
+        return None
+
+    def disconnect(self) -> None:
+        return None
+
+    async def get_entity(self, chat_id: int) -> int:
+        return chat_id
+
+    async def iter_messages(
+        self, entity: int, *, min_id=None, limit=None, reverse=False
+    ):
+        # Telethon's own contract: `min_id` is exclusive, `reverse` yields
+        # oldest-first, and the default order is newest-first.
+        self.latest_calls.append(entity)
+        found = [
+            item
+            for item in self.messages
+            if item.chat_id == entity and (min_id is None or item.id > min_id)
+        ]
+        found.sort(key=lambda item: item.id, reverse=not reverse)
+        if limit is not None:
+            found = found[:limit]
+        for item in found:
+            yield item
+
+
+async def user_ingest_manager(
+    tmp_path: Path,
+    messages: list[FakeUserMessage],
+    *,
+    enable_source: bool = True,
+) -> tuple[ConnectionManager, Database, FakeUserClient]:
+    """A manager whose user account is logged in and can read one channel."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    if enable_source:
+        await database.configure_telegram_source(
+            source_type="CHANNEL",
+            chat_id=-100123,
+            display_name="Fixture Channel",
+            enabled=True,
+            allowed_archive_formats=("zip", "rar", "7z", "cbz"),
+            max_attachment_size_mb=0,
+        )
+    store = SecretStore(tmp_path / "private")
+    store.write(TELEGRAM_USER_API_SECRET, f"1234567:{'a' * 32}")
+    store.write(TELEGRAM_USER_SESSION_SECRET, "stored-session-string")
+    client = FakeUserClient(messages)
+    manager = ConnectionManager(
+        store,
+        database,
+        telegram_client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"ok": True, "result": []})
+            )
+        ),
+        candidate_ingestor=CandidateIngestor(database),
+        user_client_factory=lambda api_id, api_hash, session: client,
+    )
+    manager._telegram_user = TelegramUserAccount(
+        state="connected", configured=True, identity="@operator"
+    )
+    return manager, database, client
+
+
+@pytest.mark.asyncio
+async def test_the_user_account_ingests_new_channel_messages(
+    tmp_path: Path,
+) -> None:
+    """No bot, and works still arrive: the account reads the channel itself."""
+    manager, database, client = await user_ingest_manager(
+        tmp_path,
+        [FakeUserMessage(id=11), FakeUserMessage(id=12, caption="Second Book")],
+    )
+    # A cursor from an earlier pass over this chat: message 11 is done.
+    await database.set_source_cursor(-100123, 11)
+
+    created = await manager._ingest_with_user_account()
+
+    assert created == 1
+    candidates = await database.list_candidates()
+    assert [candidate.candidate_id for candidate in candidates] != []
+    detail = await database.get_candidate(candidates[0].candidate_id)
+    attachment = detail.messages[0].attachments[0]
+    assert attachment["type"] == "archive"
+    assert attachment["chat_id"] == -100123
+    assert attachment["message_id"] == 12
+    # No Bot API id: the attachment came in over MTProto, and the bot route
+    # reads that as 「not fetchable through me」 rather than trying anyway.
+    assert attachment["file_id"] == ""
+    # The cursor moved past the batch, so the next pass is a no-op -- the
+    # database's unique key is the real guard, and this keeps the poll cheap.
+    assert (await database.telegram_ingest_targets())[0]["cursor"] == 12
+    assert await manager._ingest_with_user_account() == 0
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_first_poll_seeds_the_cursor_instead_of_walking_the_archive(
+    tmp_path: Path,
+) -> None:
+    """Enabling a source must not turn years of history into candidates."""
+    manager, database, client = await user_ingest_manager(
+        tmp_path,
+        [FakeUserMessage(id=1), FakeUserMessage(id=2), FakeUserMessage(id=3)],
+    )
+
+    assert await manager._ingest_with_user_account() == 0
+    # The newest message was listed once, to seed the cursor at it.
+    assert client.latest_calls == [-100123]
+    assert (await database.telegram_ingest_targets())[0]["cursor"] == 3
+    assert await database.list_candidates() == []
+
+    # From the seeded cursor on, new messages are ingested normally.
+    client.messages.append(FakeUserMessage(id=4, caption="New Book"))
+    assert await manager._ingest_with_user_account() == 1
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_message_both_paths_saw_produces_one_candidate(
+    tmp_path: Path,
+) -> None:
+    """Bot and account may both read the same post; it is still one work."""
+    manager, database, client = await user_ingest_manager(
+        tmp_path, [FakeUserMessage(id=21)]
+    )
+    await database.set_source_cursor(-100123, 20)
+
+    assert await manager._ingest_with_user_account() == 1
+    # The bot reading the identical message afterwards: same account, chat and
+    # message id, so the shared unique key answers "already seen".
+    from app.candidates.mtproto import parse_user_message
+
+    again = parse_user_message(FakeUserMessage(id=21))
+    assert again is not None
+    assert await database.save_candidate_message(None, again) is False
+    assert len(await database.list_candidates()) == 1
+    await manager.stop()

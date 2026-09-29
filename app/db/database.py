@@ -756,6 +756,65 @@ class Database:
             ).fetchall()
         return [self._source_from_row(row) for row in rows]
 
+    async def telegram_ingest_targets(self) -> list[dict]:
+        """The enabled sources the MTProto ingester should read, with cursors.
+
+        One row per source, each carrying the id to resume after: the greater of
+        the stored cursor and the newest message already in `source_messages`.
+        The second half matters when both ingest paths run -- the bot may have
+        ingested messages the user account never listed, and a cursor that
+        ignored them would make the account re-read, and then discard, every one
+        of them on each poll.
+
+        `0` means 「nothing has ever been ingested from this chat」, which the
+        caller resolves by seeding the cursor at the newest message rather than
+        walking the archive.
+        """
+        return await asyncio.to_thread(self._telegram_ingest_targets_sync)
+
+    def _telegram_ingest_targets_sync(self) -> list[dict]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT ts.chat_id, ts.display_name, "
+                "MAX(COALESCE(ts.last_message_id, 0), "
+                "    COALESCE((SELECT MAX(sm.message_id) FROM source_messages sm "
+                "              WHERE sm.account_id = ts.account_id "
+                "              AND sm.chat_id = ts.chat_id), 0)) "
+                "FROM telegram_sources ts "
+                "JOIN telegram_accounts ta ON ta.id = ts.account_id "
+                "WHERE ta.session_path = 'bot-api://configured' "
+                "AND ts.enabled = 1 "
+                "ORDER BY ts.id"
+            ).fetchall()
+        return [
+            {
+                "chat_id": int(row[0]),
+                "display_name": str(row[1]),
+                "cursor": int(row[2] or 0),
+            }
+            for row in rows
+        ]
+
+    async def set_source_cursor(self, chat_id: int, message_id: int) -> None:
+        """Remember how far the MTProto ingester has read one chat.
+
+        Written after a batch, never per message: a poll that failed halfway
+        must re-read the messages it never got to, and the unique key on
+        `source_messages` is what keeps the re-read from duplicating anything.
+        """
+        await asyncio.to_thread(
+            self._set_source_cursor_sync, chat_id, message_id
+        )
+
+    def _set_source_cursor_sync(self, chat_id: int, message_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE telegram_sources "
+                "SET last_message_id = MAX(COALESCE(last_message_id, 0), ?) "
+                "WHERE chat_id = ? AND COALESCE(last_message_id, 0) < ?",
+                (int(message_id), int(chat_id), int(message_id)),
+            )
+
     async def discover_telegram_source(
         self, message: ParsedSourceMessage
     ) -> TelegramSourceConfig:
@@ -1092,14 +1151,14 @@ class Database:
                 )
 
     async def save_candidate_message(
-        self, update_id: int, message: ParsedSourceMessage
+        self, update_id: int | None, message: ParsedSourceMessage
     ) -> bool:
         return await asyncio.to_thread(
             self._save_candidate_message_sync, update_id, message
         )
 
     def _save_candidate_message_sync(
-        self, update_id: int, message: ParsedSourceMessage
+        self, update_id: int | None, message: ParsedSourceMessage
     ) -> bool:
         with self.connection() as connection:
             account_id = self._ensure_bot_account(connection)

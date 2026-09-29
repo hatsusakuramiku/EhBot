@@ -1,5 +1,6 @@
 {#
-  系统 tab: 主题、密度、并发上限、轮询间隔、时区.
+  系统 tab: 主题、密度、并发上限、轮询间隔、自动审批扫描间隔、下载来源优先级、
+  时区、日志等级.
 
   The tab has two halves that behave differently on purpose.
 
@@ -10,8 +11,9 @@
   two controls are the topbar's own segmented buttons, and this section only says
   where they live -- it does not render a second pair that could disagree.
 
-  并发上限, 轮询间隔 and 时区 are server state, read per job through a provider
-  callable, so a save takes effect on the next task and nothing restarts. The
+  并发上限, 轮询间隔, 自动审批扫描间隔, 下载来源优先级 and 时区 are server
+  state, read per job through a provider callable, so a save takes effect on the
+  next task and nothing restarts. The
   bounds in the `min`/`max` attributes come from the same constants the service
   clamps with, so the form cannot offer a value the service would reject.
 
@@ -105,6 +107,28 @@
             {%- if not system.timezone_overridden %} 当前为默认值。{% endif %}
           </small>
         </div>
+        <fieldset class="ui-field" style="border: 0; padding: 0; margin: 0">
+          <legend>下载来源优先级</legend>
+          <small style="display: block; margin-bottom: var(--s-2)">
+            自动选路按这个顺序尝试；不可用（没有该来源的数据、服务未配置、会话断开）的直接跳过。
+            EH 归档不在其中：它会消耗 GP，始终只在作品详情页手动使用。
+            {%- if not system.download_source_priority_overridden %} 当前为默认值。{% endif %}
+          </small>
+          {% for source in download_sources %}
+          <div class="ui-field" style="margin-bottom: var(--s-2)">
+            <label for="sys-source-{{ source.code }}">{{ source.label }}</label>
+            <select class="ui-select" id="sys-source-{{ source.code }}"
+                    name="priority_{{ source.code }}">
+              {% for rank in download_source_ranks %}
+              <option value="{{ rank }}"{% if rank == source.rank %} selected{% endif %}>
+                第 {{ rank }} 顺位
+              </option>
+              {% endfor %}
+            </select>
+          </div>
+          {% endfor %}
+          <small>每个来源各选一个顺位，不能重复；Bot 只有在收到过消息（附件带有 file_id）时才会被选中。</small>
+        </fieldset>
         <div class="ui-form-actions">
           <button class="ui-btn" data-variant="primary" type="submit">保存运行参数</button>
         </div>

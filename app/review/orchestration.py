@@ -20,6 +20,7 @@ import logging
 
 from app.auto_approval.service import AutomaticApprovalService
 from app.downloads.models import (
+    AUTO_DOWNLOAD_PROVIDERS,
     PROVIDER_EH_TORRENT,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
@@ -72,6 +73,8 @@ class ReviewOrchestrator:
         torrent_available: Callable[[], bool],
         telegraph_available: Callable[[], bool],
         telegram_user_available: Callable[[], bool] | None = None,
+        telegram_available: Callable[[], bool] | None = None,
+        download_source_priority: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         self._database = database
         self._download_service = download_service
@@ -83,23 +86,46 @@ class ReviewOrchestrator:
         self._telegram_user_available = (
             telegram_user_available if telegram_user_available else lambda: False
         )
+        # Defaulted to 「available」 rather than to False: a caller that never
+        # wires the bot's health is every test and every embedding that only
+        # cares about the other three sources, and refusing to route to the bot
+        # for them would be a silent behaviour change dressed as a safety check.
+        self._telegram_available = (
+            telegram_available if telegram_available else lambda: True
+        )
+        self._download_source_priority = (
+            download_source_priority
+            if download_source_priority
+            else lambda: AUTO_DOWNLOAD_PROVIDERS
+        )
 
     def _review_service(self) -> ReviewService:
         return ReviewService(self._database)
 
     def route_source(self, candidate) -> RoutedSource:
-        """Pick the best available source for a candidate.
+        """Pick the first usable source in the operator's configured order.
 
-        1. `TELEGRAM` -- the uploader's own archive over the Bot API: original
-           quality, free, and no extra credential, but only up to 20 MB.
-        2. `TELEGRAM_USER` -- the *same* archive over MTProto, when a user
-           account is logged in. Preferred over the torrent for an oversized
-           book: it is the identical file the uploader posted, needs no swarm,
-           and cannot stall on peers.
-        3. `EH_TORRENT` -- original quality and free, whenever gdata reported a
-           torrent and a client is configured.
-        4. `TELEGRAPH` -- the preview page: complete, but re-encoded to 1280 px
-           and therefore a fraction of the original bytes. Last resort.
+        The order is a preference, not a guarantee: each provider is asked
+        whether it *can* serve this particular candidate, and a provider that
+        cannot is skipped rather than reported as the answer. That is what makes
+        the same list work for a book with an attachment and a book that only
+        has a preview link -- and what lets a deployment with a broken bot fall
+        through to the user account instead of queueing a job that can only
+        fail.
+
+        The four eligibilities, all cheap reads of data already on the
+        candidate:
+
+        * `TELEGRAM` -- some archive attachment is at or under the Bot API
+          ceiling *and* carries a `file_id`. Only the bot mints those, so an
+          attachment ingested over MTProto (or one predating a removed token)
+          is not something this route can fetch.
+        * `TELEGRAM_USER` -- any archive attachment, because MTProto re-reads
+          the message by `(chat_id, message_id)` and has no ceiling. It also
+          needs the stored session to be valid right now, which is the one
+          thing the connection manager tracks.
+        * `EH_TORRENT` -- gdata reported a torrent and a client is configured.
+        * `TELEGRAPH` -- the message carried a preview page.
         """
         archives = [
             item
@@ -107,26 +133,40 @@ class ReviewOrchestrator:
             for item in message.attachments
             if item.get("type") == "archive"
         ]
-        attachment = next(
+        for provider in self._download_source_priority():
+            if provider == PROVIDER_TELEGRAM:
+                attachment = self._bot_fetchable_attachment(archives)
+                if attachment is not None and self._telegram_available():
+                    return RoutedSource(PROVIDER_TELEGRAM, attachment)
+            elif provider == PROVIDER_TELEGRAM_USER:
+                if archives and self._telegram_user_available():
+                    return RoutedSource(PROVIDER_TELEGRAM_USER, archives[0])
+            elif provider == PROVIDER_EH_TORRENT:
+                if candidate.torrent_hash and self._torrent_available():
+                    return RoutedSource(PROVIDER_EH_TORRENT)
+            elif provider == PROVIDER_TELEGRAPH:
+                if candidate.preview_url and self._telegraph_available():
+                    return RoutedSource(PROVIDER_TELEGRAPH)
+        return RoutedSource(None)
+
+    @staticmethod
+    def _bot_fetchable_attachment(archives: list[dict]) -> dict | None:
+        """The attachment the Bot API could actually download, if any.
+
+        Two conditions, both required: under the 20 MB ceiling, and carrying a
+        `file_id`. The id is the stricter of the two -- it exists only on
+        attachments the Bot API itself reported, so an MTProto-only deployment
+        can never route to a provider it does not have.
+        """
+        return next(
             (
                 item
                 for item in archives
-                if int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
+                if item.get("file_id")
+                and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
             ),
             None,
         )
-        if attachment is not None:
-            return RoutedSource(PROVIDER_TELEGRAM, attachment)
-        # Above the Bot API ceiling the bytes are still right there in the
-        # channel; only the protocol was the problem. An oversized attachment
-        # therefore stops being the reason to fall back to a re-encode.
-        if archives and self._telegram_user_available():
-            return RoutedSource(PROVIDER_TELEGRAM_USER, archives[0])
-        if candidate.torrent_hash and self._torrent_available():
-            return RoutedSource(PROVIDER_EH_TORRENT)
-        if candidate.preview_url and self._telegraph_available():
-            return RoutedSource(PROVIDER_TELEGRAPH)
-        return RoutedSource(None)
 
     async def _load_reviewable(self, candidate_id: int):
         """Fetch a candidate and assert it is in a reviewable state."""

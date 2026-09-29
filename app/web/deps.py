@@ -220,6 +220,18 @@ async def refresh_display_timezone(request: Request) -> str:
     return zone
 
 
+async def refresh_download_source_priority(request: Request) -> tuple[str, ...]:
+    """Re-cache the order the router tries download sources in.
+
+    Cached for the reason the display zone is: `route_source` is synchronous, so
+    it reads `app.state` rather than the database. Refreshed on startup and after
+    the 系统 form saves, which together are every moment the value can change.
+    """
+    priority = await system_settings_service(request).download_source_priority()
+    request.app.state.download_source_priority = priority
+    return priority
+
+
 def int_param(raw: str | None) -> int | None:
     """A query-string integer, or None when it is absent or junk.
 
@@ -309,6 +321,7 @@ __all__ = [
     "page_layout",
     "query_href",
     "refresh_display_timezone",
+    "refresh_download_source_priority",
     "require_authenticated",
     "review_orchestrator",
     "review_service",

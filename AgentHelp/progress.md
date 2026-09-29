@@ -4462,3 +4462,62 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 `docker pull` 取回同一 digest，容器内 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；
 在容器里 `inspect.getsource` 确认 `DownloadService` 有 `redownload` 开关、`revive_states` 会把 COMPLETED 一并复活、
 `app/web/routes/candidates.py` 里五个来源路由都传了 `redownload=True`，即 R39 的修复都在镜像里；冒烟容器已清理。
+
+## R40 — 仅登录 TG 账户也能自动摄取；下载来源优先级可配置（v0.3.0rc1，2026-09-29）
+
+运营者要求：**只登录 TG 用户账户、完全不开 Bot 时也要能自动添加作品**；消息带附件时优先用账户下载；Bot 与
+账户同时配置时要并发去重；在设置页给一个用户可配置的「下载途径优先级」；并补上此前发现的缺口——Bot 进入
+「连接异常」后，20 MB 以内的附件不会改走账户。
+
+**一、账户侧自己读频道（此前只有 Bot 会收消息）。**
+- `app/candidates/mtproto.py`（新）：把一条 Telethon 消息翻译成 Bot API 形状的 `ParsedSourceMessage`
+  （标题、画廊链接、预览页、附件、回复链、媒体组、图片尺寸），走同一套 `CandidateIngestor` 下游与来源规则。
+  它与 Bot 解析器有两处刻意的差别：附件 `file_id` 留空（Bot 铸的 id 在 MTProto 下无法解析），
+  `file_unique_id` 加 `mtproto:` 前缀（不可能与 Bot 的 unique id 撞车）。
+- `ConnectionManager`：账户登录成功后起一个 `telegram-user-ingest` 任务，每 10 s 读一次已启用来源
+  （`telegram_ingest_targets()`，批次 100 条），逐条翻译、跑来源规则、`save_candidate_message`，最后
+  `_notify_ingested()` 让自动审批规则照常接手。断开账户即取消该任务；Bot 收消息不受影响，两者可同时运行。
+- **首次轮询只播种游标，不回扫历史**（新列 `telegram_sources.last_message_id`，迁移 `020_source_cursor.sql`）：
+  一个刚加进来的频道不会把几年历史一次性灌进待审核队列（与 Bot 加入频道后只收到新消息一致）。补历史作品只能走「手动添加」。
+- **并发去重**：两条路径都写 `save_candidate_message`，靠 `(account_id, chat_id, message_id)` 唯一键——
+  同一条消息被两边读到，第二次是空操作。两条路径都挂在同一个 bot 账户行上（`bot-api://configured`），
+  因此运营者在「来源」页启用的频道两路共用。
+
+**二、自动选路改为按配置顺序逐档判断。**
+- `route_source` 不再写死顺序，而是遍历 `download_source_priority()`，对每档先问「它能不能服务这条候选」：
+  `TELEGRAM` 要求附件带 `file_id` **且** ≤ 20 MB（只有 Bot 收过的消息才有 id，故仅账户部署不会排出一条注定
+  失败的 Bot 任务）；`TELEGRAM_USER` 要求账户在线且消息带附件；`EH_TORRENT` / `TELEGRAPH` 条件不变。
+- 新增 `ConnectionManager.telegram_available()`：只有 `state == "error"` 返回 False；`not_configured` 仍算可用，
+  因为带 `file_id` 就证明曾有 Bot 收过这条消息，把「当前没 Token」当成「取不到」会让库里的旧作品全部搁浅。
+  这就是那个实现缺口——Bot 报错后账户会接管 20 MB 以内的附件。
+- `app/downloads/models.py` 新增 `AUTO_DOWNLOAD_PROVIDERS`（默认 `账户 → Bot → 种子 → 预览页`）；ExHentai
+  Archive Download 仍不在其中（花 GP，永远手动）。
+
+**三、设置页的「下载来源优先级」。**「设置 → 系统」给四个来源各一个顺位下拉（1–4，不许重复），写入单个
+逗号分隔字符串（`download_source_priority`）。读宽松（未知代码丢弃、缺失的补回默认位）、写严格（未知/重复/
+缺档一律 400 并在页面说明）。保存后经 `refresh_download_source_priority` 更新 `app.state` 缓存，下一次
+审核即生效，不用重启。
+
+**测试**：新增 `tests/unit/test_mtproto_translation.py`（8）、`tests/unit/test_system_settings.py::TestDownloadSourcePriority`
+（6）、`tests/integration/test_connection_manager.py`（3，账户摄取 / 首次播种 / 两路同消息只出一条候选）；
+`tests/unit/test_api_read_layer.py` 的选路用例改成按 `file_id` 与优先级判定（净 +3）。`tests/integration/test_database.py`
+的迁移数断言 19 → 20，并加一条 `telegram_sources.last_message_id` 存在性检查。
+
+**文档同步**：`docs/USAGE.md` 的选路表把账户提到第 1 位、改写「小文件仍走 Bot」那条、新增「Bot 只在带
+`file_id` 时可用」「Bot 出错自动跳过」两条；Telegram 用户账户小节标题改为「收消息与下载」并新增「只登录账户
+也能自动添加」「两条路径并发去重」；系统设置小节五项 → 六项，补「下载来源优先级」。`README.md` 的选路摘要与
+第 4 步部署说明同步。`AgentHelp/AGENTS.md` 基线 1515 → 1535，`passed` 两个数各 +20。
+
+**验证**（定向，按新规不全量）：`test_connection_manager.py`、`test_telegram_user.py`、
+`test_telegram_user_web.py`、`test_mtproto_translation.py`、`test_system_settings.py`、`test_api_read_layer.py`、
+`test_settings_sections.py`、`test_review_actions.py`、`test_review_batch.py`、`test_auto_approval.py`、
+`test_auto_approval_workflow.py`、`test_work_detail_web.py`、`test_downloads.py`、`test_settings_web.py`、
+`test_candidate_ingestion.py`、`test_api_contracts.py`、`test_api_domains.py`、`test_web_shell.py`、`test_ui_shell.py`、
+`test_database.py`、`test_health.py`、`test_readiness.py`、`test_sources_web.py`、`test_manual_add.py` 全绿；
+`--collect-only` 全量 **1535**。`compileall` 与 `git diff --check` 通过。
+
+**已知边界**：①**不回扫历史**是刻意的（与 Bot 一致），因此账户侧也无法补更早的作品，需要时走「手动添加」；
+②一个**当前为空**的频道首次播种时没有游标可写（`latest_message_id` 返回 None），下一轮仍按「首次」处理，
+若这期间恰有新消息，它会被当作播种点跳过（命中概率与后果都极低，故不为此加列）；③账户轮询读的是游标之后
+的新消息，**不会重读对旧消息的编辑**——Bot 侧仍会收到 `edited_channel_post` 并更新候选，两条路径同时开启时
+编辑由 Bot 补上，只用账户时标题等修正要手动改。

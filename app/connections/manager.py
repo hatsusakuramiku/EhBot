@@ -7,7 +7,9 @@ import sqlite3
 
 import httpx
 
+from app.candidates import mtproto
 from app.candidates.ingestor import CandidateIngestor
+from app.candidates.rules import evaluate_source_rules
 from app.connections.exhentai import ExHentaiApi, ExHentaiCredentials
 from app.connections.models import (
     ConnectionSnapshot,
@@ -36,6 +38,14 @@ from app.secrets import SecretStore
 TELEGRAM_USER_API_SECRET = "telegram_user_api"
 TELEGRAM_USER_SESSION_SECRET = "telegram_user_session"
 
+
+#: How often the user account checks its channels for new messages, and how
+#: many messages one chat may hand over per pass. Ten seconds keeps an arrival
+#: feeling immediate without turning `messages.getHistory` into a busy loop; the
+#: batch bounds one poll so a channel that was quiet for a week cannot stall the
+#: loop behind a single enormous read.
+_USER_INGEST_INTERVAL_SECONDS = 10.0
+_USER_INGEST_BATCH = 100
 
 _POLL_BACKOFF_SECONDS: dict[str, int] = {
     "TELEGRAM_CONFLICT": 30,
@@ -69,6 +79,10 @@ class ConnectionManager:
         # sweeper is built during the lifespan, after this is constructed.
         self._on_candidates_ingested = on_candidates_ingested
         self._telegram_task: asyncio.Task[None] | None = None
+        # The MTProto ingester, when a user account is logged in. Separate from
+        # `_telegram_task` because the two are independent: either can run with
+        # the other absent, and both may run at once.
+        self._user_ingest_task: asyncio.Task[None] | None = None
         self._telegram_status = ProviderStatus(
             state="not_configured", configured=False
         )
@@ -88,6 +102,19 @@ class ConnectionManager:
         # dead form.
         self._user_challenge: LoginChallenge | None = None
         self._user_lock = asyncio.Lock()
+
+    def telegram_available(self) -> bool:
+        """Whether the Bot API route is worth queueing a job for.
+
+        `not_configured` deliberately still counts as available: the only way an
+        attachment ever carries a `file_id` is that the Bot API reported it, so
+        an id is proof a bot existed when the message was ingested -- and
+        treating 「no token right now」 as 「cannot fetch」 would strand every
+        work already in the database. `error` is the state that means stop: a
+        token is configured and the API is refusing it, which is exactly when
+        the user account should take over.
+        """
+        return self._telegram_status.state != "error"
 
     def snapshot(self) -> ConnectionSnapshot:
         return ConnectionSnapshot(
@@ -251,6 +278,143 @@ class ConnectionManager:
         self._telegram_user = TelegramUserAccount(
             state="connected", configured=True, identity=identity.label
         )
+        self._ensure_user_ingest_task()
+
+    def _ensure_user_ingest_task(self) -> None:
+        """Start the MTProto ingester if it should be running and is not.
+
+        Called at startup, after a successful login, and by nothing else: the
+        task itself is long-lived and exits only on cancel, so 「is it already
+        running」 is the whole guard. No candidate ingestor means this deployment
+        has no review pipeline wired (a test), and there is nothing to feed.
+        """
+        if self._candidate_ingestor is None:
+            return
+        if self._telegram_user.state != "connected":
+            return
+        if (
+            self._user_ingest_task is not None
+            and not self._user_ingest_task.done()
+        ):
+            return
+        self._user_ingest_task = asyncio.create_task(
+            self._run_user_ingest(), name="telegram-user-ingest"
+        )
+
+    async def _run_user_ingest(self) -> None:
+        """Poll the configured channels with the operator's own account.
+
+        The bot is not the only way a work arrives. A deployment that runs no
+        bot still has an account that can read the channels it belongs to, and
+        without this loop such a deployment ingests nothing at all -- the
+        account could download a book but never learn one existed.
+
+        It runs *alongside* the bot when both are configured, which is safe
+        because both paths write through `save_candidate_message`: the unique
+        key on `(account_id, chat_id, message_id)` is what makes the second
+        reading of a message a no-op instead of a second candidate.
+        """
+        while True:
+            try:
+                await self._ingest_with_user_account()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the loop must outlive a bad poll
+                logging.getLogger(__name__).exception(
+                    "telegram_user_ingest_failed",
+                    extra={"error_code": "TELEGRAM_USER_INGEST_FAILED"},
+                )
+            await asyncio.sleep(_USER_INGEST_INTERVAL_SECONDS)
+
+    async def _ingest_with_user_account(self) -> int:
+        """One pass over every enabled source. Returns how many works it added."""
+        if self._candidate_ingestor is None:
+            return 0
+        if self._telegram_user.state != "connected":
+            return 0
+        credentials = await self._read_user_credentials()
+        session = await asyncio.to_thread(
+            self._secret_store.read, TELEGRAM_USER_SESSION_SECRET
+        )
+        if credentials is None or not session:
+            return 0
+        client = self._user_client(credentials, session)
+        created = 0
+        for target in await self._database.telegram_ingest_targets():
+            try:
+                created += await self._ingest_source(client, target)
+            except ProviderConnectionError as exc:
+                # One unreachable chat must not stop the others: a channel the
+                # account was removed from is a fact about that channel, not a
+                # reason to stop ingesting the rest.
+                logging.getLogger(__name__).warning(
+                    "telegram_user_ingest_source_failed",
+                    extra={
+                        "error_code": exc.code,
+                        "chat_id": target["chat_id"],
+                    },
+                )
+        if created:
+            await self._notify_ingested()
+        return created
+
+    async def _ingest_source(self, client: TelegramUserClient, target: dict) -> int:
+        chat_id = int(target["chat_id"])
+        cursor = int(target["cursor"] or 0)
+        if cursor <= 0:
+            newest = await client.latest_message_id(chat_id)
+            if newest is None:
+                return 0
+            await self._database.set_source_cursor(chat_id, newest)
+            logging.getLogger(__name__).info(
+                "telegram_user_ingest_seeded",
+                extra={
+                    "error_code": "TELEGRAM_USER_INGEST_SEEDED",
+                    "chat_id": chat_id,
+                    "message_id": newest,
+                },
+            )
+            return 0
+        raw_messages = await client.fetch_channel_messages(
+            chat_id, after_id=cursor, limit=_USER_INGEST_BATCH
+        )
+        created = 0
+        highest = cursor
+        for raw in raw_messages:
+            highest = max(highest, int(getattr(raw, "id", 0) or 0))
+            message = mtproto.parse_user_message(raw)
+            if message is None:
+                continue
+            source = await self._database.discover_telegram_source(message)
+            decision = evaluate_source_rules(source, message)
+            if decision.result == "IGNORE":
+                continue
+            message = replace(
+                message,
+                filter_result=decision.result,
+                filter_reason=decision.reason,
+            )
+            # `None` rather than an update id: this message did not arrive
+            # through `getUpdates`, so there is no row to mark -- the parameter
+            # exists for the bot path's bookkeeping, which this path has no use
+            # for.
+            if await self._database.save_candidate_message(None, message):
+                created += 1
+        if highest > cursor:
+            await self._database.set_source_cursor(chat_id, highest)
+        return created
+
+    async def _notify_ingested(self) -> None:
+        """Let the automatic-approval rule act on what just arrived."""
+        if self._on_candidates_ingested is None:
+            return
+        try:
+            await self._on_candidates_ingested()
+        except Exception:  # noqa: BLE001 - ingestion must not fail on review policy
+            logging.getLogger(__name__).exception(
+                "auto_approval_after_ingest_failed",
+                extra={"error_code": "AUTO_APPROVAL_AFTER_INGEST_FAILED"},
+            )
 
     async def start_telegram_user_login(
         self, api_id: str, api_hash: str, phone: str
@@ -363,6 +527,7 @@ class ConnectionManager:
         """
         async with self._user_lock:
             self._user_challenge = None
+            await self._cancel_user_ingest_task()
             await asyncio.to_thread(
                 self._secret_store.delete, TELEGRAM_USER_SESSION_SECRET
             )
@@ -466,6 +631,13 @@ class ConnectionManager:
                     else _POLL_BACKOFF_SECONDS.get(exc.code, 5)
                 )
 
+    async def _cancel_user_ingest_task(self) -> None:
+        if self._user_ingest_task is None:
+            return
+        self._user_ingest_task.cancel()
+        await asyncio.gather(self._user_ingest_task, return_exceptions=True)
+        self._user_ingest_task = None
+
     async def _cancel_telegram_task(self) -> None:
         if self._telegram_task is None:
             return
@@ -491,3 +663,4 @@ class ConnectionManager:
 
     async def stop(self) -> None:
         await self._cancel_telegram_task()
+        await self._cancel_user_ingest_task()

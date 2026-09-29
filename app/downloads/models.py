@@ -37,6 +37,22 @@ PROVIDER_EH_TORRENT = "EH_TORRENT"
 #: two queues read as one list.
 PROVIDER_CONVERSION = "CONVERSION"
 
+#: The providers the automatic router may choose between, in the order it tries
+#: them when the operator has not reordered them. `PROVIDER_EXHENTAI` is absent
+#: on purpose: Archive Download spends GP, and the requirement that spending it
+#: stays an operator decision is older than this list.
+#:
+#: The user account leads: when a message carries an archive, MTProto hands back
+#: the uploader's own file with no Bot API ceiling, while the bot refuses
+#: anything above 20 MB. The bot is the fallback for a deployment with no
+#: account logged in, not the default.
+AUTO_DOWNLOAD_PROVIDERS: tuple[str, ...] = (
+    PROVIDER_TELEGRAM_USER,
+    PROVIDER_TELEGRAM,
+    PROVIDER_EH_TORRENT,
+    PROVIDER_TELEGRAPH,
+)
+
 #: Providers the worker claims work for. `_claim_pending_job_sync` expands this
 #: into its placeholder list, so a provider added here is picked up; a provider
 #: added anywhere else would have its jobs silently left in PENDING forever.

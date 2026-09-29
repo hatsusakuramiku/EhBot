@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 
 from app.db.database import Database
+from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 from app.settings.service import (
+    DEFAULT_DOWNLOAD_SOURCE_PRIORITY,
     DEFAULT_IDLE_POLL_INTERVAL_MS,
     DEFAULT_LOG_LEVEL,
     DEFAULT_POLL_INTERVAL_MS,
@@ -26,6 +28,7 @@ from app.settings.service import (
     SETTING_POLL_INTERVAL_MS,
     SETTING_LOG_LEVEL,
     SETTING_SOURCE_CONCURRENCY,
+    SETTING_DOWNLOAD_SOURCE_PRIORITY,
     SETTING_TIMEZONE,
     SystemSettingsError,
     SystemSettingsService,
@@ -259,3 +262,99 @@ class TestSaving:
         )
 
         assert saved["timezone"] == "America/Argentina/Salta"
+
+
+class TestDownloadSourcePriority:
+    """The order the router tries sources in, and what a save may store.
+
+    The value is a list of provider codes, so the two failure modes worth a test
+    are the ones a form can produce: a code that does not exist, and the same
+    code twice. Both are refused rather than normalised away, because an
+    operator who submitted either is looking at a page that disagrees with what
+    was stored.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_default_order_leads_with_the_user_account(
+        self, tmp_path: Path
+    ) -> None:
+        settings = await service(tmp_path)
+
+        snapshot = await settings.snapshot()
+
+        assert snapshot["download_source_priority"] == list(
+            DEFAULT_DOWNLOAD_SOURCE_PRIORITY
+        )
+        assert snapshot["download_source_priority"][0] == "TELEGRAM_USER"
+        assert "EXHENTAI" not in snapshot["download_source_priority"]
+        assert snapshot["download_source_priority_overridden"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_saved_order_round_trips(self, tmp_path: Path) -> None:
+        settings = await service(tmp_path)
+        order = ["EH_TORRENT", "TELEGRAM", "TELEGRAPH", "TELEGRAM_USER"]
+
+        await settings.save({SETTING_DOWNLOAD_SOURCE_PRIORITY: ",".join(order)})
+
+        assert await settings.download_source_priority() == tuple(order)
+        assert (
+            await settings.snapshot()
+        )["download_source_priority_overridden"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_order_is_short_and_stays_out_of_the_router(
+        self, tmp_path: Path
+    ) -> None:
+        settings = await service(tmp_path)
+
+        # The route turns 1..4 ranks into one ordered string and hands the
+        # service the result; the remaining codes keep their default place at
+        # the end so a partial list cannot silently drop a source.
+        saved = await settings.save(
+            {SETTING_DOWNLOAD_SOURCE_PRIORITY: "TELEGRAPH,TELEGRAM"}
+        )
+
+        assert saved["download_source_priority"] == [
+            "TELEGRAPH",
+            "TELEGRAM",
+            "TELEGRAM_USER",
+            "EH_TORRENT",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_source_is_refused(self, tmp_path: Path) -> None:
+        settings = await service(tmp_path)
+
+        with pytest.raises(SystemSettingsError) as caught:
+            await settings.save(
+                {SETTING_DOWNLOAD_SOURCE_PRIORITY: "TELEGRAM,CARRIER_PIGEON"}
+            )
+
+        assert caught.value.code == "DOWNLOAD_SOURCE_PRIORITY_INVALID"
+
+    @pytest.mark.asyncio
+    async def test_a_duplicate_source_is_refused(self, tmp_path: Path) -> None:
+        settings = await service(tmp_path)
+
+        with pytest.raises(SystemSettingsError):
+            await settings.save(
+                {SETTING_DOWNLOAD_SOURCE_PRIORITY: "TELEGRAM,TELEGRAM"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_every_router_source_is_offered_by_the_settings(
+        self, tmp_path: Path
+    ) -> None:
+        settings = await service(tmp_path)
+
+        saved = await settings.save(
+            {
+                SETTING_DOWNLOAD_SOURCE_PRIORITY: ",".join(
+                    AUTO_DOWNLOAD_PROVIDERS
+                )
+            }
+        )
+
+        # The store and the router read one tuple; a source added to one and not
+        # the other is the drift this asserts against.
+        assert saved["download_source_priority"] == list(AUTO_DOWNLOAD_PROVIDERS)

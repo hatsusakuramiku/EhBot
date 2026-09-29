@@ -266,6 +266,54 @@ class TelegramUserClient:
             await self._close(client)
         return str(session), identity
 
+    async def fetch_channel_messages(
+        self, chat_id: int, *, after_id: int, limit: int
+    ) -> list[Any]:
+        """Read new messages from one chat, oldest first.
+
+        `min_id` is exclusive, so `after_id` is the last message the caller has
+        already seen. Ascending order matters: the caller advances its cursor as
+        it goes, and a batch returned newest-first would move the cursor past
+        everything the batch did not contain.
+
+        History is read, never sent: this is the ingestion half of the account,
+        and the only write the module ever performs is a login.
+        """
+        client = await self._connect()
+        try:
+            entity = await client.get_entity(int(chat_id))
+            return [
+                message
+                async for message in client.iter_messages(
+                    entity,
+                    min_id=int(after_id),
+                    limit=int(limit),
+                    reverse=True,
+                )
+            ]
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            raise _translate(exc) from exc
+        finally:
+            await self._close(client)
+
+    async def latest_message_id(self, chat_id: int) -> int | None:
+        """The newest message id in one chat, or None for an empty one.
+
+        Used once per source, to seed a cursor without walking the archive: a
+        first poll that turned three years of channel history into candidates
+        would be a surprise nobody asked for.
+        """
+        client = await self._connect()
+        try:
+            entity = await client.get_entity(int(chat_id))
+            async for message in client.iter_messages(entity, limit=1):
+                return int(message.id)
+            return None
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            raise _translate(exc) from exc
+        finally:
+            await self._close(client)
+
     async def verify(self) -> TelegramUserIdentity:
         """Confirm the stored session still authorises the account."""
         client = await self._connect()

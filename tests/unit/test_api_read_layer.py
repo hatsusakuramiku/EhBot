@@ -198,7 +198,12 @@ class FakeMessage:
 
 
 def make_orchestrator(
-    *, torrent=True, telegraph=True, telegram_user=False
+    *,
+    torrent=True,
+    telegraph=True,
+    telegram_user=False,
+    telegram=True,
+    priority=None,
 ) -> ReviewOrchestrator:
     return ReviewOrchestrator(
         database=None,
@@ -206,6 +211,10 @@ def make_orchestrator(
         torrent_available=lambda: torrent,
         telegraph_available=lambda: telegraph,
         telegram_user_available=lambda: telegram_user,
+        telegram_available=lambda: telegram,
+        download_source_priority=(
+            (lambda: tuple(priority)) if priority is not None else None
+        ),
     )
 
 
@@ -213,7 +222,7 @@ class TestSourceRouting:
     def test_a_fitting_telegram_archive_wins(self) -> None:
         candidate = FakeCandidate(
             messages=(
-                FakeMessage([{"type": "archive", "size_bytes": 1024}]),
+                FakeMessage([{"type": "archive", "file_id": "bot-file", "size_bytes": 1024}]),
             ),
             torrent_hash="abc",
         )
@@ -227,7 +236,13 @@ class TestSourceRouting:
         candidate = FakeCandidate(
             messages=(
                 FakeMessage(
-                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT + 1}]
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": TELEGRAM_FILE_LIMIT + 1,
+                        }
+                    ]
                 ),
             ),
             torrent_hash="abc",
@@ -243,7 +258,13 @@ class TestSourceRouting:
         candidate = FakeCandidate(
             messages=(
                 FakeMessage(
-                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT + 1}]
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": TELEGRAM_FILE_LIMIT + 1,
+                        }
+                    ]
                 ),
             ),
             torrent_hash="abc",
@@ -261,7 +282,13 @@ class TestSourceRouting:
         candidate = FakeCandidate(
             messages=(
                 FakeMessage(
-                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT + 1}]
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": TELEGRAM_FILE_LIMIT + 1,
+                        }
+                    ]
                 ),
             ),
             torrent_hash="abc",
@@ -272,21 +299,91 @@ class TestSourceRouting:
         # deployment before the operator logs in.
         assert routed.provider == "EH_TORRENT"
 
-    def test_a_fitting_attachment_still_uses_the_bot(self) -> None:
+    def test_a_logged_in_account_takes_the_archive_it_can_fetch(self) -> None:
         candidate = FakeCandidate(
-            messages=(FakeMessage([{"type": "archive", "size_bytes": 1024}]),)
+            messages=(
+                FakeMessage(
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": 1024,
+                        }
+                    ]
+                ),
+            )
         )
         routed = make_orchestrator(telegram_user=True).route_source(candidate)
 
-        # A logged-in user account must not take over the small-file path: the
-        # bot needs no extra credential and is already receiving the message.
+        # The default order puts the account first: it fetches the uploader's
+        # own file with no ceiling, and「上传者发的那个文件」is the same bytes
+        # whichever protocol carries them.
+        assert routed.provider == "TELEGRAM_USER"
+
+    def test_the_operator_order_decides_which_source_wins(self) -> None:
+        candidate = FakeCandidate(
+            messages=(
+                FakeMessage(
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": 1024,
+                        }
+                    ]
+                ),
+            )
+        )
+        routed = make_orchestrator(
+            telegram_user=True, priority=["TELEGRAM", "TELEGRAM_USER"]
+        ).route_source(candidate)
+
+        # Both can serve it; the page's order is what picks between them.
         assert routed.provider == "TELEGRAM"
+
+    def test_a_bot_in_error_state_falls_through_to_the_account(self) -> None:
+        candidate = FakeCandidate(
+            messages=(
+                FakeMessage(
+                    [
+                        {
+                            "type": "archive",
+                            "file_id": "bot-file",
+                            "size_bytes": 1024,
+                        }
+                    ]
+                ),
+            )
+        )
+        routed = make_orchestrator(
+            telegram=False, telegram_user=True
+        ).route_source(candidate)
+
+        # A token the API is refusing must not be handed a job it can only fail;
+        # the account fetches the same message.
+        assert routed.provider == "TELEGRAM_USER"
+
+    def test_an_attachment_without_a_bot_file_id_never_uses_the_bot(self) -> None:
+        candidate = FakeCandidate(
+            messages=(
+                FakeMessage(
+                    [{"type": "archive", "file_id": "", "size_bytes": 1024}]
+                ),
+            ),
+            torrent_hash="abc",
+        )
+        routed = make_orchestrator(telegram_user=False).route_source(candidate)
+
+        # Only the Bot API mints file ids, so an attachment ingested over
+        # MTProto is not something the bot route can fetch -- even though it is
+        # small enough.
+        assert routed.provider == "EH_TORRENT"
 
     def test_a_file_exactly_at_the_limit_still_uses_telegram(self) -> None:
         candidate = FakeCandidate(
             messages=(
                 FakeMessage(
-                    [{"type": "archive", "size_bytes": TELEGRAM_FILE_LIMIT}]
+                    [{"type": "archive", "file_id": "bot-file", "size_bytes": TELEGRAM_FILE_LIMIT}]
                 ),
             )
         )

@@ -41,6 +41,7 @@ from app.archive.service import (
     TITLE_SOURCES,
     ArchiveSettingsError,
 )
+from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 from app.conversion.naming import (
     CBZ_SUFFIX,
     LibraryLimits,
@@ -765,20 +766,54 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
         return redirect
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
-    try:
-        await deps.system_settings_service(request).save(
-            {
-                key: str(form.get(key) or "")
-                for key in (
-                    "source_concurrency",
-                    "poll_interval_ms",
-                    "timezone",
-                    "auto_approval_interval_minutes",
-                    "log_level",
-                )
-                if key in form
-            }
+    values = {
+        key: str(form.get(key) or "")
+        for key in (
+            "source_concurrency",
+            "poll_interval_ms",
+            "timezone",
+            "auto_approval_interval_minutes",
+            "log_level",
         )
+        if key in form
+    }
+    # The priority is submitted as one rank per source, which is the shape a
+    # form can express without JavaScript; the service stores the single
+    # ordered string, because that is the shape the router reads.
+    ranks: dict[int, str] = {}
+    for code in AUTO_DOWNLOAD_PROVIDERS:
+        field = f"priority_{code}"
+        if field not in form:
+            continue
+        try:
+            rank = int(str(form.get(field) or "").strip())
+        except ValueError:
+            rank = 0
+        if (
+            rank < 1
+            or rank > len(AUTO_DOWNLOAD_PROVIDERS)
+            or rank in ranks
+        ):
+            return await render_settings(
+                request,
+                SETTINGS_SYSTEM,
+                error="下载来源优先级必须是 1–4 且每个来源各一个顺位",
+                status_code=400,
+            )
+        ranks[rank] = code
+    if ranks:
+        if len(ranks) != len(AUTO_DOWNLOAD_PROVIDERS):
+            return await render_settings(
+                request,
+                SETTINGS_SYSTEM,
+                error="每个下载来源都要选一个顺位",
+                status_code=400,
+            )
+        values["download_source_priority"] = ",".join(
+            ranks[rank] for rank in range(1, len(ranks) + 1)
+        )
+    try:
+        await deps.system_settings_service(request).save(values)
     except SystemSettingsError as exc:
         return await render_settings(
             request,
@@ -787,6 +822,7 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
             status_code=400,
         )
     await deps.refresh_display_timezone(request)
+    await deps.refresh_download_source_priority(request)
     apply_runtime_log_level(
         await deps.system_settings_service(request).log_level()
     )

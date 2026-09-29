@@ -23,6 +23,7 @@ import re
 
 from app.config import LOG_LEVEL_CHOICES
 from app.db.database import Database
+from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 
 
 SETTING_POLL_INTERVAL_MS = "poll_interval_ms"
@@ -30,6 +31,7 @@ SETTING_SOURCE_CONCURRENCY = "source_concurrency"
 SETTING_TIMEZONE = "timezone"
 SETTING_AUTO_APPROVAL_INTERVAL_MINUTES = "auto_approval_interval_minutes"
 SETTING_LOG_LEVEL = "log_level"
+SETTING_DOWNLOAD_SOURCE_PRIORITY = "download_source_priority"
 
 #: Visible-tab polling cadence. 2s matches what `/api/v1/meta` served as a
 #: constant before this was editable, so an operator who never opens the
@@ -73,6 +75,12 @@ MAX_AUTO_APPROVAL_INTERVAL_MINUTES = 1440
 
 DEFAULT_TIMEZONE = "UTC"
 DEFAULT_LOG_LEVEL = "INFO"
+
+#: The order the router tries download sources in. Stored as the codes joined
+#: by commas, because it is one decision -- 「谁先谁后」 -- and a table for four
+#: values would make the page read as four unrelated switches. EXHENTAI is not
+#: offered: it spends GP and stays a per-work decision.
+DEFAULT_DOWNLOAD_SOURCE_PRIORITY: tuple[str, ...] = AUTO_DOWNLOAD_PROVIDERS
 
 #: An IANA zone name: `UTC`, or `Area/Location` with at most one further level
 #: (`America/Argentina/Salta`). The name is validated by shape rather than
@@ -150,6 +158,9 @@ class SystemSettingsService:
             ),
             MAX_SOURCE_CONCURRENCY,
         )
+        download_source_priority = _read_priority(
+            stored.get(SETTING_DOWNLOAD_SOURCE_PRIORITY, "")
+        )
         timezone = stored.get(SETTING_TIMEZONE, "").strip() or DEFAULT_TIMEZONE
         if not _TIMEZONE_PATTERN.match(timezone):
             timezone = DEFAULT_TIMEZONE
@@ -179,6 +190,7 @@ class SystemSettingsService:
             "log_level": log_level,
             "log_access": log_level == "DEBUG",
             "auto_approval_interval_minutes": auto_approval_interval_minutes,
+            "download_source_priority": list(download_source_priority),
             # Whether the operator has moved this off the default. A row holding
             # an empty string is not an override -- that is how a cleared field is
             # stored, and `_read_int` reads it back as the default.
@@ -196,6 +208,9 @@ class SystemSettingsService:
             ),
             "auto_approval_interval_overridden": bool(
                 stored.get(SETTING_AUTO_APPROVAL_INTERVAL_MINUTES, "").strip()
+            ),
+            "download_source_priority_overridden": bool(
+                stored.get(SETTING_DOWNLOAD_SOURCE_PRIORITY, "").strip()
             ),
         }
 
@@ -216,6 +231,11 @@ class SystemSettingsService:
 
     async def auto_approval_interval_minutes(self) -> int:
         return int((await self.snapshot())["auto_approval_interval_minutes"])
+
+    async def download_source_priority(self) -> tuple[str, ...]:
+        return tuple(
+            (await self.snapshot())["download_source_priority"]
+        )
 
     async def save(self, values: dict[str, str]) -> dict[str, object]:
         """Validate and store whichever preferences the form submitted.
@@ -262,6 +282,12 @@ class SystemSettingsService:
                     "时区必须是 IANA 名称，例如 Asia/Shanghai",
                 )
             cleaned[SETTING_TIMEZONE] = raw
+        if SETTING_DOWNLOAD_SOURCE_PRIORITY in values:
+            cleaned[SETTING_DOWNLOAD_SOURCE_PRIORITY] = ",".join(
+                _validate_priority(
+                    values[SETTING_DOWNLOAD_SOURCE_PRIORITY]
+                )
+            )
         if SETTING_LOG_LEVEL in values:
             level = str(values[SETTING_LOG_LEVEL] or "").strip().upper()
             if level and level not in LOG_LEVEL_CHOICES:
@@ -272,6 +298,61 @@ class SystemSettingsService:
         if cleaned:
             await self._database.save_system_settings(cleaned)
         return await self.snapshot()
+
+
+def _read_priority(raw: object) -> tuple[str, ...]:
+    """The stored order, with anything unrecognised dropped and the rest appended.
+
+    Read leniently for the same reason every other stored preference is: a value
+    written by a newer version, or edited by hand, must not take the page or the
+    router down. A code the router does not know is dropped; a code it does know
+    but that the row omits (an older row, a hand-edited one) keeps its default
+    place at the end rather than disappearing from routing altogether.
+    """
+    submitted: list[str] = []
+    for item in str(raw or "").split(","):
+        code = item.strip().upper()
+        if code in AUTO_DOWNLOAD_PROVIDERS and code not in submitted:
+            submitted.append(code)
+    return tuple(
+        submitted
+        + [code for code in DEFAULT_DOWNLOAD_SOURCE_PRIORITY if code not in submitted]
+    )
+
+
+def _validate_priority(raw: object) -> tuple[str, ...]:
+    """Normalise a submitted order, refusing a code the router cannot use.
+
+    Unknown codes are an error rather than something to drop silently: the form
+    renders a checkbox per known source, so an unknown one means the request was
+    not built by this page, and quietly ignoring it would leave the operator
+    believing a source had been positioned when it had not.
+    """
+    codes: list[str] = []
+    for item in str(raw or "").split(","):
+        code = item.strip().upper()
+        if not code:
+            continue
+        if code not in AUTO_DOWNLOAD_PROVIDERS:
+            raise SystemSettingsError(
+                "DOWNLOAD_SOURCE_PRIORITY_INVALID",
+                f"未知的下载来源：{code}",
+            )
+        if code in codes:
+            raise SystemSettingsError(
+                "DOWNLOAD_SOURCE_PRIORITY_INVALID",
+                f"下载来源重复：{code}",
+            )
+        codes.append(code)
+    if not codes:
+        raise SystemSettingsError(
+            "DOWNLOAD_SOURCE_PRIORITY_INVALID",
+            "下载来源优先级至少要保留一个来源",
+        )
+    return tuple(
+        codes
+        + [code for code in DEFAULT_DOWNLOAD_SOURCE_PRIORITY if code not in codes]
+    )
 
 
 def _validate_bounded_int(
