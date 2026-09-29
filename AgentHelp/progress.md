@@ -4363,3 +4363,39 @@ R35 收尾时把两个失败写成「本机没有真实 7-Zip 工具链」，运
 **流程约束（运营者，2026-09-28）**：全量测试一次约 20 分钟，此后**默认只跑改动涉及的定向测试**，
 只有运营者明确要求（或运营者要求发版前的体检）才跑全量；交付说明里写清跑了哪些文件。已写入
 `AGENTS.md` 的 Tests 段。
+
+## R38 — 验证码正确却被判「过期」：取码与登录必须同一个会话（v0.3.0rc1，2026-09-29）
+
+运营者报「验证码正确却出现『验证码已过期』」。注意症状：不是验证码打错，而是**刚收到、确认正确的验证码**
+被拒，页面给出 `TELEGRAM_USER_CODE_EXPIRED`（「验证码已过期，请重新获取」），按提示重新取码后重复同一循环。
+
+**根因：发码与提交验证码用了两个不同的 auth key。** `TelegramUserClient` 每次操作都新开一个
+`StringSession()`、用完即 `_close`，于是 `send_code()` 里的 `send_code_request(phone)` 是在会话 A 上发生的，
+拿到 `phone_code_hash` 后把 A 丢掉了；`sign_in()` 又新开一个空会话 B，在 B 上提交 `SignInRequest(phone, hash, code)`。
+Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 auth key 提交，`phone_code_hash` 就对不上，
+服务端一律回 `PHONE_CODE_EXPIRED`——与验证码是否正确、是否新鲜无关。这解释了为什么现象是「正确却说过期」而不是
+「验证码不正确」，也解释了为什么重新取码永远救不回来：每一次重试都换了一对新旧 auth key。两步验证同理，
+`SessionPasswordNeededError` 之后的 `CheckPasswordRequest` 也必须落在同一个 auth key 上。
+
+**修法：把发码用的会话串留在登录挑战里，登录时复用它。**
+- `LoginChallenge` 增加字段 `session: str | None = None`，注释写明「验证码属于请求它的 auth key」。
+- `send_code()` 在 `_close` **之前**取 `client.session.save() or None`（关连接没问题，要留住的是 auth key），
+  写进挑战返回；`sign_in()` 由 `_connect()` 改为 `_connect(session=challenge.session)`，
+  验证码与 2FA 密码两步都在同一会话上完成。
+- `_build()` / `_connect()` 增加可选 `session` 覆盖参数，默认仍用 `self._session`（`verify()` 与下载路径不受影响）。
+- 会话串只存在于内存中的挑战里，不落盘、不进日志；登录成功后写入 `data/private/telegram_user_session` 的
+  仍是完整凭据，`manager.complete_telegram_user_login()` 无需改动（2FA 停工走 `dataclasses.replace`，字段自动带上）。
+
+**测试**：`tests/unit/test_telegram_user.py` 新增
+`test_the_code_is_completed_on_the_session_that_requested_it`——用记录每次 `session` 实参的工厂，断言
+①挑战带回了 `"stored-session-string"`；②两段之间 socket 确实断开了（`fake.disconnected` 仍为真，修的只是 auth key
+的延续而不是把连接长期挂住）；③发码调用拿到 `None`（新会话）、登录调用拿到上一段的会话串。
+
+**文档同步**：`docs/USAGE.md` 的 Telegram 用户账户小节新增一条排障说明（说明这是旧版缺陷、已修，
+以及为什么正确验证码会被判过期）；`AgentHelp/AGENTS.md` 基线 1512 → 1513，`passed` 两个数同步 +1。
+
+**验证**（定向，按新规不全量）：`tests/unit/test_telegram_user.py` +
+`tests/integration/test_telegram_user_web.py` 共 **31 passed**；`compileall` 与 `git diff --check` 通过。
+
+提交 `fe8ff9d`，只提交、不推送（`origin/main` 仍停在 `b559740`）。本轮运营者未要求重建镜像，
+`hsmk/ehbot:latest` 仍是 R37 的 digest，需要时再构建推送。
