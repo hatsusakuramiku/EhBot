@@ -144,6 +144,7 @@ Bot API 的 20 MB 下载上限在协议里，换 Token 或加代理都没用；�
 在「设置 → 外部连接 → Telegram 用户账户」登录：
 
 1. 在 [my.telegram.org](https://my.telegram.org) 的 *API development tools* 创建应用，拿到 **API ID** 与 **API Hash**（属于你自己的账户，本项目不内置共享的一对）。
+   那个表单没有「应用类型」可选：`App title`、`Short name`、`URL`、`Platform`、`Description` 都是形式字段，填什么都行，Telegram 不校验也不审核——`Platform` 选 *Desktop*（或 *Other*）、`URL` 填 `https://example.com` 即可，不必真的有个网站。要留意的只有两件事：**用哪个账户登录，API 对就属于哪个账户**，所以要用那个已经在目标频道里的账户；以及**不要用网上流传的公共 API ID/Hash**，共用凭据会被限流甚至封号。
 2. 填入 API ID、API Hash 与带国际区号的手机号，提交后 Telegram 会向该账户发送验证码。
 3. 输入验证码。若账户开启了两步验证，页面会接着要求输入两步验证密码——此时验证码不需要重新获取。
 
