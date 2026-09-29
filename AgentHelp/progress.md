@@ -4521,3 +4521,14 @@ Telegram 把验证码绑定在**发出它的那个 auth key** 上，换一个 au
 若这期间恰有新消息，它会被当作播种点跳过（命中概率与后果都极低，故不为此加列）；③账户轮询读的是游标之后
 的新消息，**不会重读对旧消息的编辑**——Bot 侧仍会收到 `edited_channel_post` 并更新候选，两条路径同时开启时
 编辑由 Bot 补上，只用账户时标题等修正要手动改。
+提交 `948305f`（feat，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。镜像随之重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:092ffe15b85fe498cb7a6b466d6df56a09dca13b8d6d79777b87e4292fe28461`，amd64 manifest
+`sha256:6a600615e7afd31b6b8ce665c97ebafe2ccdccfcb2ab7b1715e35f37877cee72`）。**从 registry 验证而不是只信本地构建**：
+`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为
+可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`（宿主侧 curl 在本沙箱
+被网络策略挡住，改为容器内请求；这不是服务问题）；再在容器里 `inspect.getsource` 与直连数据库确认 R40 都在镜像里：
+默认优先级 `TELEGRAM_USER → TELEGRAM → EH_TORRENT → TELEGRAPH`、`route_source` 内有 `_bot_fetchable_attachment`、
+`app/candidates/mtproto.parse_user_message` 存在、`ConnectionManager.telegram_available` /
+`_ensure_user_ingest_task` 存在、`schema_migrations` 计到 20、`telegram_sources` 有 `last_message_id` 列；
+冒烟容器与临时数据目录已清理。
