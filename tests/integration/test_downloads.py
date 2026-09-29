@@ -105,6 +105,49 @@ async def test_enqueue_after_approval_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_source_press_refetches_a_completed_job(
+    tmp_path: Path,
+) -> None:
+    """「取原档」 on a completed source must fetch it, not silently do nothing.
+
+    A COMPLETED row is what the automatic router has to leave alone, but it is
+    also what the pre-R37 EH bug left behind: the download reported success
+    after saving an ExHentai search page under `gallery-<gid>.zip`, so the row
+    is COMPLETED and the recorded artifact is worthless. Re-packing re-read
+    that same file, and pressing a source button queued nothing at all -- the
+    operator's retry could not get a fresh archive no matter which button they
+    pressed. `redownload=True` is the operator routes saying 「再取一次」; the
+    default still leaves a completed download to the router.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    service = DownloadService(database, tmp_path / "work")
+    candidate_id = await seed_archive(database, file_name="comic.cbz")
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET status = 'APPROVED' WHERE id = ?",
+            (candidate_id,),
+        )
+    first = await service.enqueue_exhentai_download(candidate_id)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE download_jobs SET state = ? WHERE id = ?",
+            (DOWNLOAD_STATE_COMPLETED, first.job_id),
+        )
+
+    # The router's own enqueue leaves the finished download finished.
+    silent = await service.enqueue_exhentai_download(candidate_id)
+    assert silent.job_id == first.job_id
+    assert job_state(database, first.job_id) == DOWNLOAD_STATE_COMPLETED
+
+    again = await service.enqueue_exhentai_download(
+        candidate_id, redownload=True
+    )
+    assert again.job_id == first.job_id
+    assert again.created is False
+    assert job_state(database, first.job_id) == DOWNLOAD_STATE_PENDING
+
+
+@pytest.mark.asyncio
 async def test_enqueueing_again_revives_a_failed_job_row(tmp_path: Path) -> None:
     """The other half of the 「重试后无法审核」 dead end.
 

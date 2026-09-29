@@ -29,6 +29,7 @@ from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_PENDING,
     PROVIDER_CONVERSION,
+    PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
 )
 from app.downloads.service import DownloadService
@@ -568,6 +569,49 @@ def test_the_actions_that_spend_or_destroy_ask_first(tmp_path: Path) -> None:
     # destructive here as it is on the queue.
     assert f"/activity/jobs/{job_id}/cancel" in gated_targets(download_body)
     assert f"/activity/jobs/{job_id}/resume" in ungated_targets(download_body)
+
+
+def test_pressing_the_archive_button_refetches_a_completed_download(
+    tmp_path: Path,
+) -> None:
+    """The route half of `DownloadService`'s `redownload=True`.
+
+    An old work whose EH archive came down as a web page keeps a COMPLETED
+    download row forever, so every re-pack re-read the same bad file and press
+    of 「取原档」 queued nothing. The button is the one place an operator says
+    「再取一次这个来源」, so the route hands that intent to the queue.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    attach_gallery(database, candidate_id)
+    job_id = insert_job(
+        database,
+        candidate_id,
+        state="COMPLETED",
+        provider=PROVIDER_EXHENTAI,
+        idempotency_key=f"exhentai:{candidate_id}",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+        response = client.post(
+            f"/candidates/{candidate_id}/exhentai-archive",
+            data={"csrf_token": csrf},
+        )
+        assert response.status_code == 200
+
+    with database._connect() as connection:  # noqa: SLF001
+        state = str(
+            connection.execute(
+                "SELECT state FROM download_jobs WHERE id = ?", (job_id,)
+            ).fetchone()[0]
+        )
+    # Anything but the COMPLETED it was: the press reached the queue. A worker
+    # may already have claimed it (no ExHentai credentials are configured here,
+    # so it fails fast) -- that is the retry happening, not a no-op.
+    assert state != "COMPLETED"
 
 
 def test_no_action_form_is_swallowed_by_another(tmp_path: Path) -> None:

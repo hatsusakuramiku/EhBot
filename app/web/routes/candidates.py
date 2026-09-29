@@ -604,7 +604,9 @@ async def download_candidate(
         )
     try:
         await deps.download_service(request).enqueue_telegram_download(
-            candidate_id, archive_attachments[0]
+            candidate_id,
+            archive_attachments[0],
+            redownload=True,
         )
     except DownloadError as exc:
         return await render_review_error(
@@ -651,7 +653,9 @@ async def download_candidate_with_user(
         )
     try:
         await deps.download_service(request).enqueue_telegram_user_download(
-            candidate_id, archive_attachments[0]
+            candidate_id,
+            archive_attachments[0],
+            redownload=True,
         )
     except DownloadError as exc:
         return await render_review_error(
@@ -699,13 +703,21 @@ async def download_exhentai_archive(
     finished archive to auto-pack. This is the same shape as every other
     source route; the download itself only spends GP when the worker actually
     runs it.
+
+    Pressing it on a work that already completed this source fetches it again
+    (`redownload=True`). That is what makes an old failure recoverable: a work
+    whose archive landed as a web page keeps a COMPLETED row forever, and a
+    no-op press would leave the bad file on disk for every later re-pack to
+    read.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
     try:
-        await deps.download_service(request).enqueue_exhentai_download(candidate_id)
+        await deps.download_service(request).enqueue_exhentai_download(
+            candidate_id, redownload=True
+        )
     except DownloadError as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message
@@ -733,7 +745,9 @@ async def download_telegraph_preview(
     deps.validate_csrf(request, csrf_token)
     try:
         deps.telegraph_service(request)
-        await deps.download_service(request).enqueue_telegraph_download(candidate_id)
+        await deps.download_service(request).enqueue_telegraph_download(
+            candidate_id, redownload=True
+        )
     except (DownloadError, TelegraphError) as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message
@@ -762,7 +776,9 @@ async def download_torrent(
     deps.validate_csrf(request, csrf_token)
     try:
         deps.torrent_service(request)
-        await deps.download_service(request).enqueue_torrent_download(candidate_id)
+        await deps.download_service(request).enqueue_torrent_download(
+            candidate_id, redownload=True
+        )
     except (DownloadError, TorrentError) as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message

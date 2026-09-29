@@ -99,7 +99,11 @@ class DownloadService:
         return resolved or self._work_path
 
     async def enqueue_telegram_download(
-        self, candidate_id: int, attachment: dict
+        self,
+        candidate_id: int,
+        attachment: dict,
+        *,
+        redownload: bool = False,
     ) -> DownloadEnqueueResult:
         file_id = str(attachment.get("file_id") or "")
         if not file_id:
@@ -121,10 +125,15 @@ class DownloadService:
             PROVIDER_TELEGRAM,
             idempotency_key,
             json.dumps(details, separators=(",", ":")),
+            redownload=redownload,
         )
 
     async def enqueue_telegram_user_download(
-        self, candidate_id: int, attachment: dict
+        self,
+        candidate_id: int,
+        attachment: dict,
+        *,
+        redownload: bool = False,
     ) -> DownloadEnqueueResult:
         """Queue the MTProto route for one attachment.
 
@@ -162,20 +171,22 @@ class DownloadService:
             PROVIDER_TELEGRAM_USER,
             f"telegram-user:{candidate_id}:{file_unique_id or message_id}",
             json.dumps(details, separators=(",", ":")),
+            redownload=redownload,
         )
 
     async def enqueue_exhentai_download(
-        self, candidate_id: int
+        self, candidate_id: int, *, redownload: bool = False
     ) -> DownloadEnqueueResult:
         return await self._enqueue(
             candidate_id,
             PROVIDER_EXHENTAI,
             f"exhentai:{candidate_id}",
             "{}",
+            redownload=redownload,
         )
 
     async def enqueue_telegraph_download(
-        self, candidate_id: int
+        self, candidate_id: int, *, redownload: bool = False
     ) -> DownloadEnqueueResult:
         """Queue the preview-page fallback for a candidate.
 
@@ -187,10 +198,11 @@ class DownloadService:
             PROVIDER_TELEGRAPH,
             f"telegraph:{candidate_id}",
             "{}",
+            redownload=redownload,
         )
 
     async def enqueue_torrent_download(
-        self, candidate_id: int
+        self, candidate_id: int, *, redownload: bool = False
     ) -> DownloadEnqueueResult:
         """Queue the EH torrent route, the preferred original-quality source.
 
@@ -202,6 +214,7 @@ class DownloadService:
             PROVIDER_EH_TORRENT,
             f"torrent:{candidate_id}",
             "{}",
+            redownload=redownload,
         )
 
     async def _enqueue(
@@ -210,6 +223,8 @@ class DownloadService:
         provider: str,
         idempotency_key: str,
         details_json: str,
+        *,
+        redownload: bool = False,
     ) -> DownloadEnqueueResult:
         return await asyncio.to_thread(
             self._enqueue_sync,
@@ -217,6 +232,7 @@ class DownloadService:
             provider,
             idempotency_key,
             details_json,
+            redownload,
         )
 
     def _enqueue_sync(
@@ -225,6 +241,7 @@ class DownloadService:
         provider: str,
         idempotency_key: str,
         details_json: str,
+        redownload: bool = False,
     ) -> DownloadEnqueueResult:
         with self._database.connection() as connection:
             candidate_row = connection.execute(
@@ -273,10 +290,20 @@ class DownloadService:
             # its dead job row stayed FAILED, so the book never downloaded and
             # the page showed a failure the operator had just acted on.
             #
-            # COMPLETED and the open states are left alone deliberately -- the
-            # first is `redownload_work`'s job (it bumps `attempt_count` and is
-            # an explicit operator decision), and re-pending a job the worker
-            # holds would hand the same transfer out twice.
+            # COMPLETED joins them only under `redownload`, which the operator
+            # routes pass for a source button the operator pressed by hand. A
+            # completed download is otherwise finished business -- the router
+            # must not fetch it again -- but pressing the button is the one
+            # place an operator says 「取一次这个来源」, and leaving COMPLETED
+            # out made that press a silent no-op: a book whose archive landed
+            # as a web page under a `.zip` name (the pre-R37 bug) keeps a
+            # COMPLETED row forever, so 「取原档」 queued nothing, the real
+            # archive was never re-fetched, and every re-pack re-read the same
+            # bad file. The open states stay alone: the worker holds those, and
+            # re-pending one would hand the same transfer out twice.
+            revive_states = [DOWNLOAD_STATE_FAILED, DOWNLOAD_STATE_CANCELLED]
+            if redownload:
+                revive_states.append(DOWNLOAD_STATE_COMPLETED)
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
@@ -290,15 +317,16 @@ class DownloadService:
                 "  lease_expires_at = NULL, "
                 "  retry_at = NULL, "
                 "  updated_at = CURRENT_TIMESTAMP "
-                "WHERE download_jobs.state IN (?, ?)",
+                "WHERE download_jobs.state IN ("
+                + ",".join("?" for _ in revive_states)
+                + ")",
                 (
                     candidate_id,
                     idempotency_key,
                     provider,
                     DOWNLOAD_STATE_PENDING,
                     details_json,
-                    DOWNLOAD_STATE_FAILED,
-                    DOWNLOAD_STATE_CANCELLED,
+                    *revive_states,
                 ),
             )
             # Read from the pre-flight SELECT rather than from the row count:
