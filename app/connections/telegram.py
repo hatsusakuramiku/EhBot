@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,12 +144,19 @@ class TelegramBotApi:
     ) -> int:
         url = f"/file/bot{self._token}/{file_path}"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # Written beside the destination and moved into place only once the
+        # transfer finished. A retry reuses the job row, so this file name is
+        # the one a previous attempt may already have filled with the whole
+        # archive; streaming straight into it truncated that file on failure and
+        # the artifact row went on pointing at the wreckage.
+        partial = destination.with_name(f"{destination.name}.part")
+        partial.unlink(missing_ok=True)
         try:
             async with self._client.stream(
                 "GET", url, follow_redirects=True
             ) as response:
                 response.raise_for_status()
-                with destination.open("wb") as target:
+                with partial.open("wb") as target:
                     copied = 0
                     async for chunk in response.aiter_bytes(
                         chunk_size=64 * 1024
@@ -157,9 +165,10 @@ class TelegramBotApi:
                             continue
                         target.write(chunk)
                         copied += len(chunk)
+            os.replace(partial, destination)
             return copied
         except (httpx.HTTPError, OSError):
-            destination.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             raise ProviderConnectionError(
                 "TELEGRAM_DOWNLOAD_FAILED", "Telegram 文件下载失败"
             ) from None

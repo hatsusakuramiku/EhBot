@@ -55,6 +55,21 @@ _POLL_BACKOFF_SECONDS: dict[str, int] = {
 }
 
 
+def _refusal_detail(exc: ProviderConnectionError) -> str | None:
+    """The upstream exception a translated refusal was raised from.
+
+    `_translate` keeps the operator-facing text generic on purpose -- an
+    unmapped Telethon error must not leak its own words into the page -- which
+    leaves `error_code=TELEGRAM_USER_FAILED` saying only that *something*
+    failed. The `raise ... from exc` chain still carries the original, so the
+    log can name it even when the interface must not.
+    """
+    cause = exc.__cause__
+    if cause is None or cause is exc:
+        return None
+    return f"{type(cause).__name__}: {cause}"
+
+
 class ConnectionManager:
     def __init__(
         self,
@@ -351,6 +366,8 @@ class ConnectionManager:
                     "telegram_user_ingest_source_failed",
                     extra={
                         "error_code": exc.code,
+                        "error_message": exc.public_message,
+                        "error_detail": _refusal_detail(exc),
                         "chat_id": target["chat_id"],
                     },
                 )

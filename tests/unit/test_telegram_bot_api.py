@@ -144,6 +144,54 @@ async def test_telegram_bot_api_surfaces_rate_limit_retry_after() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_completed_download_replaces_the_file(tmp_path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/file/bot123:secret/documents/book.zip"
+        return httpx.Response(200, content=b"new-archive")
+
+    destination = tmp_path / "book.zip"
+    destination.write_bytes(b"old-archive")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.telegram.org",
+    ) as client:
+        size = await TelegramBotApi("123:secret", client).download_file(
+            "documents/book.zip", destination
+        )
+
+    assert size == len(b"new-archive")
+    assert destination.read_bytes() == b"new-archive"
+    assert not (tmp_path / "book.zip.part").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_download_keeps_the_previous_file(tmp_path) -> None:
+    """A retry reuses the job row, so it writes the same path as before.
+
+    Streaming straight into `destination` meant a failed re-download truncated
+    -- and then deleted -- the archive the artifact row still referenced.
+    """
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    destination = tmp_path / "book.zip"
+    destination.write_bytes(b"previous-archive")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.telegram.org",
+    ) as client:
+        with pytest.raises(ProviderConnectionError) as caught:
+            await TelegramBotApi("123:secret", client).download_file(
+                "documents/book.zip", destination
+            )
+
+    assert caught.value.code == "TELEGRAM_DOWNLOAD_FAILED"
+    assert destination.read_bytes() == b"previous-archive"
+    assert not (tmp_path / "book.zip.part").exists()
+
+
+@pytest.mark.asyncio
 async def test_telegram_bot_api_reports_transport_failure_as_unreachable() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("dns failure")

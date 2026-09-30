@@ -44,6 +44,10 @@ class ChannelPrivateError(Exception):
     pass
 
 
+class PeerIdInvalidError(Exception):
+    pass
+
+
 class FakeSession:
     def __init__(self, value: str) -> None:
         self._value = value
@@ -358,11 +362,11 @@ class TestDownload:
         assert caught.value.code == "TELEGRAM_USER_NO_ACCESS"
 
     @pytest.mark.asyncio
-    async def test_a_partial_file_is_removed_when_the_transfer_fails(
+    async def test_a_failed_transfer_leaves_no_partial_file_behind(
         self, tmp_path: Path
     ) -> None:
         destination = tmp_path / "book.zip"
-        destination.write_bytes(b"half")
+        destination.write_bytes(b"previous-archive")
         fake = FakeClient(download_error=OSError("connection reset"))
 
         with pytest.raises(TelegramUserError) as caught:
@@ -371,9 +375,62 @@ class TestDownload:
             )
 
         assert caught.value.code == "TELEGRAM_USER_UNREACHABLE"
-        # A truncated archive left on disk would be indistinguishable from a
-        # complete one to the conversion step.
-        assert not destination.exists()
+        # The bytes go to `book.zip.part` and only the `.part` is removed. A
+        # transfer used to write straight into `destination` and delete it on
+        # failure -- which, on the retry of a job whose previous attempt
+        # succeeded, is the whole book the artifact row still points at.
+        assert destination.read_bytes() == b"previous-archive"
+        assert not (tmp_path / "book.zip.part").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_completed_transfer_replaces_the_file(
+        self, tmp_path: Path
+    ) -> None:
+        destination = tmp_path / "book.zip"
+        destination.write_bytes(b"old-archive")
+        fake = FakeClient(payload=b"new-archive")
+
+        size = await make_client(fake, "s").download_message_media(
+            -1001234, 5678, destination
+        )
+
+        assert size == len(b"new-archive")
+        assert destination.read_bytes() == b"new-archive"
+        assert not (tmp_path / "book.zip.part").exists()
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_chat_is_named_not_retried(
+        self, tmp_path: Path
+    ) -> None:
+        # Telethon answers an unknown peer with a bare ValueError, and the
+        # catch-all used to file it as「请稍后重试」-- advice that can never
+        # work for an account that is not in the channel.
+        fake = FakeClient(
+            download_error=ValueError(
+                "Could not find the input entity for PeerChannel(1234567)"
+            )
+        )
+
+        with pytest.raises(TelegramUserError) as caught:
+            await make_client(fake, "s").download_message_media(
+                -1001234, 5678, tmp_path / "book.zip"
+            )
+
+        assert caught.value.code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
+        assert "PeerChannel" not in caught.value.public_message
+
+    @pytest.mark.asyncio
+    async def test_a_peer_id_telegram_rejects_is_the_same_refusal(
+        self, tmp_path: Path
+    ) -> None:
+        fake = FakeClient(download_error=PeerIdInvalidError())
+
+        with pytest.raises(TelegramUserError) as caught:
+            await make_client(fake, "s").download_message_media(
+                -1001234, 5678, tmp_path / "book.zip"
+            )
+
+        assert caught.value.code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
 
     @pytest.mark.asyncio
     async def test_an_unauthorised_session_fails_before_reading_the_chat(

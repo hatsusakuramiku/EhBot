@@ -220,14 +220,38 @@ def test_json_formatter_redacts_context_field_strings():
     assert payload["job_id"] == 9
 
 
+def test_json_formatter_serialises_an_ingest_failure():
+    """`chat_id` and the untranslated cause are what triage reads.
+
+    The MTProto ingest loop passes `chat_id` on every failed source and the
+    whitelist dropped it, so every failing channel looked alike; and a refusal
+    `_translate` could not name logged a bare `TELEGRAM_USER_FAILED` with no
+    record of which provider error produced it.
+    """
+    record = _make_record(
+        "app.connections.manager", logging.WARNING,
+        "telegram_user_ingest_source_failed",
+        extra={
+            "error_code": "TELEGRAM_USER_ENTITY_UNRESOLVED",
+            "error_message": "登录账户无法解析该会话",
+            "error_detail": "ValueError: Could not find the input entity",
+            "chat_id": -1001234567890,
+        },
+    )
+    payload = json.loads(JsonFormatter().format(record))
+    assert payload["chat_id"] == -1001234567890
+    assert payload["error_message"] == "登录账户无法解析该会话"
+    assert payload["error_detail"].startswith("ValueError")
+
+
 def test_json_formatter_omits_unset_context_fields():
     payload = json.loads(JsonFormatter().format(
         _make_record("app.x", logging.INFO, "ok")
     ))
     for field in (
-        "request_id", "candidate_id", "work_id", "job_id", "source_type",
-        "provider", "status", "attempt", "duration_ms", "error_code",
-        "error_message",
+        "request_id", "candidate_id", "work_id", "job_id", "chat_id",
+        "message_id", "source_type", "provider", "status", "attempt",
+        "duration_ms", "error_code", "error_message", "error_detail",
     ):
         assert field not in payload
 

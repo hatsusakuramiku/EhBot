@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+import logging
 from pathlib import Path
 import sqlite3
 
@@ -437,6 +438,7 @@ class FakeUserClient:
     def __init__(self, messages: list[FakeUserMessage]) -> None:
         self.messages = sorted(messages, key=lambda item: item.id)
         self.latest_calls: list[int] = []
+        self.entity_error: Exception | None = None
 
     async def connect(self) -> None:
         return None
@@ -445,6 +447,8 @@ class FakeUserClient:
         return None
 
     async def get_entity(self, chat_id: int) -> int:
+        if self.entity_error is not None:
+            raise self.entity_error
         return chat_id
 
     async def iter_messages(
@@ -555,6 +559,37 @@ async def test_a_first_poll_seeds_the_cursor_instead_of_walking_the_archive(
     # From the seeded cursor on, new messages are ingested normally.
     client.messages.append(FakeUserMessage(id=4, caption="New Book"))
     assert await manager._ingest_with_user_account() == 1
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_source_the_account_cannot_resolve_names_itself(
+    tmp_path: Path, caplog
+) -> None:
+    """`TELEGRAM_USER_FAILED` used to be the whole story of a failing source.
+
+    `_translate` keeps the operator-facing text generic, and the log whitelist
+    dropped the `chat_id` the loop passed, so a channel that failed on every
+    poll named neither itself nor the underlying Telethon error -- the two
+    facts an operator needs to act.
+    """
+    manager, database, client = await user_ingest_manager(tmp_path, [])
+    client.entity_error = ValueError(
+        "Could not find the input entity for PeerChannel(123)"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.connections.manager"):
+        assert await manager._ingest_with_user_account() == 0
+
+    record = next(
+        item
+        for item in caplog.records
+        if item.name == "app.connections.manager"
+        and item.getMessage() == "telegram_user_ingest_source_failed"
+    )
+    assert record.error_code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
+    assert record.chat_id == -100123
+    assert "ValueError" in record.error_detail
     await manager.stop()
 
 

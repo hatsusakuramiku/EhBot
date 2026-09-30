@@ -81,6 +81,12 @@ _CONTEXT_FIELDS: tuple[str, ...] = (
     "candidate_id",
     "work_id",
     "job_id",
+    # `chat_id` / `message_id` say which Telegram source message a record is
+    # about. The MTProto ingest loop has always passed `chat_id` on a failed
+    # source, and the whitelist dropped it, so every failing source looked
+    # identical in the log.
+    "chat_id",
+    "message_id",
     "source_type",
     "provider",
     "status",
@@ -88,6 +94,10 @@ _CONTEXT_FIELDS: tuple[str, ...] = (
     "duration_ms",
     "error_code",
     "error_message",
+    # The upstream exception a refusal was translated from. `error_code` stays
+    # the stable vocabulary the interface renders; this is triage-only detail
+    # for the case where that vocabulary says nothing but「失败」.
+    "error_detail",
     # `http_method` / `http_path` are on the list for the same reason
     # `error_message` is: a rejected API request is triaged by 「哪个接口、什么
     # 值」, and a code alone answers neither. Paths carry no query string, and

@@ -24,6 +24,7 @@ the ingestor persists them on every attachment.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -347,6 +348,13 @@ class TelegramUserClient:
         fails as「消息已被删除」rather than as a mysterious download error.
         """
         client = await self._connect()
+        # The bytes land beside the destination and move into place only once
+        # the transfer is complete. `redownload_work` reuses the job row, so
+        # this destination is the very file the previous, successful download
+        # produced; writing into it directly meant a failed re-fetch (a deleted
+        # message is one refusal a retry never recovers) deleted the book the
+        # artifact row still pointed at.
+        partial = destination.with_name(f"{destination.name}.part")
         try:
             if not await client.is_user_authorized():
                 raise TelegramUserError(
@@ -360,26 +368,28 @@ class TelegramUserClient:
                     "源消息已被删除或不再包含附件，无法用用户账户下载",
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
+            partial.unlink(missing_ok=True)
             written = await client.download_media(
                 message,
-                file=str(destination),
+                file=str(partial),
                 part_size_kb=_CHUNK_BYTES // 1024,
                 progress_callback=progress,
             )
         except TelegramUserError:
-            destination.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             raise
         except Exception as exc:  # noqa: BLE001 - provider boundary
-            destination.unlink(missing_ok=True)
+            partial.unlink(missing_ok=True)
             raise _translate(exc) from exc
         finally:
             await self._close(client)
-        if written is None or not destination.exists():
-            destination.unlink(missing_ok=True)
+        if written is None or not partial.exists():
+            partial.unlink(missing_ok=True)
             raise TelegramUserError(
                 "TELEGRAM_USER_DOWNLOAD_FAILED",
                 "用户账户下载未产生文件",
             )
+        os.replace(partial, destination)
         return destination.stat().st_size
 
 
@@ -475,6 +485,21 @@ def _translate(exc: Exception) -> ProviderConnectionError:
             retry_after=seconds or None,
         )
         # `retry_after` is what the worker's backoff table already reads.
+    if name == "PeerIdInvalidError" or (
+        isinstance(exc, ValueError) and "input entity" in str(exc)
+    ):
+        # Telethon answers with this bare ValueError, not one of its typed
+        # errors, when the session cannot resolve the chat at all: the account
+        # left the channel, or it is a private chat this session has never
+        # seen. It used to fall through to the catch-all and advise a retry,
+        # which can never succeed; the fix is membership or a fresh login, so
+        # the message says that instead of repeating Telethon's own text (which
+        # carries the peer id and a documentation URL).
+        return TelegramUserError(
+            "TELEGRAM_USER_ENTITY_UNRESOLVED",
+            "登录账户无法解析该会话：可能已退出该频道，或会话缓存中没有它。"
+            "请确认账户仍在频道内，必要时重新登录后重试",
+        )
     known = _ERROR_BY_NAME.get(name)
     if known is not None:
         return TelegramUserError(*known)
