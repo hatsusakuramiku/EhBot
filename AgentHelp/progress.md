@@ -4699,4 +4699,4 @@ access hash 放在**内存**实体缓存里，而 `StringSession.save()` 只存 
 每进程只补一次、轮询与下载共用缓存，以及补完仍失败才是账户不在频道里。`README.md` 不涉及。
 `AgentHelp/AGENTS.md` 基线 1544 → 1547，`passed` 两个数各 +3 并补 R43 一环。
 
-提交 `475cdde`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。
+提交 `475cdde`（fix，含文档）与 `6d9e6b2`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。修正的是运营者正在受影响的路径，修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:ce889a0374ca115ee4660df7cd618002239fb4ce6111921fbf4cf2f0a31237ee`，amd64 manifest `sha256:b80c5754d13d8a114d5b1428a74965379ee9e88773132de0e3d1f680e5311807`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内直接复现运营者的场景——用冷会话假客户端（`get_entity(-1001821575869)` 先抛同一个 `ValueError`）跑 `TelegramUserClient.latest_message_id`：扫一次会话列表后返回 4242，第二次调用不再扫（`dialog_calls` 恒为 1），即 R43 的修复确实在镜像里并解决了那条日志；冒烟容器与临时数据目录已清理。
