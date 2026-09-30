@@ -4651,3 +4651,52 @@ index digest，如不希望直接发版请告知，下次仍走「先问再推�
 `passed` 两个数各 +7 并补 R42 一环。
 
 提交 `07dea82`（fix，含文档）与 `0261ef9`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。服务在运营者那边一直是「跑着但一直报错」，这次按既有节奏修完直接重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:2607078c8f076a1eb25e58922f34d2beea3927425e0580dc15b288aedb1b6bbc`，amd64 manifest `sha256:ea218e0340b55cdff0c61c2f38b85a4db131f2c06a54758ebb070b64b11b4e50`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`（宿主侧 curl 仍被本沙箱网络策略挡住，改为容器内请求）；再在容器里确认 R42 都在镜像里：`_CONTEXT_FIELDS` 含 `chat_id` / `message_id` / `error_detail`、`_refusal_detail` 存在、`_translate` 含 `TELEGRAM_USER_ENTITY_UNRESOLVED`、`TelegramBotApi.download_file` 写 `.part`、`schema_migrations` 计到 21；冒烟容器与临时数据目录已清理。
+
+## R43 — 冷会话先补会话列表再解析频道：账户轮询不再永远失败（v0.3.0rc1，2026-09-30）
+
+R42 上线后运营者贴回新日志：`chat_id=-1001821575869`、
+`error_code=TELEGRAM_USER_ENTITY_UNRESOLVED`、
+`error_detail=ValueError: Could not find the input entity for PeerChannel(channel_id=1821575869)`。R42 的观测修复起了作用——
+原因第一次被指出来了。而原因本身是我们自己的缺陷。
+
+**根因：我们让 Telethon 用一个从未装过任何东西的实体缓存去解析裸 `chat_id`。** Telethon 把 `InputChannel` 需要的
+access hash 放在**内存**实体缓存里，而 `StringSession.save()` 只存 dc_id / ip / port / auth_key——重启或重新登录后
+会话串里没有任何频道的 access hash。`client.get_entity(-100…)` 于是走最后一条路：拿 `InputChannel(id, 0)` 请求
+`channels.getChannels`，失败就抛裸 `ValueError`。R40 的账户轮询（以及同一份 `TelegramUserClient` 的「大文件」下载）
+都是在这样的冷会话上按裸 id 取频道，所以**每个频道在每次重启后都会先失败**，而且自己在 10 秒一轮里永远重试同一件事。
+（这解释了为什么运营者刚登录 R40 的账户就一直在报这个错；也意味着「Telegram 大文件」来源按钮在冷会话下同样取不到原档。）
+
+**修法：解析失败时先读一次账户自己的会话列表。** `client.iter_dialogs()` 会走到 `GetDialogsRequest`，其在
+`dialogs.py` 里显式 `client._mb_entity_cache.extend(r.users, r.chats)`，把每个会话（含频道）的 access hash 灌进
+缓存——之后 `get_entity` 才认得那个裸 id。实现是 `TelegramUserClient._chat_entity`：
+`get_entity` 抛 `ValueError` 且本进程还没扫过列表时，`iter_dialogs(limit=None)` 全量扫一遍再重试；扫过之后仍解析不了，
+就说明账户确实不在那个频道里，直接按 R42 的 `TELEGRAM_USER_ENTITY_UNRESOLVED` 报错，不再重复全量扫描（避免每 10 秒
+一次大请求把账户打进限流）。
+
+**缓存放在进程级而不是客户端上。** 我们的客户端是「一次操作一个」建出来的（文档字符串里刻意如此：不把会话整夜挂着），
+缓存挂在客户端上会在下一次操作前就被丢掉。所以新增 `EntityIndex`（`app/connections/telegram_user.py`）由
+`ConnectionManager` 持有，`_user_client()` 把它交给每个建出来的客户端——账户轮询与下载 worker 共用同一份；
+登录成功与「断开」时 `clear()`，因为换账户就意味着 access hash 全不一样。已解析的频道对象本身（带 access_hash）
+跨客户端复用是合法的：`get_input_peer(Channel)` 短路，不再查缓存。
+
+**测试（+3，1544 → 1547 collected）**
+- `tests/unit/test_telegram_user.py`：`FakeClient` 增加 `get_entity` / `iter_dialogs` / `iter_messages` 与
+  `unknown_chats`（模拟冷会话）。新增两条：`test_a_chat_the_session_has_not_seen_is_found_via_the_dialogs`
+  （先失败、扫列表后成功，且只扫一次）、`test_a_chat_the_account_is_not_in_is_scanned_only_once`
+  （扫完仍解析不了时按 `TELEGRAM_USER_ENTITY_UNRESOLVED` 失败，且不重复扫）。
+- `tests/integration/test_connection_manager.py`：`FakeUserClient` 加 `unseen_chats` / `iter_dialogs`，新增
+  `test_a_channel_the_session_has_not_seen_is_read_after_dialogs`——即运营者的端到端场景：冷会话下轮询一个频道，
+  扫一次列表后成功摄取候选，随后几轮不再扫。
+- `tests/integration/test_telegram_user_web.py`：它的 `StubTelethonClient` 是第三个假 Telethon 客户端，补上
+  `get_entity` / `iter_dialogs`（否则「大文件下载」用例会走进新分支并报 `TELEGRAM_USER_FAILED`）。
+
+**验证（定向，不全量）**：上列五个文件加 `tests/unit/test_telegram_bot_api.py`、`tests/unit/test_logging.py`、
+`tests/unit/test_mtproto_translation.py`、`tests/unit/test_download_logging.py`、`tests/integration/test_downloads.py`、
+`tests/integration/test_downloaded_web.py`、`tests/integration/test_connections_web.py` 全绿；
+`--collect-only` 计得 1547；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 把 R42 那条「指名报错」改写为「新会话先补会话列表再解析频道」，说明冷会话现象、
+每进程只补一次、轮询与下载共用缓存，以及补完仍失败才是账户不在频道里。`README.md` 不涉及。
+`AgentHelp/AGENTS.md` 基线 1544 → 1547，`passed` 两个数各 +3 并补 R43 一环。
+
+提交 `475cdde`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。
