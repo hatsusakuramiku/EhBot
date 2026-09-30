@@ -4999,3 +4999,77 @@ JPEG**。另有第二个机制：固体 7z 把整块的 `Packed Size` 记在块�
 930 倍，**仍以 `ARCHIVE_COMPRESSION_RATIO` 拒绝**；再把那张纯白 JPEG 用镜像自带的 7zz 打成固体 7z，
 `header=0B`、548 倍，**仍然拒绝**——即 ZIP 的误伤已修、7z 的行为如文档所述保持原样。冒烟容器与临时数据
 目录已清理。
+
+## R48 — 7z/rar 按压缩块判比例，触发时才读一次成员头（v0.3.0rc1，2026-09-30）
+
+R47 留下的尾巴：运营者问「为啥要跳过 7z 与 rar」。答案是**没有跳过**——那两个格式没拿到豁免、继续被比例门
+拦，因为 `7zz l -slt` 不提供成员字节，`detected` 只能是 `None`。但顺着这个问题把 7z 的清单拆开看，发现那边
+真正的毛病不是「缺豁免」，而是**判据本身错了**。
+
+**根因：固体 7z 的 `Packed Size` 是「块」的属性，旧实现拿它当「成员」的属性用。**
+实测（7zz 26.02，40 页固体包）：`7zz l -slt` 里有 `Solid = +` 和每成员的 `Block`，但**只有块首成员带
+`Packed Size`，其余为空**（40 个成员只有 1 个有数字）。旧实现 per-member 地算 `size / compressed_size`，
+于是
+
+- **误伤**：拿块首自己的大小去除整块的打包大小——首成员只占全书一小部分，却背了整本的压缩量；一张平坦的
+  首页会因此被判成炸弹；
+- **漏报**：块中后段的成员 `compressed_size == 0`，整条被 `if compressed_size > 0` 跳过，真正的炸弹藏在
+  那里就完全看不见。
+
+**修法一：按 `Block` 分组，比例是「该块解开后之和 ÷ 该块打包大小」。**
+`ArchiveMember` 增加 `block` 字段，`parse_slt_listing` 解析 `Block`（非数字或缺失为 `None`）；`safety.py`
+新增 `compression_groups()`：有块号的按块聚合，没有块号的（zip、以及按成员给 `Packed Size` 的非固体 7z）
+各自成一个单成员组——同一条规则对单成员块的自然退化，所以 zip 的行为一个字没变。`validate_manifest` 里那道
+per-member 的比例检查因此移出结构门禁循环，落到循环之后的 `enforce_compression_ratio()`：先做完路径、成员数、
+大小、魔数这些便宜的判断，再判比例。**顺序变了要说清楚**：`01.jpg` 里塞网页字节这种同时违反两条的成员，现在
+先报 `ARCHIVE_MEMBER_FAKE_IMAGE`（更精确的那条），不再报比例异常；R47 新加的那条比例用例改用 `payload.bin`
+来隔离比例门本身。
+
+**修法二：`7z`/`rar` 的块触发比例门时，才去读一次该块首个成员的头 16 字节。**
+`SevenZipBackend.read_member_header()` 用 `7zz x -so -ba -y -sccUTF-8 -spd -p -- <archive> <member>` 把成员
+**流到 stdout**，只读 `HEADER_SIZE`（16）字节就掐断进程——不落盘、不解到临时目录。要点与代价：
+
+- 只在 `enforce_compression_ratio` 判定某一块超限之后才调用，**每块至多一次**，且只读块首；比例没触发就
+  一次都不读（有用例钉住）。加密包一律不读（成员密码不归安全门管），读不到（`b""`）或超时（30 s，进程被
+  kill）都算「识别不出」，维持拒绝——探针的任何失败都不能变成放行。
+- `-spd` 关掉通配符匹配、`--` 结束选项解析：成员名里的 `*` 不再被当模式，以 `-` 开头的名字不再被当成未知
+  开关（实测 `7zz x -so a.7z -dash.jpg` 会报 Unknown switch，加 `--` 才对）。
+- 代价与成员在块内的偏移成正比（实测 3.2 MB 的固体块：块首 19 ms、第 20 个 163 ms、最后一个 293 ms，
+  ≈9 MB/s），所以只做「触发后确认」，不做逐成员识别。
+- 处理器里通过 `getattr(backend, "read_member_header", None)` 注入：zipfile 后端在 inspect 阶段就已经读到每个
+  成员的头几字节，识别是免费的，不需要这条路径。
+
+**没有做的事**：7z/rar 的**魔数门禁仍然是空转**（`-slt` 不给字节，`header_matches_extension` 对空头恒真），
+所以「不可压缩的垃圾字节却叫 `.jpg`」在 7z 里依旧不会被任何内容门禁拦下——这是既有事实，本次没有扩大范围。
+「整本都是平坦页」的 7z 现在因为块判 + 探针而放行；「整本都是高度可压缩的非图片数据」则被探针拒掉。
+
+**测试（+7，1557 → 1564 collected）**
+- `tests/unit/test_archive_processing.py`：新增五条——固体块按块判（块首自身比例只有 1.1，旧规则什么都不会
+  报）、触发的块被探针确认为图片后整块放行且**只探一次**（断言探到的是块首）、探针读到非图片字节维持拒绝、
+  加密包绝不探针（探针函数被调用即 `AssertionError`）、未触发的块不探针；`SLT 输出`夹具补上 `Block` 字段并
+  断言解析结果（目录成员没有块号）；R47 的比例用例改用 `payload.bin` 以隔离比例门。
+- `tests/integration/test_seven_zip_real.py`：新增两条真 7zz 端到端——两张 4800×4800 纯白 JPEG 的固体 7z
+  （先断言 `total/packed > 200`，确认夹具真的会触发），经处理器**发布成 CBZ**；以及两张「`<html>` + 空格」
+  的固体 7z（同样触发），探针读到非图片字节，以 `ARCHIVE_COMPRESSION_RATIO` 拒绝。
+
+**验证（定向，不全量）**：`tests/unit/test_archive_processing.py`、`tests/unit/test_archive_path_rules.py`、
+`tests/integration/test_archive_workflow.py`、`tests/integration/test_seven_zip_real.py`、
+`tests/unit/test_conversion.py`、`tests/unit/test_rearchive.py`、`tests/integration/test_settings_web.py` 全绿；
+`--collect-only` 计得 1564；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 归档一节把 R47 那条「压缩率只对识别不出是图片的成员判」改写为两条——一条讲
+判据是魔数、一条讲 7z/rar **按块判**并在触发时读一次成员头（含 `-so` 有界读取与不落盘）；设置页「最大压缩率」
+的提示同步改写。`README.md` 只到功能粒度，不涉及（本次无 README 变更）。`AgentHelp/AGENTS.md` 基线
+1557 → 1564，并在 R47 一环后补上 R48 的七条新增用例。
+
+提交为**单条**提交（代码、测试与本节记录同在，父提交 `dd1e349`），只提交、不推送（`origin/main` 仍停在
+`b559740`）。修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:8461ce754516050cfb4ed1f50034828889c2ab0df6bc1e4b6a789b91ab0ee68b`，amd64 manifest
+`sha256:f3dc69b9974a9c1fd2d3071ca41aa6acc8cbab8ee154337ab1b89b714769b247`）。**从 registry 验证而不是只信本地
+构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，
+数据目录挂载为可写，容器内监听 8080；本机宿主端口映射仍不可用，改在容器内用 `urllib` 打）
+里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内用镜像自带的 7zz 与 Pillow
+跑完整处理器流程——两张 4800×4800 纯白 JPEG 打成固体 7z 后，清单显示 `block id=0`、块总 264 KB / 打包
+0.3 KB = **991 倍**（块首自己只有 496 倍），处理器**发布 2 页 CBZ**，日志里正好一条
+`archive_compression_ratio_exempt members=2 ratio=991 probe=01.jpg`（探针只读了一次块首）；同样的固体结构装
+两张「`<html>` + 空格」的成员则**被 `ARCHIVE_COMPRESSION_RATIO` 拒绝**。冒烟容器与临时数据目录已清理。

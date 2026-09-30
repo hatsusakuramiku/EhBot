@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import PurePosixPath
 
 from app.archive.errors import ArchiveSafetyError
@@ -201,12 +202,114 @@ def member_depth(name: str) -> int:
     return len(PurePosixPath(name).parts)
 
 
+def compression_groups(
+    files: Iterable[ArchiveMember],
+) -> list[tuple[ArchiveMember, ...]]:
+    """Members grouped the way the archive charges its packed bytes.
+
+    7-Zip reports `Packed Size` only for the first member of a solid block, so
+    that number describes the *block*: dividing one member's size by it (the
+    old rule) charged the block leader with every other member's bytes and hid
+    the block's real expansion. Members with no block id -- zip, and any
+    archive that reports a packed size per member -- are grouped one by one,
+    which is the same rule stated for one-member blocks.
+    """
+    grouped: dict[int, list[ArchiveMember]] = {}
+    loose: list[ArchiveMember] = []
+    for member in files:
+        if member.block is None:
+            loose.append(member)
+        else:
+            grouped.setdefault(member.block, []).append(member)
+    return [tuple(group) for group in grouped.values()] + [
+        (member,) for member in loose
+    ]
+
+
+def _identified_as_image(group: Sequence[ArchiveMember]) -> bool:
+    """Whether every member of a group is a real image container by its bytes.
+
+    Positive identification only, and of the *whole* group: bytes that are not
+    an image at all, and bytes the backend never captured, are both `None`.
+    """
+    return all(
+        detected_image_extension(member.header) is not None for member in group
+    )
+
+
+def enforce_compression_ratio(
+    manifest: ArchiveManifest,
+    files: Sequence[ArchiveMember],
+    limits: SafetyLimits,
+    read_header: Callable[[ArchiveMember], bytes] | None = None,
+) -> None:
+    """Refuse an archive whose members expand far more than they are packed.
+
+    The two numbers are the archive's own claim about itself, so this measures
+    *compressibility*, and for an image that is a flatness signal rather than a
+    bomb signal: JPEG's entropy-coded output for a blank or solid-colour page
+    deflates hundreds of times over (measured through this function: a
+    4800x4800 solid-white page is 132 KB and packs to 0.3 KB -- 428x in a zip,
+    548x in a 7z). Hence the exemption: a group whose bytes are positively
+    identified as an image container is passed regardless of its ratio, and its
+    real risk -- the decoded pixel count -- is not something this ratio could
+    ever have measured anyway.
+
+    Where the listing carries no member bytes (7z, rar) identification costs a
+    decompression, so it is deferred to `read_header` and only asked once the
+    ratio has already flagged the group. `read_header` returning `b""` -- an
+    unreadable or hostile archive -- leaves the group unidentified, and an
+    unidentified group is refused.
+    """
+    for group in compression_groups(files):
+        # `Packed Size` sits on the block leader and is zero everywhere else.
+        packed = max(member.compressed_size for member in group)
+        if packed <= 0:
+            continue
+        total = sum(member.size for member in group)
+        ratio = total / packed
+        if ratio <= limits.max_compression_ratio:
+            continue
+        if _identified_as_image(group):
+            LOGGER.info(
+                "archive_compression_ratio_exempt members=%d ratio=%.0f",
+                len(group),
+                ratio,
+            )
+            continue
+        if read_header is not None and not manifest.encrypted:
+            header = read_header(group[0])
+            if detected_image_extension(header) is not None:
+                LOGGER.info(
+                    "archive_compression_ratio_exempt members=%d ratio=%.0f "
+                    "probe=%s",
+                    len(group),
+                    ratio,
+                    group[0].name,
+                )
+                continue
+        if len(group) == 1:
+            raise ArchiveSafetyError(
+                "ARCHIVE_COMPRESSION_RATIO",
+                "\u6210\u5458 {} \u538b\u7f29\u7387\u5f02\u5e38\uff0c\u53ef\u80fd\u662f\u538b\u7f29\u70b8\u5f39".format(group[0].name),
+            )
+        raise ArchiveSafetyError(
+            "ARCHIVE_COMPRESSION_RATIO",
+            "\u6210\u5458 {} \u8d77\u7684 {} \u4e2a\u6210\u5458\uff08\u538b\u7f29\u5757\uff09\u89e3\u5f00\u540e\u662f\u6253\u5305\u5927\u5c0f\u7684 {:.0f} \u500d\uff0c\u53ef\u80fd\u662f\u538b\u7f29\u70b8\u5f39".format(group[0].name, len(group), ratio),
+        )
+
+
 def validate_manifest(
-    manifest: ArchiveManifest, limits: SafetyLimits
+    manifest: ArchiveManifest,
+    limits: SafetyLimits,
+    *,
+    read_header: Callable[[ArchiveMember], bytes] | None = None,
 ) -> tuple[ArchiveMember, ...]:
     """Validate an archive listing before anything is written to disk.
 
     Returns the publishable image members in natural page order.
+    `read_header` is how an archive that carries no member bytes offers to
+    produce them; see `enforce_compression_ratio`.
     """
     files = manifest.files
     if not files:
@@ -251,31 +354,6 @@ def validate_manifest(
                 "ARCHIVE_TOTAL_TOO_LARGE",
                 "\u538b\u7f29\u5305\u89e3\u5f00\u540e\u603b\u5927\u5c0f\u8d85\u8fc7\u4e0a\u9650",
             )
-        # Only members that are *not* positively identified as an image. The
-        # ratio of a real image container is not a bomb signal, it is a
-        # flatness signal: JPEG's entropy-coded output for a blank or
-        # solid-colour page deflates hundreds of times over, and the gate was
-        # rejecting legitimate pages for it (measured through this function: a
-        # 4800x4800 solid-white JPEG is 132 KB and packs to 0.3 KB -- 428x in a
-        # zip, 548x in a 7z). Non-image bytes named `.jpg` are already refused
-        # by the magic-number gate below, so what is left for this gate is the
-        # member that *looks* like an image without being one -- a signature
-        # followed by padding, or a corrupt size field -- and that is the
-        # reading it keeps.
-        #
-        # `detected` is None both for bytes that are not an image and for
-        # bytes the backend never captured: the 7zz listing carries no header,
-        # so a 7z/rar member stays gated. That is deliberate -- there the ratio
-        # check is the only content gate that fires at all.
-        if (
-            detected is None
-            and member.compressed_size > 0
-            and member.size / member.compressed_size > limits.max_compression_ratio
-        ):
-            raise ArchiveSafetyError(
-                "ARCHIVE_COMPRESSION_RATIO",
-                f"\u6210\u5458 {member.name} \u538b\u7f29\u7387\u5f02\u5e38\uff0c\u53ef\u80fd\u662f\u538b\u7f29\u70b8\u5f39",
-            )
         # A member with no extension at all is judged by its bytes. Uploaders do
         # ship books whose pages are named `001` with no suffix, and refusing
         # those produced `ARCHIVE_NO_IMAGES` for an archive that was entirely
@@ -307,6 +385,7 @@ def validate_manifest(
                     detected,
                 )
             pages.append(member)
+    enforce_compression_ratio(manifest, files, limits, read_header)
     if not pages:
         raise ArchiveSafetyError(
             "ARCHIVE_NO_IMAGES",
@@ -342,6 +421,8 @@ def page_file_names(members: tuple[ArchiveMember, ...]) -> tuple[str, ...]:
 
 __all__ = [
     "ALLOWED_SIDECAR_NAMES",
+    "compression_groups",
+    "enforce_compression_ratio",
     "IMAGE_EXTENSIONS",
     "NESTED_ARCHIVE_EXTENSIONS",
     "detected_image_extension",

@@ -19,7 +19,11 @@ from app.archive.backends.seven_zip import (
     SevenZipBackend,
     resolve_seven_zip_executable,
 )
-from app.archive.errors import ArchivePasswordRequired, ArchiveVolumesMissing
+from app.archive.errors import (
+    ArchivePasswordRequired,
+    ArchiveSafetyError,
+    ArchiveVolumesMissing,
+)
 from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
 
@@ -266,6 +270,61 @@ def test_real_seven_zip_rejects_corrupted_archive(tmp_path: Path) -> None:
         _process(archive, tmp_path)
 
     assert getattr(error.value, "code", "").startswith("ARCHIVE_")
+
+
+def test_real_solid_archive_of_flat_pages_is_probed_and_published(
+    tmp_path: Path,
+) -> None:
+    """A book of near-blank pages is not a bomb, and the block says otherwise.
+
+    `image_bytes` is a JPEG signature followed by zeros: perfectly valid as far
+    as the gate is concerned, and compressible enough that the whole solid
+    block expands far past the ratio limit. The listing carries no member
+    bytes, so the gate probes the block leader -- one bounded read, and the
+    bytes say JPEG, so the block is exempt and the book is published. Before
+    this, the leader was charged with the block's packed size and the archive
+    was refused as a decompression bomb.
+    """
+    source = _pages(tmp_path / "src", 2, size=200_000)
+    archive = tmp_path / "flat.7z"
+    _run("a", "-t7z", "-bso0", "-bsp0", str(archive), str(source / "*"))
+
+    profile = ALL_PROFILES[1]
+    manifest = SevenZipBackend(profile, tools_path=TOOLS_PATH).inspect(
+        (archive,), None
+    )
+    assert manifest.files[0].block == 0
+    total = sum(member.size for member in manifest.files)
+    packed = max(member.compressed_size for member in manifest.files)
+    assert total / packed > 200, "the fixture must actually trip the gate"
+
+    result = _process(archive, tmp_path)
+
+    assert result.page_count == 2
+
+
+def test_real_solid_archive_of_compressed_garbage_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The probe is what tells a flat book from a payload that is not a page.
+
+    This archive trips the same gate, but its bytes are compressible *and* not
+    an image -- the case the ratio gate exists for. The probe reads the block
+    leader, finds no image signature, and the refusal stands.
+    """
+    source = tmp_path / "src"
+    source.mkdir(parents=True, exist_ok=True)
+    for index in (1, 2):
+        (source / f"{index:02d}.jpg").write_bytes(
+            b"<html><body>" + b" " * 200_000 + b"</body></html>"
+        )
+    archive = tmp_path / "garbage.7z"
+    _run("a", "-t7z", "-bso0", "-bsp0", str(archive), str(source / "*"))
+
+    with pytest.raises(ArchiveSafetyError) as error:
+        _process(archive, tmp_path)
+
+    assert error.value.code == "ARCHIVE_COMPRESSION_RATIO"
 
 
 def test_backend_inspect_reports_real_member_sizes(tmp_path: Path) -> None:

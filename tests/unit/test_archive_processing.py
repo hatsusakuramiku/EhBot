@@ -26,6 +26,7 @@ from app.archive.formats import (
     resolve_volumes,
     volume_group,
 )
+
 from app.archive.models import (
     ArchiveManifest,
     ArchiveMember,
@@ -197,13 +198,16 @@ def test_validate_manifest_enforces_limits() -> None:
         )
     assert count_error.value.code == "ARCHIVE_TOO_MANY_MEMBERS"
 
-    # Bytes that are not an image at all, however they are named: this is the
-    # member the ratio gate is for, and it stays refused.
+    # A payload that is not an image at all, so no amount of ratio is the
+    # archive's way of saying "these are flat pages". Refused by the ratio
+    # gate, which runs after the per-member gates: naming this member `.jpg`
+    # instead would make it `ARCHIVE_MEMBER_FAKE_IMAGE` first, which is the
+    # more precise refusal of the two.
     with pytest.raises(ArchiveSafetyError) as ratio_error:
         validate_manifest(
             _manifest(
                 _member(
-                    "01.jpg",
+                    "payload.bin",
                     size=10_000_000,
                     compressed_size=10,
                     header=b"<html><body>not an image</body></html>",
@@ -246,6 +250,122 @@ def test_the_ratio_gate_does_not_fire_on_a_real_image() -> None:
     )
 
     assert [member.name for member in pages] == ["01.jpg", "02.png"]
+
+
+def _solid(
+    *members: ArchiveMember, block: int = 0
+) -> tuple[ArchiveMember, ...]:
+    """Members of one solid block, in the shape the 7zz listing produces.
+
+    `Packed Size` lands on the block's first member and is absent (zero) for
+    the rest, which is exactly the shape that made a per-member ratio wrong.
+    """
+    return tuple(
+        replace(member, block=block)
+        for member in members
+    )
+
+
+def test_a_solid_block_is_judged_by_the_block_not_its_leader() -> None:
+    """The old rule charged the leader with the whole block and hid the bomb.
+
+    A small compressible leader with a large payload behind it in the same
+    solid block: read one member at a time, the leader's own ratio is 1.1 and
+    the payload has no packed size at all, so nothing fired. The block's real
+    expansion is what the number on the leader describes.
+    """
+    members = _solid(
+        _member("01.jpg", size=1_000, compressed_size=900, header=b""),
+        _member("02.jpg", size=10_000_000, compressed_size=0, header=b""),
+    )
+
+    with pytest.raises(ArchiveSafetyError) as caught:
+        validate_manifest(_manifest(*members), SafetyLimits())
+
+    assert caught.value.code == "ARCHIVE_COMPRESSION_RATIO"
+    # The refusal names the block, because no single member's size explains it.
+    assert "01.jpg" in caught.value.public_message
+
+
+def test_a_flagged_block_is_probed_and_passes_when_it_is_an_image() -> None:
+    """7z carries no member bytes, so the gate asks the backend for the head.
+
+    The probe costs a decompression, which is why it happens only after the
+    ratio has already flagged the block -- and only once per block, on the
+    block's first member.
+    """
+    members = _solid(
+        _member("01.jpg", size=1_000, compressed_size=900, header=b""),
+        _member("02.jpg", size=10_000_000, compressed_size=0, header=b""),
+    )
+    probed: list[str] = []
+
+    def read_header(member: ArchiveMember) -> bytes:
+        probed.append(member.name)
+        return JPEG_HEADER
+
+    pages = validate_manifest(
+        _manifest(*members), SafetyLimits(), read_header=read_header
+    )
+
+    assert probed == ["01.jpg"]
+    assert [member.name for member in pages] == ["01.jpg", "02.jpg"]
+
+
+def test_a_flagged_block_is_refused_when_the_probe_is_not_an_image() -> None:
+    members = _solid(
+        _member("01.jpg", size=1_000, compressed_size=900, header=b""),
+        _member("02.jpg", size=10_000_000, compressed_size=0, header=b""),
+    )
+
+    with pytest.raises(ArchiveSafetyError) as caught:
+        validate_manifest(
+            _manifest(*members),
+            SafetyLimits(),
+            read_header=lambda member: b"\x00\x00\x00\x00",
+        )
+
+    assert caught.value.code == "ARCHIVE_COMPRESSION_RATIO"
+
+
+def test_an_encrypted_archive_is_never_probed() -> None:
+    """A member-level password is not something the safety gate handles.
+
+    Encrypted bytes cannot be identified without it, so the refusal stands --
+    and the probe must not be attempted, because that would put the password
+    handling in the gate.
+    """
+    members = _solid(
+        _member("01.jpg", size=1_000, compressed_size=900, header=b""),
+        _member("02.jpg", size=10_000_000, compressed_size=0, header=b""),
+    )
+    manifest = ArchiveManifest(
+        source_format="7z", members=members, encrypted=True
+    )
+
+    def read_header(member: ArchiveMember) -> bytes:  # pragma: no cover
+        raise AssertionError("the gate must not probe an encrypted archive")
+
+    with pytest.raises(ArchiveSafetyError) as caught:
+        validate_manifest(manifest, SafetyLimits(), read_header=read_header)
+
+    assert caught.value.code == "ARCHIVE_COMPRESSION_RATIO"
+
+
+def test_a_block_under_the_limit_is_not_probed() -> None:
+    members = _solid(
+        _member("01.jpg", size=1_000, compressed_size=900, header=b""),
+        _member("02.jpg", size=1_000, compressed_size=0, header=b""),
+    )
+
+    def read_header(member: ArchiveMember) -> bytes:  # pragma: no cover
+        raise AssertionError("a block under the limit must not be probed")
+
+    pages = validate_manifest(
+        _manifest(*members), SafetyLimits(), read_header=read_header
+    )
+
+    assert [member.name for member in pages] == ["01.jpg", "02.jpg"]
 
 
 def test_the_ratio_gate_still_fires_when_no_header_was_captured() -> None:
@@ -448,6 +568,7 @@ def test_zipfile_backend_pack_cbz_uses_stored_compression(tmp_path: Path) -> Non
 SLT_OUTPUT = """Path = 01.jpg
 Size = 2048
 Packed Size = 1024
+Block = 0
 Attributes = _ -----
 Encrypted = -
 
@@ -458,7 +579,8 @@ Attributes = D_ ----
 
 Path = sub/02.jpg
 Size = 4096
-Packed Size = 2048
+Packed Size = 1024
+Block = 0
 Attributes = _ -----
 Encrypted = +
 """
@@ -471,6 +593,13 @@ def test_parse_slt_listing_extracts_members() -> None:
     assert members[0].compressed_size == 1024
     assert members[1].is_dir is True
     assert members[2].encrypted is True
+    # The block id is what tells the ratio gate that this `Packed Size` is a
+    # property of the block rather than of this one member.
+    assert members[0].block == 0
+    assert members[2].block == 0
+    # A directory has no block id, and neither does an archive that reports a
+    # packed size per member.
+    assert members[1].block is None
 
 
 def test_seven_zip_backend_inspect_uses_registered_profile(tmp_path: Path) -> None:

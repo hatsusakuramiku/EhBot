@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from app.archive.errors import (
@@ -22,6 +23,12 @@ from app.archive.toolchain import installed_executable
 
 
 HEADER_SIZE = 16
+
+#: How long a member-header probe may take before it is killed. The probe is
+#: charged per *block* and only after the ratio gate flagged it, so a few
+#: seconds is the expected cost; anything at this scale means the archive is
+#: hostile or broken, and either way the answer is "not identified".
+HEADER_PROBE_TIMEOUT = 30.0
 
 # Observed against 7-Zip 26.00: a wrong member password reports
 # "Data Error in encrypted file. Wrong password?", and a header-encrypted
@@ -158,6 +165,65 @@ class SevenZipBackend:
     @staticmethod
     def _detected_format(source: Path) -> str:
         return detect_source_format(source)
+
+    def read_member_header(
+        self,
+        volumes: tuple[Path, ...],
+        member: ArchiveMember,
+        password: str | None = None,
+    ) -> bytes:
+        """The first bytes of one member, or `b""` if they cannot be read.
+
+        The safety gate uses this to ask "are these bytes a real image?" of an
+        archive whose listing carries no member bytes. It is only asked after
+        the ratio gate has already flagged something, because the answer costs
+        a decompression: `-so` streams the member, so the head is read and the
+        process is killed rather than the member being extracted anywhere.
+
+        Failures answer `b""` -- the gate reads that as "not identified", which
+        refuses the archive. Nothing here may turn an unreadable probe into a
+        pass.
+        """
+        try:
+            executable = self._executable()
+        except ArchiveToolUnavailable:
+            return b""
+        arguments = [
+            executable,
+            "x",
+            "-so",
+            "-ba",
+            "-y",
+            "-sccUTF-8",
+            # Exact member names, not patterns, and `--` so a name that starts
+            # with a dash is a name rather than an unknown switch.
+            "-spd",
+            self._password_argument(password),
+            "--",
+            str(volumes[0]),
+            member.name,
+        ]
+        try:
+            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                arguments,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+            )
+        except OSError:
+            return b""
+        killer = threading.Timer(HEADER_PROBE_TIMEOUT, process.kill)
+        killer.start()
+        try:
+            return process.stdout.read(HEADER_SIZE) or b""
+        finally:
+            killer.cancel()
+            process.stdout.close()
+            try:
+                process.kill()
+            except OSError:  # pragma: no cover - already gone
+                pass
+            process.wait()
 
     def test_password(
         self, volumes: tuple[Path, ...], password: str | None
@@ -301,6 +367,7 @@ def parse_slt_listing(output: str) -> list[ArchiveMember]:
                 is_dir=_ATTRIBUTE_DIRECTORY in attributes.split(" ")[0],
                 is_symlink=_ATTRIBUTE_SYMLINK in attributes,
                 encrypted=current.get("Encrypted", "").strip() == "+",
+                block=_as_optional_int(current.get("Block")),
             )
         )
 
@@ -316,6 +383,21 @@ def parse_slt_listing(output: str) -> list[ArchiveMember]:
         current[key.strip()] = value.strip()
     flush()
     return members
+
+
+def _as_optional_int(value: str | None) -> int | None:
+    """A listing integer that is allowed to be absent.
+
+    `Packed Size` and `Block` are both missing for parts of a solid archive's
+    listing, and "missing" has to stay distinguishable from "zero": zero
+    packed bytes would be an infinite ratio, and no block would mean guessing.
+    """
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _as_int(value: str | None) -> int:

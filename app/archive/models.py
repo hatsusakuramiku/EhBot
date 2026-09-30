@@ -36,6 +36,13 @@ class ArchiveMember:
     is_symlink: bool = False
     encrypted: bool = False
     header: bytes = b""
+    #: Which solid block this member belongs to, when the listing says. 7-Zip
+    #: reports `Packed Size` only for the first member of a solid block, so the
+    #: compressed size is a property of the *block*: a ratio built from one
+    #: member's size and the block's packed size is wrong, and only the grouped
+    #: question ("how far does this block expand?") is the one the number can
+    #: answer. `None` for archives that carry a packed size per member.
+    block: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

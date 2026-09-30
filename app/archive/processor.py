@@ -139,7 +139,22 @@ class ArchiveProcessor:
             else:
                 backend.test_password(volumes, None)
 
-        pages = validate_manifest(manifest, self._limits)
+        # The zip backend reads each member's first bytes during inspection, so
+        # the gate can identify an image for free. 7zz's listing carries no
+        # member bytes, so the backend is asked for them -- but only if the
+        # ratio gate flags a block, because the answer costs a decompression.
+        # An encrypted archive is never probed: its bytes are not readable
+        # without the password, and the password is a member-level secret the
+        # gate has no business handling.
+        probe_member_header = getattr(backend, "read_member_header", None)
+        read_header = (
+            (lambda member: probe_member_header(volumes, member, password))
+            if probe_member_header is not None and not manifest.encrypted
+            else None
+        )
+        pages = validate_manifest(
+            manifest, self._limits, read_header=read_header
+        )
         page_names = page_file_names(pages)
         comicinfo = comicinfo_builder(len(pages))
 
