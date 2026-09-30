@@ -4756,3 +4756,83 @@ R43 上线后运营者提出：**「应当是在启动后或更新来源规则�
 `AgentHelp/AGENTS.md` 基线 1547 → 1550，`passed` 两个数各 +3 并补 R44 一环。
 
 提交 `62d5e17`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。运营者提的是日志噪声，但他指出的是把一个不变的事实当成每轮都要重新确认的事——修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:24197aacb6bfae86bc5f0e75c322e43974e297db9a84e7c9076d04c8502a6fe2`，amd64 manifest `sha256:47447f42b3b4e3a1d3ff33df46b7bebabbc3271bb2d2210e7347ff7c368c5637`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内跑一遍 R44 的场景——临时库、一个账户读不到的启用来源、假 Telethon 客户端：连打两轮 `_ingest_with_user_account()`，`telegram_user_source_unreadable` 只出现一次、`iter_dialogs` 只调用一次、候选数为 0；随后把该频道加进假客户端的会话列表并调用 `note_sources_changed()`（等价于运营者「加入频道后重新保存来源」），下一轮重扫一次并摄取 1 条候选。R44 的「检测一遍、跳过、重检」确实在镜像里。冒烟容器与临时数据目录已清理。
+
+
+## R45 — 大文件下载改调 Telethon 真实存在的接口，兜底失败自述原因（v0.3.0rc1，2026-09-30）
+
+运营者报：**账号可以正确添加任务，但大文件下载一直失败**。日志里只有
+
+    logger=app.downloads.service event=download_job_failed source=service:1045
+    candidate_id=587 job_id=1187 provider=TELEGRAM_USER status=FAILED attempt=1
+    duration_ms=923 error_code=TELEGRAM_USER_FAILED error_message=用户账户操作失败，请稍后重试
+
+**根因：`download_message_media` 给 `TelegramClient.download_media` 传了一个它不存在的参数。**
+实现里调用的是
+
+    client.download_media(message, file=..., part_size_kb=_CHUNK_BYTES // 1024, progress_callback=progress)
+
+但 `part_size_kb` 是 `TelegramClient.download_file` 的参数，`download_media` 只有
+`(message, file, *, thumb, progress_callback)`（在镜像里用 `inspect.signature` 逐字核对过）。于是真实客户端抛
+`TypeError: download_media() got an unexpected keyword argument 'part_size_kb'`，`_translate` 的兜底把它
+翻成 `TELEGRAM_USER_FAILED`「请稍后重试」。这解释了那一条日志的全部特征：`duration_ms≈920` 恰好是
+「建连接 + `is_user_authorized` + 读回消息」的时间，真正的传输一行都没跑；**只要走
+`PROVIDER_TELEGRAM_USER` 就必然失败**，所以只有大文件出问题，Bot / 种子 / 预览页照常。
+
+**为什么测试全绿：假客户端比真库更宽容。** `tests/unit/test_telegram_user.py` 与
+`tests/integration/test_telegram_user_web.py` 的 stub 都把签名写成
+`download_media(self, message, file, part_size_kb, progress_callback)`（位置参数），于是那个错误的 kwarg
+被静默收下——一个能接受库本身不接受的东西的假对象，是永远不会失败的测试。两个 stub 都改成 Telethon 的真实
+签名（`file=None, *, thumb=None, progress_callback=None`），并在注释里写明「不要退化成 `**kwargs`」；
+再退回旧调用，`test_an_oversized_attachment_is_fetched_by_the_user_account` 这类用例立刻会因 `TypeError` 而红。
+
+**修法：把整条消息交给 `download_media`，分段与续引用都由 Telethon 决定。** 它按文件大小自己选分段
+（100 MB 以内 128 KB，750 MB 以上 512 KB），而且在传输中途文件引用过期时，因为拿到的是*消息*，能记住
+`(input_chat, message id)` 重新读回新引用继续下载——这正是 2 GB 级文件需要的，也是 `download_file` 做不到的
+（它只拿到一个 `InputFileLocation`，引用过期只能整段重来）。因此删掉不再使用的 `_CHUNK_BYTES`，
+调用只留 `message` / `file` / `progress_callback`。
+
+**顺带补上 R42 漏给下载路径的那半件事：兜底错误码要在日志里自述。** 之所以这条日志两天都看不出原因，
+是因为 `download_job_failed` 只有 `error_code` / `error_message`，而 `_translate` 刻意不把 provider 原文
+写进面向界面的文案，原始异常只活在 `__cause__` 里。做法沿用 R42 的形状：把 `_refusal_detail` 从
+`app/connections/manager.py` 提到 `app/connections/models.py`（改名 `refusal_detail`，连接管理器与下载
+worker 共用），`DownloadService._handle_job` 返回它，`_process_one` 在**唯一那条**终态日志
+`download_job_failed` 上带 `error_detail`——终态记录仍然每个任务只有一条，只是现在会说话。
+没有新增错误码、也没有改动重试策略：这次的失败是编程错误而不是 provider 拒绝，修好之后没有新的永久失败。
+
+**测试（+2，1550 → 1552 collected）**
+- `tests/unit/test_telegram_user.py`：`FakeClient` 改为 Telethon 的真实签名并记录收到的消息；新增
+  `test_the_transfer_hands_telethon_the_message_to_download`——断言交给 `download_media` 的是那条消息
+  （分段大小不归调用方管），旧调用在这条用例上会因 kwarg 不存在而红。
+- `tests/unit/test_download_logging.py`：新增 `test_download_failure_logs_the_untranslated_cause`——
+  假用户客户端抛带 `TypeError` 原因的 `TELEGRAM_USER_FAILED`，断言 `download_job_failed` 的
+  `error_detail` 就是那行 `TypeError: ... 'part_size_kb'`（即运营者场景的端到端复现）。
+- `tests/integration/test_telegram_user_web.py`：stub 签名同步改成真实签名（否则修好后的调用会被它自己挡下）。
+
+**验证（定向，不全量）**：`tests/unit/test_telegram_user.py`、`tests/unit/test_download_logging.py`、
+`tests/unit/test_logging.py`、`tests/unit/test_mtproto_translation.py`、
+`tests/integration/test_telegram_user_web.py`、`tests/integration/test_downloads.py`、
+`tests/integration/test_connection_manager.py`、`tests/integration/test_downloaded_web.py`、
+`tests/integration/test_sources_web.py`、`tests/integration/test_connections_web.py`、
+`tests/unit/test_telegram_bot_api.py`、`tests/unit/test_work_detail.py`、
+`tests/unit/test_api_read_layer.py` 全绿；`--collect-only` 计得 1552；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 的「Telegram 用户账户」一节新增两条：大文件下载由 Telethon 自己分段并在引用
+过期时按消息坐标续上（以及为什么不走 `download_file`）；兜底 `TELEGRAM_USER_FAILED` 现在会在
+`download_job_failed` 里带 `error_detail`。`README.md` 只到「四级选路」的粒度，不涉及。
+`AgentHelp/AGENTS.md` 基线 1550 → 1552，`passed` 两个数各 +2 并补 R45 一环。
+
+提交 `c8b3e46`（fix，含文档）与紧随其后的这一条 `docs:` 记录提交，只提交、不推送（`origin/main` 仍停在
+`b559740`）。修的是运营者正在受影响的路径（大文件下载一路全红），修完按既有节奏重建并推送
+`hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:03b61b82edfcfdab030aec5f55de87919d3345ae24c3775148ccafb2ea971f5e`，amd64 manifest
+`sha256:8effea52c46c068b30181293a4877711e60941fba437776fda42f396bf6cabf5`）。**从 registry 验证而不是只信本地
+构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，
+数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；
+并在容器里直接复现运营者的场景——先确认镜像里的 `app/connections/telegram_user.py` 不再出现 `part_size_kb=`，
+再让一个签名与 Telethon 1.44 完全一致（没有 `part_size_kb`）的假客户端跑
+`TelegramUserClient.download_message_media(-100123, 5001, ...)`：成功写下 13 字节并返回，即修好后的调用正是
+库接受的那种；最后用临时库塞一条 `TELEGRAM_USER` 任务、假用户客户端抛「由 `TypeError: download_media() got an
+unexpected keyword argument 'part_size_kb'` 转成的 `TELEGRAM_USER_FAILED`」，`_process_one()` 出来的那条
+`download_job_failed` 带上了
+`"error_detail": "TypeError: download_media() got an unexpected keyword argument 'part_size_kb'"`——R45 的
+接口修复与自述日志确实都在镜像里。冒烟容器与临时数据目录已清理。
