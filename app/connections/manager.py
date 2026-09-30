@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 import logging
 import sqlite3
+from typing import Any
 
 import httpx
 
@@ -25,6 +26,7 @@ from app.connections.telegram_user import (
     TelegramUserClient,
     TelegramUserCredentials,
     TelegramUserError,
+    describe_dialog,
 )
 from app.db.database import Database
 from app.secrets import SecretStore
@@ -48,6 +50,11 @@ TELEGRAM_USER_SESSION_SECRET = "telegram_user_session"
 #: loop behind a single enormous read.
 _USER_INGEST_INTERVAL_SECONDS = 10.0
 _USER_INGEST_BATCH = 100
+
+#: How the source picker orders what it read: channels first, then groups, then
+#: people -- the order an operator scans for a feed in. Within a kind it is the
+#: title, so two walks of the same account render the same list.
+_DIALOG_KIND_ORDER = {"CHANNEL": 0, "GROUP": 1, "PRIVATE_CHAT": 2}
 
 _POLL_BACKOFF_SECONDS: dict[str, int] = {
     "TELEGRAM_CONFLICT": 30,
@@ -654,10 +661,12 @@ class ConnectionManager:
             )
 
     async def telegram_user_context(self):
-        """The credentials and session the download path needs, or None.
+        """The credentials and session the user account paths need, or None.
 
         Read per job rather than captured: an operator can log in, or the session
-        can be revoked, between one delivery and the next.
+        can be revoked, between one delivery and the next. The download worker
+        and the source picker both come through here, so neither has to know how
+        the account is stored.
         """
         credentials = await self._read_user_credentials()
         session = await asyncio.to_thread(
@@ -666,6 +675,40 @@ class ConnectionManager:
         if credentials is None or not session:
             return None
         return self._user_client(credentials, session)
+
+    async def list_telegram_user_dialogs(self) -> list[dict[str, Any]]:
+        """Every chat the logged-in account can see, for the source picker.
+
+        This is the same walk the ingest capability check makes, asked by hand:
+        the account's own dialog list is the authority on which chats it is in,
+        so reading it here is what lets an operator pick a Chat ID instead of
+        waiting for a message to arrive and learning the id from it. The walk
+        also fills the entity cache, so a source saved from this list is
+        readable on the next poll rather than after one more retry.
+
+        No cache of its own: the page keeps the list for exactly one pick, and
+        the walk is cheap enough to repeat when the operator asks again. What
+        would go stale is the account's membership, and an answer from five
+        minutes ago is the one thing a picker must not show.
+        """
+        client = await self.telegram_user_context()
+        if client is None:
+            raise TelegramUserError(
+                "TELEGRAM_USER_NOT_CONFIGURED",
+                "尚未登录 Telegram 用户账户，请先在「外部连接」完成登录",
+            )
+        found = await client.load_dialogs()
+        dialogs = [
+            describe_dialog(chat_id, entity)
+            for chat_id, entity in found.items()
+        ]
+        dialogs.sort(
+            key=lambda row: (
+                _DIALOG_KIND_ORDER[row["kind"]],
+                row["title"].casefold(),
+            )
+        )
+        return dialogs
 
     async def configure_exhentai(
         self, credentials: ExHentaiCredentials

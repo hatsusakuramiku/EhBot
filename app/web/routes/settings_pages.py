@@ -27,6 +27,7 @@ from app.api.status import (
     SETTINGS_SYSTEM,
     SETTINGS_SECTIONS,
 )
+from app.connections.models import ProviderConnectionError
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
@@ -159,6 +160,95 @@ async def configure_source(request: Request):
     # added to the channel, and nothing about the stored set would show it.
     deps.connection_manager(request).note_sources_changed()
     return settings_redirect(request, SETTINGS_SOURCES)
+
+
+@router.post("/sources/dialogs")
+async def browse_telegram_dialogs(request: Request, csrf_token: str = Form()):
+    """Read the account's own chats so an id can be picked, not waited for.
+
+    The whitelist asks for a Telegram Chat ID, and until now the only way to
+    learn one was to receive a message from that chat and read it off the
+    candidate. The logged-in user account already knows every chat it is in --
+    that list is what the ingest capability check walks -- so the page can ask
+    for it and offer the ids with their names. Nothing is stored here; picking
+    one fills the 添加来源 form, and a save still goes through the same
+    validation it always did.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    try:
+        dialogs = await deps.connection_manager(
+            request
+        ).list_telegram_user_dialogs()
+    except ProviderConnectionError as exc:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            error=exc.public_message,
+            status_code=400,
+        )
+    if not dialogs:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            notice="账户里没有可读取的会话。",
+        )
+    return await render_settings(
+        request,
+        SETTINGS_SOURCES,
+        notice="读到 {} 个会话，点「填入表单」把 ID 与名称带进左侧表单。".format(
+            len(dialogs)
+        ),
+        dialogs=dialogs,
+    )
+
+
+@router.post("/sources/dialogs/select")
+async def select_telegram_dialog(
+    request: Request,
+    csrf_token: str = Form(),
+    source_type: str = Form(),
+    chat_id: str = Form(),
+    display_name: str = Form(),
+):
+    """Put one picked dialog into the 添加来源 form. Stores nothing.
+
+    The values come back from the list the page itself rendered, which makes
+    them the operator's own submission -- and they are checked here with the
+    same identity rule `configure_source` applies on save, because a prefill
+    that could not be saved would be a form that lies about what 保存来源 does.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    name = display_name.strip()
+    try:
+        number = int(chat_id)
+    except ValueError:
+        number = 0
+    valid_identity = (source_type == "CHANNEL" and number < 0) or (
+        source_type == "PRIVATE_CHAT" and number > 0
+    )
+    if not valid_identity or not name:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            error="来源类型、ID 或名称无效",
+            status_code=400,
+        )
+    return await render_settings(
+        request,
+        SETTINGS_SOURCES,
+        notice="已填入「{}」（{}），确认过滤规则后保存。".format(name, number),
+        prefill={
+            "source_type": source_type,
+            "chat_id": number,
+            "display_name": name,
+        },
+    )
 
 
 @router.get("/settings")

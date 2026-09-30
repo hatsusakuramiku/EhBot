@@ -130,6 +130,17 @@ SOURCE_TYPES: tuple[dict[str, Any], ...] = (
     {"code": "PRIVATE_CHAT", "label": "私聊", "chat_id_sign": 1},
 )
 
+#: The chat kinds the MTProto dialog list reports, and the whitelist entry each
+#: one becomes. A group and a channel are both a negative chat id and both are
+#: stored as `CHANNEL` -- the sign is the whole of what that source type means
+#: -- but the picker names them apart, so an operator does not read their own
+#: group back as a 频道. `source_type` is what the saved row actually carries.
+DIALOG_KINDS: tuple[dict[str, Any], ...] = (
+    {"code": "CHANNEL", "label": "频道", "source_type": "CHANNEL"},
+    {"code": "GROUP", "label": "群组", "source_type": "CHANNEL"},
+    {"code": "PRIVATE_CHAT", "label": "私聊", "source_type": "PRIVATE_CHAT"},
+)
+
 
 def section_tabs(active: str) -> list[dict[str, Any]]:
     """The tab strip, in order, with exactly one marked current.
@@ -172,6 +183,7 @@ async def _sources_section(request: Request) -> dict[str, Any]:
             for source in await database.list_telegram_sources()
         ],
         "source_types": [dict(entry) for entry in SOURCE_TYPES],
+        "dialog_kinds": [dict(entry) for entry in DIALOG_KINDS],
         "archive_formats": list(SOURCE_ARCHIVE_FORMATS),
     }
 
@@ -661,6 +673,7 @@ async def get_settings_section(request: Request, section: str) -> dict:
 
 
 __all__ = [
+    "DIALOG_KINDS",
     "SOURCE_ARCHIVE_FORMATS",
     "SOURCE_TYPES",
     "router",

@@ -11,12 +11,65 @@
   The filter lists submit as comma-separated text because that is what an
   operator types; the snapshot returns them as arrays, so `join(', ')` here is
   rendering, not parsing.
+
+  A Chat ID is a number only Telegram knows, so the add panel can also read it
+  out of the logged-in user account's own dialog list (`POST /sources/dialogs`)
+  and offer that account's channels, groups and private chats as a pickable
+  list (`POST /sources/dialogs/select`, one form per row). Without that, a
+  source the bot has never seen a message in could not be configured at all
+  until one arrived. Picking fills this form and stores nothing.
 #}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
       <h2 class="ui-section-title">添加来源</h2>
-      <p class="ui-hint">按 Telegram Chat ID 建立白名单项。频道为负数 ID，私聊为正数。</p>
+      <p class="ui-hint">
+        按 Telegram Chat ID 建立白名单项。频道与群组是负数 ID，私聊是正数；
+        不知道 ID 就从登录的用户账户里读一遍。
+      </p>
+      <form class="ui-form" method="post"
+            action="{{ url_for('browse_telegram_dialogs') }}"
+            style="margin-top: var(--s-3)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-form-actions">
+          <button class="ui-btn" type="submit">读取我的频道与私聊</button>
+        </div>
+        <small class="ui-hint">
+          用「设置 → 外部连接」里登录的 Telegram 用户账户读一次会话列表，也就是该账户
+          自己看到的频道、群组与私聊，连同它们的 Chat ID。读取只列出来，不写入任何来源。
+        </small>
+      </form>
+
+      {% if dialogs %}
+        <div style="max-height: 18rem; overflow: auto; margin-top: var(--s-4)">
+          {% for dialog in dialogs %}
+            {#- One form per row, so «填入表单» is a real submit and the page
+                works with no JavaScript at all. `kind` carries the stored
+                source type, which is why a group posts `CHANNEL`. -#}
+            {% for kind in dialog_kinds if kind.code == dialog.kind %}
+              <form class="ui-record" method="post"
+                    action="{{ url_for('select_telegram_dialog') }}"
+                    style="margin-top: var(--s-2)">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="source_type" value="{{ kind.source_type }}">
+                <input type="hidden" name="chat_id" value="{{ dialog.chat_id }}">
+                <input type="hidden" name="display_name" value="{{ dialog.title }}">
+                <div class="ui-record-head">
+                  <span class="ui-record-title">{{ dialog.title }}</span>
+                  <span class="ui-record-meta">{{ dialog.chat_id }}</span>
+                  <div class="ui-record-badges">
+                    <span class="ui-tag">{{ kind.label }}</span>
+                  </div>
+                </div>
+                <div class="ui-form-actions">
+                  <button class="ui-btn" data-size="sm" type="submit">填入表单</button>
+                </div>
+              </form>
+            {% endfor %}
+          {% endfor %}
+        </div>
+      {% endif %}
+
       <form class="ui-form" method="post" action="{{ url_for('configure_source') }}"
             style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -25,18 +78,21 @@
             <label for="source-type">来源类型</label>
             <select class="ui-select" id="source-type" name="source_type">
               {% for kind in source_types %}
-                <option value="{{ kind.code }}">{{ kind.label }}</option>
+                <option value="{{ kind.code }}"
+                        {% if prefill and prefill.source_type == kind.code %}selected{% endif %}>{{ kind.label }}</option>
               {% endfor %}
             </select>
           </div>
           <div class="ui-field">
             <label for="chat-id">Chat ID</label>
-            <input class="ui-input" id="chat-id" name="chat_id" type="number" required>
+            <input class="ui-input" id="chat-id" name="chat_id" type="number" required
+                   value="{{ prefill.chat_id if prefill else '' }}">
           </div>
         </div>
         <div class="ui-field">
           <label for="display-name">显示名称</label>
-          <input class="ui-input" id="display-name" name="display_name" required>
+          <input class="ui-input" id="display-name" name="display_name" required
+                 value="{{ prefill.display_name if prefill else '' }}">
         </div>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="enabled" type="checkbox" checked>

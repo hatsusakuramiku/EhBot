@@ -140,8 +140,8 @@ class StubTelethonClient:
         return int(chat_id)
 
     async def iter_dialogs(self, **kwargs):
-        return
-        yield  # pragma: no cover - marks this an async generator
+        for entry in self._script.get("dialogs", []):
+            yield StubDialog(entry["id"], entry["entity"])
 
     async def get_messages(self, chat_id, ids):
         class Message:
@@ -160,6 +160,43 @@ class StubTelethonClient:
         self.downloads.append(self._script["requested"])
         Path(file).write_bytes(self._script["payload"])
         return file
+
+
+class StubDialog:
+    """A dialog: the id the whitelist stores, and the entity behind it."""
+
+    def __init__(self, chat_id: int, entity: object) -> None:
+        self.id = chat_id
+        self.entity = entity
+
+
+class StubChannel:
+    """A Telethon channel, reduced to the attributes the picker classifies on."""
+
+    def __init__(self, title: str, username: str | None = None) -> None:
+        self.title = title
+        self.username = username
+        self.broadcast = True
+        self.megagroup = False
+
+
+class StubGroup:
+    """A Telethon supergroup."""
+
+    def __init__(self, title: str) -> None:
+        self.title = title
+        self.username = None
+        self.broadcast = False
+        self.megagroup = True
+
+
+class StubPerson:
+    """A Telethon user, which is what a private chat is."""
+
+    def __init__(self, first_name: str, last_name: str = "") -> None:
+        self.first_name = first_name
+        self.last_name = last_name
+        self.username = None
 
 
 def make_app(tmp_path: Path, script: dict):
@@ -383,6 +420,121 @@ def test_the_login_forms_require_csrf(tmp_path: Path) -> None:
             # Every declared field is present, so a 403 can only be the token:
             # a missing field would be a 422 and would pass this test for the
             # wrong reason.
+            response = client.post(path, data={**body, "csrf_token": "forged"})
+            assert response.status_code == 403, path
+
+
+def test_the_sources_tab_reads_the_accounts_chats_for_picking(
+    tmp_path: Path,
+) -> None:
+    """A Chat ID could only be learnt from a message, so a quiet chat had none.
+
+    The logged-in account already knows every chat it is in -- the same dialog
+    list the ingest capability check walks -- so the 来源规则 tab can ask for it
+    and offer the ids. Reading stores nothing, and picking is a prefill: the
+    form below is still the only thing that writes a source.
+    """
+    app, settings, _ = make_app(
+        tmp_path,
+        {
+            "code": "12345",
+            "session": "s",
+            "payload": b"x",
+            "dialogs": [
+                {"id": -100500, "entity": StubChannel("Alpha Channel", "alpha")},
+                {"id": -100501, "entity": StubGroup("Beta Group")},
+                {"id": 500, "entity": StubPerson("Ada", "Lovelace")},
+            ],
+        },
+    )
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        login(client)
+        page = client.get("/settings/sources")
+        listed = client.post(
+            "/sources/dialogs", data={"csrf_token": page.context["csrf_token"]}
+        )
+        picked = client.post(
+            "/sources/dialogs/select",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "source_type": "CHANNEL",
+                "chat_id": "-100500",
+                "display_name": "Alpha Channel",
+            },
+        )
+        stored = client.get("/api/v1/settings/sources").json()
+
+    assert listed.status_code == 200
+    assert [row["chat_id"] for row in listed.context["dialogs"]] == [
+        -100500,
+        -100501,
+        500,
+    ]
+    # A group is named as a group even though the row it becomes is a CHANNEL:
+    # the badge answers「这是我哪个群」, not「它会被存成什么」.
+    assert "Beta Group" in listed.text
+    assert "群组" in listed.text
+    assert stored["sources"] == []
+    assert picked.context["prefill"] == {
+        "source_type": "CHANNEL",
+        "chat_id": -100500,
+        "display_name": "Alpha Channel",
+    }
+    # The rendered add form is what the operator then edits, so the values have
+    # to be in it, not only in the context.
+    assert 'value="-100500"' in picked.text
+    assert 'value="Alpha Channel"' in picked.text
+
+
+def test_reading_chats_without_a_logged_in_account_says_why(
+    tmp_path: Path,
+) -> None:
+    app, settings, _ = make_app(
+        tmp_path, {"code": "12345", "session": "s", "payload": b"x"}
+    )
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        page = client.get("/settings/sources")
+        refused = client.post(
+            "/sources/dialogs", data={"csrf_token": page.context["csrf_token"]}
+        )
+        # A picked row is re-validated with the same sign rule
+        # `configure_source` applies, so a prefill can never offer a save that
+        # would be refused.
+        forged = client.post(
+            "/sources/dialogs/select",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "source_type": "PRIVATE_CHAT",
+                "chat_id": "-100500",
+                "display_name": "Alpha Channel",
+            },
+        )
+
+    assert refused.status_code == 400
+    assert refused.context["error"] == (
+        "尚未登录 Telegram 用户账户，请先在「外部连接」完成登录"
+    )
+    assert forged.status_code == 400
+    assert forged.context["error"] == "来源类型、ID 或名称无效"
+
+
+def test_the_chat_picker_requires_csrf(tmp_path: Path) -> None:
+    app, settings, _ = make_app(
+        tmp_path, {"code": "12345", "session": "s", "payload": b"x"}
+    )
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        bodies = {
+            "/sources/dialogs": {},
+            "/sources/dialogs/select": {
+                "source_type": "CHANNEL",
+                "chat_id": "-100500",
+                "display_name": "Alpha Channel",
+            },
+        }
+        for path, body in bodies.items():
             response = client.post(path, data={**body, "csrf_token": "forged"})
             assert response.status_code == 403, path
 

@@ -5073,3 +5073,72 @@ per-member 的比例检查因此移出结构门禁循环，落到循环之后的
 0.3 KB = **991 倍**（块首自己只有 496 倍），处理器**发布 2 页 CBZ**，日志里正好一条
 `archive_compression_ratio_exempt members=2 ratio=991 probe=01.jpg`（探针只读了一次块首）；同样的固体结构装
 两张「`<html>` + 空格」的成员则**被 `ARCHIVE_COMPRESSION_RATIO` 拒绝**。冒烟容器与临时数据目录已清理。
+
+## R49 — 来源规则可以按需读账户的会话列表，选一个再配置（v0.3.0rc1，2026-09-30）
+
+运营者问：「如何获取 Telegram Chat ID，能不能在配置来源规则白名单时手动加载用户所在的频道与私聊的
+Telegram Chat ID，再选择配置，而不是只有收到消息后才能被动知晓 Telegram Chat ID」。
+
+**现状：Chat ID 只能被动得到。** 白名单项的身份就是 `(source_type, chat_id)`，而这个数字只有 Telegram
+知道——加一个来源前，运营者得先等那个频道发一条消息、从候选里把 id 抄下来。一个刚知道、还没发过新帖的
+频道因此配不进来，一个只想收私聊（收藏夹）的部署更是永远等不到那第一条消息。
+
+**修法：把已有的那次会话列表读取搬上页面，选中一行只预填表单。**
+
+- `ConnectionManager.list_telegram_user_dialogs()` 复用 `telegram_user_context()`（R43 的同一份
+  `get_dialogs` 结果、同一个 `EntityIndex` 实体缓存），把账户所在的会话按「频道 / 群组 / 私聊」分类后返回。
+  这一次读同时把 access hash 填进缓存，所以从列表里保存的来源**下一次轮询就可读**，不会再走一次
+  「先补会话列表再解析频道」的失败重试。
+- `describe_dialog()` 放在 `app/connections/telegram_user.py`：用 `broadcast` / `megagroup` / `title` /
+  `first_name` 这些属性分类，**不导入 Telethon**（测试环境里没装也能跑），认不出来时用 chat id 的正负兜底
+  ——那正是 `configure_source` 校验的规则。群组和频道都是负数、存下来都是 `CHANNEL`，所以 picker 的徽标
+  分「频道 / 群组 / 私聊」三类（词表新增在 `app/api/settings.py` 的 `DIALOG_KINDS`，与 `SOURCE_TYPES` 并列），
+  而写库的类型仍然只有两种；一个群不会在列表里被叫成「频道」。
+- 两个新端点都在来源页：`POST /sources/dialogs` 读一遍并把它列出来（不写任何东西），
+  `POST /sources/dialogs/select` 把选中行的 `source_type` / `chat_id` / `display_name` 预填进「添加来源」
+  表单——同样不写任何东西，**写入仍然只有「保存来源」一条路**。预填值按与保存时完全相同的身份规则重新校验，
+  免得出现「表单填得进去、保存却被拒」的假象。两处都要 CSRF；没有可读会话时只给一句说明，不显示空列表。
+- 页面上每行是一个独立的小表单，没有 JavaScript 也能用（「填入表单」是真的提交按钮）：读到的列表放在
+  「添加来源」面板上方，选中后页面重渲染，预填好的 Chat ID 与名称就在正下方。
+
+**取舍（都是刻意的）：**
+
+- **不缓存会话列表。** 页面只把它用于一次「填入」，而会过期的东西是账户的成员关系——五分钟前读来的
+  频道列表正是 picker 最不该展示的答案。「读取我的频道与私聊」每一次点击都真的去读一遍。
+- **不做「勾选后批量建来源」。** AI 供应商页那种「拉取后勾选加入」在这里是个陷阱：来源行没有删除入口，
+  误点的每一行都只能停用、删不掉。所以列表只预填，建行仍旧是操作者填完过滤规则后自己按的一次保存。
+- **读的是用户账户，不是 Bot。** Bot 只有收到消息后才知道一个 Chat ID，这正是要解决的问题本身；没登录
+  用户账户时按钮按 `TELEGRAM_USER_NOT_CONFIGURED` 说明「先去外部连接完成登录」，而不是给一个空列表。
+
+**测试（+11，1564 → 1575 collected）**
+- `tests/unit/test_telegram_user.py`：新增六条——广播频道、超级群、小群、真人各自归类；只有用户名时
+  `@name` 仍是名字；认不出来的实体按 chat id 正负兜底，且分类结果都属于 `DIALOG_KINDS`。
+- `tests/integration/test_connection_manager.py`：新增两条——会话按「频道 → 群组 → 私聊」再按名称排序，
+  一次读取只走一次 `iter_dialogs` 并置上 `dialogs_loaded`（实体缓存被填好）；空凭据与「有 API 对、无会话」
+  的半个账户都以 `TELEGRAM_USER_NOT_CONFIGURED` 拒绝，而不是返回空列表。
+  `FakeUserClient` 因此多了 `entities` 映射，`FakeUserDialog` 可以带实体。
+- `tests/integration/test_telegram_user_web.py`：新增三条——登录后读账户会话，三类分别带 ID/名称/徽标，
+  选中一行只预填表单且**没有**写出任何来源（查 `/api/v1/settings/sources` 仍为空）；未登录时按用户名
+  说明原因，伪造的预填（类型与 ID 符号不符）被同一规则拒；两个新端点都要求 CSRF。该文件的
+  `StubTelethonClient.iter_dialogs` 从空生成器改为按脚本产出会话。
+
+**验证（定向，不全量）**：`tests/unit/test_telegram_user.py`、`tests/integration/test_connection_manager.py`、
+`tests/integration/test_telegram_user_web.py`、`tests/integration/test_sources_web.py`、
+`tests/unit/test_settings_sections.py` 全绿；`--collect-only` 计得 1575；`compileall` 与 `git diff --check`
+通过。页面形态用一个临时脚本渲染核对过：列表行、三类徽标、预填后的 `value` 与 `selected` 都正确。
+
+**文档同步**：`README.md` 第 4 步补一句「不知道 Chat ID 就点该页的『读取我的频道与私聊』」；
+`docs/USAGE.md` 的「Telegram 用户账户」一节新增一条，说明按钮读的是什么、选中只预填不写入、未登录时的
+提示；`AgentHelp/AGENTS.md` 基线 1564 → 1575，并在 R48 一环后补上 R49 的十一条新增用例。
+
+提交为**单条**提交（代码、测试与本节记录同在，父提交 `9458dcd`），只提交、不推送（`origin/main` 仍停在
+`b559740`）。修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:bbf4cd01c187370192455817d0628c5332a0472f6c15f110b588d95b5f11c1af`，amd64 manifest
+`sha256:4ef1d04202fc562b3b64e3ab6cfee3f141f674b0481f7d94072f170ecdb7a680`）。**从 registry 验证而不是只信本地
+构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，
+`/app/data` 挂载为可写；本机宿主端口映射仍不可用，改在容器内用 `urllib` 打）里 `/healthz` 得
+`{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；随后在容器内用镜像自带的代码与模板跑完新链路
+（stub 用户客户端注入 `create_app`）：`POST /sources/dialogs` 读到 3 个会话并按 `CHANNEL` / `GROUP` /
+`PRIVATE_CHAT` 分类、三个中文徽标都渲染出来，`POST /sources/dialogs/select` 把 `-100778` 与「Smoke Group」
+预填进 `value=`，而 `/api/v1/settings/sources` 仍是 **0 个来源**——读取与填入都不写库。冒烟容器与临时数据
+目录已清理。

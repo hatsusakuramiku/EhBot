@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import logging
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -13,7 +14,7 @@ from app.connections.manager import (
     TELEGRAM_USER_SESSION_SECRET,
     ConnectionManager,
 )
-from app.connections.models import TelegramUserAccount
+from app.connections.models import ProviderConnectionError, TelegramUserAccount
 from app.connections.exhentai import ExHentaiCredentials
 from app.db.database import Database
 from app.secrets import SecretStore
@@ -430,9 +431,11 @@ class FakeUserMessage:
 class FakeUserDialog:
     """A dialog, reduced to the fields `load_dialogs` reads."""
 
-    def __init__(self, chat_id: int) -> None:
+    def __init__(self, chat_id: int, entity: object | None = None) -> None:
         self.id = chat_id
-        self.entity = chat_id
+        # Telethon hands over an entity object; a bare chat id is the stub that
+        # stands in for one when a test does not care what kind of chat it is.
+        self.entity = chat_id if entity is None else entity
 
 
 class FakeUserClient:
@@ -449,6 +452,7 @@ class FakeUserClient:
         *,
         unseen_chats: set[int] | None = None,
         dialogs: set[int] | None = None,
+        entities: dict[int, object] | None = None,
     ) -> None:
         self.messages = sorted(messages, key=lambda item: item.id)
         self.latest_calls: list[int] = []
@@ -463,6 +467,9 @@ class FakeUserClient:
             if dialogs is None
             else set(dialogs)
         )
+        #: The entity behind each dialog id, for the source picker's
+        #: classification. A chat without one answers with its own id.
+        self.entities = dict(entities or {})
         #: Raised by `iter_dialogs`, standing in for an outage during a check.
         self.dialogs_error: Exception | None = None
         self.dialogs_loaded = False
@@ -495,7 +502,7 @@ class FakeUserClient:
         self.unseen_chats.clear()
         self.dialogs_loaded = True
         for chat_id in sorted(self.dialogs):
-            yield FakeUserDialog(chat_id)
+            yield FakeUserDialog(chat_id, self.entities.get(chat_id))
 
     async def iter_messages(
         self, entity: int, *, min_id=None, limit=None, reverse=False
@@ -522,6 +529,7 @@ async def user_ingest_manager(
     enable_source: bool = True,
     unseen_chats: set[int] | None = None,
     dialogs: set[int] | None = None,
+    entities: dict[int, object] | None = None,
 ) -> tuple[ConnectionManager, Database, FakeUserClient]:
     """A manager whose user account is logged in and can read one channel."""
     database = Database(tmp_path / "ehbot.db")
@@ -539,7 +547,7 @@ async def user_ingest_manager(
     store.write(TELEGRAM_USER_API_SECRET, f"1234567:{'a' * 32}")
     store.write(TELEGRAM_USER_SESSION_SECRET, "stored-session-string")
     client = FakeUserClient(
-        messages, unseen_chats=unseen_chats, dialogs=dialogs
+        messages, unseen_chats=unseen_chats, dialogs=dialogs, entities=entities
     )
     manager = ConnectionManager(
         store,
@@ -766,3 +774,78 @@ async def test_a_message_both_paths_saw_produces_one_candidate(
     assert await database.save_candidate_message(None, again) is False
     assert len(await database.list_candidates()) == 1
     await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_source_picker_lists_the_accounts_own_chats(
+    tmp_path: Path,
+) -> None:
+    """「怎么知道 Chat ID」 answered without waiting for a message.
+
+    The dialog list the ingest capability check already walks is the account's
+    own view of what it is in, so the picker asks for the same thing: channel,
+    group and person, each with the id the whitelist stores and a name to
+    recognise. The order is the one the page renders, so two reads of the same
+    account produce the same list.
+    """
+    manager, _, client = await user_ingest_manager(
+        tmp_path,
+        [],
+        enable_source=False,
+        dialogs={-100501, -100500, 500},
+        entities={
+            -100501: SimpleNamespace(title="Zed Group", megagroup=True),
+            -100500: SimpleNamespace(
+                title="Alpha Channel", username="alpha", broadcast=True
+            ),
+            500: SimpleNamespace(first_name="Ada", last_name="Lovelace"),
+        },
+    )
+
+    dialogs = await manager.list_telegram_user_dialogs()
+
+    assert [row["chat_id"] for row in dialogs] == [-100500, -100501, 500]
+    assert [row["kind"] for row in dialogs] == [
+        "CHANNEL",
+        "GROUP",
+        "PRIVATE_CHAT",
+    ]
+    assert [row["title"] for row in dialogs] == [
+        "Alpha Channel",
+        "Zed Group",
+        "Ada Lovelace",
+    ]
+    # The walk is the same one the capability check makes, so it also teaches
+    # the session the access hashes: a source saved from this list is readable
+    # on the next poll rather than after one more retry.
+    assert client.dialog_calls == 1
+    assert manager._user_entities.dialogs_loaded is True
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_source_picker_refuses_without_a_logged_in_account(
+    tmp_path: Path,
+) -> None:
+    """Half a credential is not an account, and an empty list would be a lie."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    store = SecretStore(tmp_path / "private")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"ok": True, "result": []})
+        )
+    ) as client:
+        manager = ConnectionManager(store, database, telegram_client=client)
+
+        with pytest.raises(ProviderConnectionError) as refused:
+            await manager.list_telegram_user_dialogs()
+        assert refused.value.code == "TELEGRAM_USER_NOT_CONFIGURED"
+
+        # The api pair without a session is still no account: the login was
+        # started and never finished, and the picker must say so rather than
+        # present「no chats」.
+        store.write(TELEGRAM_USER_API_SECRET, f"1234567:{'a' * 32}")
+        with pytest.raises(ProviderConnectionError) as half:
+            await manager.list_telegram_user_dialogs()
+        assert half.value.code == "TELEGRAM_USER_NOT_CONFIGURED"

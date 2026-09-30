@@ -125,6 +125,49 @@ class EntityIndex:
         self.dialogs_loaded = False
 
 
+#: The kinds a dialog can be, in the order the source picker lists them. A
+#: channel and a group are both a negative chat id and both stored as
+#: `CHANNEL` -- the sign is the whole of what that source type means -- and are
+#: named apart only so an operator recognises their own chats in the picker.
+DIALOG_KINDS = ("CHANNEL", "GROUP", "PRIVATE_CHAT")
+
+
+def describe_dialog(chat_id: int, entity: Any) -> dict[str, Any]:
+    """One dialog, reduced to what the source picker shows and stores.
+
+    Telethon hands over `Channel`, `Chat` and `User` objects, and this module
+    must classify them without importing the library (a test run with Telethon
+    uninstalled still exercises this), so the entity is read by the attributes
+    that tell the three apart: a broadcast channel carries `broadcast`, a
+    supergroup `megagroup`, a small group a `title` and neither flag, and a
+    person a name and no title. When nothing is recognisable -- a stub entity,
+    or a dialog type this code has not met -- the chat id's own sign answers,
+    which is the same rule `configure_source` validates on: negative is a chat
+    the account reads as a channel, positive is a person.
+    """
+    title = str(getattr(entity, "title", "") or "").strip()
+    first = str(getattr(entity, "first_name", "") or "").strip()
+    last = str(getattr(entity, "last_name", "") or "").strip()
+    username = getattr(entity, "username", None)
+    if getattr(entity, "broadcast", False):
+        kind = "CHANNEL"
+    elif getattr(entity, "megagroup", False) or title:
+        kind = "GROUP"
+    elif first or last or username or getattr(entity, "bot", False):
+        kind = "PRIVATE_CHAT"
+    else:
+        kind = "CHANNEL" if int(chat_id) < 0 else "PRIVATE_CHAT"
+    name = title or f"{first} {last}".strip()
+    if not name:
+        name = f"@{username}" if username else str(chat_id)
+    return {
+        "chat_id": int(chat_id),
+        "title": name,
+        "username": str(username) if username else None,
+        "kind": kind,
+    }
+
+
 def _client_factory_default(
     api_id: int, api_hash: str, session: str | None
 ) -> Any:

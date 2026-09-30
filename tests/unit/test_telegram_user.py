@@ -19,12 +19,14 @@ import pytest
 
 from app.connections.models import ProviderConnectionError
 from app.connections.telegram_user import (
+    DIALOG_KINDS,
     LoginChallenge,
     TelegramUserClient,
     TelegramUserCredentials,
     TelegramUserError,
     _client_factory_default,
     _download_client_factory_default,
+    describe_dialog,
 )
 from app.downloads.models import PERMANENT_DOWNLOAD_ERRORS
 
@@ -660,3 +662,88 @@ class TestClientBudget:
 
         assert seen[0] == {"connection_retries": 5, "request_retries": 5}
         assert seen[1] == {"connection_retries": 2, "request_retries": 2}
+
+
+class TestDescribeDialog:
+    """One dialog, reduced to what the source picker shows and stores.
+
+    Telethon is not installed here, so the classification is exercised against
+    objects that carry only the attributes the real entities do -- which is
+    exactly what the picker reads them for. The fallback matters as much as the
+    three named kinds: an entity this code has never met must still answer with
+    a chat id and a sign that `configure_source` will accept.
+    """
+
+    def test_a_broadcast_channel_is_a_channel(self) -> None:
+        row = describe_dialog(
+            -100123,
+            types.SimpleNamespace(
+                title="Stream Scans",
+                username="streamscans",
+                broadcast=True,
+                megagroup=False,
+            ),
+        )
+
+        assert row == {
+            "chat_id": -100123,
+            "title": "Stream Scans",
+            "username": "streamscans",
+            "kind": "CHANNEL",
+        }
+
+    def test_a_supergroup_is_a_group(self) -> None:
+        row = describe_dialog(
+            -100456,
+            types.SimpleNamespace(
+                title="Reader Group",
+                username=None,
+                broadcast=False,
+                megagroup=True,
+            ),
+        )
+
+        assert row["kind"] == "GROUP"
+        assert row["title"] == "Reader Group"
+
+    def test_a_small_group_is_a_group(self) -> None:
+        """A `Chat` has a title and neither flag, and that is the whole test."""
+        row = describe_dialog(
+            -789, types.SimpleNamespace(title="Three Friends")
+        )
+
+        assert row["kind"] == "GROUP"
+
+    def test_a_person_is_a_private_chat(self) -> None:
+        row = describe_dialog(
+            500,
+            types.SimpleNamespace(
+                first_name="Ada", last_name="Lovelace", username=None
+            ),
+        )
+
+        assert row["kind"] == "PRIVATE_CHAT"
+        assert row["title"] == "Ada Lovelace"
+
+    def test_an_account_with_only_a_username_still_has_a_name(self) -> None:
+        row = describe_dialog(
+            501, types.SimpleNamespace(first_name=None, username="saved_notes")
+        )
+
+        assert row["title"] == "@saved_notes"
+
+    def test_an_unclassifiable_entity_falls_back_to_the_chat_id_sign(self) -> None:
+        """Negative is a chat, positive is a person -- the form's own rule."""
+        channel = describe_dialog(-100999, 123)
+        person = describe_dialog(999, 123)
+
+        assert channel == {
+            "chat_id": -100999,
+            "title": "-100999",
+            "username": None,
+            "kind": "CHANNEL",
+        }
+        assert person["kind"] == "PRIVATE_CHAT"
+        # Every kind the classifier can answer is one the page can label.
+        assert channel["kind"] in DIALOG_KINDS
+        assert person["kind"] in DIALOG_KINDS
