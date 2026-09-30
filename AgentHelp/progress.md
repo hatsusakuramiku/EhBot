@@ -4700,3 +4700,59 @@ access hash 放在**内存**实体缓存里，而 `StringSession.save()` 只存 
 `AgentHelp/AGENTS.md` 基线 1544 → 1547，`passed` 两个数各 +3 并补 R43 一环。
 
 提交 `475cdde`（fix，含文档）与 `6d9e6b2`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。修正的是运营者正在受影响的路径，修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:ce889a0374ca115ee4660df7cd618002239fb4ce6111921fbf4cf2f0a31237ee`，amd64 manifest `sha256:b80c5754d13d8a114d5b1428a74965379ee9e88773132de0e3d1f680e5311807`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内直接复现运营者的场景——用冷会话假客户端（`get_entity(-1001821575869)` 先抛同一个 `ValueError`）跑 `TelegramUserClient.latest_message_id`：扫一次会话列表后返回 4242，第二次调用不再扫（`dialog_calls` 恒为 1），即 R43 的修复确实在镜像里并解决了那条日志；冒烟容器与临时数据目录已清理。
+
+## R44 — 能读哪些来源只检测一遍，不在每轮轮询里重试（v0.3.0rc1，2026-09-30）
+
+R43 上线后运营者提出：**「应当是在启动后或更新来源规则或者在需要使用大文件下载时才进行一遍检测，
+为什么要实时轮询所有来源，这不就会一直产生大量没必要的日志吗。」** 他说得对。
+
+**根因：把「账户能不能读到这个来源」当成每一轮轮询都要重新确认的事情。** 成员关系是会话的事实，不是某一次
+轮询的属性：账户不在某个频道里，不会因为 10 秒过去就变得能读。但 R43 之后的实现是
+`_ingest_with_user_account` 每轮对每个来源调用一次解析（`_chat_entity`），解析不了就抛
+`TELEGRAM_USER_ENTITY_UNRESOLVED`，于是**每一轮、每一个读不出的来源都产生一条同样的 WARNING**，
+一发就是整夜。R43 已经保证不再重复全量扫会话列表，但没有解决「每轮重新判定同一个不变的事实」这件事。
+
+**修法：把成员关系检测从轮询里拿出来，改成「会话列表扫一遍＝一次全量答案」，并记住结论。**
+
+- `TelegramUserClient.load_dialogs()`（新增，与 `_chat_entity` 共用抽出的 `_load_dialogs`）：连上、读一遍
+  `iter_dialogs(limit=None)`，把每个会话的 `id → entity` 返回、存进共享的 `EntityIndex` 并置
+  `dialogs_loaded = True`。它既是补 access hash 的那个请求，也是「账户在哪些频道里」这一问题的答案。
+- `ConnectionManager._check_user_sources()`（新增）：启用集合变化时跑一次上面的检测。账户不在其中的来源逐条以
+  `telegram_user_source_unreadable`（带 `chat_id`、`error_code=TELEGRAM_USER_ENTITY_UNRESOLVED` 和固定的中文
+  说明）**点名一次**，记进 `_user_unreadable`；之后的轮询直接 `continue` 跳过这些来源，**不重试也不重复记录**。
+  检测本身失败（网络中断、限流）以 `telegram_user_sources_check_failed` 记一条并返回 False 放弃本轮——不把一次
+  连接故障放大成每个来源一条失败，也不把「没查成」当成「都能读」（下一轮重试）。
+- 检测由三个信号触发：**进程启动后的第一轮轮询**（状态天然为空）、**启用集合变化**（增删来源、启用/停用）、
+  以及**保存来源**——`POST /sources` 保存后调用新增的 `ConnectionManager.note_sources_changed()`。最后一条
+  不能靠 diff：运营者的操作是「在 Telegram 里把账户加进频道，再回来重新保存同一个来源」，此时行内容一字未改，
+  启用集合也不会动，只有保存这个动作本身在说「再看一遍」。
+- 登录成功与「断开」改调 `_forget_user_chats()`：一并清掉实体、`_user_unreadable` 与 `_user_checked_chats`
+  （换账户意味着 access hash 与成员关系都换了）。
+- 大文件下载仍按 R43 的按需解析：需要某个频道时先查缓存，缺了才扫一次会话列表；轮询检测过的进程里缓存已就绪，
+  下载直接复用。
+
+**测试（净 +3，1547 → 1550 collected）**
+- `tests/integration/test_connection_manager.py`：`FakeUserClient` 增加 `dialogs`（账户在哪些频道里，默认取有
+  消息的那些）与 `dialogs_error`，并让 `iter_dialogs` 真正 yield 出会话——R43 之前它 yield 空，在新检测下会让
+  所有来源都变成「读不出」。R42 那条「读不出的来源自述」用例被替换为三条：
+  `test_an_unreadable_source_is_reported_once_and_then_skipped`（第一轮点名一次、第二轮不再扫也不再记，且没有
+  `telegram_user_ingest_source_failed`）、`test_saving_a_source_again_re_runs_the_check`（加入频道 +
+  `note_sources_changed()` 后下一轮重扫并开始摄取）、`test_a_check_that_cannot_run_abandons_the_pass`
+  （`ConnectionError` → `telegram_user_sources_check_failed`，放弃本轮且不记成每个来源失败）。
+- `tests/integration/test_sources_web.py`：新增 `test_saving_a_source_tells_the_ingester_to_look_again`，确认
+  `POST /sources` 会清空缓存的判定——否则「重新保存来源」这条建议在页面上是假的。
+
+**验证（定向，不全量）**：`tests/integration/test_connection_manager.py`、`tests/unit/test_telegram_user.py`、
+`tests/integration/test_sources_web.py`、`tests/integration/test_telegram_user_web.py`、`tests/unit/test_logging.py`、
+`tests/unit/test_mtproto_translation.py`、`tests/unit/test_download_logging.py`、
+`tests/unit/test_telegram_bot_api.py`、`tests/integration/test_downloads.py`、
+`tests/integration/test_downloaded_web.py`、`tests/integration/test_connections_web.py`、
+`tests/integration/test_settings_web.py`、`tests/unit/test_web_shell.py`、`tests/integration/test_ui_shell.py` 全绿；
+`--collect-only` 计得 1550；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 把 R43 那条「新会话先补会话列表」的后半段（账户不在频道里才报错、轮询里单个频道
+失败不影响其余）拆出并改写为新的一条：「账户能读哪些来源」只在启动/保存来源/下载遇到未解析频道时检测一遍，
+读不出的来源点名一次后每轮跳过，重新保存来源即可重检，并写清检测失败与来源偶发失败的区别。`README.md` 不涉及。
+`AgentHelp/AGENTS.md` 基线 1547 → 1550，`passed` 两个数各 +3 并补 R44 一环。
+
+提交 `62d5e17`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。运营者提的是日志噪声，但他指出的是把一个不变的事实当成每轮都要重新确认的事——修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:24197aacb6bfae86bc5f0e75c322e43974e297db9a84e7c9076d04c8502a6fe2`，amd64 manifest `sha256:47447f42b3b4e3a1d3ff33df46b7bebabbc3271bb2d2210e7347ff7c368c5637`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内跑一遍 R44 的场景——临时库、一个账户读不到的启用来源、假 Telethon 客户端：连打两轮 `_ingest_with_user_account()`，`telegram_user_source_unreadable` 只出现一次、`iter_dialogs` 只调用一次、候选数为 0；随后把该频道加进假客户端的会话列表并调用 `note_sources_changed()`（等价于运营者「加入频道后重新保存来源」），下一轮重扫一次并摄取 1 条候选。R44 的「检测一遍、跳过、重检」确实在镜像里。冒烟容器与临时数据目录已清理。
