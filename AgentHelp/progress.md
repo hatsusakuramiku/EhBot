@@ -4650,4 +4650,4 @@ index digest，如不希望直接发版请告知，下次仍走「先问再推�
 `README.md` 不涉及（它是部署与配置说明，没有 MTProto 错误词表）。`AgentHelp/AGENTS.md` 基线 1537 → 1544，
 `passed` 两个数各 +7 并补 R42 一环。
 
-提交 `07dea82`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。
+提交 `07dea82`（fix，含文档）与 `0261ef9`（docs），只提交、不推送（`origin/main` 仍停在 `b559740`）。服务在运营者那边一直是「跑着但一直报错」，这次按既有节奏修完直接重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest `sha256:2607078c8f076a1eb25e58922f34d2beea3927425e0580dc15b288aedb1b6bbc`，amd64 manifest `sha256:ea218e0340b55cdff0c61c2f38b85a4db131f2c06a54758ebb070b64b11b4e50`）。**从 registry 验证而不是只信本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，数据目录挂载为可写，容器内监听 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`（宿主侧 curl 仍被本沙箱网络策略挡住，改为容器内请求）；再在容器里确认 R42 都在镜像里：`_CONTEXT_FIELDS` 含 `chat_id` / `message_id` / `error_detail`、`_refusal_detail` 存在、`_translate` 含 `TELEGRAM_USER_ENTITY_UNRESOLVED`、`TelegramBotApi.download_file` 写 `.part`、`schema_migrations` 计到 21；冒烟容器与临时数据目录已清理。
