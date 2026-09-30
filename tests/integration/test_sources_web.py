@@ -83,6 +83,42 @@ def test_admin_can_add_and_update_source_rules(tmp_path: Path) -> None:
     assert stored["enabled"] is True
 
 
+def test_saving_a_source_tells_the_ingester_to_look_again(
+    tmp_path: Path,
+) -> None:
+    """A save is the operator asking for a re-check, not just a row write.
+
+    A source the account cannot read is skipped until the next check, and the
+    check keys off the enabled set -- which a byte-identical re-save does not
+    move, even though the account may have just been added to the channel. So
+    the route itself has to drop the cached verdict.
+    """
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    with TestClient(app) as client:
+        authenticate(client, settings)
+        manager = app.state.connection_manager
+        # Pretend a check already ran and found the channel unreadable.
+        manager._user_unreadable = {-100600: "Configured Channel"}
+        manager._user_checked_chats = (-100600,)
+        csrf_token = client.get("/settings/sources").context["csrf_token"]
+        client.post(
+            "/sources",
+            data={
+                "source_type": "CHANNEL",
+                "chat_id": "-100600",
+                "display_name": "Configured Channel",
+                "enabled": "on",
+                "allowed_archive_formats": ["zip"],
+                "max_attachment_size_mb": "0",
+                "csrf_token": csrf_token,
+            },
+        )
+
+        assert manager._user_checked_chats is None
+        assert manager._user_unreadable == {}
+
+
 def test_needs_info_queue_is_separate_from_pending_queue(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     app = create_app(settings)

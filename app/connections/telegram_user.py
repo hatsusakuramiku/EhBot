@@ -355,6 +355,35 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    async def load_dialogs(self) -> dict[int, Any]:
+        """Read the account's whole dialog list once, filling the entity cache.
+
+        This is the capability check: `iter_dialogs` is the request that gives
+        Telethon every access hash it knows, so afterwards `get_entity`
+        resolves the chats the account is in and refuses -- with the named
+        error -- the ones it is not. The returned mapping is that answer, keyed
+        by the same chat ids Bot API updates carry.
+        """
+        client = await self._connect()
+        try:
+            return await self._load_dialogs(client)
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            raise _translate(exc) from exc
+        finally:
+            await self._close(client)
+
+    async def _load_dialogs(self, client: Any) -> dict[int, Any]:
+        found: dict[int, Any] = {}
+        async for dialog in client.iter_dialogs(limit=None):
+            chat_id = getattr(dialog, "id", None)
+            entity = getattr(dialog, "entity", None)
+            if chat_id is None or entity is None:
+                continue
+            found[int(chat_id)] = entity
+            self._entities.store(int(chat_id), entity)
+        self._entities.dialogs_loaded = True
+        return found
+
     async def _chat_entity(self, client: Any, chat_id: int) -> Any:
         """Resolve one chat id, teaching a blind session who its chats are.
 
@@ -374,9 +403,7 @@ class TelegramUserClient:
         except ValueError:
             if self._entities.dialogs_loaded:
                 raise
-            async for _dialog in client.iter_dialogs(limit=None):
-                pass
-            self._entities.dialogs_loaded = True
+            await self._load_dialogs(client)
             entity = await client.get_entity(int(chat_id))
         self._entities.store(chat_id, entity)
         return entity

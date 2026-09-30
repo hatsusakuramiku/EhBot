@@ -427,6 +427,14 @@ class FakeUserMessage:
         self.chat = None
 
 
+class FakeUserDialog:
+    """A dialog, reduced to the fields `load_dialogs` reads."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.id = chat_id
+        self.entity = chat_id
+
+
 class FakeUserClient:
     """A Telethon client, reduced to the calls the ingester makes.
 
@@ -440,13 +448,24 @@ class FakeUserClient:
         messages: list[FakeUserMessage],
         *,
         unseen_chats: set[int] | None = None,
+        dialogs: set[int] | None = None,
     ) -> None:
         self.messages = sorted(messages, key=lambda item: item.id)
         self.latest_calls: list[int] = []
-        self.entity_error: Exception | None = None
         #: Chat ids only resolvable after the dialog list has been read, like a
         #: session rebuilt from the stored string (it carries no access hashes).
         self.unseen_chats = set(unseen_chats or ())
+        #: Chat ids the account's dialog list contains -- the membership test
+        #: the capability check runs on. Defaults to the chats this fake holds
+        #: messages for, which is the ordinary case of a readable source.
+        self.dialogs = (
+            {item.chat_id for item in self.messages}
+            if dialogs is None
+            else set(dialogs)
+        )
+        #: Raised by `iter_dialogs`, standing in for an outage during a check.
+        self.dialogs_error: Exception | None = None
+        self.dialogs_loaded = False
         self.dialog_calls = 0
 
     async def connect(self) -> None:
@@ -456,9 +475,13 @@ class FakeUserClient:
         return None
 
     async def get_entity(self, chat_id: int) -> int:
-        if self.entity_error is not None:
-            raise self.entity_error
-        if int(chat_id) in self.unseen_chats:
+        # Telethon refuses a peer the session has not seen until the dialog
+        # walk fills the cache; after it, only the chats actually in the dialog
+        # list resolve, so absence from it reads as「this account is not in the
+        # channel」.
+        if int(chat_id) in self.unseen_chats or (
+            self.dialogs_loaded and int(chat_id) not in self.dialogs
+        ):
             raise ValueError(
                 "Could not find the input entity for PeerChannel("
                 f"channel_id={abs(int(chat_id))}) (PeerChannel)."
@@ -467,9 +490,12 @@ class FakeUserClient:
 
     async def iter_dialogs(self, **kwargs):
         self.dialog_calls += 1
+        if self.dialogs_error is not None:
+            raise self.dialogs_error
         self.unseen_chats.clear()
-        return
-        yield  # pragma: no cover - marks this an async generator
+        self.dialogs_loaded = True
+        for chat_id in sorted(self.dialogs):
+            yield FakeUserDialog(chat_id)
 
     async def iter_messages(
         self, entity: int, *, min_id=None, limit=None, reverse=False
@@ -495,6 +521,7 @@ async def user_ingest_manager(
     *,
     enable_source: bool = True,
     unseen_chats: set[int] | None = None,
+    dialogs: set[int] | None = None,
 ) -> tuple[ConnectionManager, Database, FakeUserClient]:
     """A manager whose user account is logged in and can read one channel."""
     database = Database(tmp_path / "ehbot.db")
@@ -511,7 +538,9 @@ async def user_ingest_manager(
     store = SecretStore(tmp_path / "private")
     store.write(TELEGRAM_USER_API_SECRET, f"1234567:{'a' * 32}")
     store.write(TELEGRAM_USER_SESSION_SECRET, "stored-session-string")
-    client = FakeUserClient(messages, unseen_chats=unseen_chats)
+    client = FakeUserClient(
+        messages, unseen_chats=unseen_chats, dialogs=dialogs
+    )
     manager = ConnectionManager(
         store,
         database,
@@ -611,20 +640,92 @@ async def test_a_channel_the_session_has_not_seen_is_read_after_dialogs(
 
 
 @pytest.mark.asyncio
-async def test_a_source_the_account_cannot_resolve_names_itself(
+async def test_an_unreadable_source_is_reported_once_and_then_skipped(
     tmp_path: Path, caplog
 ) -> None:
-    """`TELEGRAM_USER_FAILED` used to be the whole story of a failing source.
+    """The old loop asked the account to resolve a channel it is not in.
 
-    `_translate` keeps the operator-facing text generic, and the log whitelist
-    dropped the `chat_id` the loop passed, so a channel that failed on every
-    poll named neither itself nor the underlying Telethon error -- the two
-    facts an operator needs to act.
+    Every ten-second pass retried the chat, failed, and re-logged the same
+    line, so one unreadable source kept the log busy all day. Reading the
+    account's own dialogs answers membership for every source in one walk;
+    the verdict is remembered and later polls skip the chat in silence.
     """
-    manager, database, client = await user_ingest_manager(tmp_path, [])
-    client.entity_error = ValueError(
-        "Could not find the input entity for PeerChannel(123)"
+    manager, database, client = await user_ingest_manager(
+        tmp_path, [FakeUserMessage(id=5)], dialogs=set()
     )
+
+    with caplog.at_level(logging.WARNING, logger="app.connections.manager"):
+        assert await manager._ingest_with_user_account() == 0
+        assert await manager._ingest_with_user_account() == 0
+
+    warned = [
+        item.getMessage()
+        for item in caplog.records
+        if item.name == "app.connections.manager"
+    ]
+    assert warned.count("telegram_user_source_unreadable") == 1
+    # The per-source failure is no longer the story: the membership problem is
+    # named once and nothing retries the chat behind it.
+    assert "telegram_user_ingest_source_failed" not in warned
+    assert client.dialog_calls == 1
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "telegram_user_source_unreadable"
+    )
+    assert record.error_code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
+    assert record.chat_id == -100123
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_saving_a_source_again_re_runs_the_check(
+    tmp_path: Path, caplog
+) -> None:
+    """The operator's way back is to save the source, not to restart.
+
+    The account was added to the channel between two polls, and the saved row
+    is byte-identical, so nothing in the enabled set moved. The save is still
+    the operator saying 「look again」, and the next poll has to obey.
+    """
+    manager, database, client = await user_ingest_manager(
+        tmp_path, [FakeUserMessage(id=5)], dialogs=set()
+    )
+    await database.set_source_cursor(-100123, 4)
+    assert await manager._ingest_with_user_account() == 0
+    assert client.dialog_calls == 1
+
+    # The account is in the channel now, and the same source is saved again:
+    # what the dialogs contain changed, the row did not.
+    client.dialogs.add(-100123)
+    manager.note_sources_changed()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="app.connections.manager"):
+        assert await manager._ingest_with_user_account() == 1
+
+    assert client.dialog_calls == 2
+    assert "telegram_user_source_unreadable" not in [
+        item.getMessage() for item in caplog.records
+    ]
+    assert len(await database.list_candidates()) == 1
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_cannot_run_abandons_the_pass(
+    tmp_path: Path, caplog
+) -> None:
+    """A check that could not run must not read as「every source is bad」.
+
+    An outage during the dialog walk would otherwise turn one connection
+    problem into a per-source failure for every channel; the pass is dropped
+    and the reason named, so the next poll can try the check again.
+    """
+    manager, database, client = await user_ingest_manager(
+        tmp_path, [FakeUserMessage(id=5)]
+    )
+    client.dialogs_error = ConnectionError("network down")
 
     with caplog.at_level(logging.WARNING, logger="app.connections.manager"):
         assert await manager._ingest_with_user_account() == 0
@@ -632,12 +733,16 @@ async def test_a_source_the_account_cannot_resolve_names_itself(
     record = next(
         item
         for item in caplog.records
-        if item.name == "app.connections.manager"
-        and item.getMessage() == "telegram_user_ingest_source_failed"
+        if item.getMessage() == "telegram_user_sources_check_failed"
     )
-    assert record.error_code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
-    assert record.chat_id == -100123
-    assert "ValueError" in record.error_detail
+    assert record.error_code == "TELEGRAM_USER_UNREACHABLE"
+    assert record.error_detail.startswith("ConnectionError")
+    warned = [item.getMessage() for item in caplog.records]
+    assert "telegram_user_source_unreadable" not in warned
+    assert "telegram_user_ingest_source_failed" not in warned
+    # Nothing was learned, so the next poll re-checks instead of trusting a
+    # verdict it never reached.
+    assert manager._user_checked_chats is None
     await manager.stop()
 
 

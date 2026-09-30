@@ -92,10 +92,10 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 1547 collected, 0 failed.** Ending below this is a regression.
+**Baseline: 1550 collected, 0 failed.** Ending below this is a regression.
 **Compare `collected`, not `passed`:** the twelve `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
-`data/tools/7zip/`, so `passed` is 1486 on a machine that has one and 1474 with
+`data/tools/7zip/`, so `passed` is 1489 on a machine that has one and 1477 with
 twelve skips on a machine that does not. Install it on a POSIX host with
 `.venv/bin/python -c "from pathlib import Path; from app.archive.toolchain import install; install(Path('data/tools'))"`
 (`data/` is ignored, so every host installs its own; the download is digest-pinned
@@ -106,13 +106,13 @@ R0 439 -> R1 524 -> R2 569 -> R3 592 -> R4 635 -> R5 663 -> R6 708 -> R8 809 ->
 R9 820 -> Telegram user account 866 -> R10 939 -> R11 985 -> R12 1018 -> R13 1029
 -> R14 1039 -> R15 1068 -> R16 1079 -> R17 1119 -> R18 1122 -> R19 1154 -> R20 1163 -> R21 1174 -> R22 1181 -> R23 1192 -> R24 1207 -> R25 1251 -> R26 1252 -> R27 1310 ->
 R28 1360 -> R29 1435 -> R30 1465 -> R31 1497 -> R34 1506 -> R35 1508 -> R36 1508 ->
-R37 1512 -> R38 1513 -> R39 1515 -> R40 1535 -> R41 1537 -> R42 1544 -> R43 1547 (R36 只修好两个此前在 Linux 上必红的工具链用例，数量不变；R37 新增四条
+R37 1512 -> R38 1513 -> R39 1515 -> R40 1535 -> R41 1537 -> R42 1544 -> R43 1547 -> R44 1550 (R36 只修好两个此前在 Linux 上必红的工具链用例，数量不变；R37 新增四条
 原档下载用例，R38 新增一条：取码与提交验证码必须落在同一个会话上；R39 新增两条：来源按钮重抓已完成的下载
 （服务层一条、路由一条）；R40 新增二十条：MTProto 消息翻译八条、下载来源优先级六条、账户轮询摄取三条、
 选路按 file_id 与优先级判定三条（另有一条旧用例被替换）；R41 新增两条：AI 路径缓存随候选合并搬迁、
 迁移 021 的升级路径（旧表未带 CASCADE 时删除候选会报外键错）；R42 新增七条：MTProto 断点续写四条、
 日志白名单一条、账户轮询失败自述一条、Bot 下载原子写两条（原有一条 partial-file 用例被替换）；
-R43 新增三条：冷会话按会话列表解析频道、解析失败只扫一次列表、轮询端到端读取未曾见过的频道。R32 与 R33 的新增用例此前没有并进这个数，R34 一并算清). There is no R7 — that number
+R43 新增三条：冷会话按会话列表解析频道、解析失败只扫一次列表、轮询端到端读取未曾见过的频道；R44 新增四条：读不出的来源只报一次并在后续轮询跳过（原有的一条失败自述用例被替换）、重新保存来源会重跑检测、检测本身失败则放弃本轮、保存来源的 Web 路由触发重检（净 +3）。R32 与 R33 的新增用例此前没有并进这个数，R34 一并算清). There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost

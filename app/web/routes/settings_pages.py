@@ -154,6 +154,10 @@ async def configure_source(request: Request):
         allowed_categories=allowed_categories,
         min_rating=min_rating,
     )
+    # A save is the operator asking the MTProto ingester to look at this source
+    # again: the row may be byte-identical, but the account may have just been
+    # added to the channel, and nothing about the stored set would show it.
+    deps.connection_manager(request).note_sources_changed()
     return settings_redirect(request, SETTINGS_SOURCES)
 
 

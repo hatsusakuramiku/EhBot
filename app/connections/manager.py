@@ -123,6 +123,13 @@ class ConnectionManager:
         # entity cache empty and cannot resolve a channel id until it has read
         # the account's dialog list once.
         self._user_entities = EntityIndex()
+        #: Enabled chats the account could not resolve at the last capability
+        #: check, and the enabled set that check ran against. A source the
+        #: account is not in does not become readable between two polls ten
+        #: seconds apart, so it is reported once and then skipped instead of
+        #: being retried -- and re-logged -- on every pass.
+        self._user_unreadable: dict[int, str] = {}
+        self._user_checked_chats: tuple[int, ...] | None = None
 
     def telegram_available(self) -> bool:
         """Whether the Bot API route is worth queueing a job for.
@@ -264,6 +271,29 @@ class ConnectionManager:
         except TelegramUserError:
             return None
 
+    def note_sources_changed(self) -> None:
+        """Make the next poll re-check which sources this account can read.
+
+        Called when the operator saves a source. The enabled set alone cannot
+        see 「the same source, saved again after joining the channel」 -- no
+        field of the row changed -- and that re-save is exactly how the
+        operator asks a deployment to look afresh, so the save has to say so
+        rather than rely on a diff that will not move.
+        """
+        self._user_checked_chats = None
+        self._user_unreadable = {}
+
+    def _forget_user_chats(self) -> None:
+        """Drop everything learned about the previous account's chats.
+
+        Called when the session changes: another account has different access
+        hashes, so both the resolved entities and the capability verdict are
+        about a session that no longer exists.
+        """
+        self._user_entities.clear()
+        self._user_unreadable = {}
+        self._user_checked_chats = None
+
     def _user_client(
         self, credentials: TelegramUserCredentials, session: str | None
     ) -> TelegramUserClient:
@@ -363,14 +393,31 @@ class ConnectionManager:
         if credentials is None or not session:
             return 0
         client = self._user_client(credentials, session)
+        targets = await self._database.telegram_ingest_targets()
+        if not targets:
+            return 0
+        # Which sources this account can read is a property of the session and
+        # the membership list, not of this particular poll, so it is checked
+        # only when something could have moved it -- a changed enabled set, or
+        # a source save that said so through `note_sources_changed`. A channel
+        # the account is not in then costs one line at check time instead of
+        # one on every pass.
+        enabled = tuple(sorted(int(target["chat_id"]) for target in targets))
+        if enabled != self._user_checked_chats:
+            if not await self._check_user_sources(client, targets, enabled):
+                return 0
         created = 0
-        for target in await self._database.telegram_ingest_targets():
+        for target in targets:
+            if int(target["chat_id"]) in self._user_unreadable:
+                continue
             try:
                 created += await self._ingest_source(client, target)
             except ProviderConnectionError as exc:
-                # One unreachable chat must not stop the others: a channel the
-                # account was removed from is a fact about that channel, not a
-                # reason to stop ingesting the rest.
+                # A failure here is news even for a source the check passed: a
+                # rate limit or an outage is transient, unlike「the account is
+                # not in this channel」, which `_check_user_sources` reports once
+                # and stops retrying. One unreachable chat must not stop the
+                # others either.
                 logging.getLogger(__name__).warning(
                     "telegram_user_ingest_source_failed",
                     extra={
@@ -383,6 +430,58 @@ class ConnectionManager:
         if created:
             await self._notify_ingested()
         return created
+
+    async def _check_user_sources(
+        self,
+        client: TelegramUserClient,
+        targets: list[dict],
+        enabled: tuple[int, ...],
+    ) -> bool:
+        """Decide once which of the enabled sources this account can read.
+
+        One dialog pass answers it for every source at once, because the list
+        of chats the account is in *is* the membership test. A source that is
+        not in it is reported here, once, and then skipped until the deployment
+        is asked to look again: a source saved, another account logged in, or a
+        restart.
+
+        Returns False when the check itself could not run, in which case this
+        pass is abandoned: assuming every source is fine would only turn a
+        connection problem into a burst of per-source failures.
+        """
+        logger = logging.getLogger(__name__)
+        try:
+            readable = await client.load_dialogs()
+        except ProviderConnectionError as exc:
+            logger.warning(
+                "telegram_user_sources_check_failed",
+                extra={
+                    "error_code": exc.code,
+                    "error_message": exc.public_message,
+                    "error_detail": _refusal_detail(exc),
+                },
+            )
+            return False
+        unreadable: dict[int, str] = {}
+        for target in targets:
+            chat_id = int(target["chat_id"])
+            if chat_id in readable:
+                continue
+            unreadable[chat_id] = str(target.get("display_name") or "")
+            logger.warning(
+                "telegram_user_source_unreadable",
+                extra={
+                    "error_code": "TELEGRAM_USER_ENTITY_UNRESOLVED",
+                    "error_message": (
+                        "登录账户不在该来源中，轮询已跳过；把账户加入频道后"
+                        "重新保存该来源或重启即可重新检测"
+                    ),
+                    "chat_id": chat_id,
+                },
+            )
+        self._user_unreadable = unreadable
+        self._user_checked_chats = enabled
+        return True
 
     async def _ingest_source(self, client: TelegramUserClient, target: dict) -> int:
         chat_id = int(target["chat_id"])
@@ -541,7 +640,7 @@ class ConnectionManager:
             )
             # A different account has different access hashes, so nothing
             # resolved for the previous session can be reused.
-            self._user_entities.clear()
+            self._forget_user_chats()
             self._user_challenge = None
             self._telegram_user = TelegramUserAccount(
                 state="connected", configured=True, identity=identity.label
@@ -556,7 +655,7 @@ class ConnectionManager:
         """
         async with self._user_lock:
             self._user_challenge = None
-            self._user_entities.clear()
+            self._forget_user_chats()
             await self._cancel_user_ingest_task()
             await asyncio.to_thread(
                 self._secret_store.delete, TELEGRAM_USER_SESSION_SECRET
