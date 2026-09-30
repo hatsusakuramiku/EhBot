@@ -4591,3 +4591,63 @@ index digest，如不希望直接发版请告知，下次仍走「先问再推�
 合并成功且建议行搬到存活候选。`compileall` 与 `git diff --check` 通过。**注意**：这一批里
 `test_candidates_web.py::test_quick_approve_returns_to_the_tab_it_was_fired_from` 曾在一次合并运行中偶发失败，
 单独跑与随后两次同样组合连跑都通过，判定为既有 flake（涉及下载 worker 的时序），与本改动无关，未做处理。
+
+## R42 — MTProto 失败在日志里自述；重下失败不再删掉已有原档（v0.3.0rc1，2026-09-30）
+
+运营者贴出日志，里面是三条互不相干的失败。第一条每约 10 s 重复一次：
+`logger=app.connections.manager event=telegram_user_ingest_source_failed source=manager:350 error_code=TELEGRAM_USER_FAILED`，
+但**看不出是哪一个频道、哪一种错误**；第二条与第三条属于同一个作品（candidate 583）：
+`download_job_failed ... provider=TELEGRAM_USER error_code=TELEGRAM_USER_MESSAGE_GONE`，以及紧接着的
+`conversion_archive_failed ... error_code=ARCHIVE_COMPRESSION_RATIO error_message=成员 002.jpg 压缩率异常`。
+
+**根因一：日志白名单把 `chat_id` 丢了。** `JsonFormatter` 只输出 `_CONTEXT_FIELDS` 列出的字段，而轮询失败这条记录一直传
+`chat_id`，它却不在名单里——于是所有失败来源在日志里长得一模一样，运营者无从下手。这套白名单此前漏过 `error_message`（R13 修），
+这次漏的是来源标识。**修法**：补 `chat_id` / `message_id` / `error_detail`。前两个是 Telegram 源消息的坐标，
+`error_detail` 是「翻译前的上游异常」，专给 `error_code` 只能说「失败」时用。
+
+**根因二：翻译不了的 MTProto 错误一律变成「请稍后重试」。** `_translate` 对未知异常返回笼统的
+`TELEGRAM_USER_FAILED`，把原因丢掉；而 Telethon 在会话**无法解析 `chat_id`**（账户已退出频道，或私有会话从未进过会话缓存）
+时抛的是裸 `ValueError: Could not find the input entity`，不属于 `_ERROR_BY_NAME` 任何一项，于是落进这个兜底。运营者照着
+「稍后重试」永远不会成功。**修法**：`_translate` 把 `PeerIdInvalidError` 与这条 `ValueError` 映射成新码
+`TELEGRAM_USER_ENTITY_UNRESOLVED`，文案直接给动作（确认账户仍在频道内、必要时重新登录），页面只显示固定中文，
+不重复 Telethon 原文（那段文本带 peer id 与文档链接）；底层异常名与消息留在日志的 `error_detail` 里，界面不展示。
+`ConnectionManager` 的单源失败告警同时补上 `error_message` 与 `error_detail`，一个坏来源不再影响其余频道。
+
+**根因三（数据丢失）：一次失败的重下会把已有原档删掉。** `redownload_work` 复用同一条 `download_jobs` 行
+（`idempotency_key` 唯一），所以重下时算出的 `destination` 与**上一次成功下载写的是同一个路径**；而 Bot 与 MTProto 两条
+下载路径都是直接往这个路径写、失败时 `unlink()`。于是重下失败=把 artifact 行仍然指向的原档删掉——candidate 583 的
+`TELEGRAM_USER_MESSAGE_GONE`（原消息被删）恰好是重试永远不会成功的永久错误，删得毫无补救余地。**修法**：两条路径都先写
+同目录的 `<name>.part`，成功后 `os.replace()` 原子改名，失败只删 `.part`。这同时修掉「重下与打包并发时打包读到半截文件」
+的可能（改名是原子的，旧的 inode 不受影响）。
+
+**`ARCHIVE_COMPRESSION_RATIO` 本身不是缺陷。** 阈值为 200 倍，真实 JPEG 在 zip/7z 里压缩率≈1（实测：固体 7z 里同块
+第二个成员 7zz 干脆不报 Packed Size，守卫也不触发），能达到 200 倍的只可能是「名字叫 `002.jpg` 的高冗余数据」或损坏的
+长度字段——正是 R39 记录过的「网页被当成原档存成 `gallery-<gid>.zip` 却记为下载完成」那一类坏文件。对它正确的处置是用
+仍可用的来源按钮重抓（R39 已让按钮对 COMPLETED 行也生效），而根因三保证重抓失败不会再把文件搭进去。这条没有改：
+调低守卫会把真正的压缩炸弹放进来，得不偿失。
+
+**测试（+7，1537 → 1544 collected）**
+- `tests/unit/test_telegram_user.py`：原 `test_a_partial_file_is_removed_when_the_transfer_fails` 断言「失败后目标文件
+  不存在」，正是这次的错误行为，替换为两条——失败时保留既有文件且不留 `.part`、成功时替换文件且不留 `.part`；另加两条翻译
+  用例：裸 `ValueError("Could not find the input entity...")` 与 `PeerIdInvalidError` 都映射成
+  `TELEGRAM_USER_ENTITY_UNRESOLVED`，且不把 `PeerChannel` 原文带进 `public_message`。
+- `tests/unit/test_logging.py`：新增 `test_json_formatter_serialises_an_ingest_failure`（`chat_id` 与 `error_detail`
+  真的会写进 JSON），并把三个新字段补进「未设置就不输出」那条的清单。
+- `tests/integration/test_connection_manager.py`：`FakeUserClient` 加 `entity_error`，新增
+  `test_a_source_the_account_cannot_resolve_names_itself`——一条来源解析失败时，告警记录带 `chat_id=-100123`、
+  `error_detail` 含 `ValueError`，轮询本身不抛。
+- `tests/unit/test_telegram_bot_api.py`：新增两条，Bot 下载成功替换、失败保留旧文件且不留 `.part`。
+
+**验证（定向，按新规不全量）**：`tests/unit/test_telegram_user.py`、`tests/unit/test_telegram_bot_api.py`、
+`tests/unit/test_logging.py`、`tests/integration/test_connection_manager.py`（94 passed）、
+`tests/unit/test_mtproto_translation.py`、`tests/unit/test_download_logging.py`、`tests/integration/test_downloads.py`、
+`tests/integration/test_telegram_user_web.py`、`tests/integration/test_downloaded_web.py`（75 passed）全绿；
+`--collect-only` 计得 1544；`compileall` 与 `git diff --check` 通过。上一批的 flake
+（`test_candidates_web.py::test_quick_approve_returns_to_the_tab_it_was_fired_from`）与本次改动无关，未处理。
+
+**文档同步**：`docs/USAGE.md` 两处——来源按钮那段补「重下失败只删 `.part`」；Telegram 用户账户一节新增一条，
+说明 `TELEGRAM_USER_ENTITY_UNRESOLVED`、轮询单个频道失败不影响其余、以及日志里的 `chat_id` / `error_detail`。
+`README.md` 不涉及（它是部署与配置说明，没有 MTProto 错误词表）。`AgentHelp/AGENTS.md` 基线 1537 → 1544，
+`passed` 两个数各 +7 并补 R42 一环。
+
+提交 `07dea82`（fix，含文档），只提交、不推送（`origin/main` 仍停在 `b559740`）。
