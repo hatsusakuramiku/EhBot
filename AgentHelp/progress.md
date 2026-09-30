@@ -4836,3 +4836,88 @@ unexpected keyword argument 'part_size_kb'` 转成的 `TELEGRAM_USER_FAILED`」�
 `download_job_failed` 带上了
 `"error_detail": "TypeError: download_media() got an unexpected keyword argument 'part_size_kb'"`——R45 的
 接口修复与自述日志确实都在镜像里。冒烟容器与临时数据目录已清理。
+
+## R46 — 大文件下载用独立的长传输客户端，Telethon 重试耗尽译成可重试的网络原因（v0.3.0rc1，2026-09-30）
+
+R45 修好接口后运营者复测，大文件下载**仍然失败**，但日志把新情况说清楚了：
+
+    logger=app.downloads.service event=download_job_failed source=service:1049
+    candidate_id=587 job_id=1187 provider=TELEGRAM_USER status=FAILED attempt=3
+    duration_ms=82334 error_code=TELEGRAM_USER_FAILED
+    error_message=用户账户操作失败，请稍后重试
+    error_detail=ValueError: Request was unsuccessful 3 time(s)
+
+同一时刻的底层日志是
+
+    logger=telethon.client.users event=Telegram is having internal issues
+    TimeoutError: Timeout while fetching data (caused by GetFileRequest) source=users:100
+
+**R45 已经生效**：`duration_ms` 从 923 涨到 82334，真正的传输跑起来了（一次 2 GB 级文件），`error_detail`
+也正是 R45 新增的那一栏。新的失败点与 R45 无关，是**传输中途 Telegram 端超时**。
+
+**根因：登录与下载共用同一个 Telethon 客户端参数，而两者的重试预算需要相反。**
+`_client_factory_default` 为登录表单的响应速度刻意把 Telethon 默认的 5 次请求重试/5 次重连压到 **2/2**，
+但同一个客户端也拿去下载。Telethon 的重试是**按请求**的（下载时就是按 `GetFileRequest` 分块），
+`telethon/client/users.py` 的 `_call` 循环在 `TimedOutError`/`ServerError` 等上重试 `request_retries` 次、
+每次之间睡 2 秒，耗尽后抛出赤裸的 `ValueError('Request was unsuccessful N time(s)')`（`retry_range` 使
+`retries+1` 次尝试，所以 2 配出「3 time(s)」）。于是**一个分块连续超时 3 次，整次已经跑了 82 秒的传输连同
+已下载的部分一起丢掉**——这正是日志里的 82 秒。而那个 `ValueError` 与「无法解析该会话」的 `ValueError`
+同型不同因，掉进了 `_translate` 的兜底 `TELEGRAM_USER_FAILED`（「请稍后重试」），完全看不出是网络原因。
+
+**修法一：下载路径单独建客户端，用回 Telethon 自己的重试预算。** 新增
+`_download_client_factory_default`（`connection_retries=5, request_retries=5`，显式写出而不是靠默认值，
+好让与登录客户端的对比留在代码里）。`TelegramUserClient` 增加 `download_client_factory` 参数，
+取值顺序是**显式传入的下载工厂 → 注入的 `client_factory` → 长传输默认工厂**：测试只注入一个假客户端时，
+下载路径仍然说那个假客户端（不必改任何既有用例）；生产两个都不传，于是登录/轮询走 2/2、下载走 5/5。
+`download_message_media` 用 `_connect(for_download=True)` 取后者。登录页面的响应速度不受影响——
+这是把两件事分开，不是把登录也改慢。
+
+**修法二：Telethon 自己重试耗尽不再是兜底错误码。** `_translate` 增加一条
+`isinstance(exc, ValueError) and "Request was unsuccessful" in str(exc)` 分支，译成
+`TELEGRAM_USER_UNREACHABLE`（「与 Telegram 的传输中断，请重试该任务」）。它**必须留在可重试集合里**：
+这是 Telegram 端/网络的临时故障，重试按钮就是运营者恢复任务的方式，所以**不进
+`PERMANENT_DOWNLOAD_ERRORS`**（用例里显式断言了这一点）。`_handle_job` 仍把
+`ValueError: Request was unsuccessful 3 time(s)` 作为 `error_detail` 带出来，底层原因没有丢。
+
+**没有做的事**：没有把重试次数调到 Telethon 默认值之上。5 次是库自己的选择，比它更高只是拿更长的假死
+换一点成功率；也没有加「断点续传」——重试发生在分块层，Telethon 会从当前分块继续，R45 交给它的整条消息
+仍然负责中途续文件引用。真要说清楚的是：这条路能扛住偶发超时，扛不住 Telegram 持续不可用；那种情况下
+作业会以 `TELEGRAM_USER_UNREACHABLE` 明确失败，而不是伪装成我们自己的 bug。
+
+**测试（+3，1552 → 1555 collected）**
+- `tests/unit/test_telegram_user.py`：新增 `test_a_download_uses_the_long_transfer_client`——注入两个假客户端，
+  断言下载走的是 `download_client_factory`、登录客户端一次都没连；新增
+  `test_telethons_retries_running_out_is_a_retryable_refusal`——`ValueError('Request was unsuccessful 3 time(s)')`
+  译成 `TELEGRAM_USER_UNREACHABLE` 且不在永久失败集合里；新增
+  `test_the_transfer_client_gets_telethons_full_retry_budget`——用**stub 的 `telethon` 模块**（而非导入真库）
+  断言两个工厂交出的关键字参数是 5/5 与 2/2，这条用例把这次修复的核心数字钉住了，同时保持该文件
+  「不导入 Telethon」的性质（模块 docstring 已同步说明）。
+
+**验证（定向，不全量）**：`tests/unit/test_telegram_user.py`、`tests/unit/test_download_logging.py`、
+`tests/unit/test_mtproto_translation.py`、`tests/unit/test_logging.py`、
+`tests/integration/test_telegram_user_web.py`、`tests/integration/test_downloads.py`、
+`tests/integration/test_connection_manager.py`、`tests/integration/test_downloaded_web.py`、
+`tests/integration/test_sources_web.py`、`tests/integration/test_connections_web.py`、
+`tests/unit/test_work_detail.py`、`tests/unit/test_api_read_layer.py`、`tests/unit/test_telegram_bot_api.py`
+全绿；`--collect-only` 计得 1555；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 的「Telegram 用户账户」一节新增「长传输与登录用不同的重试预算」一条，
+说明两条路径的预算为何不同、传输中断现在报 `TELEGRAM_USER_UNREACHABLE` 且可重试。
+`README.md` 只到「四级选路」的粒度，不涉及（本次无 README 变更）。
+`AgentHelp/AGENTS.md` 基线 1552 → 1555，并在 R45 一环后补上 R46 的三条新增用例。
+
+提交为**单条**提交（代码、测试与本条记录同在，父提交 `f2ea91b`），只提交、不推送（`origin/main` 仍停在
+`b559740`）。修的是运营者正在受影响的路径，修完按既有节奏重建并推送 `hsmk/ehbot:latest`
+（`linux/amd64`，index digest
+`sha256:dbac0da2cb80b26e6dce10f368d75505f029ec95f8ae0265554a350ee7042ca5`，amd64 manifest
+`sha256:c86761d7296fa9e2918477abc6c85e393320641367469651b944b2e02af38eb0`）。**从 registry 验证而不是只信本地
+构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，
+数据目录挂载为可写，容器内监听 8080；宿主端口映射在本机不可用，改在容器内用 `urllib` 打）
+里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内直接核对 R46 的三件事——
+用**真实 Telethon** 建两个客户端，`_client_factory_default` 得 2/2、`_download_client_factory_default` 得 5/5
+（即镜像里的调用确实被库接受）；让一个假客户端跑 `download_message_media`，确认下载路径取的是
+`download_client_factory` 而不是登录那个（11 字节落盘、返回 11）；再按真实边界
+`raise _translate(exc) from exc` 复现运营者的 `ValueError('Request was unsuccessful 3 time(s)')`，
+得到 `code=TELEGRAM_USER_UNREACHABLE`、「与 Telegram 的传输中断，请重试该任务」、
+`error_detail=ValueError: Request was unsuccessful 3 time(s)`，且该错误码不在永久失败集合中。
+冒烟容器与临时数据目录已清理。

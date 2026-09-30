@@ -3,12 +3,16 @@
 Telethon is never imported here. `TelegramUserClient` takes a `client_factory`
 precisely so this suite can drive a login and a download against a stub, and the
 error table is matched on exception *class name* so a fake can raise a
-same-named class and get the real translation.
+same-named class and get the real translation. Even the retry budget the real
+Telethon client is built with is asserted against a stub `telethon` module
+rather than the library itself, so nothing here needs it installed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -19,7 +23,10 @@ from app.connections.telegram_user import (
     TelegramUserClient,
     TelegramUserCredentials,
     TelegramUserError,
+    _client_factory_default,
+    _download_client_factory_default,
 )
+from app.downloads.models import PERMANENT_DOWNLOAD_ERRORS
 
 
 class ApiIdInvalidError(Exception):
@@ -463,6 +470,64 @@ class TestDownload:
         assert not (tmp_path / "book.zip.part").exists()
 
     @pytest.mark.asyncio
+    async def test_a_download_uses_the_long_transfer_client(
+        self, tmp_path: Path
+    ) -> None:
+        """A transfer and a login must not share one retry budget.
+
+        The login client is deliberately impatient -- two attempts -- because an
+        operator is watching a form. This client spends minutes on a socket, so
+        the download path is built by a separate factory; an hour of transfer
+        must not end because one chunk timed out three times. Fakes rather than
+        the real factory so the assertion is about which one the download path
+        picked, and a stub rather than Telethon so the numbers stay checked
+        without importing the library (see the test below).
+        """
+        login = FakeClient()
+        download = FakeClient()
+        client = TelegramUserClient(
+            TelegramUserCredentials(api_id=1234567, api_hash="a" * 32),
+            "s",
+            client_factory=lambda api_id, api_hash, session: login,
+            download_client_factory=lambda api_id, api_hash, session: download,
+        )
+
+        await client.download_message_media(
+            -1001234, 5678, tmp_path / "book.zip"
+        )
+
+        assert download.download_calls == [download.message]
+        # The impatient client was never opened for the transfer.
+        assert not login.connected
+        assert login.download_calls == []
+
+    @pytest.mark.asyncio
+    async def test_telethons_retries_running_out_is_a_retryable_refusal(
+        self, tmp_path: Path
+    ) -> None:
+        """Telethon's own `ValueError` means a stall, not a fault of ours.
+
+        With the retry budget exhausted Telethon raises a bare
+        `ValueError('Request was unsuccessful N time(s)')`, which shares its
+        type with the unresolvable-entity `ValueError` above but not its cause.
+        It used to land on the catch-all `TELEGRAM_USER_FAILED` (「请稍后重试」
+        with no hint that the network was at fault). It is a transient failure
+        of Telegram's side, so the code must stay out of the permanent set --
+        the retry button is how the operator resumes.
+        """
+        fake = FakeClient(
+            download_error=ValueError("Request was unsuccessful 3 time(s)")
+        )
+
+        with pytest.raises(TelegramUserError) as caught:
+            await make_client(fake, "s").download_message_media(
+                -1001234, 5678, tmp_path / "book.zip"
+            )
+
+        assert caught.value.code == "TELEGRAM_USER_UNREACHABLE"
+        assert caught.value.code not in PERMANENT_DOWNLOAD_ERRORS
+
+    @pytest.mark.asyncio
     async def test_a_chat_the_session_has_not_seen_is_found_via_the_dialogs(
         self,
     ) -> None:
@@ -562,3 +627,36 @@ class TestErrorContract:
 
         assert caught.value.code == "TELEGRAM_USER_FAILED"
         assert "deadbeef" not in caught.value.public_message
+
+
+class TestClientBudget:
+    def test_the_transfer_client_gets_telethons_full_retry_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The numbers that make the download path different, pinned.
+
+        Telethon is not imported here -- the two factories are handed a stub
+        `telethon` module instead -- but the keyword arguments Telethon would
+        receive are the whole fix: five attempts per request and five
+        reconnects, against the login client's two and two.
+        """
+        seen: list[dict] = []
+
+        class StubTelegramClient:
+            def __init__(self, session, api_id, api_hash, **kwargs):
+                self.session = session
+                seen.append(kwargs)
+
+        stub = types.ModuleType("telethon")
+        stub.TelegramClient = StubTelegramClient
+        sessions = types.ModuleType("telethon.sessions")
+        sessions.StringSession = lambda value=None: f"session:{value}"
+        stub.sessions = sessions
+        monkeypatch.setitem(sys.modules, "telethon", stub)
+        monkeypatch.setitem(sys.modules, "telethon.sessions", sessions)
+
+        _download_client_factory_default(123, "a" * 32, None)
+        _client_factory_default(123, "a" * 32, None)
+
+        assert seen[0] == {"connection_retries": 5, "request_retries": 5}
+        assert seen[1] == {"connection_retries": 2, "request_retries": 2}

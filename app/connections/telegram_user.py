@@ -150,6 +150,36 @@ def _client_factory_default(
     )
 
 
+def _download_client_factory_default(
+    api_id: int, api_hash: str, session: str | None
+) -> Any:
+    """Build a Telethon client for a long byte transfer, not for a login.
+
+    The two operations want opposite things from the retry budget. A login is
+    an operator watching a form: a wrong api_id must say so in seconds rather
+    than hang, so `_client_factory_default` cuts Telethon's default of five
+    attempts down to two. A transfer is minutes of socket time that will cross
+    a transient stall, and a request is retried per *chunk* -- giving up after
+    three attempts on one chunk throws away everything downloaded up to that
+    point. The log that motivated this split was a job that ran 82 seconds
+    against a 2 GB document, then died on a `GetFileRequest` that timed out
+    three times in a row.
+
+    Telethon's own defaults are the right shape here, so they are stated rather
+    than inherited, and the contrast with the login client is deliberate.
+    """
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
+    return TelegramClient(
+        StringSession(session) if session else StringSession(),
+        api_id,
+        api_hash,
+        connection_retries=5,
+        request_retries=5,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramUserCredentials:
     """The application identity a user session is created under.
@@ -202,24 +232,43 @@ class TelegramUserClient:
         session: str | None = None,
         *,
         client_factory: Callable[[int, str, str | None], Any] | None = None,
+        download_client_factory: (
+            Callable[[int, str, str | None], Any] | None
+        ) = None,
         entity_index: EntityIndex | None = None,
     ) -> None:
         self._credentials = credentials
         self._session = session
         self._client_factory = client_factory or _client_factory_default
+        # An injected `client_factory` still covers the download path: a test
+        # that hands over one stub expects every method to speak to that stub.
+        # The split only exists for real Telethon clients, where the login
+        # budget and the transfer budget are different numbers.
+        self._download_client_factory = (
+            download_client_factory
+            or client_factory
+            or _download_client_factory_default
+        )
         # Shared by every client this application builds, so a chat is resolved
         # once per process rather than once per operation.
         self._entities = entity_index if entity_index is not None else EntityIndex()
 
-    def _build(self, session: str | None = None) -> Any:
-        return self._client_factory(
+    def _build(
+        self, session: str | None = None, *, for_download: bool = False
+    ) -> Any:
+        factory = (
+            self._download_client_factory if for_download else self._client_factory
+        )
+        return factory(
             self._credentials.api_id,
             self._credentials.api_hash,
             self._session if session is None else session,
         )
 
-    async def _connect(self, session: str | None = None) -> Any:
-        client = self._build(session)
+    async def _connect(
+        self, session: str | None = None, *, for_download: bool = False
+    ) -> Any:
+        client = self._build(session, for_download=for_download)
         try:
             await client.connect()
         except Exception as exc:  # noqa: BLE001 - provider boundary
@@ -435,7 +484,10 @@ class TelegramUserClient:
         keeps this honest about deletions -- a message the uploader removed
         fails as「消息已被删除」rather than as a mysterious download error.
         """
-        client = await self._connect()
+        # The long-transfer budget, not the login one: this client is about to
+        # spend minutes on a socket, and a stalled chunk must be retried rather
+        # than end the job.
+        client = await self._connect(for_download=True)
         # The bytes land beside the destination and move into place only once
         # the transfer is complete. `redownload_work` reuses the job row, so
         # this destination is the very file the previous, successful download
@@ -595,6 +647,17 @@ def _translate(exc: Exception) -> ProviderConnectionError:
             "TELEGRAM_USER_ENTITY_UNRESOLVED",
             "登录账户无法解析该会话：可能已退出该频道，或会话缓存中没有它。"
             "请确认账户仍在频道内，必要时重新登录后重试",
+        )
+    if isinstance(exc, ValueError) and "Request was unsuccessful" in str(exc):
+        # Telethon's own retry loop gives up with this bare `ValueError` once
+        # one request -- during a transfer, a single `GetFileRequest` chunk --
+        # has timed out `request_retries` times in a row. Telegram was stalling,
+        # not the job being wrong, so it has to stay retryable; without this
+        # branch it fell through to the catch-all `TELEGRAM_USER_FAILED`
+        # (「请稍后重试」 with no hint of a network cause) and read as a
+        # failure of ours.
+        return TelegramUserError(
+            "TELEGRAM_USER_UNREACHABLE", "与 Telegram 的传输中断，请重试该任务"
         )
     known = _ERROR_BY_NAME.get(name)
     if known is not None:
