@@ -4921,3 +4921,81 @@ R45 修好接口后运营者复测，大文件下载**仍然失败**，但日志
 得到 `code=TELEGRAM_USER_UNREACHABLE`、「与 Telegram 的传输中断，请重试该任务」、
 `error_detail=ValueError: Request was unsuccessful 3 time(s)`，且该错误码不在永久失败集合中。
 冒烟容器与临时数据目录已清理。
+
+## R47 — 压缩率门禁只拦「识别不出是图片」的成员（v0.3.0rc1，2026-09-30）
+
+运营者问的是两个问题：**这个压缩率是怎么算出来的**，以及**`.jpg` 被误判的概率有多大**。查下来答案是
+「算出来的是可压缩性，不是炸弹性」，而且误判不是小概率——于是这一阶段就修它。
+
+**算法**：不解压、不重新压缩，只看压缩包自己声称的两个数，逐成员
+
+    ratio = member.size / member.compressed_size      # 解开后 / 打包后
+    if member.compressed_size > 0 and ratio > max_compression_ratio:  # 默认 200
+        raise ARCHIVE_COMPRESSION_RATIO
+
+ZIP 的两个数来自中央目录（`ZipInfo.file_size` / `.compress_size`），7z/rar 来自 `7zz l -slt` 的
+`Size` / `Packed Size`；`compressed_size == 0` 直接跳过（固体 7z 只有块首成员带这个字段）。所以这个比例
+衡量的是**这段数据有多容易被压掉**，对 JPEG 来说就是**这张图有多平坦**，不含任何随机性。
+
+**实测误判（全部用仓库自己的 `ZipfileBackend.inspect` + `validate_manifest` 跑，阈值 200）**
+
+| 成员 | 大小 | 比例 | 结果 |
+|---|---|---|---|
+| 扫描/照片类 JPEG | 222 KB | 1.01 | 通过 |
+| 漫画页 3000×4200（白底黑线） | 277 KB | 21.95 | 通过 |
+| 纯白 2400×2400 q85 | 33 KB | 154.70 | 通过（余量只剩 1.3×） |
+| 纯白 2400×2400 **q100** | 33 KB | 231.52 | **拒绝** |
+| 纯白 4800×4800 q85 | 132 KB | 428.11 | **拒绝** |
+| 纯白 9600×9600 q85 | 528 KB | 763.11 | **拒绝** |
+
+同一个纯白 4800×4800 放进固体 7z 更糟：**548 倍**，照旧被拒。也就是说误伤条件是「一张约 4000px 以上的
+近乎纯色页」（空白页、全黑分隔页、纯色底封面），q100 的纯色 2400px 页也已经越线；而那些页是**完全合法的
+JPEG**。另有第二个机制：固体 7z 把整块的 `Packed Size` 记在块首成员头上、其余记 0，于是块首的合法 JPEG 会
+背上整块的压缩量（实测「一张正常 JPEG + 一个 2 MB 零字节文件」同块时被判 249 而拒绝），而真正的炸弹若在块
+中后段则因为 `compressed_size == 0` 被整条跳过——**这道门在 7z 上既误伤又漏报**。
+
+**修法（按运营者的选择）：只对「无法被识别为真实图片」的成员保留比例检查。**
+
+`validate_manifest` 里把 `detected = detected_image_extension(member.header)` 提到比例门之前（原来在它之后），
+比例门的条件加上 `detected is None`。判据是**成员字节的魔数**（JPEG/PNG/GIF/BMP/WebP），不是文件名：
+
+- 字节是真实图片容器 → 不论比例多高都放行。这些页面的真实风险（解码后的像素规模）本来就不是这个比例能
+  衡量的，由单成员/总解压大小上限与后续图像处理负责。
+- 字节不是图片却叫 `.jpg` → 照旧按比例拦下（R42 那种「网页被存成 zip」的垃圾数据），而且魔数门禁仍在它后面
+  兜底。
+- **7z / rar 仍然全部按比例校验**，一行没改：`7zz l -slt` 不提供成员的头几个字节，`header` 恒为 `b""`，
+  `detected` 只能是 `None`。这是刻意保守的读法——「读不到字节」不等于「是图片」，而在 7z 那边这道比例门是
+  唯一会生效的内容门禁（魔数门禁对它本来就是空转）。代价如实记下：**固体 7z 里块首的平坦页仍会被拒**，
+  要修它需要另一种机制（在有界读取的前提下取成员头），本次没有做。
+
+**放弃的东西**：`\xff\xd8\xff` 开头、后面全是填充的伪 JPEG 现在不再被比例门拦（它会被识别成 JPEG 而免检）。
+它仍受 `max_member_bytes` / `max_total_bytes` 约束，并会在图像处理阶段暴露。
+
+**测试（+2，1555 → 1557 collected）**
+- `tests/unit/test_archive_processing.py`：`test_validate_manifest_enforces_limits` 里那条比例用例改用
+  **非图片字节**（`<html>…` 却叫 `01.jpg`）——它本来用 `JPEG_HEADER`，正好断言的是这次要改掉的旧行为；
+  新增 `test_the_ratio_gate_does_not_fire_on_a_real_image`（JPEG 与 PNG 签名成员各一个、比例都是 100 万倍，
+  必须通过并正常排序）与 `test_the_ratio_gate_still_fires_when_no_header_was_captured`
+  （`header=b""` 且比例离谱仍必须拦下，把 7z/rar 的行为钉住）。
+
+**验证（定向，不全量）**：`tests/unit/test_archive_processing.py`、`tests/integration/test_archive_workflow.py`、
+`tests/integration/test_settings_web.py`、`tests/unit/test_archive_path_rules.py`、`tests/unit/test_rearchive.py`、
+`tests/unit/test_archived_works.py` 全绿；`--collect-only` 计得 1557；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`docs/USAGE.md` 的归档一节新增「压缩率只对『识别不出是图片』的成员判」一条（含实测数字、
+判据是魔数不是文件名、7z/rar 为例外）；设置页「最大压缩率」输入框下补了一句同样意思的提示，因为这是
+运营者会盯着改的那个数字。`README.md` 只到功能粒度，不涉及（本次无 README 变更）。
+`AgentHelp/AGENTS.md` 基线 1555 → 1557，并在 R46 一环后补上 R47 的两条新增用例。
+
+提交为**单条**提交（代码、测试与本节记录同在，父提交 `5437d3b`），只提交、不推送（`origin/main` 仍停在
+`b559740`）。修完按既有节奏重建并推送 `hsmk/ehbot:latest`（`linux/amd64`，index digest
+`sha256:29b863b6aeb3827e19065ccd14c591a50752dd4ada9bf01d1c786512b1bda5db`，amd64 manifest
+`sha256:64bb7c10578e443dffacdddb9d7a339b045f81abdee4e7770cec3c551a8056b5`）。**从 registry 验证而不是只信本地
+构建**：`docker buildx imagetools inspect` 与 `docker pull` 都取回同一 index digest。冒烟容器（`--user 0:0`，
+数据目录挂载为可写，容器内监听 8080；本机宿主端口映射仍不可用，改在容器内用 `urllib` 打）
+里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并在容器内用真实数据跑三条——
+用镜像里的 Pillow 生成 4800×4800 纯白 JPEG（132 KB）打成 zip，`ZipfileBackend.inspect` 报 428 倍，
+`validate_manifest` **通过**（修好前这里必红）；同样方式装一个「`<html>` 却叫 `01.jpg`」的成员，391 KB、
+930 倍，**仍以 `ARCHIVE_COMPRESSION_RATIO` 拒绝**；再把那张纯白 JPEG 用镜像自带的 7zz 打成固体 7z，
+`header=0B`、548 倍，**仍然拒绝**——即 ZIP 的误伤已修、7z 的行为如文档所述保持原样。冒烟容器与临时数据
+目录已清理。

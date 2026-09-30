@@ -197,9 +197,18 @@ def test_validate_manifest_enforces_limits() -> None:
         )
     assert count_error.value.code == "ARCHIVE_TOO_MANY_MEMBERS"
 
+    # Bytes that are not an image at all, however they are named: this is the
+    # member the ratio gate is for, and it stays refused.
     with pytest.raises(ArchiveSafetyError) as ratio_error:
         validate_manifest(
-            _manifest(_member("01.jpg", size=10_000_000, compressed_size=10)),
+            _manifest(
+                _member(
+                    "01.jpg",
+                    size=10_000_000,
+                    compressed_size=10,
+                    header=b"<html><body>not an image</body></html>",
+                )
+            ),
             SafetyLimits(),
         )
     assert ratio_error.value.code == "ARCHIVE_COMPRESSION_RATIO"
@@ -216,6 +225,46 @@ def test_validate_manifest_enforces_limits() -> None:
             SafetyLimits(max_total_bytes=100),
         )
     assert total_error.value.code == "ARCHIVE_TOTAL_TOO_LARGE"
+
+
+def test_the_ratio_gate_does_not_fire_on_a_real_image() -> None:
+    """A flat page is the one thing a real JPEG compresses like a bomb.
+
+    JPEG's entropy-coded output for a blank or solid-colour page deflates
+    hundreds of times over -- a 4800x4800 solid-white page measured 428x in a
+    zip and 548x in a 7z -- so a ratio gate that cannot tell "redundant image"
+    from "not an image" rejects legitimate pages. Positive identification of
+    the container is what separates them: a member whose header carries a real
+    image signature passes regardless of its ratio.
+    """
+    pages = validate_manifest(
+        _manifest(
+            _member("01.jpg", size=10_000_000, compressed_size=10),
+            _member("02.png", size=10_000_000, compressed_size=10, header=PNG_HEADER),
+        ),
+        SafetyLimits(),
+    )
+
+    assert [member.name for member in pages] == ["01.jpg", "02.png"]
+
+
+def test_the_ratio_gate_still_fires_when_no_header_was_captured() -> None:
+    """The 7zz listing carries no member bytes, and that must not be an exemption.
+
+    `detected` is None both for bytes that are not an image and for bytes the
+    backend never read. Reading it the other way round would switch the gate
+    off for every 7z and rar archive, where it is the only content gate that
+    fires at all.
+    """
+    with pytest.raises(ArchiveSafetyError) as caught:
+        validate_manifest(
+            _manifest(
+                _member("01.jpg", size=10_000_000, compressed_size=10, header=b"")
+            ),
+            SafetyLimits(),
+        )
+
+    assert caught.value.code == "ARCHIVE_COMPRESSION_RATIO"
 
 
 def test_validate_manifest_rejects_fake_image_extension() -> None:

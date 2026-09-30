@@ -222,6 +222,8 @@ def validate_manifest(
     pages: list[ArchiveMember] = []
     for member in files:
         name = normalize_member_name(member.name)
+        # Read before the ratio gate, which now asks a question about the bytes.
+        detected = detected_image_extension(member.header)
         if member.is_symlink:
             raise ArchiveSafetyError(
                 "ARCHIVE_MEMBER_SYMLINK",
@@ -249,15 +251,31 @@ def validate_manifest(
                 "ARCHIVE_TOTAL_TOO_LARGE",
                 "\u538b\u7f29\u5305\u89e3\u5f00\u540e\u603b\u5927\u5c0f\u8d85\u8fc7\u4e0a\u9650",
             )
+        # Only members that are *not* positively identified as an image. The
+        # ratio of a real image container is not a bomb signal, it is a
+        # flatness signal: JPEG's entropy-coded output for a blank or
+        # solid-colour page deflates hundreds of times over, and the gate was
+        # rejecting legitimate pages for it (measured through this function: a
+        # 4800x4800 solid-white JPEG is 132 KB and packs to 0.3 KB -- 428x in a
+        # zip, 548x in a 7z). Non-image bytes named `.jpg` are already refused
+        # by the magic-number gate below, so what is left for this gate is the
+        # member that *looks* like an image without being one -- a signature
+        # followed by padding, or a corrupt size field -- and that is the
+        # reading it keeps.
+        #
+        # `detected` is None both for bytes that are not an image and for
+        # bytes the backend never captured: the 7zz listing carries no header,
+        # so a 7z/rar member stays gated. That is deliberate -- there the ratio
+        # check is the only content gate that fires at all.
         if (
-            member.compressed_size > 0
+            detected is None
+            and member.compressed_size > 0
             and member.size / member.compressed_size > limits.max_compression_ratio
         ):
             raise ArchiveSafetyError(
                 "ARCHIVE_COMPRESSION_RATIO",
                 f"\u6210\u5458 {member.name} \u538b\u7f29\u7387\u5f02\u5e38\uff0c\u53ef\u80fd\u662f\u538b\u7f29\u70b8\u5f39",
             )
-        detected = detected_image_extension(member.header)
         # A member with no extension at all is judged by its bytes. Uploaders do
         # ship books whose pages are named `001` with no suffix, and refusing
         # those produced `ARCHIVE_NO_IMAGES` for an archive that was entirely

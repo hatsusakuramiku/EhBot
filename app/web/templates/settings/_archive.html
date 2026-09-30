@@ -151,6 +151,7 @@
             <label for="lim-ratio">最大压缩率</label>
             <input class="ui-input" id="lim-ratio" name="max_compression_ratio" type="number"
                    step="0.1" min="0.1" value="{{ limits.max_compression_ratio }}">
+            <p class="ui-hint">只对无法识别为真实图片的成员生效。空白页、纯色页这类大尺寸 JPEG 本身就能被压掉几百倍，按比例拦会误伤；成员字节不是可识别的图片格式时才用这道门。7z / rar 的清单不带成员字节，因此仍然全部按比例校验。</p>
           </div>
         </div>
         <div class="ui-field">
