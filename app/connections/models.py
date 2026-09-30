@@ -15,6 +15,21 @@ class ProviderConnectionError(Exception):
         self.retry_after = retry_after
 
 
+def refusal_detail(exc: ProviderConnectionError) -> str | None:
+    """The upstream exception a translated refusal was raised from.
+
+    A translation keeps the operator-facing text generic on purpose -- an
+    unmapped provider error must not leak its own words into the page -- which
+    leaves a catch-all like `TELEGRAM_USER_FAILED` saying only that *something*
+    failed. The `raise ... from exc` chain still carries the original, so the
+    log can name it even when the interface must not.
+    """
+    cause = exc.__cause__
+    if cause is None or cause is exc:
+        return None
+    return f"{type(cause).__name__}: {cause}"
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramBotIdentity:
     bot_id: int

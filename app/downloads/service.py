@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 import time
 
-from app.connections.models import ProviderConnectionError
+from app.connections.models import ProviderConnectionError, refusal_detail
 from app.connections.telegram import TelegramBotApi
 from app.db.database import Database
 from app.downloads.models import (
@@ -997,7 +997,11 @@ class DownloadService:
         logger.info("download_job_claimed", extra=job_context)
         started = time.monotonic()
         try:
-            await self._handle_job(job)
+            # `_handle_job` returns the untranslated cause behind a translated
+            # refusal, or None. The terminal line below is the one place a
+            # finished job is reported, so the cause has to travel back here
+            # rather than be logged from the provider branch.
+            detail = await self._handle_job(job)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1049,6 +1053,7 @@ class DownloadService:
                         "status": final_state,
                         "error_code": error_code,
                         "error_message": error_message,
+                        "error_detail": detail,
                     },
                 )
         # Announced here rather than at each of the dozen places that write a
@@ -1116,10 +1121,19 @@ class DownloadService:
                 "attempt_count": int(row[5]) + 1,
             }
 
-    async def _handle_job(self, job: dict) -> None:
+    async def _handle_job(self, job: dict) -> str | None:
+        """Run one delivery, returning the untranslated cause of a refusal.
+
+        The interface must never see a provider's own words, but the log has to:
+        a translated refusal whose code is a catch-all -- `TELEGRAM_USER_FAILED`
+        is the one an operator has hit -- says nothing about what actually went
+        wrong. The `raise ... from exc` chain still holds it, so it is handed
+        back to the single terminal log line. Providers whose exception is
+        already their message return nothing.
+        """
         if job["provider"] == PROVIDER_EH_TORRENT:
             await self._push_torrent_job(job)
-            return
+            return None
         if job["provider"] == PROVIDER_EXHENTAI:
             await self._run_delegated_provider(
                 job,
@@ -1128,7 +1142,7 @@ class DownloadService:
                 missing_message="ExHentai 下载服务未配置",
                 default_error="EXHENTAI_DOWNLOAD_FAILED",
             )
-            return
+            return None
         if job["provider"] == PROVIDER_TELEGRAPH:
             await self._run_delegated_provider(
                 job,
@@ -1137,10 +1151,9 @@ class DownloadService:
                 missing_message="预览页下载服务未配置",
                 default_error="TELEGRAPH_PAGE_UNREACHABLE",
             )
-            return
+            return None
         if job["provider"] == PROVIDER_TELEGRAM_USER:
-            await self._run_telegram_user_job(job)
-            return
+            return await self._run_telegram_user_job(job)
         if job["provider"] != PROVIDER_TELEGRAM:
             await asyncio.to_thread(
                 self._mark_job_failed_sync,
@@ -1148,7 +1161,7 @@ class DownloadService:
                 "PROVIDER_UNSUPPORTED",
                 f"Provider {job['provider']!r} is not yet supported",
             )
-            return
+            return None
         try:
             details = json.loads(job["details_json"])
             file_id = str(details["file_id"])
@@ -1161,7 +1174,7 @@ class DownloadService:
                     "TELEGRAM_NOT_CONFIG",
                     "Telegram Bot is not connected",
                 )
-                return
+                return None
             file_info = await api.get_file(file_id)
             work_path = await self._effective_work_path()
             destination = (
@@ -1190,8 +1203,10 @@ class DownloadService:
                 exc.code,
                 exc.public_message,
             )
+            return refusal_detail(exc)
+        return None
 
-    async def _run_telegram_user_job(self, job: dict) -> None:
+    async def _run_telegram_user_job(self, job: dict) -> str | None:
         """Fetch an attachment with the operator's own Telegram account.
 
         The same shape as the bot branch -- resolve, download, record, complete --
@@ -1215,7 +1230,7 @@ class DownloadService:
                 "ATTACHMENT_INVALID",
                 "任务缺少源消息位置，无法用用户账户下载",
             )
-            return
+            return None
         client = None
         if self._telegram_user_client is not None:
             client = await self._telegram_user_client()
@@ -1226,7 +1241,7 @@ class DownloadService:
                 "TELEGRAM_USER_NOT_CONFIG",
                 "尚未登录 Telegram 用户账户，无法下载大文件",
             )
-            return
+            return None
         work_path = await self._effective_work_path()
         destination = (
             work_path / "downloads" / f"job-{job['job_id']}-{Path(file_name).name}"
@@ -1242,7 +1257,7 @@ class DownloadService:
                 exc.code,
                 exc.public_message,
             )
-            return
+            return refusal_detail(exc)
         await asyncio.to_thread(
             self._record_artifact_sync,
             job["job_id"],
@@ -1252,6 +1267,7 @@ class DownloadService:
         )
         await asyncio.to_thread(self._mark_job_completed_sync, job["job_id"])
         await self._maybe_auto_pack(job["candidate_id"])
+        return None
 
     async def _push_torrent_job(self, job: dict) -> None:
         """Hand the torrent to the client and park the job on peers.

@@ -37,11 +37,6 @@ from app.connections.models import ProviderConnectionError
 #: Telegram Premium), and an operator reading an error needs the comparison.
 MTPROTO_FILE_LIMIT = 2 * 1024 * 1024 * 1024
 
-#: Download chunk size handed to Telethon. Matches the Bot API path's streaming
-#: chunk so a progress callback reports at the same granularity on both routes.
-_CHUNK_BYTES = 64 * 1024
-
-
 @dataclass(frozen=True, slots=True)
 class TelegramUserIdentity:
     """Who the stored session belongs to."""
@@ -463,10 +458,17 @@ class TelegramUserClient:
                 )
             destination.parent.mkdir(parents=True, exist_ok=True)
             partial.unlink(missing_ok=True)
+            # Only `download_media` renews a file reference that expires
+            # mid-transfer: handed the *message*, it remembers `(chat, message
+            # id)` and re-reads it. `download_file` is the one that takes an
+            # explicit `part_size_kb`, and a bare `InputFileLocation` cannot be
+            # re-fetched -- a long download would die on the reference it can
+            # no longer refresh. (Passing `part_size_kb` here was a `TypeError`
+            # the error table filed under the catch-all「失败」, for every
+            # oversized download.)
             written = await client.download_media(
                 message,
                 file=str(partial),
-                part_size_kb=_CHUNK_BYTES // 1024,
                 progress_callback=progress,
             )
         except TelegramUserError:

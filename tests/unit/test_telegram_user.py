@@ -99,6 +99,8 @@ class FakeClient:
         self.disconnected = False
         self.sign_in_calls: list[dict] = []
         self.requested: tuple[int, int] | None = None
+        #: The messages handed to `download_media`, in call order.
+        self.download_calls: list[object] = []
 
     async def connect(self) -> None:
         self.connected = True
@@ -157,7 +159,18 @@ class FakeClient:
         self.requested = (chat_id, ids)
         return self.message
 
-    async def download_media(self, message, file, part_size_kb, progress_callback):
+    async def download_media(
+        self, message, file=None, *, thumb=None, progress_callback=None
+    ):
+        """Telethon's real signature, down to the keyword-only parameters.
+
+        Deliberately not a `**kwargs` shim. This fake used to take
+        `part_size_kb` as a positional parameter, so a call passing a keyword
+        `download_media` has never had -- `part_size_kb` belongs to
+        `download_file` -- raised `TypeError` in production while every test
+        here stayed green. A fake has to reject what the library rejects.
+        """
+        self.download_calls.append(message)
         if self.download_error is not None:
             raise self.download_error
         Path(file).write_bytes(self.payload)
@@ -349,6 +362,28 @@ class TestDownload:
         assert fake.requested == (-1001234, 5678)
         assert destination.read_bytes() == b"archive-bytes"
         assert size == len(b"archive-bytes")
+
+    @pytest.mark.asyncio
+    async def test_the_transfer_hands_telethon_the_message_to_download(
+        self, tmp_path: Path
+    ) -> None:
+        """`part_size_kb` is not a `download_media` parameter, and this is why.
+
+        `download_media` takes the *message*: that is what lets Telethon
+        remember `(chat, message id)` and re-read it for a fresh file reference
+        when the current one expires mid-transfer, and it sizes the parts from
+        the document itself. `part_size_kb` belongs to `download_file`, which
+        takes a bare `InputFileLocation` and cannot refresh it. Passing it here
+        was a `TypeError` that the error table filed as the generic「失败」, so
+        every oversized download failed at once.
+        """
+        fake = FakeClient()
+
+        await make_client(fake, "s").download_message_media(
+            -1001234, 5678, tmp_path / "book.zip"
+        )
+
+        assert fake.download_calls == [fake.message]
 
     @pytest.mark.asyncio
     async def test_a_deleted_message_is_a_named_permanent_failure(

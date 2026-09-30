@@ -16,6 +16,7 @@ from app.connections.models import (
     ProviderConnectionError,
     ProviderStatus,
     TelegramUserAccount,
+    refusal_detail,
 )
 from app.connections.telegram import TelegramBotApi
 from app.connections.telegram_user import (
@@ -54,21 +55,6 @@ _POLL_BACKOFF_SECONDS: dict[str, int] = {
     "TELEGRAM_UNAUTHORIZED": 60,
     "TELEGRAM_SERVER_ERROR": 15,
 }
-
-
-def _refusal_detail(exc: ProviderConnectionError) -> str | None:
-    """The upstream exception a translated refusal was raised from.
-
-    `_translate` keeps the operator-facing text generic on purpose -- an
-    unmapped Telethon error must not leak its own words into the page -- which
-    leaves `error_code=TELEGRAM_USER_FAILED` saying only that *something*
-    failed. The `raise ... from exc` chain still carries the original, so the
-    log can name it even when the interface must not.
-    """
-    cause = exc.__cause__
-    if cause is None or cause is exc:
-        return None
-    return f"{type(cause).__name__}: {cause}"
 
 
 class ConnectionManager:
@@ -423,7 +409,7 @@ class ConnectionManager:
                     extra={
                         "error_code": exc.code,
                         "error_message": exc.public_message,
-                        "error_detail": _refusal_detail(exc),
+                        "error_detail": refusal_detail(exc),
                         "chat_id": target["chat_id"],
                     },
                 )
@@ -458,7 +444,7 @@ class ConnectionManager:
                 extra={
                     "error_code": exc.code,
                     "error_message": exc.public_message,
-                    "error_detail": _refusal_detail(exc),
+                    "error_detail": refusal_detail(exc),
                 },
             )
             return False

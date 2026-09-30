@@ -150,7 +150,13 @@ class StubTelethonClient:
         self._script["requested"] = (chat_id, ids)
         return Message()
 
-    async def download_media(self, message, file, part_size_kb, progress_callback):
+    async def download_media(
+        self, message, file=None, *, thumb=None, progress_callback=None
+    ):
+        # Telethon's real signature. It used to take `part_size_kb` as a
+        # positional parameter, which let the app pass a keyword the library
+        # does not have: the whole suite passed while every oversized download
+        # died on `TypeError`.
         self.downloads.append(self._script["requested"])
         Path(file).write_bytes(self._script["payload"])
         return file
