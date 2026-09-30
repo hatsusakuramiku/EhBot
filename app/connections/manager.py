@@ -19,6 +19,7 @@ from app.connections.models import (
 )
 from app.connections.telegram import TelegramBotApi
 from app.connections.telegram_user import (
+    EntityIndex,
     LoginChallenge,
     TelegramUserClient,
     TelegramUserCredentials,
@@ -117,6 +118,11 @@ class ConnectionManager:
         # dead form.
         self._user_challenge: LoginChallenge | None = None
         self._user_lock = asyncio.Lock()
+        # Shared by every client this manager builds -- the ingest loop and the
+        # download worker alike -- because a fresh client starts with Telethon's
+        # entity cache empty and cannot resolve a channel id until it has read
+        # the account's dialog list once.
+        self._user_entities = EntityIndex()
 
     def telegram_available(self) -> bool:
         """Whether the Bot API route is worth queueing a job for.
@@ -262,7 +268,10 @@ class ConnectionManager:
         self, credentials: TelegramUserCredentials, session: str | None
     ) -> TelegramUserClient:
         return TelegramUserClient(
-            credentials, session, client_factory=self._user_client_factory
+            credentials,
+            session,
+            client_factory=self._user_client_factory,
+            entity_index=self._user_entities,
         )
 
     async def _restore_telegram_user(self) -> None:
@@ -530,6 +539,9 @@ class ConnectionManager:
                 TELEGRAM_USER_SESSION_SECRET,
                 session,
             )
+            # A different account has different access hashes, so nothing
+            # resolved for the previous session can be reused.
+            self._user_entities.clear()
             self._user_challenge = None
             self._telegram_user = TelegramUserAccount(
                 state="connected", configured=True, identity=identity.label
@@ -544,6 +556,7 @@ class ConnectionManager:
         """
         async with self._user_lock:
             self._user_challenge = None
+            self._user_entities.clear()
             await self._cancel_user_ingest_task()
             await asyncio.to_thread(
                 self._secret_store.delete, TELEGRAM_USER_SESSION_SECRET

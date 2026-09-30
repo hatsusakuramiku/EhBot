@@ -78,6 +78,8 @@ class FakeClient:
         sign_in_error: Exception | None = None,
         download_error: Exception | None = None,
         payload: bytes = b"archive-bytes",
+        unknown_chats: set[int] | None = None,
+        dialogs_reveal: bool = True,
     ) -> None:
         self.authorized = authorized
         self.message = FakeMessage() if message is _UNSET else message
@@ -85,6 +87,13 @@ class FakeClient:
         self.sign_in_error = sign_in_error
         self.download_error = download_error
         self.payload = payload
+        #: Chat ids Telethon refuses until it has read the account's dialog
+        #: list: the state of every session rebuilt from the stored string,
+        #: which carries no access hashes.
+        self.unknown_chats = set(unknown_chats or ())
+        self.dialogs_reveal = dialogs_reveal
+        self.dialog_calls = 0
+        self.channel_messages: list[object] = []
         self.session = FakeSession("stored-session-string")
         self.connected = False
         self.disconnected = False
@@ -123,6 +132,26 @@ class FakeClient:
             last_name = "Keeper"
 
         return Me()
+
+    async def get_entity(self, chat_id):
+        if int(chat_id) in self.unknown_chats:
+            raise ValueError(
+                "Could not find the input entity for PeerChannel("
+                f"channel_id={abs(int(chat_id))}) (PeerChannel)."
+            )
+        return int(chat_id)
+
+    async def iter_dialogs(self, limit=None):
+        self.dialog_calls += 1
+        if self.dialogs_reveal:
+            # Reading the dialog list is what teaches Telethon the access hash.
+            self.unknown_chats.clear()
+        return
+        yield  # pragma: no cover - marks this an async generator
+
+    async def iter_messages(self, entity, **kwargs):
+        for message in self.channel_messages:
+            yield message
 
     async def get_messages(self, chat_id, ids):
         self.requested = (chat_id, ids)
@@ -397,6 +426,41 @@ class TestDownload:
         assert size == len(b"new-archive")
         assert destination.read_bytes() == b"new-archive"
         assert not (tmp_path / "book.zip.part").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_chat_the_session_has_not_seen_is_found_via_the_dialogs(
+        self,
+    ) -> None:
+        """A session restored from the stored string knows no access hashes.
+
+        `get_entity(-100...)` refuses with「Could not find the input entity」
+        until the account's dialog list has been read once, which is why every
+        poll of a channel failed after a restart. The chat is then remembered
+        for the process instead of being re-resolved every operation.
+        """
+        fake = FakeClient(unknown_chats={-1001234})
+        client = make_client(fake, "s")
+
+        assert await client.latest_message_id(-1001234) is None
+        assert fake.dialog_calls == 1
+        assert await client.latest_message_id(-1001234) is None
+        assert fake.dialog_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_a_chat_the_account_is_not_in_is_scanned_only_once(
+        self,
+    ) -> None:
+        """The dialog walk is expensive; a hopeless chat must not repeat it."""
+        fake = FakeClient(unknown_chats={-1001234}, dialogs_reveal=False)
+        client = make_client(fake, "s")
+
+        with pytest.raises(TelegramUserError) as caught:
+            await client.latest_message_id(-1001234)
+        assert caught.value.code == "TELEGRAM_USER_ENTITY_UNRESOLVED"
+
+        with pytest.raises(TelegramUserError):
+            await client.latest_message_id(-1001234)
+        assert fake.dialog_calls == 1
 
     @pytest.mark.asyncio
     async def test_an_unresolvable_chat_is_named_not_retried(

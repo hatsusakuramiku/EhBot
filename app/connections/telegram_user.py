@@ -94,6 +94,42 @@ class TelegramUserError(ProviderConnectionError):
     """
 
 
+class EntityIndex:
+    """Chats resolved during this process, keyed by chat id.
+
+    Telethon cannot turn a raw chat id into an input peer unless that session
+    has seen the chat: the access hash `InputChannel` needs lives in an
+    in-memory cache that `StringSession.save()` does not persist, so a session
+    rebuilt from the stored string starts blind and `get_entity(-100...)`
+    fails for every channel with `ValueError: Could not find the input
+    entity`. Listing the account's own dialogs is the request that fills that
+    cache, and this object keeps the result.
+
+    A process-wide index rather than one per client because our clients are
+    built per operation -- a cache living on one of them would be thrown away
+    before the next operation needed it.
+    """
+
+    def __init__(self) -> None:
+        self._entities: dict[int, Any] = {}
+        #: Whether the account's dialog list has already been walked. A chat
+        #: that is still unresolvable afterwards is one this account is not in,
+        #: and re-walking the whole list on every poll would spend a lot of
+        #: requests to learn nothing.
+        self.dialogs_loaded = False
+
+    def get(self, chat_id: int) -> Any | None:
+        return self._entities.get(int(chat_id))
+
+    def store(self, chat_id: int, entity: Any) -> None:
+        self._entities[int(chat_id)] = entity
+
+    def clear(self) -> None:
+        """Forget everything. A different account has different access hashes."""
+        self._entities.clear()
+        self.dialogs_loaded = False
+
+
 def _client_factory_default(
     api_id: int, api_hash: str, session: str | None
 ) -> Any:
@@ -171,10 +207,14 @@ class TelegramUserClient:
         session: str | None = None,
         *,
         client_factory: Callable[[int, str, str | None], Any] | None = None,
+        entity_index: EntityIndex | None = None,
     ) -> None:
         self._credentials = credentials
         self._session = session
         self._client_factory = client_factory or _client_factory_default
+        # Shared by every client this application builds, so a chat is resolved
+        # once per process rather than once per operation.
+        self._entities = entity_index if entity_index is not None else EntityIndex()
 
     def _build(self, session: str | None = None) -> Any:
         return self._client_factory(
@@ -282,7 +322,7 @@ class TelegramUserClient:
         """
         client = await self._connect()
         try:
-            entity = await client.get_entity(int(chat_id))
+            entity = await self._chat_entity(client, chat_id)
             return [
                 message
                 async for message in client.iter_messages(
@@ -306,7 +346,7 @@ class TelegramUserClient:
         """
         client = await self._connect()
         try:
-            entity = await client.get_entity(int(chat_id))
+            entity = await self._chat_entity(client, chat_id)
             async for message in client.iter_messages(entity, limit=1):
                 return int(message.id)
             return None
@@ -314,6 +354,32 @@ class TelegramUserClient:
             raise _translate(exc) from exc
         finally:
             await self._close(client)
+
+    async def _chat_entity(self, client: Any, chat_id: int) -> Any:
+        """Resolve one chat id, teaching a blind session who its chats are.
+
+        `get_entity` only knows a raw channel id when the session already holds
+        that channel's access hash -- and a session restored from the stored
+        string holds none, which is the state after every restart. So the first
+        resolution falls back to reading the account's own dialog list, the
+        request that fills Telethon's entity cache, and retries. The walk
+        happens at most once per process; a chat that is still unknown after it
+        is one the account is not in.
+        """
+        cached = self._entities.get(chat_id)
+        if cached is not None:
+            return cached
+        try:
+            entity = await client.get_entity(int(chat_id))
+        except ValueError:
+            if self._entities.dialogs_loaded:
+                raise
+            async for _dialog in client.iter_dialogs(limit=None):
+                pass
+            self._entities.dialogs_loaded = True
+            entity = await client.get_entity(int(chat_id))
+        self._entities.store(chat_id, entity)
+        return entity
 
     async def verify(self) -> TelegramUserIdentity:
         """Confirm the stored session still authorises the account."""
@@ -361,7 +427,8 @@ class TelegramUserClient:
                     "TELEGRAM_USER_UNAUTHORIZED",
                     "用户会话已失效，请重新登录",
                 )
-            message = await client.get_messages(chat_id, ids=message_id)
+            entity = await self._chat_entity(client, chat_id)
+            message = await client.get_messages(entity, ids=message_id)
             if message is None or not getattr(message, "media", None):
                 raise TelegramUserError(
                     "TELEGRAM_USER_MESSAGE_GONE",
@@ -514,6 +581,7 @@ def _translate(exc: Exception) -> ProviderConnectionError:
 
 __all__ = [
     "MTPROTO_FILE_LIMIT",
+    "EntityIndex",
     "LoginChallenge",
     "TelegramUserClient",
     "TelegramUserCredentials",

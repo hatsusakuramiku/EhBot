@@ -136,6 +136,13 @@ class StubTelethonClient:
 
         return Me()
 
+    async def get_entity(self, chat_id):
+        return int(chat_id)
+
+    async def iter_dialogs(self, **kwargs):
+        return
+        yield  # pragma: no cover - marks this an async generator
+
     async def get_messages(self, chat_id, ids):
         class Message:
             media = "document"

@@ -435,10 +435,19 @@ class FakeUserClient:
     translation layer, and a fake above them would skip the code being tested.
     """
 
-    def __init__(self, messages: list[FakeUserMessage]) -> None:
+    def __init__(
+        self,
+        messages: list[FakeUserMessage],
+        *,
+        unseen_chats: set[int] | None = None,
+    ) -> None:
         self.messages = sorted(messages, key=lambda item: item.id)
         self.latest_calls: list[int] = []
         self.entity_error: Exception | None = None
+        #: Chat ids only resolvable after the dialog list has been read, like a
+        #: session rebuilt from the stored string (it carries no access hashes).
+        self.unseen_chats = set(unseen_chats or ())
+        self.dialog_calls = 0
 
     async def connect(self) -> None:
         return None
@@ -449,7 +458,18 @@ class FakeUserClient:
     async def get_entity(self, chat_id: int) -> int:
         if self.entity_error is not None:
             raise self.entity_error
+        if int(chat_id) in self.unseen_chats:
+            raise ValueError(
+                "Could not find the input entity for PeerChannel("
+                f"channel_id={abs(int(chat_id))}) (PeerChannel)."
+            )
         return chat_id
+
+    async def iter_dialogs(self, **kwargs):
+        self.dialog_calls += 1
+        self.unseen_chats.clear()
+        return
+        yield  # pragma: no cover - marks this an async generator
 
     async def iter_messages(
         self, entity: int, *, min_id=None, limit=None, reverse=False
@@ -474,6 +494,7 @@ async def user_ingest_manager(
     messages: list[FakeUserMessage],
     *,
     enable_source: bool = True,
+    unseen_chats: set[int] | None = None,
 ) -> tuple[ConnectionManager, Database, FakeUserClient]:
     """A manager whose user account is logged in and can read one channel."""
     database = Database(tmp_path / "ehbot.db")
@@ -490,7 +511,7 @@ async def user_ingest_manager(
     store = SecretStore(tmp_path / "private")
     store.write(TELEGRAM_USER_API_SECRET, f"1234567:{'a' * 32}")
     store.write(TELEGRAM_USER_SESSION_SECRET, "stored-session-string")
-    client = FakeUserClient(messages)
+    client = FakeUserClient(messages, unseen_chats=unseen_chats)
     manager = ConnectionManager(
         store,
         database,
@@ -559,6 +580,33 @@ async def test_a_first_poll_seeds_the_cursor_instead_of_walking_the_archive(
     # From the seeded cursor on, new messages are ingested normally.
     client.messages.append(FakeUserMessage(id=4, caption="New Book"))
     assert await manager._ingest_with_user_account() == 1
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_channel_the_session_has_not_seen_is_read_after_dialogs(
+    tmp_path: Path,
+) -> None:
+    """The operator's own case, end to end.
+
+    The account was logged in fresh, so its session carried no access hash for
+    the channel and every poll of it failed; reading the account's dialog list
+    once resolves the id, and the resolved chat is reused on later passes.
+    """
+    manager, database, client = await user_ingest_manager(
+        tmp_path,
+        [FakeUserMessage(id=5, caption="Book")],
+        unseen_chats={-100123},
+    )
+    await database.set_source_cursor(-100123, 4)
+
+    assert await manager._ingest_with_user_account() == 1
+    assert client.dialog_calls == 1
+    assert len(await database.list_candidates()) == 1
+
+    # Read once per process, not once per poll.
+    assert await manager._ingest_with_user_account() == 0
+    assert client.dialog_calls == 1
     await manager.stop()
 
 
