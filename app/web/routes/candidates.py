@@ -13,7 +13,12 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from app.api.actions import REVIEW_BATCH_ACTIONS, apply_review_batch
+from app.api.actions import (
+    CANDIDATE_DELETE_ACTIONS,
+    REVIEW_BATCH_ACTIONS,
+    apply_candidate_delete_batch,
+    apply_review_batch,
+)
 from app.api.candidates import (
     CANDIDATE_SORTS,
     CANDIDATE_TABS,
@@ -185,6 +190,11 @@ async def _render_candidates(
     # `REVIEWABLE_STATUSES` decides that, not the tab name, and 「全部」 has
     # no status filter so it always offers it.
     batch_enabled = not statuses or bool(set(statuses) & REVIEWABLE_STATUSES)
+    # Selection is a different question from review: a rejected or failed row
+    # is exactly what 彻底删除 is for, and the list is where an operator clears
+    # a batch of them out. So the checkbox column and the delete dialogs are on
+    # every tab; only 批量通过/驳回 is tied to `batch_enabled`.
+    bulk_selectable = True
     return deps.templates(request).TemplateResponse(
         request=request,
         name="candidates.html",
@@ -226,13 +236,10 @@ async def _render_candidates(
             ],
             "search": search,
             "view": view,
-            # List-view headers. The select and action columns are dropped
-            # where the tab cannot review anything, so a terminal tab does
-            # not show an empty checkbox column.
             "columns": [
                 *(
                     [{"key": "select", "label": "选择"}]
-                    if batch_enabled
+                    if bulk_selectable
                     else []
                 ),
                 {"key": "candidate", "label": "候选"},
@@ -261,9 +268,10 @@ async def _render_candidates(
             "active_filters": sum(
                 len(values) for values in facets.values()
             ),
-            # Batch review is offered wherever a candidate can still be
-            # reviewed -- see `batch_enabled` above.
+            # 批量通过/驳回 only where the rows can still be reviewed; the
+            # selection itself (and the delete actions) is everywhere.
             "batch_enabled": batch_enabled,
+            "bulk_selectable": bulk_selectable,
             "empty_title": current["empty_title"],
             "empty_hint": current["empty_hint"],
             "error": error,
@@ -333,6 +341,17 @@ async def processing_queue(request: Request):
     return RedirectResponse("/candidates/approved", status_code=307)
 
 
+def _with_message(href: str, name: str, message: str) -> str:
+    """Append one query parameter to a local path, quoting the value.
+
+    The candidates list reads its notice out of the query string, so a redirect
+    that carries one has to build it the same way for a path that may already
+    have a query (`/candidates/pending?sort=title`).
+    """
+    separator = "&" if "?" in href else "?"
+    return f"{href}{separator}{name}={quote_plus(message)}"
+
+
 async def _candidates_redirect(
     request: Request, error: str | None = None
 ) -> RedirectResponse:
@@ -378,7 +397,7 @@ async def batch_review(request: Request):
         )
     except ValueError:
         candidate_ids = []
-    if action not in REVIEW_BATCH_ACTIONS:
+    if action not in REVIEW_BATCH_ACTIONS and action not in CANDIDATE_DELETE_ACTIONS:
         return await _candidates_redirect(
             request, f"未知的审核动作：{action}"
         )
@@ -386,20 +405,33 @@ async def batch_review(request: Request):
         return await _candidates_redirect(request, "请至少选择一条候选")
     operator = request.session.get("username", "admin")
     try:
-        result = await apply_review_batch(
-            deps.review_orchestrator(request),
-            action,
-            candidate_ids,
-            operator,
-            announce_candidate=lambda candidate_id: (
-                request.app.state.event_bus.publish(
-                    EVENT_CANDIDATE, candidate_id=candidate_id
-                )
-            ),
-            announce_job=lambda job_id: request.app.state.event_bus.publish(
-                EVENT_DOWNLOAD, job_id=job_id
-            ),
-        )
+        if action in CANDIDATE_DELETE_ACTIONS:
+            result = await apply_candidate_delete_batch(
+                deps.archived_work_service(request),
+                action,
+                candidate_ids,
+                operator,
+                announce_candidate=lambda candidate_id: (
+                    request.app.state.event_bus.publish(
+                        EVENT_CANDIDATE, candidate_id=candidate_id
+                    )
+                ),
+            )
+        else:
+            result = await apply_review_batch(
+                deps.review_orchestrator(request),
+                action,
+                candidate_ids,
+                operator,
+                announce_candidate=lambda candidate_id: (
+                    request.app.state.event_bus.publish(
+                        EVENT_CANDIDATE, candidate_id=candidate_id
+                    )
+                ),
+                announce_job=lambda job_id: request.app.state.event_bus.publish(
+                    EVENT_DOWNLOAD, job_id=job_id
+                ),
+            )
     except ApiError as exc:
         return await _candidates_redirect(request, exc.message)
     skipped = result["skipped"]
@@ -427,6 +459,63 @@ async def candidate_detail(request: Request, candidate_id: int):
         request.url_for("work_detail", candidate_id=candidate_id).path,
         status_code=307,
     )
+
+
+@router.post("/candidates/{candidate_id}/delete")
+async def delete_candidate(
+    request: Request,
+    candidate_id: int,
+    csrf_token: str = Form(),
+    mode: str = Form("delete"),
+    return_to: str | None = Form(None),
+):
+    """彻底删除 one candidate and every work it produced.
+
+    The destructive sibling of 驳回, and the only action on the detail page that
+    ends with the work gone rather than re-queued. Two modes in one endpoint --
+    `delete` keeps the files, `delete-files` removes them too -- because the
+    difference is one flag on the same operation, and a second URL would be a
+    second place to keep the in-flight guard and the audit row in step.
+
+    Redirects back where the operator came from, through the same
+    `local_return_to` guard the job actions use; a target that is the work's own
+    page (about to stop existing) falls back to the candidate list.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    if mode not in CANDIDATE_DELETE_ACTIONS:
+        return await render_review_error(
+            request, candidate_id, f"未知的删除动作：{mode}"
+        )
+    operator = request.session.get("username", "admin")
+    try:
+        await deps.archived_work_service(request).purge_work(
+            candidate_id,
+            delete_files=mode == "delete-files",
+            operator_name=operator,
+        )
+    except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
+        message = getattr(exc, "public_message", None)
+        if message is None:
+            raise
+        # A candidate that is already gone has no page to re-render; every other
+        # refusal (a running download, a running pack) still has one, and the
+        # operator needs the timeline on it to decide what to do next.
+        if getattr(exc, "code", "") == "CANDIDATE_NOT_FOUND":
+            return RedirectResponse(
+                _with_message("/candidates", "error", str(message)),
+                status_code=303,
+            )
+        return await render_review_error(request, candidate_id, str(message))
+    request.app.state.event_bus.publish(
+        EVENT_CANDIDATE, candidate_id=candidate_id
+    )
+    target = deps.local_return_to(return_to)
+    if not target or target.startswith(f"/works/{candidate_id}"):
+        target = "/candidates"
+    return RedirectResponse(target, status_code=303)
 
 
 @router.post("/candidates/{candidate_id}/approve")

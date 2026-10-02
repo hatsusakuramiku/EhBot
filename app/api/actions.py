@@ -265,6 +265,80 @@ async def apply_review_batch(
     }
 
 
+#: The two 彻底删除 actions a batch may run. Split exactly like `remove` and
+#: `remove-files` on `/downloaded`: the destructive one is a separate word so a
+#: mis-sent action cannot be the one that also wipes the files, and so the two
+#: dialogs can say which one the operator pressed.
+CANDIDATE_DELETE_ACTIONS: frozenset[str] = frozenset({"delete", "delete-files"})
+
+
+async def apply_candidate_delete_batch(
+    archived_service,
+    action: str,
+    candidate_ids: list[int],
+    operator: str,
+    *,
+    announce_candidate: Callable[[int], None] | None = None,
+) -> dict:
+    """Purge a selection of candidates, records and optionally files.
+
+    One candidate at a time, for the reason `apply_review_batch` acts per
+    candidate: one work with a download still in flight must not refuse the
+    other forty-nine. A refused work -- running task, missing row -- is reported
+    under ``skipped`` with the reason, and re-sending the batch finishes what a
+    half-failed first attempt started.
+
+    A genuine fault is re-raised rather than folded into ``skipped``: a broken
+    filesystem must not read as 「49 已删除，1 跳过」.
+    """
+    if action not in CANDIDATE_DELETE_ACTIONS:
+        raise ApiError(
+            "ACTION_UNKNOWN",
+            f"未知的删除动作：{action}",
+            details={"allowed": sorted(CANDIDATE_DELETE_ACTIONS)},
+        )
+    delete_files = action == "delete-files"
+
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for candidate_id in candidate_ids:
+        try:
+            result = await archived_service.purge_work(
+                candidate_id,
+                delete_files=delete_files,
+                operator_name=operator,
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
+            translated = _translate(exc)
+            if not isinstance(translated, ApiError):
+                raise translated from exc
+            skipped.append(
+                {
+                    "candidate_id": candidate_id,
+                    "code": translated.code,
+                    "message": translated.message,
+                }
+            )
+            continue
+        applied.append(
+            {
+                "candidate_id": candidate_id,
+                "removed_jobs": result["removed_jobs"],
+                "deleted_files": list(result["deleted_files"]),
+                "failed_files": list(result["failed_files"]),
+            }
+        )
+        if announce_candidate is not None:
+            announce_candidate(candidate_id)
+
+    return {
+        "action": action,
+        "requested": len(candidate_ids),
+        "applied": applied,
+        "skipped": skipped,
+    }
+
+
 @router.post("/candidates/batch")
 async def batch_review(request: Request) -> dict:
     """Approve or reject several candidates at once.
@@ -573,11 +647,13 @@ def _translate(exc: Exception) -> Exception:
 
 __all__ = [
     "BATCH_JOB_ACTIONS",
+    "CANDIDATE_DELETE_ACTIONS",
     "JOB_ACTIONS",
     "JOB_ACTION_PRIORITY",
     "JOB_ACTION_SWITCH_SOURCE",
     "MAX_BATCH",
     "REVIEW_BATCH_ACTIONS",
+    "apply_candidate_delete_batch",
     "apply_job_batch",
     "apply_review_batch",
     "router",

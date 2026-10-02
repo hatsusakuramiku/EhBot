@@ -13,6 +13,7 @@ from app.archive.backends.seven_zip import (
 )
 from app.archive.backends.zip_backend import ZipfileBackend
 from app.archive.errors import (
+    ArchiveBackendUnsupported,
     ArchiveError,
     ArchivePasswordRequired,
     ArchiveSafetyError,
@@ -114,6 +115,10 @@ def test_volume_group_only_matches_split_names() -> None:
     assert volume_group(Path("a.part2.rar")) == "a.rar"
     assert volume_group(Path("a.r01")) == "a.rar"
     assert volume_group(Path("a.7z.003")) == "a.7z"
+    # The leading volume of a legacy `.r00` series belongs to the same group as
+    # its companions, so the set can also be found from the `.rar` end.
+    assert volume_group(Path("a.rar")) == "a.rar"
+    assert volume_group(Path("a.cbr")) == "a.rar"
     assert volume_group(Path("a.zip")) is None
 
 
@@ -145,6 +150,37 @@ def test_resolve_volumes_handles_numbered_series(tmp_path: Path) -> None:
     volumes, missing = resolve_volumes(tmp_path / "book.7z.001")
     assert len(volumes) == 3
     assert missing == ()
+
+
+def test_resolve_volumes_finds_a_legacy_rnn_series_from_either_end(
+    tmp_path: Path,
+) -> None:
+    """`.rar` + `.r00`/`.r01` must group the same way from either direction.
+
+    Before this, starting from the leading `.rar` returned a single volume, so
+    the missing-volume gate never fired for a truncated legacy set.
+    """
+    for name in ("book.rar", "book.r00", "book.r01"):
+        (tmp_path / name).write_bytes(b"Rar!\x1a\x07\x00")
+    from_rar = resolve_volumes(tmp_path / "book.rar")
+    from_r00 = resolve_volumes(tmp_path / "book.r00")
+    assert from_rar == from_r00
+    assert [path.name for path in from_rar[0]] == [
+        "book.rar",
+        "book.r00",
+        "book.r01",
+    ]
+    assert from_rar[1] == ()
+
+
+def test_resolve_volumes_reports_a_gap_in_a_legacy_rnn_series(
+    tmp_path: Path,
+) -> None:
+    for name in ("book.rar", "book.r01"):
+        (tmp_path / name).write_bytes(b"Rar!\x1a\x07\x00")
+    volumes, missing = resolve_volumes(tmp_path / "book.rar")
+    assert [path.name for path in volumes] == ["book.rar", "book.r01"]
+    assert missing == ("book.r00",)
 
 
 # --- safety ---------------------------------------------------------------
@@ -546,6 +582,50 @@ def test_zipfile_backend_reports_encrypted_members(tmp_path: Path) -> None:
     assert manifest.encrypted is True
 
 
+def _rewrite_zip_method(path: Path, method: int) -> None:
+    """Rewrite the compression-method field of every ZIP record."""
+    data = bytearray(path.read_bytes())
+    payload = method.to_bytes(2, "little")
+    # Local file header has the method at offset 8, central directory at 10.
+    for signature, offset in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):
+        start = data.find(signature)
+        while start != -1:
+            data[start + offset : start + offset + 2] = payload
+            start = data.find(signature, start + 1)
+    path.write_bytes(bytes(data))
+
+
+def test_zipfile_backend_rejects_a_method_it_cannot_decode(
+    tmp_path: Path,
+) -> None:
+    """AES-256 (99) and Deflate64 (9) are a backend mismatch, not a password.
+
+    The listing carries the method, so admission can hand the archive to
+    7-Zip instead of reporting "wrong password" for every vault entry.
+    """
+    source = tmp_path / "aes.zip"
+    write_image_zip(source, ("01.jpg",))
+    _rewrite_zip_method(source, 99)
+
+    with pytest.raises(ArchiveBackendUnsupported) as error:
+        ZipfileBackend().inspect((source,), None)
+    assert error.value.code == "ARCHIVE_COMPRESSION_UNSUPPORTED"
+    assert "99" in error.value.public_message
+
+    with pytest.raises(ArchiveBackendUnsupported):
+        ZipfileBackend().test_password((source,), "S3cret")
+
+
+def test_zipfile_backend_keeps_supported_methods_on_the_builtin_path(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "plain.zip"
+    write_image_zip(source, ("01.jpg", "02.jpg"))
+    manifest = ZipfileBackend().inspect((source,), None)
+    assert manifest.member_count == 2
+    assert manifest.encrypted is False
+
+
 def test_zipfile_backend_pack_cbz_uses_stored_compression(tmp_path: Path) -> None:
     page = tmp_path / "page.jpg"
     page.write_bytes(image_bytes("page.jpg"))
@@ -620,6 +700,63 @@ def test_seven_zip_backend_inspect_uses_registered_profile(tmp_path: Path) -> No
     assert calls[0][0] == "l"
     assert "-slt" in calls[0]
     assert calls[0][-1] == str(source)
+
+
+def test_seven_zip_pack_cbz_falls_back_to_copy_when_linking_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cross-device hardlink must not fail the pack; a copy is the fallback.
+
+    The operator's work and library directories are different mounts, and two
+    bind mounts of one host filesystem can report an equal `st_dev` while
+    still refusing the link, so the link itself has to be allowed to fail.
+    """
+    page = tmp_path / "src" / "0001.jpg"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(image_bytes("0001.jpg"))
+    observed: dict[str, object] = {}
+
+    def runner(arguments, working_directory=None):
+        staged = Path(working_directory) / "0001.jpg"
+        observed["staged"] = staged.read_bytes()
+        observed["linked"] = staged.stat().st_ino == page.stat().st_ino
+        return 0, ""
+
+    def refuse(self, target):
+        raise OSError(18, "Invalid cross-device link")
+
+    monkeypatch.setattr(Path, "hardlink_to", refuse)
+    backend = SevenZipBackend(SEVEN_ZIP_PROFILE, runner=runner)
+    written = backend.pack_cbz(
+        (("0001.jpg", page),), tmp_path / "out.cbz.part", b"<ComicInfo />"
+    )
+
+    assert written == 1
+    assert observed["staged"] == page.read_bytes()
+    assert observed["linked"] is False
+
+
+def test_seven_zip_pack_cbz_hardlinks_when_the_filesystem_allows_it(
+    tmp_path: Path,
+) -> None:
+    """The copy is only a fallback: same-device staging still links."""
+    page = tmp_path / "src" / "0001.jpg"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(image_bytes("0001.jpg"))
+    observed: dict[str, object] = {}
+
+    def runner(arguments, working_directory=None):
+        staged = Path(working_directory) / "0001.jpg"
+        observed["linked"] = staged.stat().st_ino == page.stat().st_ino
+        return 0, ""
+
+    backend = SevenZipBackend(SEVEN_ZIP_PROFILE, runner=runner)
+    written = backend.pack_cbz(
+        (("0001.jpg", page),), tmp_path / "out.cbz.part", b"<ComicInfo />"
+    )
+
+    assert written == 1
+    assert observed["linked"] is True
 
 
 def test_seven_zip_backend_maps_password_failure() -> None:
@@ -845,6 +982,117 @@ def test_processor_tries_vault_passwords_in_order(tmp_path: Path) -> None:
     )
     assert attempted == ["bad", "good"]
     assert result.password_id == 9
+
+
+class _UnreadableBackend:
+    """Stands in for a backend whose decoder does not know the method."""
+
+    streaming = False
+
+    def inspect(self, volumes, password):
+        raise ArchiveBackendUnsupported("built-in reader cannot decode this")
+
+    def test_password(self, volumes, password):
+        raise ArchiveBackendUnsupported("built-in reader cannot decode this")
+
+    def extract(self, volumes, destination, password, members):
+        raise ArchiveBackendUnsupported("built-in reader cannot decode this")
+
+    def pack_cbz(self, pages, destination, comicinfo):
+        raise ArchiveBackendUnsupported("built-in reader cannot decode this")
+
+
+class _ReadableBackend:
+    streaming = False
+
+    def inspect(self, volumes, password):
+        return ArchiveManifest(
+            source_format="zip",
+            members=(_member("01.jpg"),),
+            volumes=volumes,
+            encrypted=False,
+        )
+
+    def test_password(self, volumes, password):
+        return None
+
+    def extract(self, volumes, destination, password, members):
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / "01.jpg"
+        target.write_bytes(image_bytes("01.jpg"))
+        return {"01.jpg": target}
+
+    def pack_cbz(self, pages, destination, comicinfo):
+        return ZipfileBackend().pack_cbz(pages, destination, comicinfo)
+
+
+def _fake_build_backend(profile):
+    if profile.backend == "zipfile":
+        return _UnreadableBackend()
+    return _ReadableBackend()
+
+
+def test_processor_falls_back_to_the_next_profile(tmp_path: Path) -> None:
+    """A backend that cannot decode the method must not end the attempt."""
+    source = tmp_path / "src.zip"
+    write_image_zip(source, ("01.jpg",))
+    processor = ArchiveProcessor(profiles=ALL_PROFILES)
+    processor.build_backend = _fake_build_backend
+    result = processor.process(
+        source,
+        destination=tmp_path / "out.cbz",
+        work_directory=tmp_path / "work",
+        comicinfo_builder=lambda count: b"<ComicInfo />",
+    )
+    assert result.snapshot.backend == "seven_zip"
+    assert result.snapshot.tool_profile == "7zz-default"
+    assert result.page_count == 1
+
+
+def test_processor_does_not_fall_back_on_a_password_failure(
+    tmp_path: Path,
+) -> None:
+    """Only "this backend can't read it" moves on; a wrong vault does not."""
+    source = tmp_path / "src.zip"
+    write_image_zip(source, ("01.jpg",))
+    built: list[str] = []
+
+    class PasswordFailingBackend(_ReadableBackend):
+        def test_password(self, volumes, password):
+            raise ArchivePasswordRequired()
+
+    def build(profile):
+        built.append(profile.backend)
+        return PasswordFailingBackend()
+
+    processor = ArchiveProcessor(profiles=ALL_PROFILES)
+    processor.build_backend = build
+    with pytest.raises(ArchivePasswordRequired):
+        processor.process(
+            source,
+            destination=tmp_path / "out.cbz",
+            work_directory=tmp_path / "work",
+            comicinfo_builder=lambda count: b"<ComicInfo />",
+        )
+    assert built == ["zipfile"]
+
+
+def test_processor_names_the_fallback_when_nothing_can_read(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "src.zip"
+    write_image_zip(source, ("01.jpg",))
+    processor = _processor()
+    processor.build_backend = lambda profile: _UnreadableBackend()
+    with pytest.raises(ArchiveError) as error:
+        processor.process(
+            source,
+            destination=tmp_path / "out.cbz",
+            work_directory=tmp_path / "work",
+            comicinfo_builder=lambda count: b"<ComicInfo />",
+        )
+    assert error.value.code == "ARCHIVE_COMPRESSION_UNSUPPORTED"
+    assert "7-Zip" in error.value.public_message
 
 
 # --- image quality -------------------------------------------------------

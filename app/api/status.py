@@ -254,13 +254,14 @@ WORK_STAGE_STATUS: dict[str, StatusView] = {
     STAGE_ARCHIVED: _view(STAGE_ARCHIVED, "入库期", TONE_SUCCESS),
 }
 
-#: The eight settings sections. Codes are the URL segment of `/settings/{section}`
+#: The nine settings sections. Codes are the URL segment of `/settings/{section}`
 #: as well as the tab label's key, so a tab, its link, its JSON payload and the
 #: nav entry that reaches it all name the same thing once. They are `neutral`
 #: throughout: a section is a place, not a state, and giving one a tone would
 #: imply the settings inside it were healthy or in trouble.
 SETTINGS_CONNECTIONS = "connections"
 SETTINGS_SOURCES = "sources"
+SETTINGS_PARSE = "parse"
 SETTINGS_AUTO_APPROVAL = "auto-approval"
 SETTINGS_ARCHIVE = "archive"
 SETTINGS_PATHS = "paths"
@@ -271,6 +272,7 @@ SETTINGS_SYSTEM = "system"
 SETTINGS_SECTION_STATUS: dict[str, StatusView] = {
     SETTINGS_CONNECTIONS: _view(SETTINGS_CONNECTIONS, "外部连接", TONE_NEUTRAL),
     SETTINGS_SOURCES: _view(SETTINGS_SOURCES, "来源规则", TONE_NEUTRAL),
+    SETTINGS_PARSE: _view(SETTINGS_PARSE, "解析规则", TONE_NEUTRAL),
     SETTINGS_AUTO_APPROVAL: _view(
         SETTINGS_AUTO_APPROVAL, "自动审批", TONE_NEUTRAL
     ),
@@ -769,6 +771,7 @@ __all__ = [
     "SETTINGS_ARCHIVE",
     "SETTINGS_AUTO_APPROVAL",
     "SETTINGS_CONNECTIONS",
+    "SETTINGS_PARSE",
     "SETTINGS_PASSWORDS",
     "SETTINGS_PATHS",
     "SETTINGS_SECTIONS",

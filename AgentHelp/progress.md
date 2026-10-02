@@ -5142,3 +5142,212 @@ Telegram Chat ID，再选择配置，而不是只有收到消息后才能被动�
 `PRIVATE_CHAT` 分类、三个中文徽标都渲染出来，`POST /sources/dialogs/select` 把 `-100778` 与「Smoke Group」
 预填进 `value=`，而 `/api/v1/settings/sources` 仍是 **0 个来源**——读取与填入都不写库。冒烟容器与临时数据
 目录已清理。
+
+## R50 — 彻底删除、解析规则页、AI 候选判定、来源批量（v0.3.0rc2，2026-10-01）
+
+运营者一次提了六件事：①候选与作品要能被**彻底、完整**地删掉；②加入候选时只解析含 Eh 链接的消息，
+解析规则要独立成页、可配置；③候选准入接入 AI，AI 判定**先于**解析规则，并可选是否完全覆盖解析规则；
+④来源规则的添加与配置要能批量操作；⑤文档太大，先给一份阶段索引；⑥先审一遍：为什么现在的规则配置、
+候选、作品都没有完善的删除。方案见 `CANDIDATE_ADMISSION_AND_DELETE_PROPOSAL.md`（v2，已按本条目落地，
+落地偏差记在该文件 §9）。
+
+**审查结论（需求 ⑥）**：不是忘了做，是三处不同的原因叠加。
+
+- **来源**只有停用没有删除，是因为 `discover_telegram_source()` 会在**每一条来自新 chat 的消息**上
+  自动建行——单纯 DELETE 会在下一条消息到达时“复活”。所以来源的删除必须是**墓碑**，否则不彻底。
+- **候选**只有驳回没有删除，是因为候选是作品的**身份**：`review_actions` 与 `download_jobs` 对
+  `candidates` **没有 CASCADE**，任何“删候选”的实现都得显式清子表并留审计（`021` 迁移正是两条
+  删候选路径撞外键导致服务起不来的记录）。于是当时只提供「驳回 / 重新排队」。
+- **作品**有 `remove_work`，但它只删 **`work.job_id` + `work.pack_job_id`** 两行：一个候选每换一次
+  来源就多一行 `download_jobs`（`telegram:` / `telegram-user:` / `exhentai:` / `telegraph:` /
+  `torrent:`），最多五下载 + 一打包。换过来源的书移除后仍留下兄弟来源的 job、artifacts 与磁盘文件，
+  `/activity` 与 `/downloaded` 还能读到。**这条是现有删除真正的不完整，比缺按钮更该修。**
+
+**修法。**
+
+- **迁移 `022_source_dismissed_and_job_index.sql`**：`telegram_sources.dismissed`（+索引）、
+  `idx_download_jobs_candidate`。没有表结构重建，没有数据迁移；设置项全部走 k/v（`system_settings`）。
+- **彻底删除（需求 ①）**：`Database.candidate_jobs()` / `candidate_artifacts()` 取该候选**全部**历史
+  job 与产物；`purge_candidate()` 先删 artifacts（外键指向 job），再删 `download_jobs` 与
+  `review_actions`，然后删候选行（`candidate_messages` / `metadata_values` / `work_archive_paths` /
+  `ai_path_suggestions` 随之级联），最后写一行 `removed_works` 审计——审计表无外键，行比候选活得久。
+  `ArchivedWorkService.purge_work()` 复用 `remove_work` 的在途守卫（下载/打包进行中 → 拒绝，不抢 worker
+  的行）；`_delete_work_files()` 遍历**所有** artifact 与路径钉，逐条经 `_resolve_inside` 校验，
+  文件本就不存在算删除成功，失败进 `failed_files` 不阻断记录删除，库内空目录用
+  `_prune_empty_parents` 收尾。**顺手修 `remove_work`**：现在也删该候选的全部 job 与 artifacts（仍保留
+  候选），消掉兄弟来源残留这条旧缺陷。
+- **删除入口**：`POST /candidates/{id}/delete`（表单 `mode=delete|delete-files`、`return_to` 走与任务
+  动作同一个 `local_return_to` 守卫；目标若是作品页自身——马上就不存在了——回落 `/candidates`；
+  候选已不在时带错误信息回候选列表）。候选列表的批量条与作品详情页各加「彻底删除」「彻底删除并删文件」
+  两个 `ui.confirm` 两步确认；批量走 `apply_candidate_delete_batch()`，逐条执行并报
+  `applied` / `skipped`，一条在途不拖累其余，文件系统层面的真异常照旧抛出而不是记成“跳过”。
+- **解析规则（需求 ②）**：新 `app/candidates/parse_rules.py` 保管默认方案与校验——默认
+  `require_gallery_link=true`，`accept_photo/accept_archive/accept_preview=false`，
+  `archive_formats=["zip","rar","7z","cbz"]`，`title_required=false`，即「只解析含 Eh 链接的消息」。
+  存在 `system_settings.parse_rules_json` 一个 JSON 文档里（六项是一个决定，六个 k/v 会允许半套生效）。
+  读永远宽松（坏值回退默认，不让一行坏设置停掉摄取），写严格（未知键/类型错/格式非法都拒绝并给中文原因）。
+  设置区新增**独立页** `设置 → 解析规则`（`SETTINGS_PARSE`，与来源规则同级），带「恢复默认解析规则」。
+  Bot 与 MTProto 两条摄取路径都收敛到 `CandidateIngestor.admit_message()`：AI（若开）→ 解析规则 →
+  来源规则 → 标题规则，两条路不会各说各话；规则的**快照**在 MTProto 每个批次读一次，不按消息读。
+- **AI 候选判定（需求 ③）**：新 `app/candidates/admission.py` 与 `DEFAULT_CANDIDATE_PROMPT`；四个 k/v
+  开关（`ai_candidate_enabled` / `ai_candidate_prompt` / `ai_candidate_override_parse_rules` /
+  `ai_candidate_fallback`）。**只在“已配置 AI 供应商（全局默认模型链非空）+ 手动开启”时才生效**，
+  缺一条就报 `skip`、直接走解析规则、一个 token 都不花。判定**先于**解析规则：拒绝即不入候选；通过时
+  `override=on` 直接入候选（这是无链接消息能进来的唯一途径），`off` 则与解析规则是「与」。模型链整体失败/
+  超时/输出无法解析按兜底动作处理，默认 `reject`（判定失效时宁可少入也不乱入）。请求体只有消息正文、
+  来源名称、链接与附件（类型、文件名），不含 chat id 或账户信息；`AiProviderService.complete()` 新增
+  `scope` 参数（默认仍是 `archive_path`，候选判定显式传 `CHAIN_SCOPE_DEFAULT`）。
+- **来源批量（需求 ④）**：数据层 `add_telegram_sources_bulk()`（多选会话一次建多条，一律停用、空规则）、
+  `update_telegram_sources_bulk(ids, enabled=|rules=)`、`dismiss_telegram_sources(ids)`（墓碑：
+  `dismissed=1, enabled=0, rules_json='{}'`，列表隐藏，`discover_telegram_source` 不复活，保存该来源会
+  `dismissed=0`）。路由 `POST /sources/batch`（启用/停用/删除/套用规则）与 `POST /sources/batch-add`；
+  模板用 HTML 的 `form="sources-batch"` / `form="dialog-batch-add"` 把每行 checkbox 关联到一个**不嵌套**
+  的批量表单，没有 JavaScript 也能用。
+- **文档/工具（需求 ⑤）**：新增 `AgentHelp/PHASES.md`——每个阶段一行的索引 + `progress.md` 行号，
+  以后先读它再决定要不要开 5000 行的详细日志；`codegraph`（`@lzehrung/codegraph` 2.4.0）已安装并把
+  `codegraph sync` 写进开工流程；根 `AGENTS.md` 与 `AgentHelp/AGENTS.md` 增加「先写方案、审阅后动手」的
+  硬规则与开工前 `codegraph sync` / 先读 `PHASES.md` 的两条。
+
+**取舍（都是刻意的）。**
+
+- **来源删除是墓碑而不是 DELETE**：来源会被消息自动发现重建，删行等于没删。
+- **解析规则的默认值变更是有意的行为变更**：纯图片、纯压缩包、纯预览页的频道从此**静默失效**，
+  必须去「设置 → 解析规则」放宽；README / USAGE / EHBot 都写明了这一点。
+- **AI 判定先于解析规则 = 判定开启时每条被消息解析器认得的消息都要过一次模型**（哪怕解析规则随后会
+  丢掉它）——没有这个顺序，「AI 通过即覆盖解析规则」就不可能放行一条无链接消息。要少花钱就把判定关掉。
+- **AI 通过只覆盖解析规则，不覆盖来源自己的过滤规则**：来源的 tag / 语言 / 体积是那个频道的白名单，
+  不该被一次模型判断推翻。
+- 彻底删除默认只删记录，删文件是独立的第二个动作，两者都要两步确认——`delete-files` 不可恢复。
+- `remove_work` 的行为修正会改变「移除记录后仍残留兄弟来源 job」的旧表现，属修缺陷，不是功能变更。
+
+**测试（+75，1575 → 1650 collected）。**
+
+- `tests/unit/test_parse_rules.py`（新，25 条）：默认方案、宽松读取（缺行/坏 JSON/错类型/越界格式回退）、
+  严格校验（未知键、非布尔、非法格式、空格式表）、`message_qualifies()` 的六条判定路径与
+  `title_forces_needs_info()`、`dump→view` 往返。
+- `tests/unit/test_ai_candidates.py`（新，16 条）：判定输出解析（合法/缺 accept/非布尔/带 Markdown）、
+  未开启→`skip`、开启但模型链为空→`skip` 且不调用模型、拒绝/通过、`override` 通过即入候选、
+  失败按 `reject`/`accept` 兜底、请求体字段与 `scope=default` 由 `AiProviderService.complete` 收到。
+- `tests/unit/test_archived_works.py`（+7）：`remove_work` 现在清全部兄弟来源 job（一条）；`purge_work`
+  删候选/全部 job/artifacts/审核历史与路径钉且默认保留文件、`delete_files` 连 CBZ 与空目录一起删、
+  没有下载过的候选删掉但不写审计、候选不存在时拒绝、在途任务拒绝且文件不动、每个兄弟 job 都被清。
+- `tests/integration/test_work_detail_web.py`（+5）：页面上的两个删除动作、默认模式保留文件、
+  删文件连 CBZ 一起、在途工作被拒且页面还在、每个阶段都有这两个按钮。
+- `tests/integration/test_candidates_web.py`（+3）：候选列表批量删除（记录 / 记录+文件）且被删的行消失；
+  「下载失败」这种不能审核的 Tab 也给出选择列与两个删除对话框（通过/驳回仍不出现），并能从那里批量删掉。
+- `tests/integration/test_settings_web.py`（+8）：解析规则页的保存/恢复默认/严格拒绝/与快照一致，
+  以及 AI 判定的开关与提示词往返、默认提示词不落库。
+- `tests/integration/test_sources_web.py`（+7）：批量启用/停用/删除（墓碑后列表与接口都不再出现，
+  且不复活）/套用规则；批量添加（多条一次建、非法行跳过、全不可用给 400）。
+- `tests/integration/test_database.py`（+4）：022 的列与索引、墓碑在发现流程中不复活且列表隐藏、
+  再次保存恢复、批量添加只建新行不动旧行、批量添加顺手恢复墓碑。
+- 既有摄取用例的适配：新增 `tests/ingest_admission.py::permit_all_message_types()`，把「不是测准入策略」
+  的用例（下载流水线、来源规则、连接管理器、元数据复核、Telegram 用户 Web、候选 Web、自动审批）重新设成
+  宽松解析方案，它们才继续在测原本要测的东西；真正的准入策略由解析规则/AI 判定两个新文件正面覆盖。
+  另修两处夹具竞态：作品详情的「在途」用例改用 `PAUSED`（`PENDING` 会被真的 worker 抢走并失败），
+  删除后回列表的用例不再第二次登录（第一次已经改过密码）。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q --no-header -p no:randomly` →
+**1650 collected / 0 failed**；`--collect-only` 复核 `1650`；定向重跑解析规则、AI 判定、彻底删除、
+来源批量、数据库与设置页六个文件，以及受选择列影响的候选列表 / 审核批次 / 自动审批页面用例，全绿；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`README.md` 加三条能力（候选准入可控、AI 候选判定、彻底删除 + 来源批量）并更新数据外发
+段落与第 4 步部署说明；`docs/USAGE.md` 设置表加「解析规则」、新增「解析规则与 AI 候选判定」一节、
+「已下载内容」补「彻底删除」两条、来源一节补批量操作；`AgentHelp/EHBot.md` 新增
+`### 4.7 候选准入与彻底删除（2026-10-01，R50）`；`AgentHelp/PHASES.md` 建索引并在本条目后补 R50 行；
+`AgentHelp/AGENTS.md` 基线链 `R49 1575 → R50 1650`。本次没有新增环境变量，`.env.example` 无需改动
+（四个 AI 判定开关与解析方案都存 `system_settings`，在页面上配置）。
+
+**提交说明**：R50 落地时改动停留在工作区；2026-10-02 运营者指示「提交暂存更改，tag `v0.3.0rc2`」，
+于是 R50 与 R51 一并落进同一个提交（代码、测试、迁移、文档与本条目同在），没有按仓库惯例拆成单独的 R50 提交。
+
+## R51 — 内置解压器读不了的加密 ZIP 回退到 7-Zip（v0.3.0rc2，2026-10-01）
+
+运营者报告：「加密压缩包在密库里已配置正确的密码但是无法正确解压缩打包处理」，随后追加「加一个 RAR 工具链」。
+定位与取舍写在 `ENCRYPTED_ARCHIVE_FALLBACK_PROPOSAL.md`（含 §9 RAR 工具链评估，运营者选定方案 A）：**这不是
+密码问题，是后端选择问题**。运营者的包几乎肯定是 7-Zip / WinRAR / Bandizip 做的 **WinZip AES-256 ZIP**，
+内置 `zipfile` 永远打不开，而流水线没有回退到镜像里已经装好的 7-Zip。
+
+**根因（两处叠加）。**
+
+- `NotImplementedError` 是 `RuntimeError` 的**子类**。`app/archive/backends/zip_backend.py` 里
+  `except RuntimeError → ArchivePasswordRequired` 写在 `except NotImplementedError` 之前，后者成了死代码。
+  「内置解压器不认识这个方法」于是被译成「密码不对」，`_resolve_password()` 把密码库里每一条（包括正确那条）
+  都判失败，抛 `ArchivePasswordRequired`，任务停在「待补密码」。
+- `ArchiveProcessor.select_profile()` 只要 profile 支持 zip 就优先内置 `zipfile`，`process()` 只用这一个后端
+  跑完整条流水线，失败不回退。`zipfile` 只支持 Stored(0) / Deflate(8) / Bzip2(12) / LZMA(14)：AES-256 用
+  方法 99、Deflate64 用方法 9，两者都读不了；连**没有加密**的 Deflate64 ZIP 也被误报成「已加密」。
+
+`docs/USAGE.md` 本来就写着「`zipfile` 无法打开的加密 ZIP 使用 `7zz-default`」——代码没有做到文档承诺的事，
+属修缺陷。
+
+**修法。**
+
+- 新增内部错误 `ArchiveBackendUnsupported(ArchiveError)`（沿用错误码 `ARCHIVE_COMPRESSION_UNSUPPORTED`，
+  不新增面向运营者的词），语义是「**这个后端**读不了，换一个」；只有 `ArchiveProcessor` 捕获它做回退。
+- `ZipfileBackend.inspect()` 遍历中央目录时，见非目录成员的压缩方法不在 `{0,8,12,14}` 内即抛
+  `ArchiveBackendUnsupported`（消息带成员名与方法号）——清单阶段就能判断，不需要密码、不需要解压；
+  `test_password` / `extract` / `stream_pages` 的 `except` 顺序改为 `NotImplementedError` 在前，映射同一种错误，
+  防止将来只改一处。
+- `ArchiveProcessor`：把 `select_profile()` 拆出 `eligible_profiles()`；`process()` 改为对候选 profile 逐个
+  `_admit()`（inspect + 解析密码），捕获 `ArchiveBackendUnsupported` 就换下一个；快照记录真正干活的那个
+  profile。**只在准入阶段回退**——解压/打包失败不回退（清单已经说明方法是否支持，重跑等于把同一份工作做两遍）。
+  没有任何后端能接时，错误说清「方法不支持」并提示「设置 → 归档」启用 7-Zip profile，而不是「密码错误」。
+- **顺手修 RAR 分卷发现**（方案 §9.3）：`volume_group()` 对领头的 `name.rar`/`name.cbr` 返回 `None`，只有从
+  `.r00`/`.r01` 出发才能发现整套旧式分卷；改成对裸 `.rar`/`.cbr` 也返回 `{stem}.rar`，并让缺失分卷按运营者
+  实际使用的命名方案报出（`.rNN` 系列报 `.r00`，不再是 `.part2.rar`）。这条以前让缺卷的旧式分卷绕过
+  `ARCHIVE_VOLUMES_MISSING` 门禁。
+- **没有新增 rarlab 工具链**（方案 §9，运营者选定方案 A）：RAR 继续由已内置的 7-Zip 读取。理由：`rar`
+  （能创建 RAR）的 EULA 禁止随其它软件包分发且官方没有 linux-arm64 构建；`unrar` 虽可分发，但相比已内置的
+  7-Zip 几乎买不到额外能力，唯一缺口是 7-Zip 不能用恢复记录修复损坏分卷。仓库与镜像都不含 rarlab 二进制。
+- **修跨挂载打包失败（运营者测出的第二个问题）**：非内置后端打包 CBZ 时用 `st_dev` 判断能否硬链接，工作目录
+  与书库是不同挂载时整个作业以 `OSError: [Errno 18] Invalid cross-device link` 失败；更隐蔽的是同一宿主
+  文件系统的两处 bind mount——`st_dev` 相同、`os.link` 仍返回 `EXDEV`，预判根本不可靠。改为「先试硬链接、
+  失败即复制」（`_link_or_copy`，与 `app/torrent/delivery.py` 同一种写法）：硬链接只是省一次复制的优化，
+  不能当成正确性前提；跨挂载打包从此不会失败。
+
+**结果**：AES-256 ZIP（有/无密码）、Deflate64 ZIP（有/无密码）现在正常出 CBZ（`backend=seven_zip`），
+普通 ZIP 仍走内置流式路径（`backend=zipfile`）；RAR3/RAR5、`-hp` 头部加密、固体、`.partN` 与旧式 `.rNN`
+分卷的完整流水线都已实测通过；工作目录与书库跨挂载（含同一宿主文件系统的两处 bind mount）时打包不再失败。
+
+**测试（+22，1650 → 1672 collected）。**
+
+- `tests/unit/test_archive_processing.py`（+9）：方法号不在支持集时 `inspect()` / `test_password()` 抛
+  `ArchiveBackendUnsupported`（不是 `ArchivePasswordRequired`）；支持的方法仍走内置路径；处理器在
+  `ArchiveBackendUnsupported` 时换下一个 profile 且快照记录第二个；密码失败**不**触发回退（只建过一个后端）；
+  没有可回退 profile 时错误码是 `ARCHIVE_COMPRESSION_UNSUPPORTED` 且提示 7-Zip；`volume_group` 认领头的
+  `.rar`/`.cbr`；`.rNN` 系列从 `.rar` 与 `.r00` 两端得到同一组卷；缺卷按 `.rNN` 命名报出；硬链接被拒
+  （`EXDEV`）时 `pack_cbz` 退回复制且暂存内容与原页一致、同设备时仍然真的走硬链接（`st_ino` 相同）——
+  把「优化」与「正确性」两条都钉住。
+- `tests/integration/test_seven_zip_real.py`（+13，14 → 27 条）：真 7-Zip 造的 AES-256 ZIP 回退成功并记
+  `password_id`；无密码与有密码的 Deflate64 各一条；空密码库的 AES ZIP 仍如实报 `ARCHIVE_PASSWORD_REQUIRED`
+  （回退没有把密码问题吞成方法问题）；普通 ZIP 仍是 `zipfile`；RAR5 明文、RAR5 `-hp`、RAR3 `-hp`、RAR5 仅数据
+  加密（各断言 `password_id`）、无密码时报 `ArchivePasswordRequired`、RAR5 `.partN` 分卷、**旧式 `.rNN` 分卷
+  从领头的 `.rar` 出发**（锁住这次的修复）、固体 RAR 高压缩比页面放行。
+- 新增 `tests/fixtures/rar/`（12 个夹具档案加一份 README）与 `scripts/make_rar_fixtures.py`（开发机用自备 `rar` 重生成一次后
+  提交，无 `rar` 时自己跳过；夹具是数据不是软件，CI 不需要 `rar`）。`scripts/verify_docker_linux.py` 的 RAR
+  检查从「查 `7zz i` 格式表」改成真的用夹具 `l` 一次。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q --no-header -p no:randomly` →
+**1672 collected / 0 failed**；`--collect-only` 复核 `1672`；定向重跑归档处理、真 7-Zip 集成、归档工作流、
+归档作品与重新打包用例全绿；`compileall` 与 `git diff --check` 通过。一次与 `docker buildx` 抢 CPU 的全量跑里 `test_downloaded_web.py::test_packing_one_work_uses_the_row_button_and_the_one_packing_path` 红了：断言新作业是 `CONVERSION_PENDING`，却已被 worker 抢成 `CONVERSION_RUNNING`——既有的 worker 竞态，与本阶段改动无关（该文件单独跑、连跑五次、以及独占 CPU 的全量跑都全绿）。
+
+**文档同步**：`docs/USAGE.md` 归档一节改实——内置 `zipfile` 的方法白名单、AES-256/Deflate64 **自动回退**、
+RAR 覆盖面与「不能修复损坏分卷」的边界、三种错误（待补分卷 / 待补密码 / 方法不支持）各自处置；比例门那条
+从「7z / rar 按块判」改成「7z 按块判，ZIP 与 RAR 按成员判」（实测 RAR 的 `-slt` 没有 `Block`）。
+`README.md` 加「压缩包都能读」一条；`AgentHelp/EHBot.md` 新增 `### 4.8 加密 ZIP 回退与 RAR 覆盖
+（2026-10-01，R51）`；`AgentHelp/PHASES.md` 在本条目后补 R51 行并更新基线链；`AgentHelp/AGENTS.md` 基线
+`R50 1650 → R51 1670`，并把「真 7-Zip 用例数」从十四改成二十七（无工具链时 `passed` 为 1643）。本次没有新增
+环境变量、没有数据库迁移（迁移仍到 022），`.env.example` 无需改动。
+
+**镜像**（以最后一版为准，前一版已修跨挂载问题后覆盖）：当时按运营者的既定节奏只构建并推送 `latest`（`docker buildx build --platform linux/amd64 -t
+hsmk/ehbot:latest --push .`）、暂不提交；2026-10-02 已随 v0.3.0rc2 一并提交。index digest `sha256:3de505432d6743d79962059eeb38a37d406c2fa16a69b94b1d453b5338a91814`，
+amd64 manifest `sha256:221c57bafdfe5c324c2a61dcfcd655de0d3e352402f3a9317b2c615f9c9fa33a`；`docker buildx imagetools
+inspect` 与本地 `docker images` 取回同一 digest（本地镜像 ID 与 index digest 一致）。冒烟在镜像内（`--user 0:0`，
+`DATA_PATH=/tmp/ehbotdata`，容器内 8080）完成：启动时自动装好 7-Zip 26.02，`/healthz` 得 `{"status":"ok"}`；
+容器内用自带 7-Zip 现场造 AES-256 / Deflate64 / 普通 ZIP：前两者 `backend=seven_zip`（AES 记 `password_id`），
+普通 ZIP 仍是 `backend=zipfile`；再把仓库夹具拷进容器跑 RAR：`-hp`（`password_id` 命中）、RAR5 `.partN` 三卷、
+旧式 `.rNN` 从 `.rar` 与 `.r00` 两端都得到三卷。修好跨挂载打包后重建并再验一次：把 `Path.hardlink_to` 换成抛 `EXDEV` 的桩，`pack_cbz` 退回复制且暂存内容与原页一致（`hardlinked=False`），并真的打了 `rar5-hp.rar` 一包（`backend=seven_zip`、页数 3、`password_id` 命中）。冒烟容器已清理，本地镜像保留以便复测。
+
+**提交说明**：与 R50 一并提交，tag `v0.3.0rc2`（详见 R50 条目末尾的说明）；
+「R50、R51 各自一个提交」的拆分未执行。

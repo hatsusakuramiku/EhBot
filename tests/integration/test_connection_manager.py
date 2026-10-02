@@ -17,6 +17,7 @@ from app.connections.manager import (
 from app.connections.models import ProviderConnectionError, TelegramUserAccount
 from app.connections.exhentai import ExHentaiCredentials
 from app.db.database import Database
+from tests.ingest_admission import permit_all_message_types
 from app.secrets import SecretStore
 
 
@@ -76,6 +77,7 @@ async def test_configuring_telegram_starts_durable_update_polling(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,
@@ -122,6 +124,7 @@ async def test_configuring_exhentai_persists_verified_cookie_session(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     store = SecretStore(tmp_path / "private")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -165,6 +168,7 @@ async def test_saved_telegram_token_reconnects_on_startup(tmp_path: Path) -> Non
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     store = SecretStore(tmp_path / "private")
     store.write("telegram_bot_token", "123:saved-secret")
     async with httpx.AsyncClient(
@@ -191,6 +195,7 @@ async def test_saved_exhentai_session_reconnects_without_telegram(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     store = SecretStore(tmp_path / "private")
     store.write(
         "exhentai_cookies",
@@ -239,6 +244,7 @@ async def test_disconnect_removes_saved_provider_credentials(tmp_path: Path) -> 
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     store = SecretStore(tmp_path / "private")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -273,6 +279,7 @@ async def test_startup_processes_saved_updates_without_telegram_connection(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,
@@ -364,6 +371,7 @@ async def test_candidate_storage_failure_sets_visible_connection_error(
 
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="PRIVATE_CHAT",
         chat_id=900,
@@ -534,6 +542,7 @@ async def user_ingest_manager(
     """A manager whose user account is logged in and can read one channel."""
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     if enable_source:
         await database.configure_telegram_source(
             source_type="CHANNEL",
@@ -830,6 +839,7 @@ async def test_the_source_picker_refuses_without_a_logged_in_account(
     """Half a credential is not an account, and an empty list would be a lie."""
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     store = SecretStore(tmp_path / "private")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(

@@ -7,11 +7,13 @@ from pathlib import Path
 
 from app.candidates.ingestor import CandidateIngestor
 from app.db.database import Database
+from tests.ingest_admission import permit_all_message_types
 from app.review.service import ReviewService
 
 
 def _seed_candidate(database: Database, chat_id: int) -> int:
     async def run() -> int:
+        await permit_all_message_types(database)
         await database.save_telegram_updates(
             [
                 {

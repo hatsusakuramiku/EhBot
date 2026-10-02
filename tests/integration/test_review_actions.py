@@ -11,6 +11,7 @@ from app.db.database import Database
 from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.service import ReviewError, ReviewService
+from tests.ingest_admission import permit_all_message_types
 
 
 def make_settings(root: Path) -> Settings:
@@ -56,6 +57,7 @@ async def seed_candidate(
     gallery_ref: str = "",
 ) -> int:
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100456,
@@ -441,6 +443,7 @@ def test_rating_field_requires_numeric_value(tmp_path: Path) -> None:
     asyncio.run(database.initialize())
 
     async def run() -> None:
+        await permit_all_message_types(database)
         await database.configure_telegram_source(
             source_type="CHANNEL",
             chat_id=-100999,

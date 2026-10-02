@@ -10,6 +10,7 @@ from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
 from app.db.database import Database
 from app.main import create_app
+from tests.ingest_admission import permit_all_message_types
 from tests.integration.markup import (
     gated_targets,
     nested_form_lines,
@@ -53,6 +54,11 @@ def authenticate(client: TestClient, settings: Settings) -> None:
 
 async def configure_source(database: Database) -> None:
     await database.initialize()
+    # These fixtures use photo-only messages, which R50's shipped parse scheme
+    # (gallery links only) would drop before they became candidates. The policy
+    # itself is covered by `test_parse_rules`; here it is put back to the old
+    # permissive behaviour so the queue tests keep testing the queue.
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,
@@ -664,3 +670,102 @@ def test_a_batch_rejection_asks_before_it_runs(tmp_path: Path) -> None:
     # Approving is not gated: it is the action the queue exists for, and it is
     # reversible from the 已通过 tab.
     assert "/candidates/1/approve" in ungated_targets(body)
+
+
+# ------------------------------------------------- the purge from the list
+
+
+def test_a_batch_purge_removes_the_candidate_entirely(tmp_path: Path) -> None:
+    """R50: 彻底删除 from the candidate list.
+
+    The candidate row, its messages and its (absent) jobs all go; the list it
+    was on no longer shows it and the detail page is a 404. The records-only
+    action is the one being exercised, so no file work is involved.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        csrf = client.get("/candidates").context["csrf_token"]
+        response = client.post(
+            "/candidates/batch-review",
+            data={
+                "csrf_token": csrf,
+                "action": "delete",
+                "tab": "all",
+                "candidate_ids": ["1"],
+            },
+        )
+        listed = client.get("/candidates/all")
+
+    assert response.status_code == 303
+    assert listed.context["total"] == 0
+
+
+def test_the_purge_dialogs_are_gated_and_named(tmp_path: Path) -> None:
+    """Both modes are destructive and both say which one they are.
+
+    A single dialog with a checkbox would leave the operator unable to tell, at
+    the moment they confirm, whether the files are about to go.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        body = client.get("/candidates").text
+
+    assert 'value="delete"' in body
+    assert 'value="delete-files"' in body
+    for label in ("确认彻底删除", "确认删除文件"):
+        closing = body.index(f"{label}</button>")
+        button = body[body.rindex("<button", 0, closing) : closing]
+        assert 'form="candidate-batch"' in button
+        assert 'name="action"' in button
+    assert nested_form_lines(body) == []
+
+
+def test_a_batch_purge_works_on_a_tab_that_cannot_review(
+    tmp_path: Path,
+) -> None:
+    """R50: a failed row can be cleared from the list it sits on.
+
+    Review actions stop making sense once a candidate has failed its download,
+    so 批量通过/驳回 stays off that tab. 彻底删除 does not: 下载失败 is exactly
+    the queue an operator wants to empty, and making them open every work to
+    delete it one at a time is how dead rows accumulate. The selection column
+    and the delete dialogs therefore live on every tab, reviewable or not.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=340, message_id=90, title="Failed Fixture"
+        )
+    )
+    set_status(database, candidate_id, "FAILED")
+
+    with TestClient(create_app(settings), follow_redirects=False) as client:
+        authenticate(client, settings)
+        page = client.get("/candidates/failed")
+        assert 'value="delete"' in page.text
+        assert 'value="delete-files"' in page.text
+        # Only the delete dialogs: there is nothing left to approve or reject.
+        assert "批量通过并下载" not in page.text
+        assert "确认驳回" not in page.text
+        response = client.post(
+            "/candidates/batch-review",
+            data={
+                "csrf_token": page.context["csrf_token"],
+                "action": "delete",
+                "tab": "failed",
+                "candidate_ids": [str(candidate_id)],
+            },
+        )
+        listed = client.get("/candidates/failed")
+
+    assert response.status_code == 303
+    assert listed.context["total"] == 0

@@ -1,0 +1,162 @@
+{#
+  解析规则 tab: 一条消息够不够格成为候选, and the optional AI gate over it.
+
+  Two forms, both server-validated, both posted to their own route. The parse
+  scheme is a whitelist of message kinds -- 「只解析含 Eh 链接的消息」 is the
+  shipped default -- and the AI gate is the semantic second opinion that runs
+  *before* it. They are on one page because they are one pipeline; an operator
+  who turns on AI admission and cannot see the parse rules beside it will
+  reasonably wonder why a photo-filled message was still dropped.
+
+  Every checkbox is a real checkbox and the 恢复默认 button is a real submit, so
+  the tab works with JavaScript off. Nothing here is a state label: the values
+  come from `解析规则`'s snapshot, and the words beside them are page copy.
+#}
+<div class="ui-settings-layout">
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">解析规则</h2>
+      <p class="ui-hint">
+        决定哪些监听消息会被解析成候选。默认「只解析含 ExHentai / e-hentai
+        画廊链接的消息」，其余消息在抓取元数据之前就会被忽略。
+      </p>
+      <form class="ui-form" method="post" action="{{ url_for('save_parse_rules') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="require_gallery_link" type="checkbox"
+                 {% if parse_rules.require_gallery_link %}checked{% endif %}>
+          <span>必须包含画廊链接</span>
+        </label>
+        <small class="ui-hint">
+          开启后，没有 ExHentai / e-hentai 画廊链接的消息一律不入候选，下面的
+          开关只有在关闭它之后才有效。这就是默认的「只解析含 Eh 链接的消息」。
+        </small>
+
+        <label class="ui-checkline" style="margin-top: var(--s-3)">
+          <input class="ui-checkbox" name="accept_photo" type="checkbox"
+                 {% if parse_rules.accept_photo %}checked{% endif %}>
+          <span>接受纯图片预览消息</span>
+        </label>
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="accept_archive" type="checkbox"
+                 {% if parse_rules.accept_archive %}checked{% endif %}>
+          <span>接受压缩包附件消息</span>
+        </label>
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="accept_preview" type="checkbox"
+                 {% if parse_rules.accept_preview %}checked{% endif %}>
+          <span>接受 telegra.ph / graph.org 预览页消息</span>
+        </label>
+
+        <fieldset class="ui-fieldset">
+          <legend>允许的压缩格式（「接受压缩包附件」开启时生效）</legend>
+          <div class="ui-checkgrid">
+            {% for format in archive_formats %}
+              <label class="ui-checkline">
+                <input class="ui-checkbox" name="archive_formats" type="checkbox"
+                       value="{{ format }}"
+                       {% if format in parse_rules.archive_formats %}checked{% endif %}>
+                <span>{{ format|upper }}</span>
+              </label>
+            {% endfor %}
+          </div>
+        </fieldset>
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="title_required" type="checkbox"
+                 {% if parse_rules.title_required %}checked{% endif %}>
+          <span>没有标题的消息直接判为「待补充」</span>
+        </label>
+        <small class="ui-hint">
+          关闭时沿用来源规则：解析不到标题的候选会进入「待补充」，仍然保留。
+        </small>
+
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">保存解析规则</button>
+        </div>
+        <small class="ui-hint">
+          保存后新到的消息立即按新规则判断，已入库的候选不受影响。
+        </small>
+      </form>
+      <form class="ui-form" method="post" action="{{ url_for('reset_parse_rules') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-size="sm" type="submit">恢复默认解析规则</button>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="ui-settings-col">
+    <section class="ui-panel">
+      <h2 class="ui-section-title">AI 候选判定</h2>
+      <p class="ui-hint">
+        可选项。开启且「AI 供应商」里配置了可用模型后，每条通过初步解析的消息都会
+        先交给模型判断是不是一部作品，通过的才继续走上面的解析规则。
+      </p>
+      {% if not candidate_admission.enabled_overridden %}
+        <p class="ui-hint">当前为默认值：关闭。</p>
+      {% endif %}
+      <form class="ui-form" method="post" action="{{ url_for('save_candidate_admission') }}"
+            style="margin-top: var(--s-4)">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="ai_candidate_enabled" type="checkbox"
+                 {% if candidate_admission.enabled %}checked{% endif %}>
+          <span>开启 AI 候选判定</span>
+        </label>
+        <small class="ui-hint">
+          未配置 AI 模型时该开关不会生效，消息仍按解析规则处理，也不会产生 AI 调用。
+        </small>
+
+        <div class="ui-field" style="margin-top: var(--s-3)">
+          <label for="ai-candidate-fallback">判定失败时的兜底动作</label>
+          <select class="ui-select" id="ai-candidate-fallback" name="ai_candidate_fallback">
+            {% for fallback in candidate_fallbacks %}
+              <option value="{{ fallback }}"
+                      {% if fallback == candidate_admission.fallback %}selected{% endif %}>
+                {% if fallback == "reject" %}拒绝（默认，失败即不入候选）{% else %}放行（失败时按解析规则继续）{% endif %}
+              </option>
+            {% endfor %}
+          </select>
+          <small>
+            模型链整体失败、超时或输出无法解析时使用。默认拒绝，避免判定失效时把
+            不该进的消息放进来。
+          </small>
+        </div>
+
+        <label class="ui-checkline">
+          <input class="ui-checkbox" name="ai_candidate_override_parse_rules" type="checkbox"
+                 {% if candidate_admission.override_parse_rules %}checked{% endif %}>
+          <span>AI 通过即完全覆盖解析规则</span>
+        </label>
+        <small class="ui-hint">
+          关闭时两者是「与」的关系：AI 通过后仍要满足解析规则。开启时 AI 通过就直接
+          入候选，可以放行没有画廊链接的消息。
+        </small>
+
+        <div class="ui-field">
+          <label for="ai-candidate-prompt">判定提示词</label>
+          <textarea class="ui-input" id="ai-candidate-prompt" name="ai_candidate_prompt"
+                    rows="12">{{ candidate_admission.prompt }}</textarea>
+          <small>
+            会随每条消息的正文、来源名称、链接与附件名一起发给模型。留空或提交默认文本
+            即恢复默认提示词。
+            {%- if not candidate_admission.prompt_overridden %} 当前为默认提示词。{% endif %}
+          </small>
+        </div>
+
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-variant="primary" type="submit">保存 AI 判定设置</button>
+        </div>
+      </form>
+      <details style="margin-top: var(--s-3)">
+        <summary class="ui-hint">查看默认提示词</summary>
+        <pre class="ui-hint" style="white-space: pre-wrap">{{ candidate_prompt_default }}</pre>
+      </details>
+    </section>
+  </div>
+</div>

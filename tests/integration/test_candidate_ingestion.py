@@ -5,6 +5,7 @@ import pytest
 from app.ai.models import AiPathSuggestion
 from app.candidates.ingestor import CandidateIngestor
 from app.db.database import Database
+from tests.ingest_admission import permit_all_message_types
 
 
 async def allow_sources(database: Database, *chat_ids: int) -> None:
@@ -25,6 +26,7 @@ async def test_photo_preview_update_becomes_a_pending_review_candidate(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100123)
     await database.save_telegram_updates(
         [
@@ -74,6 +76,7 @@ async def test_exhentai_link_update_becomes_a_review_candidate(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, 501)
     await database.save_telegram_updates(
         [
@@ -106,6 +109,7 @@ async def test_archive_only_update_uses_filename_as_candidate_title(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100123)
     await database.save_telegram_updates(
         [
@@ -141,6 +145,7 @@ async def test_messages_in_same_media_group_share_one_candidate(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100123)
     await database.save_telegram_updates(
         [
@@ -196,6 +201,7 @@ async def test_messages_in_same_media_group_share_one_candidate(
 async def test_unrelated_text_update_is_ignored_once(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.save_telegram_updates(
         [
             {
@@ -226,6 +232,7 @@ async def test_same_exhentai_gallery_reference_merges_across_chats(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     gallery_url = "https://exhentai.org/g/67890/tokenXYZ/"
     await allow_sources(database, 600, -100999)
     await database.save_telegram_updates(
@@ -285,6 +292,7 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
     """
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, 600)
     await database.save_telegram_updates(
         [
@@ -380,6 +388,7 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
 async def test_reply_message_joins_the_referenced_candidate(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100123)
     await database.save_telegram_updates(
         [
@@ -431,6 +440,7 @@ async def test_adjacent_preview_and_archive_with_same_title_are_merged(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100321)
     await database.save_telegram_updates(
         [
@@ -481,6 +491,7 @@ async def test_malformed_update_isolated_without_blocking_later_updates(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, 801)
     await database.save_telegram_updates(
         [
@@ -527,6 +538,7 @@ async def test_edited_message_updates_existing_candidate_content(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100456)
     original_message = {
         "message_id": 120,
@@ -571,6 +583,7 @@ async def test_non_adjacent_same_title_messages_remain_separate(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100567)
     await database.save_telegram_updates(
         [
@@ -620,6 +633,7 @@ async def test_edit_keeps_original_candidate_when_media_group_changes(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100678)
     first_message = {
         "message_id": 210,
@@ -705,6 +719,7 @@ async def test_edit_replaces_gallery_identity_and_stale_explicit_title(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100789)
     original_message = {
         "message_id": 230,
@@ -751,6 +766,7 @@ async def test_edit_without_candidate_content_removes_stale_candidate(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100890)
     original_message = {
         "message_id": 240,
@@ -795,6 +811,7 @@ async def test_edit_removal_rebuilds_metadata_from_remaining_message(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100901)
     first_message = {
         "message_id": 250,
@@ -863,6 +880,7 @@ async def test_a_hyperlinked_preview_only_message_becomes_a_candidate(
     # caption entity. A text-only regex sees nothing here.
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100555)
     await database.save_telegram_updates(
         [
@@ -910,6 +928,7 @@ async def test_a_preview_link_with_no_other_content_is_still_accepted(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100556)
     await database.save_telegram_updates(
         [
@@ -957,6 +976,7 @@ async def test_a_message_without_any_candidate_content_is_still_ignored(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100557)
     await database.save_telegram_updates(
         [
@@ -983,6 +1003,7 @@ async def test_a_message_without_any_candidate_content_is_still_ignored(
 async def test_the_first_preview_link_in_a_group_is_kept(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100558)
     await database.save_telegram_updates(
         [
@@ -1039,6 +1060,7 @@ async def test_an_edit_that_drops_the_preview_link_clears_it(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await allow_sources(database, -100559)
     original = {
         "message_id": 540,

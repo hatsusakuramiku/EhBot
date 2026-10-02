@@ -89,6 +89,17 @@ check("the managed binary runs on slim", result.returncode == 0, result.returnco
 check("the version matches the pin", SEVEN_ZIP_VERSION in result.stdout, SEVEN_ZIP_VERSION)
 check("RAR and RAR5 are supported", "Rar5" in result.stdout and "Rar" in result.stdout)
 
+fixture = Path("/repo/tests/fixtures/rar/rar5-hp.rar")
+listing = subprocess.run(
+    [str(executable), "l", "-ba", "-pS3cret", str(fixture)],
+    capture_output=True, text=True, timeout=60,
+)
+check(
+    "a real header-encrypted RAR5 archive lists with its password",
+    listing.returncode == 0 and "01.jpg" in listing.stdout,
+    listing.returncode,
+)
+
 pages = Path("/tmp/pages")
 pages.mkdir(parents=True, exist_ok=True)
 jpeg_header = bytes([0xFF, 0xD8, 0xFF, 0xE0])

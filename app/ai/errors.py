@@ -52,6 +52,10 @@ AI_PATH_MISSING = "AI_PATH_MISSING"
 #: The whole model chain failed. The caller turns this into 需干预, or into the
 #: fallback template when the operator asked for that (proposal §7).
 AI_PATH_UNAVAILABLE = "AI_PATH_UNAVAILABLE"
+#: A candidate-admission answer that is not the `{"accept": bool, ...}` object we
+#: asked for. Like `AI_PATH_INVALID`, this walks the chain: a model that answers
+#: prose has not decided anything, and the next one gets the question.
+AI_CANDIDATE_INVALID = "AI_CANDIDATE_INVALID"
 
 
 class AiError(ValueError):
@@ -64,6 +68,7 @@ class AiError(ValueError):
 
 
 __all__ = [
+    "AI_CANDIDATE_INVALID",
     "AI_CHAIN_DUPLICATE",
     "AI_CHAIN_EMPTY",
     "AI_CHAIN_ENTRY_MISSING",

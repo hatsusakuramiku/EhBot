@@ -5,6 +5,7 @@ import pytest
 
 from app.candidates.ingestor import CandidateIngestor
 from app.db.database import Database
+from tests.ingest_admission import permit_all_message_types
 
 
 def archive_update(
@@ -36,6 +37,7 @@ def archive_update(
 async def test_unknown_source_is_discovered_but_not_ingested(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.save_telegram_updates(
         [archive_update(update_id=500, chat_id=-100500)]
     )
@@ -54,6 +56,7 @@ async def test_unknown_source_is_discovered_but_not_ingested(tmp_path: Path) -> 
 async def test_enabled_source_accepts_allowed_archive(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100501,
@@ -78,6 +81,7 @@ async def test_enabled_source_accepts_allowed_archive(tmp_path: Path) -> None:
 async def test_disallowed_archive_format_is_ignored(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100502,
@@ -106,6 +110,7 @@ async def test_disallowed_archive_format_is_ignored(tmp_path: Path) -> None:
 async def test_unknown_attachment_size_requires_information(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100503,
@@ -135,6 +140,7 @@ async def test_unknown_attachment_size_requires_information(tmp_path: Path) -> N
 async def test_oversized_attachment_is_ignored(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100504,
@@ -157,6 +163,7 @@ async def test_oversized_attachment_is_ignored(tmp_path: Path) -> None:
 async def test_preview_without_title_requires_information(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="PRIVATE_CHAT",
         chat_id=505,
@@ -201,6 +208,7 @@ async def test_archive_title_resolves_grouped_preview_needs_info(
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100506,
@@ -259,6 +267,7 @@ async def test_archive_title_resolves_grouped_preview_needs_info(
 async def test_rejected_edit_removes_stale_candidate(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100507,
@@ -289,6 +298,7 @@ async def test_rejected_edit_removes_stale_candidate(tmp_path: Path) -> None:
 async def test_discovery_preserves_admin_source_name(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100508,
@@ -310,6 +320,7 @@ async def test_discovery_preserves_admin_source_name(tmp_path: Path) -> None:
 async def test_invalid_saved_rules_fail_closed(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100509,

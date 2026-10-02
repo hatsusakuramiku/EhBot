@@ -28,6 +28,7 @@ from app.connections.manager import (
     TELEGRAM_USER_SESSION_SECRET,
 )
 from app.db.database import Database
+from tests.ingest_admission import permit_all_message_types
 from app.main import create_app
 from app.review.orchestration import TELEGRAM_FILE_LIMIT
 
@@ -542,6 +543,7 @@ def test_the_chat_picker_requires_csrf(tmp_path: Path) -> None:
 async def seed_oversized_candidate(database: Database) -> int:
     """One APPROVED candidate whose only attachment is over the Bot API limit."""
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,

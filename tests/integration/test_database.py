@@ -167,8 +167,12 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(telegram_sources)")
         }
 
-    assert migration_count == 21
+    assert migration_count == 22
     assert "last_message_id" in telegram_source_columns
+    # Migration 022: the source tombstone and the candidate's job index.
+    assert "dismissed" in telegram_source_columns
+    assert "idx_telegram_sources_dismissed" in indexes
+    assert "idx_download_jobs_candidate" in indexes
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",
@@ -451,3 +455,162 @@ async def test_ai_path_suggestion_cascades_and_survives_its_migration(
             "SELECT COUNT(*) FROM ai_path_suggestions"
         ).fetchone()[0]
     assert remaining == 0
+
+
+def _source_message(chat_id: int = -100900) -> "object":
+    from app.candidates.models import ParsedSourceMessage
+
+    return ParsedSourceMessage(
+        is_edit=False,
+        chat_id=chat_id,
+        chat_title="Tombstone Fixture",
+        message_id=1,
+        sender_id=None,
+        reply_to_message_id=None,
+        media_group_id=None,
+        message_text="",
+        attachments=(),
+        file_unique_id=None,
+        message_date="2026-01-01T00:00:00+00:00",
+        title="X",
+        title_source="TELEGRAM",
+        title_confidence=0.9,
+        filter_result="ACCEPT",
+        filter_reason="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dismissed_source_survives_discovery_and_stays_hidden(
+    tmp_path: Path,
+) -> None:
+    """R50: 删除来源 is a tombstone, not a DELETE.
+
+    `discover_telegram_source` inserts a row for every chat a message ever
+    arrives from, so a deleted row would come back (disabled) on the next
+    message. A dismissed row stays dismissed through discovery and is hidden
+    from the settings list.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100900,
+        display_name="Fixtures",
+        enabled=True,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+    source_id = (await database.list_telegram_sources())[0].source_id
+
+    removed = await database.dismiss_telegram_sources([source_id])
+    assert removed == 1
+    assert await database.list_telegram_sources() == []
+
+    # A message from the chat re-runs discovery; the tombstone must hold.
+    await database.discover_telegram_source(_source_message())
+    assert await database.list_telegram_sources() == []
+
+
+@pytest.mark.asyncio
+async def test_saving_a_dismissed_source_again_revives_it(
+    tmp_path: Path,
+) -> None:
+    """The way back from a tombstone: an explicit save un-dismisses the chat."""
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100901,
+        display_name="Revive",
+        enabled=True,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+    source_id = (await database.list_telegram_sources())[0].source_id
+    await database.dismiss_telegram_sources([source_id])
+
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100901,
+        display_name="Revive",
+        enabled=False,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+    listed = await database.list_telegram_sources()
+    assert [row.source_id for row in listed] == [source_id]
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_creates_disabled_rows_and_keeps_existing_ones(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100902,
+        display_name="Existing",
+        enabled=True,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+
+    created = await database.add_telegram_sources_bulk(
+        [
+            {
+                "source_type": "CHANNEL",
+                "chat_id": -100902,
+                "display_name": "Existing",
+            },
+            {
+                "source_type": "PRIVATE_CHAT",
+                "chat_id": 9100,
+                "display_name": "Fresh",
+            },
+        ]
+    )
+
+    assert created == 1
+    rows = {row.chat_id: row for row in await database.list_telegram_sources()}
+    assert rows[-100902].enabled is True
+    assert rows[9100].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_revives_a_dismissed_source(tmp_path: Path) -> None:
+    """Re-selecting a 删除过的 chat in the picker lifts its tombstone.
+
+    The single-source form already behaves this way; the batch add has to
+    agree, or an operator who deleted a chat and then found it again in the
+    dialog list would see it counted as 已有 while it stayed invisible.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100903,
+        display_name="Gone",
+        enabled=True,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+    source_id = (await database.list_telegram_sources())[0].source_id
+    await database.dismiss_telegram_sources([source_id])
+    assert await database.list_telegram_sources() == []
+
+    created = await database.add_telegram_sources_bulk(
+        [
+            {
+                "source_type": "CHANNEL",
+                "chat_id": -100903,
+                "display_name": "Gone",
+            }
+        ]
+    )
+
+    assert created == 0
+    listed = await database.list_telegram_sources()
+    assert [row.source_id for row in listed] == [source_id]
+    assert listed[0].enabled is False

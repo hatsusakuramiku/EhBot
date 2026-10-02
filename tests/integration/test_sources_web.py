@@ -133,3 +133,223 @@ def test_needs_info_queue_is_separate_from_pending_queue(tmp_path: Path) -> None
     assert "待补充" in response.text
     assert "暂无待补充候选" in response.text
     assert "暂无待审核候选" not in response.text
+
+
+def _add_source(client: TestClient, *, chat_id: int, name: str, csrf: str, enabled: bool = True) -> None:
+    client.post(
+        "/sources",
+        data={
+            "source_type": "CHANNEL",
+            "chat_id": str(chat_id),
+            "display_name": name,
+            "enabled": "on" if enabled else "",
+            "allowed_archive_formats": ["zip"],
+            "max_attachment_size_mb": "256",
+            "csrf_token": csrf,
+        },
+    )
+
+
+class TestBatchActions:
+    """R50: 来源规则的添加与配置支持批量操作.
+
+    The rows are still individual forms; the checkboxes carry
+    `form="sources-batch"`, which is what lets one submit act on several rows
+    without nesting forms (HTML forbids that, and the repo has been bitten by it
+    before).
+    """
+
+    def test_a_selection_can_be_enabled_and_disabled_at_once(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            _add_source(client, chat_id=-100701, name="A", csrf=csrf, enabled=False)
+            _add_source(client, chat_id=-100702, name="B", csrf=csrf, enabled=False)
+            ids = [row["source_id"] for row in client.get("/settings/sources").context["sources"]]
+
+            response = client.post(
+                "/sources/batch",
+                data={
+                    "csrf_token": csrf,
+                    "action": "enable",
+                    "source_ids": [str(value) for value in ids],
+                },
+                follow_redirects=False,
+            )
+            rows = client.get("/settings/sources").context["sources"]
+
+        assert response.status_code == 303
+        assert all(row["enabled"] for row in rows)
+
+    def test_batch_delete_is_a_tombstone_rather_than_a_delete(
+        self, tmp_path: Path
+    ) -> None:
+        """A plain DELETE would come back on the next message from the chat.
+
+        `discover_telegram_source` inserts a row for every chat a message
+        arrives from, so the delete has to be a tombstone: hidden from the list
+        and untouched by discovery.
+        """
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            _add_source(client, chat_id=-100703, name="C", csrf=csrf)
+            source_id = client.get("/settings/sources").context["sources"][0]["source_id"]
+
+            client.post(
+                "/sources/batch",
+                data={
+                    "csrf_token": csrf,
+                    "action": "delete",
+                    "source_ids": [str(source_id)],
+                },
+            )
+            listed = client.get("/settings/sources").context["sources"]
+
+        assert listed == []
+        assert source_id not in [
+            row["source_id"] for row in listed
+        ]
+
+    def test_batch_apply_overwrites_the_filter_rules(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            _add_source(client, chat_id=-100704, name="D", csrf=csrf)
+            _add_source(client, chat_id=-100705, name="E", csrf=csrf)
+            ids = [row["source_id"] for row in client.get("/settings/sources").context["sources"]]
+
+            client.post(
+                "/sources/batch",
+                data={
+                    "csrf_token": csrf,
+                    "action": "apply",
+                    "source_ids": [str(value) for value in ids],
+                    "allowed_archive_formats": ["7z"],
+                    "max_attachment_size_mb": "512",
+                    "required_tags": "language:chinese",
+                    "min_rating": "3.5",
+                },
+            )
+            rows = client.get("/settings/sources").context["sources"]
+
+        for row in rows:
+            assert row["allowed_archive_formats"] == ["7z"]
+            assert row["max_attachment_size_mb"] == 512
+            assert row["required_tags"] == ["language:chinese"]
+            assert row["min_rating"] == 3.5
+
+    def test_a_batch_with_no_selection_is_refused(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            response = client.post(
+                "/sources/batch",
+                data={"csrf_token": csrf, "action": "enable"},
+            )
+
+        assert response.status_code == 400
+        assert "请至少选择一个来源" in response.text
+
+
+class TestBatchAdd:
+    def test_several_dialogs_become_disabled_sources_at_once(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            response = client.post(
+                "/sources/batch-add",
+                data={
+                    "csrf_token": csrf,
+                    "dialogs": [
+                        json.dumps(
+                            {
+                                "source_type": "CHANNEL",
+                                "chat_id": -100801,
+                                "display_name": "Batch A",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "source_type": "PRIVATE_CHAT",
+                                "chat_id": 9001,
+                                "display_name": "Batch B",
+                            }
+                        ),
+                    ],
+                },
+                follow_redirects=False,
+            )
+            rows = client.get("/settings/sources").context["sources"]
+
+        # The picker flows answer in place with a notice rather than a redirect,
+        # the same as `browse_telegram_dialogs` beside it: the operator is
+        # looking at a list they just read from, and the count belongs on it.
+        assert response.status_code == 200
+        assert "已新增 2 个来源" in response.text
+        assert {row["chat_id"] for row in rows} == {-100801, 9001}
+        assert all(row["enabled"] is False for row in rows)
+
+    def test_an_invalid_dialog_is_skipped_without_failing_the_batch(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            client.post(
+                "/sources/batch-add",
+                data={
+                    "csrf_token": csrf,
+                    "dialogs": [
+                        "not json",
+                        json.dumps(
+                            {
+                                "source_type": "CHANNEL",
+                                "chat_id": 5,
+                                "display_name": "wrong sign",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "source_type": "CHANNEL",
+                                "chat_id": -100802,
+                                "display_name": "Good",
+                            }
+                        ),
+                    ],
+                },
+            )
+            rows = client.get("/settings/sources").context["sources"]
+
+        assert [row["chat_id"] for row in rows] == [-100802]
+
+    def test_a_batch_add_with_nothing_usable_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            csrf = client.get("/settings/sources").context["csrf_token"]
+            response = client.post(
+                "/sources/batch-add",
+                data={"csrf_token": csrf, "dialogs": ["not json"]},
+            )
+
+        assert response.status_code == 400
+        assert "请至少选择一个会话" in response.text

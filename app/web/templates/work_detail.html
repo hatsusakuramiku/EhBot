@@ -350,8 +350,9 @@
 </div>
 
 {#- The action area, switched by stage. Each stage shows what the pipeline can
-    actually do at that point: 改路径 and 删除 are absent because no endpoint
-    performs them and书库管理 is out of this project's scope. -#}
+    actually do at that point: 改路径 lives on `/downloaded` (it is a library
+    filing decision, made after packaging), while 彻底删除 is here because it is
+    the one action that ends the work and belongs wherever the work is opened. -#}
 <div class="ui-actionbar" role="group" aria-label="{{ work.stage.label }}操作">
   <span class="ui-actionbar-stage">{{ ui.badge(work.stage) }}</span>
   <div class="ui-actionbar-actions">
@@ -401,6 +402,22 @@
                    disabled=not source.available, hint=source.hint) }}
     {% endif %}
     {% endfor %}
+
+    {#- 彻底删除 is the one action that removes the work itself rather than
+        moving it through the pipeline, so it sits after the stage actions and
+        asks twice. Two dialogs, not one with a checkbox, for the same reason
+        `/downloaded` splits its removals: the difference between keeping and
+        deleting the files has to be legible in the button that was pressed. -#}
+    {{ ui.confirm("彻底删除", "彻底删除这件作品",
+                  "候选记录、消息、元数据与审核历史都会删除，已下载的压缩包与已归档的 CBZ 保留；此操作不可恢复。",
+                  confirm_label="确认彻底删除", action=base ~ "/delete",
+                  csrf_token=csrf_token,
+                  hidden={"mode": "delete", "return_to": origin.href}, size="sm") }}
+    {{ ui.confirm("彻底删除并删文件", "彻底删除并删除文件",
+                  "除候选的全部记录外，还会删除已下载的压缩包与已归档的 CBZ；此操作不可恢复。",
+                  confirm_label="确认删除文件", action=base ~ "/delete",
+                  csrf_token=csrf_token,
+                  hidden={"mode": "delete-files", "return_to": origin.href}, size="sm") }}
 
     {#- 快捷翻页 keeps the previous and next work by candidate id in the same
         bar as the stage actions, newest-first order of the 候选 list. Links

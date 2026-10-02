@@ -10,7 +10,6 @@ import httpx
 
 from app.candidates import mtproto
 from app.candidates.ingestor import CandidateIngestor
-from app.candidates.rules import evaluate_source_rules
 from app.connections.exhentai import ExHentaiApi, ExHentaiCredentials
 from app.connections.models import (
     ConnectionSnapshot,
@@ -181,6 +180,16 @@ class ConnectionManager:
                 "auto_approval_after_ingest_failed",
                 extra={"error_code": "AUTO_APPROVAL_AFTER_INGEST_FAILED"},
             )
+
+    def attach_candidate_admission(self, admission: object | None) -> None:
+        """Give the shared ingestor its AI gate.
+
+        The gate depends on the AI service, which is built after this manager;
+        attaching it later keeps the two from having to know about each other's
+        construction order. A manager built without an ingestor ignores this.
+        """
+        if self._candidate_ingestor is not None:
+            self._candidate_ingestor.set_admission(admission)
 
     async def start(self) -> None:
         await self._ingest_pending()
@@ -498,13 +507,19 @@ class ConnectionManager:
         )
         created = 0
         highest = cursor
+        # One rules read for the whole batch, the same as the bot path.
+        rules = await self._candidate_ingestor.parse_rules()
         for raw in raw_messages:
             highest = max(highest, int(getattr(raw, "id", 0) or 0))
             message = mtproto.parse_user_message(raw)
             if message is None:
                 continue
-            source = await self._database.discover_telegram_source(message)
-            decision = evaluate_source_rules(source, message)
+            # The same gate the Bot API path runs: AI admission (when enabled),
+            # the parse rules, then the source's own filters. Sharing it is why
+            # the two ingest paths cannot disagree about what a candidate is.
+            decision = await self._candidate_ingestor.admit_message(
+                message, rules=rules
+            )
             if decision.result == "IGNORE":
                 continue
             message = replace(

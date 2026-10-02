@@ -1,6 +1,6 @@
 """The settings domain's vocabulary, tab strip, and two shared badge resolvers.
 
-Eight sections have to agree in four places: the URL segment, the tab label, the
+Nine sections have to agree in four places: the URL segment, the tab label, the
 sidebar leaf and the JSON payload. Any two of those drifting apart shows up as a
 tab that navigates nowhere or a nav item whose label differs from the heading it
 lands on, so the agreement is asserted here rather than left to a page render.
@@ -30,8 +30,8 @@ def settings_domain():
 
 
 class TestVocabulary:
-    def test_there_are_eight_sections_and_each_has_words(self) -> None:
-        assert len(SETTINGS_SECTIONS) == 8
+    def test_there_are_nine_sections_and_each_has_words(self) -> None:
+        assert len(SETTINGS_SECTIONS) == 9
         assert set(SETTINGS_SECTIONS) == set(SETTINGS_SECTION_STATUS)
         for code in SETTINGS_SECTIONS:
             assert settings_section_view(code).label
@@ -82,7 +82,7 @@ class TestTabStrip:
 
 
 class TestNavigation:
-    def test_the_domain_carries_the_eight_sections_as_children(self) -> None:
+    def test_the_domain_carries_the_nine_sections_as_children(self) -> None:
         children = settings_domain().children
 
         assert [child.path for child in children] == [

@@ -10,7 +10,7 @@ Why the tree has two levels
 ---------------------------
 The target information architecture is four flat domains, but three of them own
 several pages an operator switches between constantly -- the six candidate tabs,
-the three activity queues, the eight settings sections -- and a flat nav would
+the three activity queues, the nine settings sections -- and a flat nav would
 put those behind a page they had to load first. So a domain carries its sections
 as ``children``, the sidebar renders both levels, and only a leaf ever claims
 ``aria-current="page"``.
@@ -32,6 +32,7 @@ from app.api.status import (
     SETTINGS_ARCHIVE,
     SETTINGS_AUTO_APPROVAL,
     SETTINGS_CONNECTIONS,
+    SETTINGS_PARSE,
     SETTINGS_PASSWORDS,
     SETTINGS_PATHS,
     SETTINGS_SOURCES,
@@ -286,7 +287,7 @@ NAV_ITEMS: tuple[NavItem, ...] = (
         "/settings",
         icon="⚙",
         children=(
-            #: The seven tabs of the settings domain, named by
+            #: The nine tabs of the settings domain, named by
             #: `settings_section_view` rather than by a string typed here, for
             #: the same reason the candidate tabs are: the tab, the URL segment
             #: and the JSON payload must be one vocabulary. 外部连接 is the index
@@ -306,6 +307,13 @@ NAV_ITEMS: tuple[NavItem, ...] = (
                 "来源",
                 f"/settings/{SETTINGS_SOURCES}",
                 f"/settings/{SETTINGS_SOURCES}",
+            ),
+            NavItem(
+                "parse",
+                settings_section_view(SETTINGS_PARSE).label,
+                "解析",
+                f"/settings/{SETTINGS_PARSE}",
+                f"/settings/{SETTINGS_PARSE}",
             ),
             NavItem(
                 "auto_approval",

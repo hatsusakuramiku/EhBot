@@ -102,6 +102,12 @@ def volume_group(path: Path) -> str | None:
     legacy = _RAR_LEGACY_PATTERN.match(path.name)
     if legacy:
         return f"{legacy.group('stem')}.rar"
+    if path.suffix.lower() in {".rar", ".cbr"}:
+        # The leading volume of a legacy `.r00` series carries no `.rNN` marker
+        # of its own, but it is index 1 of a group named after its stem. A
+        # single-file `.rar` still resolves to itself: `_sibling_volumes` finds
+        # only that one candidate, which is what the no-group path returned.
+        return f"{path.stem}.rar"
     return None
 
 
@@ -140,19 +146,29 @@ def resolve_volumes(path: Path) -> tuple[tuple[Path, ...], tuple[str, ...]]:
     if not volumes:
         return (path,), ()
     indexes = [index for index in (_volume_index(item) for item in volumes) if index]
+    # `.rar` + `.r00`/`.r01` names its companions differently from a
+    # `.part1.rar` series, so a missing volume must be reported in the naming
+    # scheme the operator actually has on disk.
+    legacy_naming = any(
+        _RAR_LEGACY_PATTERN.match(item.name) for item in volumes
+    )
     missing: list[str] = []
     if indexes:
         expected = set(range(1, max(indexes) + 1))
         for index in sorted(expected - set(indexes)):
-            missing.append(_expected_volume_name(group, index))
+            missing.append(
+                _expected_volume_name(group, index, legacy=legacy_naming)
+            )
     return volumes, tuple(missing)
 
 
-def _expected_volume_name(group: str, index: int) -> str:
+def _expected_volume_name(group: str, index: int, *, legacy: bool = False) -> str:
     stem, _, container = group.rpartition(".")
     if container == "rar":
         if index == 1:
             return group
+        if legacy:
+            return f"{stem}.r{index - 2:02d}"
         return f"{stem}.part{index}.rar"
     return f"{group}.{index:03d}"
 

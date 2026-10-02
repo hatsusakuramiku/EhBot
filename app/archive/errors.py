@@ -43,6 +43,28 @@ class ArchiveToolUnavailable(ArchiveError):
         super().__init__("ARCHIVE_TOOL_UNAVAILABLE", message)
 
 
+class ArchiveBackendUnsupported(ArchiveError):
+    """This backend cannot read the archive, but another profile might.
+
+    It is raised while *admitting* an archive -- listing it, or resolving its
+    password -- and is caught by `ArchiveProcessor` to move on to the next
+    eligible profile. When no profile accepts the archive it surfaces as a
+    plain `ArchiveError` with `ARCHIVE_COMPRESSION_UNSUPPORTED`: the difference
+    between "this backend can't" and "nothing here can" is the fallback.
+    The code is deliberately reused so the operator-facing vocabulary does not
+    grow a word for an internal retry.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "\u538b\u7f29\u5305\u4f7f\u7528\u4e86\u5185\u7f6e\u89e3\u538b\u5668"
+            "\u4e0d\u652f\u6301\u7684\u52a0\u5bc6\u6216\u538b\u7f29\u65b9\u5f0f"
+        ),
+    ) -> None:
+        super().__init__("ARCHIVE_COMPRESSION_UNSUPPORTED", message)
+
+
 class UnsupportedArchiveFormat(ArchiveError):
     def __init__(self, source_format: str) -> None:
         super().__init__(
@@ -53,6 +75,7 @@ class UnsupportedArchiveFormat(ArchiveError):
 
 
 __all__ = [
+    "ArchiveBackendUnsupported",
     "ArchiveError",
     "ArchivePasswordRequired",
     "ArchiveSafetyError",

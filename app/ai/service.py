@@ -778,6 +778,7 @@ class AiProviderService:
         *,
         validate: Callable[[str], object] | None = None,
         stream: bool | None = None,
+        scope: str = CHAIN_SCOPE_ARCHIVE_PATH,
     ) -> AiAnswer:
         """Ask the chain, primary first, and return the first usable answer.
 
@@ -793,8 +794,14 @@ class AiProviderService:
         useless prose must walk the chain exactly like a timeout does: 「返回非法
         JSON 也算失败」 (proposal §7) means the *next model* gets the question,
         and only `complete` knows which model is next.
+
+        `scope` selects which chain answers: the archive-path feature keeps its
+        own list, everything else falls back to the global default. It defaults
+        to `archive_path` because that is what every pre-existing caller wants,
+        and a feature that needs the default chain passes it explicitly rather
+        than getting it by omission.
         """
-        chain = await self.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH)
+        chain = await self.effective_chain(scope)
         if not chain:
             raise AiError(
                 AI_CHAIN_EMPTY,

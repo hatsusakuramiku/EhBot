@@ -35,6 +35,7 @@ from app.downloads.models import (
 from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.models import AUTO_OPERATOR
+from tests.ingest_admission import permit_all_message_types
 from tests.integration.markup import (
     gated_targets,
     nested_form_lines,
@@ -85,6 +86,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
 async def seed_work(database: Database, *, status: str = "PENDING_REVIEW") -> int:
     """One candidate from a real message, so the page has a source to show."""
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,
@@ -228,12 +230,17 @@ def pin_archive_path(
         )
 
 
-def seed_downloaded(database: Database, candidate_id: int) -> int:
+def seed_downloaded(
+    database: Database,
+    candidate_id: int,
+    *,
+    archive_path: str = "/work/source.zip",
+) -> int:
     """A completed download with its archive artifact, and nothing packaged."""
     set_status(database, candidate_id, "DOWNLOADED")
     download_id = insert_job(database, candidate_id, state="COMPLETED")
     insert_artifact(
-        database, download_id, artifact_type="ARCHIVE", path="/work/source.zip"
+        database, download_id, artifact_type="ARCHIVE", path=archive_path
     )
     return download_id
 
@@ -1273,3 +1280,137 @@ class TestAiArchivePath:
         # carries the same word in its own fields.
         assert 'id="archive-directory"' in page.text
         assert 'value="同人志"' not in page.text.split('id="archive-directory"')[1].split(">")[0]
+
+
+class TestPurgeFromThePage:
+    """彻底删除 on `/works/{id}`: the candidate itself goes (R50).
+
+    The record removal and the file removal are two dialogs on the same route,
+    chosen by `mode`, so the tests that matter are that the safe one keeps the
+    files, the destructive one takes them, and a work still in flight refuses
+    rather than racing the worker.
+    """
+
+    def test_deleting_a_work_returns_to_the_list_and_the_work_is_gone(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+
+        with TestClient(create_app(settings), follow_redirects=False) as client:
+            authenticate(client, settings)
+            csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+            response = client.post(
+                f"/candidates/{candidate_id}/delete",
+                data={
+                    "csrf_token": csrf,
+                    "mode": "delete",
+                    "return_to": "/candidates/pending?sort=title",
+                },
+            )
+
+            assert response.status_code == 303
+            assert response.headers["location"] == "/candidates/pending?sort=title"
+            # The work is gone for the session that deleted it; no reload
+            # is needed for the page to stop answering at its old URL.
+            assert client.get(f"/works/{candidate_id}").status_code == 404
+
+    def test_the_default_mode_keeps_the_files_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+        archive = settings.work_path / "source.zip"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"payload")
+        seed_downloaded(database, candidate_id, archive_path=str(archive))
+
+        with TestClient(create_app(settings), follow_redirects=False) as client:
+            authenticate(client, settings)
+            csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+            client.post(
+                f"/candidates/{candidate_id}/delete",
+                data={"csrf_token": csrf, "mode": "delete"},
+            )
+
+        assert archive.exists()
+
+    def test_deleting_the_files_takes_the_cbz_too(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+        pack_id = insert_job(
+            database,
+            candidate_id,
+            state="COMPLETED",
+            provider=PROVIDER_CONVERSION,
+            idempotency_key=f"convert:{candidate_id}",
+        )
+        cbz = settings.library_path / "作者" / "作品.cbz"
+        cbz.parent.mkdir(parents=True, exist_ok=True)
+        cbz.write_bytes(b"payload")
+        insert_artifact(
+            database,
+            pack_id,
+            artifact_type="CBZ",
+            path=str(cbz),
+            relative_path="作者/作品.cbz",
+        )
+
+        with TestClient(create_app(settings), follow_redirects=False) as client:
+            authenticate(client, settings)
+            csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+            client.post(
+                f"/candidates/{candidate_id}/delete",
+                data={"csrf_token": csrf, "mode": "delete-files"},
+            )
+
+        assert not cbz.exists()
+        assert not cbz.parent.exists()
+
+    def test_a_work_in_flight_is_refused_and_the_page_stays(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
+        # PAUSED, not PENDING: the running worker claims a pending job and
+        # fails it before the request arrives, which would turn this into a
+        # test about the worker. A paused job is in flight and stays put. It
+        # carries the archive from its previous run, which is what makes it a
+        # work the guard can see -- a job row alone has no artifact.
+        job_id = insert_job(database, candidate_id, state="PAUSED")
+        insert_artifact(
+            database, job_id, artifact_type="ARCHIVE", path="/work/source.zip"
+        )
+
+        with TestClient(create_app(settings), follow_redirects=False) as client:
+            authenticate(client, settings)
+            csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
+            response = client.post(
+                f"/candidates/{candidate_id}/delete",
+                data={"csrf_token": csrf, "mode": "delete"},
+            )
+            still_there = client.get(f"/works/{candidate_id}")
+
+        assert response.status_code == 400
+        assert "仍有下载任务在进行" in response.text
+        assert still_there.status_code == 200
+
+    def test_the_delete_buttons_are_on_the_page_at_every_stage(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        candidate_id = asyncio.run(seed_work(database))
+
+        with TestClient(create_app(settings)) as client:
+            authenticate(client, settings)
+            page = client.get(f"/works/{candidate_id}")
+
+        assert f'action="/candidates/{candidate_id}/delete"' in page.text
+        assert 'value="delete-files"' in page.text

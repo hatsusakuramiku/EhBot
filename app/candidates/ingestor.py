@@ -5,20 +5,115 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.candidates import links
-from app.candidates.models import IngestSummary, ParsedSourceMessage
+from app.candidates.models import (
+    IngestSummary,
+    ParsedSourceMessage,
+    RuleDecision,
+)
+from app.candidates.parse_rules import (
+    PARSE_RULES_KEY,
+    message_qualifies,
+    parse_rules_view,
+    title_forces_needs_info,
+)
 from app.candidates.rules import evaluate_source_rules
 from app.db.database import Database
 
 
 class CandidateIngestor:
-    def __init__(self, database: Database) -> None:
+    """Turn incoming messages into candidates, or decide not to.
+
+    One pipeline for both ingest paths -- the Bot API updates and the MTProto
+    user-account read. `admit_message` is the shared half: the AI gate (when the
+    operator turned it on), the parse rules, the source's own filters and the
+    title requirement, in that order. A second copy of any of these is how the
+    two paths would start disagreeing about what a candidate is.
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        settings_service: object | None = None,
+        admission: object | None = None,
+    ) -> None:
         self._database = database
+        self._settings = settings_service
+        self._admission = admission
+
+    def set_admission(self, admission: object | None) -> None:
+        """Wire the AI gate after startup.
+
+        The AI service is built after the connection manager (which owns this
+        ingestor) because it needs the archive settings the manager does not, so
+        the gate is attached rather than passed to the constructor. `None` turns
+        it off, which is what a deployment with no AI configuration ever sees.
+        """
+        self._admission = admission
+
+    # ------------------------------------------------------------- admission
+
+    async def parse_rules(self) -> dict:
+        """The current scheme, from the settings service or straight from k/v."""
+        if self._settings is not None:
+            return await self._settings.parse_rules()  # type: ignore[attr-defined]
+        stored = await self._database.system_settings()
+        return parse_rules_view(stored.get(PARSE_RULES_KEY))
+
+    async def admit_message(
+        self, message: ParsedSourceMessage, *, rules: dict | None = None
+    ) -> RuleDecision:
+        """Gate one parsed message, then apply the source's own filters.
+
+        Returns the decision the caller stores on the candidate: `IGNORE` means
+        nothing is written, `NEEDS_INFO` means the candidate exists but is
+        flagged, `ACCEPT` means it is a normal pending candidate.
+        """
+        if rules is None:
+            rules = await self.parse_rules()
+        gate = await self._gate(message, rules)
+        if gate.result == "IGNORE":
+            return gate
+        source = await self._database.discover_telegram_source(message)
+        decision = evaluate_source_rules(source, message)
+        if decision.result != "ACCEPT":
+            return decision
+        if title_forces_needs_info(rules, message):
+            return RuleDecision("NEEDS_INFO", "解析规则要求必须提供标题")
+        return RuleDecision("ACCEPT", gate.reason or decision.reason)
+
+    async def _gate(
+        self, message: ParsedSourceMessage, rules: dict
+    ) -> RuleDecision:
+        """The two pre-source gates: AI admission, then the parse scheme.
+
+        The AI gate runs first (an operator decision recorded in the proposal):
+        it is the expensive, semantic judgement, and when the operator lets it
+        override the parse scheme a message can be admitted on the model's word
+        alone. With the override off, the two are an AND -- the model's `accept`
+        still has to survive the structural rules.
+        """
+        if self._admission is not None:
+            admission = await self._admission.decide(message)  # type: ignore[attr-defined]
+            if admission.verdict == "reject":
+                return RuleDecision("IGNORE", admission.reason)
+            if admission.verdict == "accept" and admission.override:
+                return RuleDecision("ACCEPT", admission.reason)
+        qualified, reason = message_qualifies(rules, message)
+        if not qualified:
+            return RuleDecision("IGNORE", reason)
+        return RuleDecision("ACCEPT", reason)
+
+    # ----------------------------------------------------------------- batch
 
     async def process_pending_updates(self) -> IngestSummary:
         processed = 0
         created = 0
         ignored = 0
         failed = 0
+        # Read once per batch rather than per message: the scheme is one settings
+        # row and a poll may carry a hundred updates.
+        rules = await self.parse_rules()
         while updates := await self._database.pending_telegram_updates(limit=100):
             for update_id, update in updates:
                 try:
@@ -48,8 +143,7 @@ class CandidateIngestor:
                     processed += 1
                     ignored += 1
                     continue
-                source = await self._database.discover_telegram_source(message)
-                decision = evaluate_source_rules(source, message)
+                decision = await self.admit_message(message, rules=rules)
                 if decision.result == "IGNORE":
                     if message.is_edit:
                         await self._database.deactivate_candidate_message(

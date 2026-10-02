@@ -8,9 +8,20 @@ This stub stays at the root because that is where the agent convention looks for
 it. Nothing else belongs here — add a rule to `AgentHelp/AGENTS.md` instead, so
 there is one copy of it.
 
+> **Workflow rule (master copy in `AgentHelp/AGENTS.md`):** write a proposal
+> (`AgentHelp/<FEATURE>_PROPOSAL.md`) first, wait for the operator's review,
+> then implement. 「先寫方案後開工，審閱之後再動手」.
+
+**Before starting any work in this repository, read `AgentHelp/PHASES.md`** — it
+is the one-screen index of every phase (one line each) with pointers into the
+detailed log. Only dive into `AgentHelp/progress.md` after that. Run
+`codegraph sync` at the start of a session so symbol/graph lookup is fresh
+(`.codegraph/` is local and git-ignored).
+
 | Document | What it is |
 |----------|------------|
 | `AgentHelp/AGENTS.md` | Environment, architecture rules, business invariants, test baseline |
+| `AgentHelp/PHASES.md` | **Read first**: one-line summary of every phase + pointers into `progress.md` |
 | `AgentHelp/progress.md` | Phase-by-phase implementation log; read bottom-up for current state |
 | `AgentHelp/EHBot.md` | Requirements spec |
 | `AgentHelp/DEVELOPMENT_PLAN.md` | Phased plan |

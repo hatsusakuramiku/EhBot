@@ -1038,3 +1038,151 @@ class TestSettingsAreReadPerAction:
         # than refused as being outside the startup one.
         assert result["failed_files"] == ()
         assert not inside_new_root.exists()
+
+class TestAllJobsOnRemoval:
+    """A work tried through several sources is still one work.
+
+    `remove_work` used to delete only `work.job_id` and `work.pack_job_id`, so a
+    candidate that had been fetched through two providers kept the other
+    provider's job row, its artifacts and its file. The record was "removed" and
+    still turned up in the activity history.
+    """
+
+    def test_removing_a_work_clears_every_source_it_was_tried_with(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, archive, cbz = fixture.packaged()
+        sibling = fixture.work / "other.zip"
+        sibling_id = fixture.job(
+            candidate_id, provider="EXHENTAI", key="exhentai:1"
+        )
+        fixture.artifact(sibling_id, kind="ARCHIVE", path=sibling)
+
+        result = asyncio.run(
+            fixture.service.remove_work(candidate_id, delete_files=True)
+        )
+
+        assert fixture.jobs(candidate_id) == []
+        assert not archive.exists()
+        assert not cbz.exists()
+        assert not sibling.exists()
+        assert set(result["deleted_files"]) == {
+            str(archive),
+            str(cbz),
+            str(sibling),
+        }
+        # One audit row per removal, not one per provider attempt: the operator
+        # removed one book.
+        assert len(fixture.audit()) == 1
+
+
+class TestPurge:
+    """`purge_work`: the candidate itself goes, not just its downloaded content."""
+
+    def test_records_and_artifacts_go_and_the_files_stay_by_default(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, archive, cbz = fixture.packaged()
+        asyncio.run(
+            fixture.database.record_review_action(
+                candidate_id, "APPROVE", "admin", {}
+            )
+        )
+
+        result = asyncio.run(fixture.service.purge_work(candidate_id))
+
+        assert result["removed_candidate"] == 1
+        assert result["removed_jobs"] == 2
+        assert fixture.candidate_rows() == 0
+        assert fixture.jobs(candidate_id) == []
+        assert archive.exists()
+        assert cbz.exists()
+        with fixture.database._connect() as connection:  # noqa: SLF001
+            actions = connection.execute(
+                "SELECT COUNT(*) FROM review_actions WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()[0]
+            artifacts = connection.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE job_id IN ("
+                " SELECT id FROM download_jobs WHERE candidate_id = ?)",
+                (candidate_id,),
+            ).fetchone()[0]
+        assert actions == 0
+        assert artifacts == 0
+        # The audit outlives the candidate: it is the only remaining answer to
+        # 「这本书去哪了」.
+        assert fixture.audit() == [(candidate_id, 0, "admin", str(cbz))]
+
+    def test_deleting_the_files_takes_the_archive_and_the_cbz(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, archive, cbz = fixture.packaged()
+
+        result = asyncio.run(
+            fixture.service.purge_work(
+                candidate_id, delete_files=True, operator_name="operator"
+            )
+        )
+
+        assert set(result["deleted_files"]) == {str(archive), str(cbz)}
+        assert result["failed_files"] == ()
+        assert not archive.exists()
+        assert not cbz.exists()
+        assert fixture.candidate_rows() == 0
+        assert fixture.audit() == [(candidate_id, 1, "operator", str(cbz))]
+
+    def test_a_candidate_that_never_downloaded_is_deleted_without_an_audit_row(
+        self, fixture: Fixture
+    ) -> None:
+        """There was no work, so there is nothing to record as removed."""
+        candidate_id = fixture.candidate()
+
+        result = asyncio.run(fixture.service.purge_work(candidate_id))
+
+        assert result["removed_candidate"] == 1
+        assert result["removed_jobs"] == 0
+        assert fixture.candidate_rows() == 0
+        assert fixture.audit() == []
+
+    def test_a_missing_candidate_is_refused(self, fixture: Fixture) -> None:
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(fixture.service.purge_work(404))
+
+        assert raised.value.code == "CANDIDATE_NOT_FOUND"
+
+    def test_a_work_in_flight_is_refused_not_raced(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, archive, cbz = fixture.packaged()
+        with fixture.database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "UPDATE download_jobs SET state = ? "
+                "WHERE candidate_id = ? AND provider <> ?",
+                (DOWNLOAD_STATE_PENDING, candidate_id, PROVIDER_CONVERSION),
+            )
+
+        with pytest.raises(ArchivedWorkError) as raised:
+            asyncio.run(fixture.service.purge_work(candidate_id))
+
+        assert raised.value.code == "WORK_STILL_RUNNING"
+        assert fixture.candidate_rows() == 1
+        assert archive.exists()
+        assert cbz.exists()
+
+    def test_every_sibling_job_goes_with_the_candidate(
+        self, fixture: Fixture
+    ) -> None:
+        candidate_id, archive, cbz = fixture.packaged()
+        sibling = fixture.work / "other.zip"
+        sibling_id = fixture.job(
+            candidate_id, provider="EXHENTAI", key="exhentai:2"
+        )
+        fixture.artifact(sibling_id, kind="ARCHIVE", path=sibling)
+
+        result = asyncio.run(
+            fixture.service.purge_work(candidate_id, delete_files=True)
+        )
+
+        assert result["removed_jobs"] == 3
+        assert not sibling.exists()
+        assert fixture.candidate_rows() == 0

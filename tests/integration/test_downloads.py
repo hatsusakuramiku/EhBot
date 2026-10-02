@@ -19,6 +19,7 @@ from app.downloads.models import (
 )
 from app.downloads.service import DownloadError, DownloadService
 from app.main import create_app
+from tests.ingest_admission import permit_all_message_types
 
 
 def make_settings(root: Path) -> Settings:
@@ -34,6 +35,7 @@ def make_settings(root: Path) -> Settings:
 
 async def seed_archive(database: Database, *, file_name: str) -> int:
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100123,

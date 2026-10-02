@@ -3,7 +3,11 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from app.archive.errors import ArchiveError, ArchivePasswordRequired
+from app.archive.errors import (
+    ArchiveBackendUnsupported,
+    ArchiveError,
+    ArchivePasswordRequired,
+)
 from app.archive.models import (
     BACKEND_ZIPFILE,
     FORMAT_ZIP,
@@ -20,6 +24,25 @@ HEADER_SIZE = 16
 _ENCRYPTED_FLAG = 0x1
 # Unix symlink mode bits stored in the high half of external_attr.
 _SYMLINK_MODE = 0xA000
+
+#: Methods Python's `zipfile` can actually decode: Stored, Deflate, Bzip2 and
+#: LZMA. WinZip AES-256 stores method 99 and Deflate64 stores method 9, and the
+#: listing reports both without a password. Catching them here turns "this
+#: backend cannot read the bytes" into a hand-off to 7-Zip, instead of letting
+#: `zipfile` raise `NotImplementedError` inside a password attempt, where it
+#: used to be mistaken for a wrong password.
+_SUPPORTED_METHODS = frozenset({0, 8, 12, 14})
+
+
+def _unsupported_method(
+    name: str | None = None, method: int | None = None
+) -> ArchiveBackendUnsupported:
+    if name is None or method is None:
+        return ArchiveBackendUnsupported()
+    return ArchiveBackendUnsupported(
+        f"ZIP \u6210\u5458 {name} \u4f7f\u7528\u4e86\u5185\u7f6e\u89e3\u538b\u5668"
+        f"\u4e0d\u652f\u6301\u7684\u65b9\u6cd5\uff08{method}\uff09"
+    )
 
 
 class ZipfileBackend:
@@ -42,6 +65,13 @@ class ZipfileBackend:
                     member_encrypted = bool(info.flag_bits & _ENCRYPTED_FLAG)
                     encrypted = encrypted or member_encrypted
                     is_dir = info.is_dir() or info.filename.endswith("/")
+                    if not is_dir and int(info.compress_type) not in _SUPPORTED_METHODS:
+                        # Decide before reading a single byte: the check needs
+                        # the central directory only, so it also works for an
+                        # AES archive whose members cannot be opened at all.
+                        raise _unsupported_method(
+                            info.filename, int(info.compress_type)
+                        )
                     header = b""
                     if not is_dir and not member_encrypted:
                         header = self._read_header(archive, info)
@@ -96,13 +126,10 @@ class ZipfileBackend:
                     return
                 with archive.open(target, "r") as reader:
                     reader.read(1)
+        except NotImplementedError as exc:
+            raise _unsupported_method(target.filename, target.compress_type) from exc
         except RuntimeError as exc:
             raise ArchivePasswordRequired() from exc
-        except NotImplementedError as exc:
-            raise ArchiveError(
-                "ARCHIVE_COMPRESSION_UNSUPPORTED",
-                "ZIP \u4f7f\u7528\u4e86\u4e0d\u53d7\u652f\u6301\u7684\u52a0\u5bc6\u6216\u538b\u7f29\u65b9\u5f0f",
-            ) from exc
         except (OSError, zipfile.BadZipFile) as exc:
             raise ArchiveError(
                 "ARCHIVE_UNREADABLE",
@@ -146,6 +173,8 @@ class ZipfileBackend:
                                     break
                                 writer.write(chunk)
                     extracted[wanted[safe_name]] = target
+        except NotImplementedError as exc:
+            raise _unsupported_method() from exc
         except RuntimeError as exc:
             raise ArchivePasswordRequired() from exc
         except (OSError, zipfile.BadZipFile) as exc:
@@ -196,6 +225,9 @@ class ZipfileBackend:
                                         break
                                     writer.write(chunk)
                         written += 1
+        except NotImplementedError as exc:
+            destination.unlink(missing_ok=True)
+            raise _unsupported_method() from exc
         except RuntimeError as exc:
             destination.unlink(missing_ok=True)
             raise ArchivePasswordRequired() from exc

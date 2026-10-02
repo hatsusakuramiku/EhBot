@@ -104,6 +104,24 @@ language、tags（数组）、page_count。
 输出：{"directory": "商业志/作者名/○○の単行本", "filename": "○○の単行本"}"""
 
 
+#: The candidate-admission prompt. A different question from the archive-path
+#: one above -- 「这条消息是不是一本作品」 rather than 「这本书归到哪个目录」 --
+#: so it is its own default text, stored under its own key. Kept short: the
+#: model reads one message, not a metadata document.
+DEFAULT_CANDIDATE_PROMPT = r"""你是 EhBot 的候选准入助手。你会收到一条 Telegram 消息的 JSON：
+来源名称、正文、链接，以及附件（类型、文件名）。请判断这条消息是不是一本可以
+加入下载候选的 ExHentai/e-hentai 作品（同人志、商业志、单行本、画集等）。
+
+只根据消息本身判断，不要推测消息里没有的信息。以下都算「不是作品」：
+闲聊、广告、抽奖、纯表情图片、与作品无关的文件、只有外部网盘链接的转发。
+如果消息包含 ExHentai/e-hentai 画廊链接，或明确是一部作品的上传/转发，算「是」。
+
+只输出一个 JSON 对象，不要输出解释、Markdown 代码块或任何其它文字：
+{"accept": true, "reason": "<一句中文理由>"}
+
+accept 为 true 表示可以入候选，为 false 表示拒绝。reason 会记入日志与页面。"""
+
+
 #: Where the payload goes when the operator writes it into the prompt. Absent,
 #: the payload is appended as the user message instead -- the arrangement the
 #: default prompt uses, because it keeps the instructions and the data visually
@@ -231,11 +249,38 @@ def build_messages(
     ]
 
 
+def candidate_payload(message: Any) -> dict[str, Any]:
+    """The JSON one admission request carries.
+
+    Deliberately the message the operator's channels can see, not the parsed
+    candidate: no gallery token, no chat id, no account detail. The text already
+    contains the links, so passing them again under their own keys would only
+    give the model two places to disagree with itself.
+    """
+    return {
+        "source": getattr(message, "chat_title", None),
+        "text": getattr(message, "message_text", ""),
+        "has_gallery_link": getattr(message, "ex_gid", None) is not None,
+        "preview_links": list(getattr(message, "preview_urls", ()) or ()),
+        "attachments": [
+            {
+                "type": str(attachment.get("type") or ""),
+                "file_name": str(attachment.get("file_name") or ""),
+                "mime_type": str(attachment.get("mime_type") or ""),
+                "size_bytes": int(attachment.get("size_bytes") or 0),
+            }
+            for attachment in (getattr(message, "attachments", ()) or ())
+        ],
+    }
+
+
 __all__ = [
     "DEFAULT_AI_PROMPT",
+    "DEFAULT_CANDIDATE_PROMPT",
     "METADATA_PLACEHOLDER",
     "build_metadata_payload",
     "build_messages",
+    "candidate_payload",
     "fields_from_metadata",
     "metadata_payload",
     "split_values",

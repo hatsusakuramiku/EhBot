@@ -53,6 +53,7 @@ from app.api.status import (
     SETTINGS_CONNECTIONS,
     SETTINGS_PASSWORDS,
     SETTINGS_PATHS,
+    SETTINGS_PARSE,
     SETTINGS_SECTIONS,
     SETTINGS_SOURCES,
     SETTINGS_SYSTEM,
@@ -60,7 +61,11 @@ from app.api.status import (
     dependency_view,
     settings_section_view,
 )
-from app.ai.prompt import DEFAULT_AI_PROMPT
+from app.ai.prompt import DEFAULT_AI_PROMPT, DEFAULT_CANDIDATE_PROMPT
+from app.candidates.parse_rules import (
+    ARCHIVE_FORMATS as PARSE_ARCHIVE_FORMATS,
+    DEFAULT_PARSE_RULES,
+)
 from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 from app.archive.service import (
     MAX_AI_BATCH_SIZE,
@@ -106,6 +111,7 @@ from app.conversion.naming import (
 from app.logs.reader import MAX_LIMIT, clamp_limit, read_log_tail
 from app.review.models import field_label
 from app.settings.service import (
+    AI_CANDIDATE_FALLBACKS,
     MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
     MAX_POLL_INTERVAL_MS,
     MAX_SOURCE_CONCURRENCY,
@@ -185,6 +191,25 @@ async def _sources_section(request: Request) -> dict[str, Any]:
         "source_types": [dict(entry) for entry in SOURCE_TYPES],
         "dialog_kinds": [dict(entry) for entry in DIALOG_KINDS],
         "archive_formats": list(SOURCE_ARCHIVE_FORMATS),
+    }
+
+
+async def _parse_section(request: Request) -> dict[str, Any]:
+    """The candidate-admission scheme and the AI gate over it.
+
+    One section for both because they are one pipeline: the AI gate runs in
+    front of the parse rules and may be told to override them, and an operator
+    tuning 「什么消息能进候选」 has to see the two together or they will set one
+    and wonder why the other still fires. Nothing here is a secret.
+    """
+    settings = deps.system_settings_service(request)
+    return {
+        "parse_rules": await settings.parse_rules(),
+        "parse_defaults": DEFAULT_PARSE_RULES,
+        "archive_formats": list(PARSE_ARCHIVE_FORMATS),
+        "candidate_admission": await settings.candidate_admission(),
+        "candidate_prompt_default": DEFAULT_CANDIDATE_PROMPT,
+        "candidate_fallbacks": list(AI_CANDIDATE_FALLBACKS),
     }
 
 
@@ -622,6 +647,7 @@ _SECTION_BUILDERS: dict[
 ] = {
     SETTINGS_CONNECTIONS: _connections_section,
     SETTINGS_SOURCES: _sources_section,
+    SETTINGS_PARSE: _parse_section,
     SETTINGS_AUTO_APPROVAL: _auto_approval_section,
     SETTINGS_ARCHIVE: _archive_section,
     SETTINGS_PATHS: _paths_section,

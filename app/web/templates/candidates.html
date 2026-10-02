@@ -144,7 +144,7 @@
         <a href="{{ grid_href }}" {% if view == 'grid' %}aria-current="true"{% endif %}>封面</a>
         <a href="{{ list_href }}" {% if view == 'list' %}aria-current="true"{% endif %}>列表</a>
       </div>
-      {% if batch_enabled and candidates %}
+      {% if bulk_selectable and candidates %}
       {#- Unhidden by `candidates.js`. Select-all across a page of 50 is the one
           selection task a mouse is bad at, and there is no no-script fallback
           worth faking with 50 hidden checkboxes. -#}
@@ -171,7 +171,7 @@
           owns, and a header button that needed JavaScript to rewrite the URL
           would be a second, worse copy of it. -#}
       {% call ui.table(columns, caption=tab_title) %}
-        {% for item in candidates %}{{ candidate_row(item, selectable=batch_enabled) }}{% endfor %}
+        {% for item in candidates %}{{ candidate_row(item, selectable=bulk_selectable) }}{% endfor %}
       {% endcall %}
       {% else %}
       <div class="ui-cover-grid">
@@ -184,7 +184,7 @@
                 meta=candidate_meta(item),
                 tags=item.tags[:4],
                 status=item.status,
-                selectable=batch_enabled,
+                selectable=bulk_selectable,
                 value=item.candidate_id) %}
             {{ candidate_actions(item) }}
           {% endcall %}
@@ -193,13 +193,15 @@
       </div>
       {% endif %}
 
-      {% if batch_enabled %}
+      {% if bulk_selectable %}
       <div x-show="selected > 0" x-cloak>
         {% call ui.bulk_toolbar(0, total=total, noun="条候选", count_binding="selected") %}
+          {% if batch_enabled %}
           <button class="ui-btn" data-variant="primary" data-size="sm" type="submit"
                   name="action" value="approve">批量通过并下载</button>
-          {#- The one destructive action on this page, so it is the one that gets
-              a second step. The dialog's button carries `form="candidate-batch"`
+          {#- 驳回 moves a whole page of works at once, so it gets a second
+              step like the 彻底删除 dialogs below. Its button carries
+              `form="candidate-batch"`
               because the dialog is teleported to `<body>`: it submits the same
               form, with the same selection, and the same `action=reject` the
               plain button used to send. -#}
@@ -207,6 +209,20 @@
                         "候选会进入「已驳回」队列，不会被删除；需要时可在该队列里重新排队。",
                         confirm_label="确认驳回", form="candidate-batch",
                         field="action", value="reject", size="sm") }}
+          {% endif %}
+          {#- 彻底删除 goes all the way: the candidate row, its messages and
+              metadata, its review history and every download job it ever had.
+              Split into two dialogs for the same reason `/downloaded` splits
+              its removals -- 「默认不删文件」 is only true if the operator can
+              see which button deletes them. -#}
+          {{ ui.confirm("批量彻底删除", "彻底删除选中的候选",
+                        "候选记录、消息、元数据与审核历史都会删除，已下载的压缩包与 CBZ 保留；此操作不可恢复。",
+                        confirm_label="确认彻底删除", form="candidate-batch",
+                        field="action", value="delete", size="sm") }}
+          {{ ui.confirm("批量彻底删除并删文件", "彻底删除候选并删除文件",
+                        "除候选的全部记录外，还会删除已下载的压缩包与已归档的 CBZ；此操作不可恢复。",
+                        confirm_label="确认删除文件", form="candidate-batch",
+                        field="action", value="delete-files", size="sm") }}
         {% endcall %}
       </div>
       {% endif %}

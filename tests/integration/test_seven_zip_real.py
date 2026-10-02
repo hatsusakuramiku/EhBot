@@ -341,3 +341,172 @@ def test_backend_inspect_reports_real_member_sizes(tmp_path: Path) -> None:
     assert manifest.member_count == 2
     assert manifest.encrypted is False
     assert manifest.total_size == 4096
+
+
+# --- built-in reader fallback (R51) ---------------------------------------
+
+
+def test_aes256_zip_falls_back_to_seven_zip(tmp_path: Path) -> None:
+    """The archive that used to stop at "waiting for password" now packs.
+
+    `zipfile` cannot decode WinZip AES-256 (method 99), so admission hands the
+    archive to 7-Zip instead of calling the correct password wrong.
+    """
+    source = _pages(tmp_path / "src", 3, size=2048)
+    archive = tmp_path / "aes.zip"
+    _run(
+        "a", "-tzip", "-mem=AES256", "-pS3cret", "-bso0", "-bsp0",
+        str(archive), str(source / "*"),
+    )
+
+    result = _process(archive, tmp_path, passwords=((1, "S3cret"),))
+
+    assert result.snapshot.backend == "seven_zip"
+    assert result.page_count == 3
+    assert result.password_id == 1
+
+
+def test_unencrypted_deflate64_zip_no_longer_asks_for_a_password(
+    tmp_path: Path,
+) -> None:
+    # Compressible pages: 7-Zip stores incompressible data verbatim, and only a
+    # real Deflate64 stream (method 9) exercises the fallback.
+    source = _pages(tmp_path / "src", 3, size=4096)
+    archive = tmp_path / "deflate64.zip"
+    _run(
+        "a", "-tzip", "-mm=Deflate64", "-bso0", "-bsp0",
+        str(archive), str(source / "*"),
+    )
+
+    result = _process(archive, tmp_path)
+
+    assert result.snapshot.backend == "seven_zip"
+    assert result.page_count == 3
+    assert result.password_id is None
+
+
+def test_encrypted_deflate64_zip_uses_the_vault_after_falling_back(
+    tmp_path: Path,
+) -> None:
+    source = _pages(tmp_path / "src", 3, size=4096)
+    archive = tmp_path / "deflate64-secret.zip"
+    _run(
+        "a", "-tzip", "-mm=Deflate64", "-pS3cret", "-bso0", "-bsp0",
+        str(archive), str(source / "*"),
+    )
+
+    result = _process(archive, tmp_path, passwords=((1, "S3cret"),))
+
+    assert result.snapshot.backend == "seven_zip"
+    assert result.password_id == 1
+
+
+def test_a_plain_zip_keeps_the_builtin_streaming_backend(tmp_path: Path) -> None:
+    source = _pages(tmp_path / "src", 2)
+    archive = tmp_path / "plain.zip"
+    _run("a", "-tzip", "-mx=9", "-bso0", "-bsp0", str(archive), str(source / "*"))
+
+    result = _process(archive, tmp_path)
+
+    assert result.snapshot.backend == "zipfile"
+
+
+def test_an_aes_zip_with_an_empty_vault_still_reports_a_password(
+    tmp_path: Path,
+) -> None:
+    """Falling back must not turn a real password problem into a method error."""
+    source = _pages(tmp_path / "src", 1, size=2048)
+    archive = tmp_path / "aes-empty.zip"
+    _run(
+        "a", "-tzip", "-mem=AES256", "-pS3cret", "-bso0", "-bsp0",
+        str(archive), str(source / "*"),
+    )
+
+    with pytest.raises(ArchivePasswordRequired):
+        _process(archive, tmp_path)
+
+
+# --- real RAR archives (committed fixtures, no rar binary required) --------
+
+
+RAR_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "rar"
+RAR_PASSWORD = "S3cret"
+
+pytestmark = [
+    pytestmark,
+    pytest.mark.skipif(
+        not (RAR_FIXTURES / "rar5-plain.rar").is_file(),
+        reason="RAR fixtures are not present",
+    ),
+]
+
+
+def _rar(name: str) -> Path:
+    return RAR_FIXTURES / name
+
+
+def test_real_rar5_archive_is_published_as_cbz(tmp_path: Path) -> None:
+    result = _process(_rar("rar5-plain.rar"), tmp_path)
+    assert result.snapshot.backend == "seven_zip"
+    assert result.snapshot.source_format == "rar"
+    assert result.page_count == 3
+
+
+def test_real_rar5_header_encrypted_archive_uses_the_vault(
+    tmp_path: Path,
+) -> None:
+    """`-hp` hides the names too, so the vault is consulted before listing."""
+    result = _process(
+        _rar("rar5-hp.rar"), tmp_path, passwords=((4, RAR_PASSWORD),)
+    )
+    assert result.snapshot.backend == "seven_zip"
+    assert result.page_count == 3
+    assert result.password_id == 4
+
+
+def test_real_rar3_header_encrypted_archive_uses_the_vault(
+    tmp_path: Path,
+) -> None:
+    result = _process(
+        _rar("rar3-hp.rar"), tmp_path, passwords=((4, RAR_PASSWORD),)
+    )
+    assert result.page_count == 3
+    assert result.password_id == 4
+
+
+def test_real_rar_with_data_only_encryption_uses_the_vault(
+    tmp_path: Path,
+) -> None:
+    result = _process(
+        _rar("rar5-password.rar"), tmp_path, passwords=((4, RAR_PASSWORD),)
+    )
+    assert result.page_count == 3
+    assert result.password_id == 4
+
+
+def test_real_rar_without_the_password_still_asks_for_one(tmp_path: Path) -> None:
+    with pytest.raises(ArchivePasswordRequired):
+        _process(_rar("rar5-hp.rar"), tmp_path, passwords=((1, "wrong"),))
+
+
+def test_real_rar5_volumes_are_all_used(tmp_path: Path) -> None:
+    result = _process(_rar("rar5-vol.part1.rar"), tmp_path)
+    assert result.volume_count == 3
+    assert result.page_count == 3
+
+
+def test_real_legacy_rnn_volumes_are_found_from_the_leading_rar(
+    tmp_path: Path,
+) -> None:
+    """The `.rar` end of a `.r00` series must find its companions (R51 fix)."""
+    result = _process(_rar("rar3-old.rar"), tmp_path)
+    assert result.volume_count == 3
+    assert result.page_count == 3
+
+
+def test_real_solid_rar_high_ratio_pages_pass_the_ratio_gate(
+    tmp_path: Path,
+) -> None:
+    """A solid block of blank pages is identified as an image and allowed."""
+    result = _process(_rar("rar5-solid.rar"), tmp_path)
+    assert result.page_count == 3

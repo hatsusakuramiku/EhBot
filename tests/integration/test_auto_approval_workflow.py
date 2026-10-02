@@ -9,6 +9,7 @@ from app.config import Settings
 from app.db.database import Database
 from app.downloads.service import DownloadService
 from app.main import create_app
+from tests.ingest_admission import permit_all_message_types
 
 
 def _settings(root: Path) -> Settings:
@@ -23,6 +24,7 @@ def _settings(root: Path) -> Settings:
 
 async def _seed_candidate(database: Database) -> int:
     await database.initialize()
+    await permit_all_message_types(database)
     await database.configure_telegram_source(
         source_type="CHANNEL",
         chat_id=-100987,

@@ -21,6 +21,15 @@ from __future__ import annotations
 
 import re
 
+from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
+from app.candidates.parse_rules import (
+    PARSE_RULES_KEY,
+    ParseRulesError,
+    default_parse_rules,
+    dump_parse_rules,
+    parse_rules_view,
+    validate_parse_rules,
+)
 from app.config import LOG_LEVEL_CHOICES
 from app.db.database import Database
 from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
@@ -32,6 +41,19 @@ SETTING_TIMEZONE = "timezone"
 SETTING_AUTO_APPROVAL_INTERVAL_MINUTES = "auto_approval_interval_minutes"
 SETTING_LOG_LEVEL = "log_level"
 SETTING_DOWNLOAD_SOURCE_PRIORITY = "download_source_priority"
+
+#: The AI candidate-admission switches. All four are one decision -- 「要不要让
+#: 模型先看一遍消息」 -- so they are read together and saved from one page.
+SETTING_AI_CANDIDATE_ENABLED = "ai_candidate_enabled"
+SETTING_AI_CANDIDATE_PROMPT = "ai_candidate_prompt"
+SETTING_AI_CANDIDATE_OVERRIDE = "ai_candidate_override_parse_rules"
+SETTING_AI_CANDIDATE_FALLBACK = "ai_candidate_fallback"
+
+#: What to do when the gate is on but the chain cannot answer. `reject` keeps
+#: the gate's intent (keep things out) on error; `accept` is for an operator who
+#: would rather review a stray message than lose a book to a timeout.
+AI_CANDIDATE_FALLBACKS: tuple[str, ...] = ("reject", "accept")
+DEFAULT_AI_CANDIDATE_FALLBACK = "reject"
 
 #: Visible-tab polling cadence. 2s matches what `/api/v1/meta` served as a
 #: constant before this was editable, so an operator who never opens the
@@ -237,6 +259,92 @@ class SystemSettingsService:
             (await self.snapshot())["download_source_priority"]
         )
 
+    async def parse_rules(self) -> dict[str, object]:
+        """The candidate-admission parse scheme, always in the full shape."""
+        stored = await self._database.system_settings()
+        return parse_rules_view(stored.get(PARSE_RULES_KEY))
+
+    async def save_parse_rules(self, raw: object) -> dict[str, object]:
+        """Validate and store a submitted scheme, or refuse with the reason."""
+        try:
+            rules = validate_parse_rules(raw)  # type: ignore[arg-type]
+        except ParseRulesError as exc:
+            raise SystemSettingsError(exc.code, exc.public_message) from exc
+        await self._database.save_system_settings(
+            {PARSE_RULES_KEY: dump_parse_rules(rules)}
+        )
+        return await self.parse_rules()
+
+    async def reset_parse_rules(self) -> dict[str, object]:
+        """Drop the stored scheme, returning the shipped default."""
+        await self._database.save_system_settings(
+            {PARSE_RULES_KEY: dump_parse_rules(default_parse_rules())}
+        )
+        return await self.parse_rules()
+
+    async def candidate_admission(self) -> dict[str, object]:
+        """The AI candidate gate, read leniently and always complete.
+
+        An empty prompt reads back as the shipped default rather than as 「ask
+        nothing」: a blank system message would be a request the model cannot
+        answer, and the page shows the default in the box so the operator can
+        see what a cleared field means.
+        """
+        stored = await self._database.system_settings()
+        fallback = stored.get(SETTING_AI_CANDIDATE_FALLBACK, "").strip().lower()
+        if fallback not in AI_CANDIDATE_FALLBACKS:
+            fallback = DEFAULT_AI_CANDIDATE_FALLBACK
+        prompt = stored.get(SETTING_AI_CANDIDATE_PROMPT, "").strip()
+        return {
+            "enabled": _read_bool(stored, SETTING_AI_CANDIDATE_ENABLED),
+            "prompt": prompt or DEFAULT_CANDIDATE_PROMPT,
+            "override_parse_rules": _read_bool(
+                stored, SETTING_AI_CANDIDATE_OVERRIDE
+            ),
+            "fallback": fallback,
+            "prompt_overridden": bool(prompt),
+            "enabled_overridden": bool(
+                stored.get(SETTING_AI_CANDIDATE_ENABLED, "").strip()
+            ),
+            "override_overridden": bool(
+                stored.get(SETTING_AI_CANDIDATE_OVERRIDE, "").strip()
+            ),
+        }
+
+    async def save_candidate_admission(
+        self, values: dict[str, object]
+    ) -> dict[str, object]:
+        """Store whichever admission switches the form submitted.
+
+        A key the form left out is untouched, so the two halves of the page (the
+        parse scheme and the AI gate) can be saved independently without one
+        clearing the other.
+        """
+        cleaned: dict[str, str] = {}
+        if SETTING_AI_CANDIDATE_ENABLED in values:
+            cleaned[SETTING_AI_CANDIDATE_ENABLED] = (
+                "1" if _truthy(values[SETTING_AI_CANDIDATE_ENABLED]) else "0"
+            )
+        if SETTING_AI_CANDIDATE_OVERRIDE in values:
+            cleaned[SETTING_AI_CANDIDATE_OVERRIDE] = (
+                "1" if _truthy(values[SETTING_AI_CANDIDATE_OVERRIDE]) else "0"
+            )
+        if SETTING_AI_CANDIDATE_PROMPT in values:
+            cleaned[SETTING_AI_CANDIDATE_PROMPT] = str(
+                values[SETTING_AI_CANDIDATE_PROMPT] or ""
+            ).strip()
+        if SETTING_AI_CANDIDATE_FALLBACK in values:
+            fallback = str(values[SETTING_AI_CANDIDATE_FALLBACK] or "").strip().lower()
+            if fallback not in AI_CANDIDATE_FALLBACKS:
+                raise SystemSettingsError(
+                    "AI_CANDIDATE_FALLBACK_INVALID",
+                    "兜底动作必须是 reject 或 accept",
+                )
+            cleaned[SETTING_AI_CANDIDATE_FALLBACK] = fallback
+        if cleaned:
+            await self._database.save_system_settings(cleaned)
+        return await self.candidate_admission()
+
     async def save(self, values: dict[str, str]) -> dict[str, object]:
         """Validate and store whichever preferences the form submitted.
 
@@ -298,6 +406,27 @@ class SystemSettingsService:
         if cleaned:
             await self._database.save_system_settings(cleaned)
         return await self.snapshot()
+
+
+def _read_bool(stored: dict[str, str], key: str, default: bool = False) -> bool:
+    """A stored on/off value, read leniently.
+
+    Absent means the default; anything the form (or an older build) might have
+    written as "on" counts as on, and everything else is off. Reads never raise
+    for the same reason every other preference read does not.
+    """
+    raw = str(stored.get(key, "")).strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "on", "yes"}
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "on", "yes"}
 
 
 def _read_priority(raw: object) -> tuple[str, ...]:

@@ -203,6 +203,77 @@ class ArchivedWorkService:
 
     # ---------------------------------------------------------------- removal
 
+    async def _delete_work_files(
+        self, candidate_id: int
+    ) -> tuple[list[str], list[str]]:
+        """Delete every artifact this candidate produced, and its pinned CBZ.
+
+        Shared by 移除 and 彻底删除, which differ in what they do to the records
+        but not in what "delete the files" means. It reads *all* artifacts rather
+        than the newest download's two paths: a work tried through two sources has
+        two archive files, and removing one of them was the old defect.
+
+        The CBZ lives under the library, every other artifact under the work
+        directory; each path is validated against its own root, so a path that has
+        drifted between the two is refused rather than deleted from whichever tree
+        happens to contain it.
+        """
+        library_root, work_root = await self._roots()
+        targets: list[tuple[str, Path]] = []
+        for artifact_type, raw in await self._database.candidate_artifacts(
+            candidate_id
+        ):
+            root = library_root if artifact_type == "CBZ" else work_root
+            targets.append((raw, root))
+        pin = await self._database.archive_path_pin(candidate_id)
+        if pin is not None and pin.get("relative_path"):
+            targets.append(
+                (str(library_root / str(pin["relative_path"])), library_root)
+            )
+
+        deleted: list[str] = []
+        failed: list[str] = []
+        seen: set[str] = set()
+        for raw, root in targets:
+            try:
+                target = _resolve_inside(root, Path(raw))
+            except ArchivedWorkError:
+                # Refusing one file must not abandon the removal: the operator
+                # asked for the work to go, and a path we will not touch is
+                # reported rather than silently skipped.
+                failed.append(raw)
+                logger.warning(
+                    "archived_work_path_refused",
+                    extra={"error_code": "PATH_OUTSIDE_ROOT"},
+                )
+                continue
+            if str(target) in seen:
+                continue
+            seen.add(str(target))
+            try:
+                await asyncio.to_thread(target.unlink)
+            except FileNotFoundError:
+                # Already gone is the desired end state, not an error. It still
+                # counts as deleted: the operator asked for it not to be there,
+                # and the audit row should not claim the bytes might remain.
+                deleted.append(raw)
+                if root == library_root:
+                    await asyncio.to_thread(
+                        _prune_empty_parents, target, library_root
+                    )
+                continue
+            except OSError:
+                failed.append(raw)
+                logger.warning(
+                    "archived_work_delete_failed",
+                    extra={"error_code": "FILE_DELETE_FAILED"},
+                )
+                continue
+            deleted.append(raw)
+            if root == library_root:
+                await asyncio.to_thread(_prune_empty_parents, target, library_root)
+        return deleted, failed
+
     async def remove_work(
         self,
         candidate_id: int,
@@ -217,6 +288,12 @@ class ArchivedWorkService:
         requirements document makes file deletion opt-in and off by default, and
         the parameter keeps that shape -- a caller that forgets it deletes
         nothing rather than everything.
+
+        **Every** job the candidate owns is removed, not just the newest download
+        and the packaging task. A work tried through several sources holds one
+        row per source (each has its own idempotency key), and removing only the
+        newest left the others' rows and files behind -- they still appeared in
+        the activity history and could still be listed as downloaded content.
 
         A work with a task still in flight is refused rather than raced: the
         download worker or the packer holds that row and would write to it (or
@@ -233,54 +310,16 @@ class ArchivedWorkService:
                 "WORK_PACK_RUNNING",
                 "该作品正在打包，请等待打包结束再移除",
             )
-        library_root, work_root = await self._roots()
-
+        jobs = await self._database.candidate_jobs(candidate_id)
         deleted: list[str] = []
         failed: list[str] = []
         if delete_files:
-            # The CBZ lives under the library; the source archive under the work
-            # directory. Each is validated against its own root, so a path that
-            # has drifted between the two is refused rather than deleted from
-            # whichever tree happens to contain it.
-            for raw, root in (
-                (work.cbz_path, library_root),
-                (work.archive_path, work_root),
-            ):
-                if not raw:
-                    continue
-                try:
-                    target = _resolve_inside(root, Path(raw))
-                except ArchivedWorkError:
-                    # Refusing one file must not abandon the removal: the
-                    # operator asked for the work to go, and a path we will not
-                    # touch is reported rather than silently skipped.
-                    failed.append(raw)
-                    logger.warning(
-                        "archived_work_path_refused",
-                        extra={"error_code": "PATH_OUTSIDE_ROOT"},
-                    )
-                    continue
-                try:
-                    await asyncio.to_thread(target.unlink)
-                except FileNotFoundError:
-                    # Already gone is the desired end state, not an error.
-                    pass
-                except OSError:
-                    failed.append(raw)
-                    logger.warning(
-                        "archived_work_delete_failed",
-                        extra={"error_code": "FILE_DELETE_FAILED"},
-                    )
-                    continue
-                deleted.append(raw)
-                if root == library_root:
-                    await asyncio.to_thread(
-                        _prune_empty_parents, target, library_root
-                    )
+            deleted, failed = await self._delete_work_files(candidate_id)
 
         removed_jobs = await asyncio.to_thread(
             self._remove_records_sync,
             work,
+            jobs,
             bool(delete_files) and not failed,
             operator_name,
         )
@@ -302,9 +341,13 @@ class ArchivedWorkService:
         }
 
     def _remove_records_sync(
-        self, work: DownloadedWork, deleted_files: bool, operator_name: str
+        self,
+        work: DownloadedWork,
+        jobs: list[tuple[int, str]],
+        deleted_files: bool,
+        operator_name: str,
     ) -> int:
-        """Delete the job rows in one transaction, leaving an audit row.
+        """Delete every job row for the work, leaving one audit row per job.
 
         `artifacts` is deleted first because it holds a foreign key onto
         `download_jobs` and `PRAGMA foreign_keys` is ON for every connection --
@@ -315,9 +358,9 @@ class ArchivedWorkService:
         orphan `review_actions` rows that point at it. Removing downloaded
         content means the download is gone, not that the book was never seen.
         """
-        job_ids = [work.job_id]
-        if work.pack_job_id is not None:
-            job_ids.append(work.pack_job_id)
+        if not jobs:
+            jobs = [(work.job_id, work.provider)]
+        job_ids = [job_id for job_id, _ in jobs]
         placeholders = ", ".join("?" for _ in job_ids)
         with self._database.connection() as connection:
             connection.execute(
@@ -329,6 +372,10 @@ class ArchivedWorkService:
                 tuple(job_ids),
             )
             removed = int(cursor.rowcount or 0)
+            # One audit row per *removal*, matching the table's original shape:
+            # `removed_works` answers「这本书的记录去哪了」, and one row per
+            # provider attempt would read as several books. The newest job is
+            # the identity the operator saw on `/downloaded`.
             connection.execute(
                 "INSERT INTO removed_works "
                 "(candidate_id, job_id, provider, title, archive_path, "
@@ -346,6 +393,69 @@ class ArchivedWorkService:
                 ),
             )
         return removed
+
+    # ------------------------------------------------------------- full purge
+
+    async def purge_work(
+        self,
+        candidate_id: int,
+        *,
+        delete_files: bool = False,
+        operator_name: str = "admin",
+    ) -> dict:
+        """Delete the candidate and every work it produced.
+
+        `remove_work` above removes a *download* and leaves the candidate, which
+        is right for「这本书我下载错了」. This is the other decision --「这条候选
+        根本不该存在」-- and it goes all the way: the candidate row, its
+        messages, metadata, review history, path pin, jobs and artifacts. A
+        half-removal would leave a row the interface keeps offering actions for.
+
+        `delete_files` keeps the same opt-in shape and default as `remove_work`.
+        The in-flight guard is the same too: the worker holds that row.
+
+        Refuses rather than half-deletes when a task is running; otherwise the
+        records always go, and a file that could not be deleted is reported in
+        `failed_files` rather than silently claimed as removed.
+        """
+        candidate = await self._database.get_candidate(candidate_id)
+        if candidate is None:
+            raise ArchivedWorkError(
+                "CANDIDATE_NOT_FOUND", "该候选不存在或已被删除"
+            )
+        work = await self._database.downloaded_work(candidate_id)
+        if work is not None:
+            if work.state in OPEN_DOWNLOAD_STATES:
+                raise ArchivedWorkError(
+                    "WORK_STILL_RUNNING",
+                    "该作品仍有下载任务在进行，请先取消或等待完成再删除",
+                )
+            if work.pack_state == CONVERSION_STATE_RUNNING:
+                raise ArchivedWorkError(
+                    "WORK_PACK_RUNNING",
+                    "该作品正在打包，请等待打包结束再删除",
+                )
+        jobs = await self._database.candidate_jobs(candidate_id)
+        deleted: list[str] = []
+        failed: list[str] = []
+        if delete_files:
+            deleted, failed = await self._delete_work_files(candidate_id)
+        records = await self._database.purge_candidate(
+            candidate_id,
+            deleted_files=bool(delete_files) and not failed,
+            operator_name=operator_name,
+            job_ids=[job_id for job_id, _ in jobs],
+            jobs=jobs,
+        )
+        if self._notify is not None:
+            self._notify(candidate_id)
+        return {
+            "candidate_id": candidate_id,
+            "removed_candidate": records["removed_candidate"],
+            "removed_jobs": records["removed_jobs"],
+            "deleted_files": tuple(deleted),
+            "failed_files": tuple(failed),
+        }
 
     # ----------------------------------------------------------- re-download
 

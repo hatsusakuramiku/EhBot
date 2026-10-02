@@ -2558,3 +2558,159 @@ class TestAiReArchiveSweep:
         assert forced_run.status_code == 200
         assert "强制" in forced_run.text
         assert "入队重算路径 1 件" in forced_run.text
+
+
+class TestParseRulesSection:
+    """R50: 解析规则 is its own tab, with the AI candidate gate over it."""
+
+    def test_the_default_scheme_is_gallery_links_only(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/parse")
+
+        rules = page.context["parse_rules"]
+        assert rules["require_gallery_link"] is True
+        assert rules["accept_photo"] is False
+        assert rules["accept_archive"] is False
+        assert rules["accept_preview"] is False
+        assert "解析规则" in page.text
+        assert "AI 候选判定" in page.text
+        assert nested_form_lines(page.text) == []
+
+    def test_saving_a_scheme_stores_it_and_the_json_layer_agrees(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            response = client.post(
+                "/settings/parse",
+                data={
+                    "csrf_token": csrf,
+                    "accept_archive": "on",
+                    "archive_formats": ["zip", "7z"],
+                },
+                follow_redirects=False,
+            )
+            snapshot = client.get("/api/v1/settings/parse").json()
+
+        assert response.status_code == 303
+        rules = snapshot["parse_rules"]
+        assert rules["require_gallery_link"] is False
+        assert rules["accept_archive"] is True
+        assert rules["archive_formats"] == ["zip", "7z"]
+
+    def test_an_empty_format_list_is_refused_with_a_reason(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            response = client.post(
+                "/settings/parse",
+                data={"csrf_token": csrf, "accept_archive": "on"},
+            )
+
+        assert response.status_code == 400
+        assert "压缩格式" in response.text
+
+    def test_reset_puts_the_shipped_scheme_back(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            client.post(
+                "/settings/parse",
+                data={
+                    "csrf_token": csrf,
+                    "accept_photo": "on",
+                    "archive_formats": ["zip"],
+                },
+            )
+            client.post(
+                "/settings/parse/reset",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            rules = client.get("/api/v1/settings/parse").json()["parse_rules"]
+
+        assert rules["require_gallery_link"] is True
+        assert rules["accept_photo"] is False
+        assert rules["archive_formats"] == ["zip", "rar", "7z", "cbz"]
+
+    def test_the_ai_gate_can_be_turned_on_with_override_and_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            response = client.post(
+                "/settings/parse/ai",
+                data={
+                    "csrf_token": csrf,
+                    "ai_candidate_enabled": "on",
+                    "ai_candidate_override_parse_rules": "on",
+                    "ai_candidate_fallback": "accept",
+                },
+                follow_redirects=False,
+            )
+            admission = client.get("/api/v1/settings/parse").json()[
+                "candidate_admission"
+            ]
+
+        assert response.status_code == 303
+        assert admission["enabled"] is True
+        assert admission["override_parse_rules"] is True
+        assert admission["fallback"] == "accept"
+
+    def test_submitting_the_default_prompt_keeps_it_as_the_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Otherwise every save of this form would pin the default as a custom
+        prompt and the page could never say which it was."""
+        from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
+
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            client.post(
+                "/settings/parse/ai",
+                data={
+                    "csrf_token": csrf,
+                    "ai_candidate_prompt": DEFAULT_CANDIDATE_PROMPT,
+                },
+            )
+            admission = client.get("/api/v1/settings/parse").json()[
+                "candidate_admission"
+            ]
+
+        assert admission["prompt_overridden"] is False
+        assert admission["prompt"] == DEFAULT_CANDIDATE_PROMPT
+
+    def test_an_unknown_fallback_is_refused(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            csrf = _csrf(client, "parse")
+            response = client.post(
+                "/settings/parse/ai",
+                data={"csrf_token": csrf, "ai_candidate_fallback": "maybe"},
+            )
+
+        assert response.status_code == 400
+        assert "兜底动作" in response.text
+
+    def test_the_tab_requires_authentication(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(create_app(settings)) as client:
+            response = client.get("/settings/parse", follow_redirects=False)
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login"

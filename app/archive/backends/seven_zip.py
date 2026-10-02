@@ -300,10 +300,7 @@ class SevenZipBackend:
             target = staging / page_name
             if target.exists():
                 target.unlink()
-            if _can_hardlink(path, target):
-                target.hardlink_to(path)
-            else:
-                shutil.copy2(path, target)
+            _link_or_copy(path, target)
         try:
             # `-spf2` would keep the staging prefix, so the archive is built
             # with the staging directory as the working directory instead and
@@ -342,11 +339,21 @@ def resolve_seven_zip_executable(
     return None
 
 
-def _can_hardlink(source: Path, target: Path) -> bool:
+def _link_or_copy(source: Path, target: Path) -> None:
+    """Hard-link a staged page when the filesystem allows it, else copy it.
+
+    The work directory and the library are frequently different mounts, and
+    two bind mounts of the same host filesystem can report an equal `st_dev`
+    while still refusing the link with `EXDEV` -- as this code once assumed
+    they could not. There is no reliable pre-check for that, so the link is
+    simply attempted and a copy is the fallback. A move is never used: the
+    extracted page is still referenced by the rest of the pipeline.
+    """
     try:
-        return source.stat().st_dev == target.parent.stat().st_dev
-    except OSError:
-        return False
+        target.hardlink_to(source)
+        return
+    except (OSError, NotImplementedError):
+        shutil.copy2(source, target)
 
 
 def parse_slt_listing(output: str) -> list[ArchiveMember]:

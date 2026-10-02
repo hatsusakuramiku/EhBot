@@ -8,6 +8,19 @@
   edited. Changing a chat id would mean creating a different source, and doing it
   through an「更新」button would silently orphan the old one.
 
+  Two batch paths sit beside the single forms, both built on HTML's `form="…"`
+  attribute rather than JavaScript or a second nested form (which HTML forbids):
+
+  * 会话列表 -- one checkbox per row belongs to the hidden `#dialog-batch-add`
+    form, so several chats can be created in one submit, all disabled, with an
+    empty rule set.
+
+  * 已配置来源 -- one checkbox per row belongs to `#sources-batch`, whose buttons
+    enable, disable, tombstone (删除) or overwrite the filter rules of everything
+    selected. 删除 is a tombstone rather than a DELETE because
+    `discover_telegram_source` re-creates a row for any chat a message arrives
+    from; a dismissed row stays hidden until the chat is saved again on purpose.
+
   The filter lists submit as comma-separated text because that is what an
   operator types; the snapshot returns them as arrays, so `join(', ')` here is
   rendering, not parsing.
@@ -15,9 +28,8 @@
   A Chat ID is a number only Telegram knows, so the add panel can also read it
   out of the logged-in user account's own dialog list (`POST /sources/dialogs`)
   and offer that account's channels, groups and private chats as a pickable
-  list (`POST /sources/dialogs/select`, one form per row). Without that, a
-  source the bot has never seen a message in could not be configured at all
-  until one arrived. Picking fills this form and stores nothing.
+  list. Without that, a source the bot has never seen a message in could not be
+  configured at all until one arrived.
 #}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
@@ -41,6 +53,12 @@
       </form>
 
       {% if dialogs %}
+        {#- The batch form is empty and lives here only to own the row
+            checkboxes: they carry `form="dialog-batch-add"`, which is what lets
+            one submit carry several chats without wrapping (and therefore
+            invalidating) the per-row 填入表单 forms. -#}
+        <form id="dialog-batch-add" method="post"
+              action="{{ url_for('add_sources_bulk') }}"></form>
         <div style="max-height: 18rem; overflow: auto; margin-top: var(--s-4)">
           {% for dialog in dialogs %}
             {#- One form per row, so «填入表单» is a real submit and the page
@@ -55,6 +73,12 @@
                 <input type="hidden" name="chat_id" value="{{ dialog.chat_id }}">
                 <input type="hidden" name="display_name" value="{{ dialog.title }}">
                 <div class="ui-record-head">
+                  <label class="ui-checkline">
+                    <input class="ui-checkbox" type="checkbox" form="dialog-batch-add"
+                           name="dialogs"
+                           value='{{ {"source_type": kind.source_type, "chat_id": dialog.chat_id, "display_name": dialog.title} | tojson }}'
+                           aria-label="选择「{{ dialog.title }}」加入批量添加">
+                  </label>
                   <span class="ui-record-title">{{ dialog.title }}</span>
                   <span class="ui-record-meta">{{ dialog.chat_id }}</span>
                   <div class="ui-record-badges">
@@ -68,6 +92,13 @@
             {% endfor %}
           {% endfor %}
         </div>
+        <div class="ui-form-actions" style="margin-top: var(--s-3)">
+          <button class="ui-btn" data-variant="primary" data-size="sm"
+                  type="submit" form="dialog-batch-add">批量添加选中会话</button>
+        </div>
+        <small class="ui-hint">
+          批量添加的来源一律以停用状态创建，规则为空；在右侧逐个确认后再启用。
+        </small>
       {% endif %}
 
       <form class="ui-form" method="post" action="{{ url_for('configure_source') }}"
@@ -95,8 +126,8 @@
                  value="{{ prefill.display_name if prefill else '' }}">
         </div>
         <label class="ui-checkline">
-          <input class="ui-checkbox" name="enabled" type="checkbox" checked>
-          <span>保存后启用</span>
+          <input class="ui-checkbox" name="enabled" type="checkbox">
+          <span>启用此来源</span>
         </label>
         <fieldset class="ui-fieldset">
           <legend>允许的压缩格式</legend>
@@ -111,36 +142,36 @@
           </div>
         </fieldset>
         <div class="ui-field">
-          <label for="max-size">附件上限（MB）</label>
-          <input class="ui-input" id="max-size" name="max_attachment_size_mb" type="number"
-                 min="1" placeholder="不限">
+          <label for="new-size">附件上限（MB）</label>
+          <input class="ui-input" id="new-size" name="max_attachment_size_mb"
+                 type="number" min="1" placeholder="不限">
         </div>
         <details class="ui-fieldset">
-          <summary>元数据过滤</summary>
+          <summary>元数据过滤（可选）</summary>
           <div class="ui-field">
-            <label for="required-tags">必需 Tag</label>
-            <input class="ui-input" id="required-tags" name="required_tags" type="text"
-                   placeholder="language:chinese, female:big_breasts">
+            <label for="new-req">必需 Tag</label>
+            <input class="ui-input" id="new-req" name="required_tags" type="text"
+                   placeholder="language:chinese">
           </div>
           <div class="ui-field">
-            <label for="forbidden-tags">禁用 Tag</label>
-            <input class="ui-input" id="forbidden-tags" name="forbidden_tags" type="text"
-                   placeholder="male:only, lolicon">
+            <label for="new-forb">禁用 Tag</label>
+            <input class="ui-input" id="new-forb" name="forbidden_tags" type="text"
+                   placeholder="male:only">
           </div>
           <div class="ui-field">
-            <label for="allowed-languages">允许语言</label>
-            <input class="ui-input" id="allowed-languages" name="allowed_languages" type="text"
-                   placeholder="chinese, japanese, english">
+            <label for="new-lang">允许语言</label>
+            <input class="ui-input" id="new-lang" name="allowed_languages" type="text"
+                   placeholder="chinese, japanese">
           </div>
           <div class="ui-field">
-            <label for="allowed-categories">允许类别</label>
-            <input class="ui-input" id="allowed-categories" name="allowed_categories" type="text"
+            <label for="new-cat">允许类别</label>
+            <input class="ui-input" id="new-cat" name="allowed_categories" type="text"
                    placeholder="doujinshi, manga">
           </div>
           <div class="ui-field">
-            <label for="min-rating">最低评分</label>
-            <input class="ui-input" id="min-rating" name="min_rating" type="number"
-                   step="0.1" min="0" max="5" placeholder="不限">
+            <label for="new-rating">最低评分</label>
+            <input class="ui-input" id="new-rating" name="min_rating"
+                   type="number" step="0.1" min="0" max="5" placeholder="不限">
           </div>
         </details>
         <div class="ui-form-actions">
@@ -156,6 +187,76 @@
         <h2 class="ui-section-title" style="margin: 0">已配置来源</h2>
         <span class="ui-record-meta">{{ sources|length }} 项</span>
       </div>
+
+      {% if sources %}
+      {#- The batch form. Rendered once, above the rows; every row's checkbox
+          points at it by id. Rule fields are shared by the 套用规则 action and
+          are ignored by 启用/停用/删除. -#}
+      <form class="ui-form" id="sources-batch" method="post"
+            action="{{ url_for('sources_batch_action') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-form-actions">
+          <button class="ui-btn" data-size="sm" type="submit"
+                  name="action" value="enable">批量启用</button>
+          <button class="ui-btn" data-size="sm" type="submit"
+                  name="action" value="disable">批量停用</button>
+          {{ ui.confirm("批量删除", "删除选中的来源",
+                        "来源会从列表隐藏并停用，规则一并清空。若之后收到该会话的消息，或再次保存同一来源，它会重新出现——删除是墓碑，不是抹除。",
+                        confirm_label="确认删除", form="sources-batch",
+                        field="action", value="delete", size="sm") }}
+        </div>
+        <details class="ui-fieldset">
+          <summary>把下面这组过滤规则套用到选中来源（空字段=清空该项）</summary>
+          <fieldset class="ui-fieldset">
+            <legend>允许的压缩格式</legend>
+            <div class="ui-checkgrid">
+              {% for format in archive_formats %}
+                <label class="ui-checkline">
+                  <input class="ui-checkbox" name="allowed_archive_formats"
+                         type="checkbox" value="{{ format }}">
+                  <span>{{ format|upper }}</span>
+                </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <div class="ui-field">
+            <label for="batch-size">附件上限（MB）</label>
+            <input class="ui-input" id="batch-size" name="max_attachment_size_mb"
+                   type="number" min="0" placeholder="留空 = 不限">
+          </div>
+          <div class="ui-field">
+            <label for="batch-req">必需 Tag</label>
+            <input class="ui-input" id="batch-req" name="required_tags" type="text"
+                   placeholder="language:chinese">
+          </div>
+          <div class="ui-field">
+            <label for="batch-forb">禁用 Tag</label>
+            <input class="ui-input" id="batch-forb" name="forbidden_tags" type="text"
+                   placeholder="male:only">
+          </div>
+          <div class="ui-field">
+            <label for="batch-lang">允许语言</label>
+            <input class="ui-input" id="batch-lang" name="allowed_languages" type="text"
+                   placeholder="chinese, japanese">
+          </div>
+          <div class="ui-field">
+            <label for="batch-cat">允许类别</label>
+            <input class="ui-input" id="batch-cat" name="allowed_categories" type="text"
+                   placeholder="doujinshi, manga">
+          </div>
+          <div class="ui-field">
+            <label for="batch-rating">最低评分</label>
+            <input class="ui-input" id="batch-rating" name="min_rating"
+                   type="number" step="0.1" min="0" max="5" placeholder="留空 = 不限">
+          </div>
+          <div class="ui-form-actions">
+            <button class="ui-btn" data-size="sm" type="submit"
+                    name="action" value="apply">套用规则到选中来源</button>
+          </div>
+        </details>
+      </form>
+      {% endif %}
+
       {% for source in sources %}
         <form class="ui-record" method="post" action="{{ url_for('configure_source') }}"
               style="margin-top: var(--s-4)">
@@ -164,6 +265,11 @@
           <input type="hidden" name="source_type" value="{{ source.source_type }}">
           <input type="hidden" name="chat_id" value="{{ source.chat_id }}">
           <div class="ui-record-head">
+            <label class="ui-checkline">
+              <input class="ui-checkbox" type="checkbox" form="sources-batch"
+                     name="source_ids" value="{{ source.source_id }}"
+                     aria-label="选择来源「{{ source.display_name }}」">
+            </label>
             <span class="ui-record-title">{{ source.display_name }}</span>
             <span class="ui-record-meta">{{ source.chat_id }}</span>
             <div class="ui-record-badges">{{ ui.badge(source.enablement) }}</div>

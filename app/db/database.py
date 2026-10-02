@@ -727,11 +727,12 @@ class Database:
             account_id = self._ensure_bot_account(connection)
             connection.execute(
                 "INSERT INTO telegram_sources "
-                "(account_id, source_type, chat_id, display_name, enabled, rules_json) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id, chat_id) "
+                "(account_id, source_type, chat_id, display_name, enabled, "
+                " rules_json, dismissed) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT(account_id, chat_id) "
                 "DO UPDATE SET source_type = excluded.source_type, "
                 "display_name = excluded.display_name, enabled = excluded.enabled, "
-                "rules_json = excluded.rules_json",
+                "rules_json = excluded.rules_json, dismissed = 0",
                 (
                     account_id,
                     source_type,
@@ -741,6 +742,126 @@ class Database:
                     rules_json,
                 ),
             )
+
+    async def add_telegram_sources_bulk(
+        self, entries: list[dict]
+    ) -> int:
+        """Create many sources at once, disabled, without disturbing existing ones.
+
+        The batch half of 添加来源. `ON CONFLICT DO NOTHING` rather than an
+        upsert: the picker hands back chats the operator may already have
+        configured, and re-adding one must not silently replace rules it already
+        carries. Existing rows keep theirs; only genuinely new chats are created.
+        A chat that was 删除 earlier is the one exception -- re-selecting it in
+        the picker is the same intent as saving it alone, so its tombstone is
+        lifted while its rules stay untouched.
+        """
+        return await asyncio.to_thread(self._add_telegram_sources_bulk_sync, entries)
+
+    def _add_telegram_sources_bulk_sync(self, entries: list[dict]) -> int:
+        if not entries:
+            return 0
+        with self.connection() as connection:
+            account_id = self._ensure_bot_account(connection)
+            before = connection.total_changes
+            connection.executemany(
+                "INSERT INTO telegram_sources "
+                "(account_id, source_type, chat_id, display_name, enabled, "
+                " rules_json, dismissed) "
+                "VALUES (?, ?, ?, ?, 0, '{}', 0) "
+                "ON CONFLICT(account_id, chat_id) DO NOTHING",
+                [
+                    (
+                        account_id,
+                        str(entry["source_type"]),
+                        int(entry["chat_id"]),
+                        str(entry["display_name"]),
+                    )
+                    for entry in entries
+                ],
+            )
+            created = connection.total_changes - before
+            # Counted before the revive so a re-added tombstone is not reported
+            # as a new source; only rows the operator cannot already see move.
+            connection.executemany(
+                "UPDATE telegram_sources SET dismissed = 0 "
+                "WHERE account_id = ? AND chat_id = ? AND dismissed = 1",
+                [(account_id, int(entry["chat_id"])) for entry in entries],
+            )
+            return created
+
+    async def update_telegram_sources_bulk(
+        self,
+        source_ids: list[int],
+        *,
+        enabled: bool | None = None,
+        rules: dict | None = None,
+    ) -> int:
+        """Apply one change to a selection of sources.
+
+        `enabled` and `rules` are independent; a caller passing neither is a
+        programming error, so the caller's own 400 guard stays in the route.
+        """
+        return await asyncio.to_thread(
+            self._update_telegram_sources_bulk_sync,
+            [int(value) for value in source_ids],
+            enabled,
+            rules,
+        )
+
+    def _update_telegram_sources_bulk_sync(
+        self,
+        source_ids: list[int],
+        enabled: bool | None,
+        rules: dict | None,
+    ) -> int:
+        if not source_ids:
+            return 0
+        assignments: list[str] = []
+        params: list[object] = []
+        if enabled is not None:
+            assignments.append("enabled = ?")
+            params.append(1 if enabled else 0)
+        if rules is not None:
+            assignments.append("rules_json = ?")
+            params.append(json.dumps(rules, separators=(",", ":")))
+        if not assignments:
+            return 0
+        assignments.append("dismissed = 0")
+        placeholders = ", ".join("?" for _ in source_ids)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE telegram_sources SET {', '.join(assignments)} "
+                f"WHERE id IN ({placeholders})",
+                (*params, *source_ids),
+            )
+            return int(cursor.rowcount or 0)
+
+    async def dismiss_telegram_sources(self, source_ids: list[int]) -> int:
+        """Tombstone a selection of sources so discovery cannot revive them.
+
+        Not a DELETE: `discover_telegram_source` inserts a row for every chat a
+        message arrives from, so a deleted row would come back on the next
+        message. A tombstone clears the whitelist state (disabled, no rules) and
+        is hidden from the settings list, while giving the operator a real way
+        back: saving the chat again un-dismisses it.
+        """
+        return await asyncio.to_thread(
+            self._dismiss_telegram_sources_sync,
+            [int(value) for value in source_ids],
+        )
+
+    def _dismiss_telegram_sources_sync(self, source_ids: list[int]) -> int:
+        if not source_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in source_ids)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE telegram_sources SET dismissed = 1, enabled = 0, "
+                f"rules_json = '{{}}' WHERE id IN ({placeholders})",
+                tuple(source_ids),
+            )
+            return int(cursor.rowcount or 0)
 
     async def list_telegram_sources(self) -> list[TelegramSourceConfig]:
         return await asyncio.to_thread(self._list_telegram_sources_sync)
@@ -752,6 +873,7 @@ class Database:
                 "ts.enabled, ts.rules_json FROM telegram_sources ts "
                 "JOIN telegram_accounts ta ON ta.id = ts.account_id "
                 "WHERE ta.session_path = 'bot-api://configured' "
+                "AND ts.dismissed = 0 "
                 "ORDER BY ts.enabled DESC, ts.id DESC"
             ).fetchall()
         return [self._source_from_row(row) for row in rows]
@@ -1899,6 +2021,169 @@ class Database:
                 "DELETE FROM work_archive_paths WHERE candidate_id = ?",
                 (candidate_id,),
             )
+
+    async def candidate_jobs(self, candidate_id: int) -> list[tuple[int, str]]:
+        """``(job_id, provider)`` for every job this candidate owns.
+
+        A work can hold one download row per source it was tried with
+        (`telegram:` / `telegram-user:` / `exhentai:` / `telegraph:` / `torrent:`
+        idempotency keys) plus a packaging row, so "the work's jobs" is a list,
+        not the newest row. Removal reads this; before it existed, removing a
+        work left every superseded source's row and files behind.
+        """
+        return await asyncio.to_thread(self._candidate_jobs_sync, int(candidate_id))
+
+    def _candidate_jobs_sync(self, candidate_id: int) -> list[tuple[int, str]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT id, provider FROM download_jobs "
+                "WHERE candidate_id = ? ORDER BY id",
+                (candidate_id,),
+            ).fetchall()
+        return [(int(row[0]), str(row[1])) for row in rows]
+
+    async def candidate_artifacts(self, candidate_id: int) -> list[tuple[str, str]]:
+        """``(artifact_type, path)`` for every file this candidate produced."""
+        return await asyncio.to_thread(
+            self._candidate_artifacts_sync, int(candidate_id)
+        )
+
+    def _candidate_artifacts_sync(self, candidate_id: int) -> list[tuple[str, str]]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT artifacts.artifact_type, artifacts.path "
+                "FROM artifacts JOIN download_jobs "
+                "  ON download_jobs.id = artifacts.job_id "
+                "WHERE download_jobs.candidate_id = ? ORDER BY artifacts.id",
+                (int(candidate_id),),
+            ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    async def purge_candidate(
+        self,
+        candidate_id: int,
+        *,
+        deleted_files: bool,
+        operator_name: str,
+        job_ids: list[int] | None = None,
+        jobs: list[tuple[int, str]] | None = None,
+    ) -> dict:
+        """Delete a candidate and everything it produced, keeping an audit row.
+
+        The candidate is the work's identity: its metadata, message links, review
+        history, path pin, AI suggestions and every job row hang off it.
+        `remove_work` deliberately keeps all of that -- it removes a *download*
+        -- and this is the other decision: 彻底删除，把候选本身也去掉。
+
+        `review_actions` and `download_jobs` do not cascade from `candidates`, so
+        they are deleted explicitly; `artifacts` has to go first because it
+        points at a job row with foreign keys ON. Everything else
+        (`candidate_messages`, `metadata_values`, `work_archive_paths`,
+        `ai_path_suggestions`) cascades with the candidate.
+
+        `removed_works` gets one row per deleted job, written before the candidate
+        goes so the record outlives it. A candidate that never downloaded has no
+        job to record.
+
+        The job list may be passed in by the caller, which has already resolved
+        the paths it is about to delete; a second read is harmless but pointless.
+        """
+        return await asyncio.to_thread(
+            self._purge_candidate_sync,
+            int(candidate_id),
+            bool(deleted_files),
+            operator_name,
+            job_ids,
+            jobs,
+        )
+
+    def _purge_candidate_sync(
+        self,
+        candidate_id: int,
+        deleted_files: bool,
+        operator_name: str,
+        job_ids: list[int] | None,
+        jobs: list[tuple[int, str]] | None,
+    ) -> dict:
+        with self.connection() as connection:
+            if jobs is None:
+                jobs = [
+                    (int(row[0]), str(row[1]))
+                    for row in connection.execute(
+                        "SELECT id, provider FROM download_jobs "
+                        "WHERE candidate_id = ? ORDER BY id",
+                        (candidate_id,),
+                    ).fetchall()
+                ]
+            if job_ids is None:
+                job_ids = [job_id for job_id, _ in jobs]
+            title_row = connection.execute(
+                "SELECT field_value FROM metadata_values "
+                "WHERE candidate_id = ? AND field_name = 'Title' "
+                "ORDER BY is_manual DESC, confidence DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            title = str(title_row[0]) if title_row is not None else None
+            archive_row = connection.execute(
+                "SELECT artifacts.path FROM artifacts "
+                "WHERE artifacts.artifact_type = 'ARCHIVE' "
+                "AND artifacts.job_id IN (SELECT id FROM download_jobs "
+                "  WHERE candidate_id = ?) ORDER BY artifacts.id DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            cbz_row = connection.execute(
+                "SELECT artifacts.path FROM artifacts "
+                "WHERE artifacts.artifact_type = 'CBZ' "
+                "AND artifacts.job_id IN (SELECT id FROM download_jobs "
+                "  WHERE candidate_id = ?) ORDER BY artifacts.id DESC LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            archive_path = str(archive_row[0]) if archive_row is not None else None
+            cbz_path = str(cbz_row[0]) if cbz_row is not None else None
+            if job_ids:
+                placeholders = ", ".join("?" for _ in job_ids)
+                connection.execute(
+                    f"DELETE FROM artifacts WHERE job_id IN ({placeholders})",
+                    tuple(job_ids),
+                )
+                connection.execute(
+                    f"DELETE FROM download_jobs WHERE id IN ({placeholders})",
+                    tuple(job_ids),
+                )
+            connection.execute(
+                "DELETE FROM review_actions WHERE candidate_id = ?",
+                (candidate_id,),
+            )
+            cursor = connection.execute(
+                "DELETE FROM candidates WHERE id = ?", (candidate_id,)
+            )
+            removed_candidate = int(cursor.rowcount or 0)
+            # One audit row per *candidate*, and only when it actually had a
+            # job: a candidate that never downloaded has no work to record, and
+            # a row for it would claim something was removed that never existed.
+            if jobs:
+                primary_job_id, primary_provider = jobs[-1]
+                connection.execute(
+                    "INSERT INTO removed_works "
+                    "(candidate_id, job_id, provider, title, archive_path, "
+                    " cbz_path, deleted_files, operator_name) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        candidate_id,
+                        int(primary_job_id),
+                        str(primary_provider),
+                        title,
+                        archive_path,
+                        cbz_path,
+                        1 if deleted_files else 0,
+                        operator_name,
+                    ),
+                )
+        return {
+            "candidate_id": candidate_id,
+            "removed_candidate": removed_candidate,
+            "removed_jobs": len(job_ids),
+        }
 
     async def downloaded_work_counts(self) -> dict[str, int]:
         """One count per pack filter, for the tab strip.

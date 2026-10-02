@@ -43,6 +43,7 @@ from app.bootstrap import (
     write_bootstrap_password,
 )
 from app.auto_approval.sweeper import AutoApprovalSweeper
+from app.candidates.admission import CandidateAdmissionService
 from app.candidates.ingestor import CandidateIngestor
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.manager import ConnectionManager
@@ -362,7 +363,10 @@ def build_lifespan(
                 database,
                 telegram_client=telegram_client,
                 exhentai_client=exhentai_client,
-                candidate_ingestor=CandidateIngestor(database),
+                candidate_ingestor=CandidateIngestor(
+                    database,
+                    settings_service=application.state.system_settings_service,
+                ),
                 user_client_factory=telegram_user_client_factory,
                 # Read off `app.state` at call time, not captured: the sweeper is
                 # built further down this same startup (it needs the download
@@ -536,6 +540,16 @@ def build_lifespan(
                 database,
                 archive_settings_service,
                 http_client=ai_client,
+            )
+            # The AI candidate gate is attached here rather than at construction
+            # because the connection manager (which owns the ingestor) is built
+            # before this service is. Attaching it also means a deployment with
+            # no AI configuration leaves the gate off with no extra checks.
+            connection_manager.attach_candidate_admission(
+                CandidateAdmissionService(
+                    application.state.ai_service,
+                    application.state.system_settings_service,
+                )
             )
             # Linux and Docker images ship no archiver, so fetch the pinned
             # official 7-Zip build once per version if it is missing.

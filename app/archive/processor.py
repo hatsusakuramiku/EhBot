@@ -7,6 +7,7 @@ from pathlib import Path
 from app.archive.backends.seven_zip import SevenZipBackend
 from app.archive.backends.zip_backend import ZipfileBackend
 from app.archive.errors import (
+    ArchiveBackendUnsupported,
     ArchiveError,
     ArchivePasswordRequired,
     ArchiveToolUnavailable,
@@ -19,6 +20,7 @@ from app.archive.models import (
     BACKEND_ZIPFILE,
     FORMAT_UNKNOWN,
     FORMAT_ZIP,
+    ArchiveManifest,
     ArchiveProcessResult,
     ArchiveTaskSnapshot,
     SafetyLimits,
@@ -61,7 +63,8 @@ class ArchiveProcessor:
         self._tools_path = tools_path
         self._image_quality = normalize_quality(image_quality)
 
-    def select_profile(self, source_format: str) -> ToolProfile:
+    def eligible_profiles(self, source_format: str) -> tuple[ToolProfile, ...]:
+        """Every enabled profile that claims the format, in attempt order."""
         if source_format == FORMAT_UNKNOWN:
             raise UnsupportedArchiveFormat(source_format)
         eligible = [
@@ -73,7 +76,10 @@ class ArchiveProcessor:
             raise UnsupportedArchiveFormat(source_format)
         # Prefer the streaming built-in backend when it can handle the format.
         eligible.sort(key=lambda profile: (profile.backend != BACKEND_ZIPFILE,))
-        return eligible[0]
+        return tuple(eligible)
+
+    def select_profile(self, source_format: str) -> ToolProfile:
+        return self.eligible_profiles(source_format)[0]
 
     def build_backend(self, profile: ToolProfile):
         if profile.backend == BACKEND_ZIPFILE:
@@ -87,6 +93,66 @@ class ArchiveProcessor:
         raise ArchiveToolUnavailable(
             f"\u540e\u7aef {profile.backend} \u672a\u5b9e\u73b0"
         )
+
+    def _admit(
+        self, source_format: str, volumes: tuple[Path, ...]
+    ) -> tuple[ToolProfile, object, ArchiveManifest, int | None, str | None]:
+        """Pick the first profile that can list the archive and open it.
+
+        A backend that cannot read the compression method raises
+        `ArchiveBackendUnsupported` while listing, and the next eligible
+        profile gets its turn. Only this stage falls back: once a backend has
+        understood the archive, a later failure is a real failure rather than
+        a reason to do the same work twice.
+        """
+        last_error: ArchiveError | None = None
+        for profile in self.eligible_profiles(source_format):
+            backend = self.build_backend(profile)
+            try:
+                manifest, password_id, password = self._inspect_archive(
+                    backend, volumes
+                )
+            except ArchiveBackendUnsupported as exc:
+                last_error = exc
+                continue
+            return profile, backend, manifest, password_id, password
+        if last_error is None:
+            raise ArchiveBackendUnsupported()
+        if any(
+            profile.backend == BACKEND_SEVEN_ZIP
+            for profile in self._profiles
+            if profile.enabled and profile.supports(source_format)
+        ):
+            raise last_error
+        # No 7-Zip profile was even in the running, so the honest answer is
+        # that the built-in reader met a method it cannot handle and the
+        # fallback is switched off -- say that, rather than "wrong password".
+        raise ArchiveError(
+            "ARCHIVE_COMPRESSION_UNSUPPORTED",
+            f"{last_error.public_message}\uff1b\u8bf7\u5728"
+            "\u300c\u8bbe\u7f6e \u2192 \u5f52\u6863\u300d\u542f\u7528 7-Zip profile"
+            "\u540e\u91cd\u8bd5",
+        ) from last_error
+
+    def _inspect_archive(self, backend, volumes: tuple[Path, ...]):
+        """List the archive, consulting the vault only when it is encrypted."""
+        try:
+            manifest = backend.inspect(volumes, None)
+        except ArchivePasswordRequired:
+            # A header-encrypted archive cannot even be listed without the
+            # password, so the vault must be consulted before inspection.
+            password_id, password = self._resolve_password(
+                backend, volumes, probe=self._probe_inspect(backend)
+            )
+            manifest = backend.inspect(volumes, password)
+        else:
+            if manifest.encrypted:
+                password_id, password = self._resolve_password(backend, volumes)
+                manifest = backend.inspect(volumes, password)
+            else:
+                backend.test_password(volumes, None)
+                password_id, password = None, None
+        return manifest, password_id, password
 
     def process(
         self,
@@ -111,8 +177,9 @@ class ArchiveProcessor:
         if missing:
             raise ArchiveVolumesMissing(missing)
         source_format = detect_source_format(source)
-        profile = self.select_profile(source_format)
-        backend = self.build_backend(profile)
+        profile, backend, manifest, password_id, password = self._admit(
+            source_format, volumes
+        )
         snapshot = ArchiveTaskSnapshot(
             backend=profile.backend,
             tool_profile=profile.name,
@@ -120,24 +187,6 @@ class ArchiveProcessor:
             library_path=str(library_path or destination.parent),
             work_path=str(work_directory),
         )
-
-        password_id: int | None = None
-        password: str | None = None
-        try:
-            manifest = backend.inspect(volumes, None)
-        except ArchivePasswordRequired:
-            # A header-encrypted archive cannot even be listed without the
-            # password, so the vault must be consulted before inspection.
-            password_id, password = self._resolve_password(
-                backend, volumes, probe=self._probe_inspect(backend)
-            )
-            manifest = backend.inspect(volumes, password)
-        else:
-            if manifest.encrypted:
-                password_id, password = self._resolve_password(backend, volumes)
-                manifest = backend.inspect(volumes, password)
-            else:
-                backend.test_password(volumes, None)
 
         # The zip backend reads each member's first bytes during inspection, so
         # the gate can identify an image for free. 7zz's listing carries no

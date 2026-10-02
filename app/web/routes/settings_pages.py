@@ -21,6 +21,7 @@ from app.api.status import (
     SETTINGS_AI,
     SETTINGS_ARCHIVE,
     SETTINGS_CONNECTIONS,
+    SETTINGS_PARSE,
     SETTINGS_PASSWORDS,
     SETTINGS_PATHS,
     SETTINGS_SOURCES,
@@ -34,6 +35,8 @@ from app.auto_approval.rules import (
     validate_rule_ast,
 )
 from app.auto_approval.service import AutomaticApprovalService
+from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
+from app.candidates.parse_rules import ARCHIVE_FORMATS as PARSE_ARCHIVE_FORMATS
 from app.web.rule_forms import parse_rule_condition
 from app.archive.rearchive import rearchive_works
 from app.archive.service import (
@@ -248,6 +251,174 @@ async def select_telegram_dialog(
             "chat_id": number,
             "display_name": name,
         },
+    )
+
+
+def _source_rules_from_form(form) -> tuple[dict | None, str | None]:
+    """Read one source's filter rules out of a submitted form.
+
+    Shared by the per-row 更新规则 form and the batch 套用规则 action, so the two
+    cannot disagree about what an empty field means -- it clears that rule, which
+    is the only reading an operator can predict from an empty box.
+    """
+    try:
+        max_attachment_size_mb = int(
+            str(form.get("max_attachment_size_mb") or "0")
+        )
+    except ValueError:
+        return None, "附件上限格式无效"
+    if max_attachment_size_mb < 0:
+        return None, "附件上限无效"
+    min_rating_raw = str(form.get("min_rating") or "").strip()
+    min_rating: float | None = None
+    if min_rating_raw:
+        try:
+            min_rating = float(min_rating_raw)
+        except ValueError:
+            return None, "最低评分格式无效"
+        if min_rating < 0:
+            return None, "最低评分格式无效"
+    submitted_formats = set(form.getlist("allowed_archive_formats"))
+    return (
+        {
+            "allowed_archive_formats": [
+                archive_format
+                for archive_format in ("zip", "rar", "7z", "cbz")
+                if archive_format in submitted_formats
+            ],
+            "max_attachment_size_mb": max_attachment_size_mb,
+            "required_tags": list(_parse_csv_tags(form.get("required_tags"))),
+            "forbidden_tags": list(_parse_csv_tags(form.get("forbidden_tags"))),
+            "allowed_languages": list(
+                _parse_csv_tags(form.get("allowed_languages"))
+            ),
+            "allowed_categories": list(
+                _parse_csv_tags(form.get("allowed_categories"))
+            ),
+            "min_rating": min_rating,
+        },
+        None,
+    )
+
+
+def _selected_source_ids(form) -> list[int]:
+    ids: list[int] = []
+    for value in form.getlist("source_ids"):
+        try:
+            number = int(str(value))
+        except ValueError:
+            continue
+        if number not in ids:
+            ids.append(number)
+    return ids
+
+
+@router.post("/sources/batch")
+async def sources_batch_action(request: Request):
+    """One action over a selection of stored sources.
+
+    `enable`/`disable` flip the whitelist flag; `delete` tombstones (see
+    `dismiss_telegram_sources`); `apply` overwrites the whole filter rule set
+    with whatever the batch form carried, so an operator can fix a dozen
+    sources at once instead of opening twelve rows.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    source_ids = _selected_source_ids(form)
+    if not source_ids:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            error="请至少选择一个来源",
+            status_code=400,
+        )
+    action = str(form.get("action") or "")
+    database = deps.database(request)
+    if action == "enable":
+        await database.update_telegram_sources_bulk(source_ids, enabled=True)
+    elif action == "disable":
+        await database.update_telegram_sources_bulk(source_ids, enabled=False)
+    elif action == "delete":
+        await database.dismiss_telegram_sources(source_ids)
+    elif action == "apply":
+        rules, error = _source_rules_from_form(form)
+        if error is not None:
+            return await render_settings(
+                request, SETTINGS_SOURCES, error=error, status_code=400
+            )
+        await database.update_telegram_sources_bulk(
+            source_ids, rules=rules
+        )
+    else:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            error=f"未知的来源动作：{action}",
+            status_code=400,
+        )
+    # The MTProto ingester reads its target list from the same rows, so any of
+    # these four actions can change what it should be polling.
+    deps.connection_manager(request).note_sources_changed()
+    return settings_redirect(request, SETTINGS_SOURCES)
+
+
+@router.post("/sources/batch-add")
+async def add_sources_bulk(request: Request):
+    """Create several sources at once from the account's dialog list.
+
+    The chat list is the account's own, so every entry is already known to be
+    reachable; the identity check is repeated here only because the browser can
+    send anything. Rows are created disabled with no rules, the same shape a
+    single 保存来源 of a new chat produces, so the operator confirms filters
+    before a source starts admitting messages.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    entries: list[dict] = []
+    seen: set[int] = set()
+    for token in form.getlist("dialogs"):
+        try:
+            payload = json.loads(str(token))
+            source_type = str(payload["source_type"])
+            chat_id = int(payload["chat_id"])
+            display_name = str(payload["display_name"]).strip()
+        except (KeyError, TypeError, ValueError):
+            continue
+        valid_identity = (
+            source_type == "CHANNEL" and chat_id < 0
+        ) or (source_type == "PRIVATE_CHAT" and chat_id > 0)
+        if not valid_identity or not display_name or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        entries.append(
+            {
+                "source_type": source_type,
+                "chat_id": chat_id,
+                "display_name": display_name,
+            }
+        )
+    if not entries:
+        return await render_settings(
+            request,
+            SETTINGS_SOURCES,
+            error="请至少选择一个会话",
+            status_code=400,
+        )
+    created = await deps.database(request).add_telegram_sources_bulk(entries)
+    deps.connection_manager(request).note_sources_changed()
+    return await render_settings(
+        request,
+        SETTINGS_SOURCES,
+        notice=(
+            f"已新增 {created} 个来源（其余已存在），均为停用状态，"
+            "请在右侧逐个确认过滤规则后再启用。"
+        ),
     )
 
 
@@ -841,6 +1012,90 @@ async def delete_archive_path_rule(rule_id: int, request: Request):
     except LookupError:
         raise HTTPException(status_code=404, detail="规则不存在") from None
     return settings_redirect(request, SETTINGS_PATHS)
+
+
+@router.post("/settings/parse")
+async def save_parse_rules(request: Request):
+    """Store the candidate-admission parse scheme.
+
+    Every checkbox is read explicitly rather than defaulted through: an
+    unchecked box sends nothing, so absence means off, and letting the
+    validator fill in a default for an omitted key would make unchecking a rule
+    silently keep it on.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    submitted_formats = set(form.getlist("archive_formats"))
+    raw = {
+        "require_gallery_link": form.get("require_gallery_link") == "on",
+        "accept_photo": form.get("accept_photo") == "on",
+        "accept_archive": form.get("accept_archive") == "on",
+        "accept_preview": form.get("accept_preview") == "on",
+        "title_required": form.get("title_required") == "on",
+        "archive_formats": [
+            archive_format
+            for archive_format in PARSE_ARCHIVE_FORMATS
+            if archive_format in submitted_formats
+        ],
+    }
+    try:
+        await deps.system_settings_service(request).save_parse_rules(raw)
+    except SystemSettingsError as exc:
+        return await render_settings(
+            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
+        )
+    return settings_redirect(request, SETTINGS_PARSE)
+
+
+@router.post("/settings/parse/reset")
+async def reset_parse_rules(request: Request, csrf_token: str = Form()):
+    """Put the shipped scheme back, so a bad experiment is one click from gone."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    await deps.system_settings_service(request).reset_parse_rules()
+    return settings_redirect(request, SETTINGS_PARSE)
+
+
+@router.post("/settings/parse/ai")
+async def save_candidate_admission(request: Request):
+    """Store the AI candidate gate's switches and prompt.
+
+    A prompt submitted byte-identical to the shipped default is stored as an
+    empty string, i.e. 「use the default」: otherwise virtually every save of
+    this form would pin the default text as an override, and the page could
+    never say whether the operator had actually customised it.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
+    prompt = str(form.get("ai_candidate_prompt") or "").strip()
+    if prompt == DEFAULT_CANDIDATE_PROMPT.strip():
+        prompt = ""
+    try:
+        await deps.system_settings_service(request).save_candidate_admission(
+            {
+                "ai_candidate_enabled": form.get("ai_candidate_enabled") == "on",
+                "ai_candidate_override_parse_rules": (
+                    form.get("ai_candidate_override_parse_rules") == "on"
+                ),
+                "ai_candidate_prompt": prompt,
+                "ai_candidate_fallback": str(
+                    form.get("ai_candidate_fallback") or ""
+                ),
+            }
+        )
+    except SystemSettingsError as exc:
+        return await render_settings(
+            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
+        )
+    return settings_redirect(request, SETTINGS_PARSE)
 
 
 #: The 系统 tab's only writer, and the one settings endpoint with no legacy
