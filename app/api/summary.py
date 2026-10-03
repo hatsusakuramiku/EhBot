@@ -26,7 +26,7 @@ ATTENTION_LIMIT = 5
 @router.get("/summary")
 async def get_summary(request: Request) -> dict:
     """Counts, connection health and the items asking for a decision."""
-    deps.require_session(request)
+    await deps.require_session(request)
     database = deps.database(request)
     counts = await database.candidate_counts()
 

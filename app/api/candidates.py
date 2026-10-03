@@ -119,7 +119,7 @@ async def list_candidates(
     page_size: int | None = Query(None),
 ) -> dict:
     """A page of candidates for the review grid."""
-    deps.require_session(request)
+    await deps.require_session(request)
     if tab not in CANDIDATE_TABS:
         raise ApiError(
             "TAB_UNKNOWN",
@@ -173,7 +173,7 @@ async def list_candidate_facets(
     request: Request, tab: str = Query("pending")
 ) -> dict:
     """Filter values available in one tab, most common first."""
-    deps.require_session(request)
+    await deps.require_session(request)
     if tab not in CANDIDATE_TABS:
         raise ApiError(
             "TAB_UNKNOWN",

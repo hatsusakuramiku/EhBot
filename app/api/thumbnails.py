@@ -73,7 +73,7 @@ def _placeholder_response(state: str, error_code: str | None) -> Response:
 @router.get("/thumbnails/{thumbnail_hash}")
 async def get_thumbnail(request: Request, thumbnail_hash: str) -> Response:
     """Serve one cached cover thumbnail, fetching it on first request."""
-    deps.require_session(request)
+    await deps.require_session(request)
     if not _HASH_PATTERN.match(thumbnail_hash):
         raise ApiError(
             "THUMBNAIL_HASH_INVALID",

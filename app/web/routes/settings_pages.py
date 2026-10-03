@@ -33,6 +33,7 @@ from app.api.status import (
     SETTINGS_SECTIONS,
 )
 from app.connections.models import ProviderConnectionError
+from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
@@ -1126,6 +1127,8 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
             "poll_interval_ms",
             "timezone",
             "auto_approval_interval_minutes",
+            "mobile_access_ttl_seconds",
+            "mobile_refresh_ttl_seconds",
             "log_level",
         )
         if key in form
@@ -1355,6 +1358,43 @@ async def add_archive_password(request: Request, csrf_token: str = Form()):
             error=exc.public_message,
             status_code=400,
         )
+    return settings_redirect(request, SETTINGS_PASSWORDS)
+
+
+#: The single mobile API key. It shares the 密码库 tab with the archive
+#: passwords because it is the same kind of thing -- a credential the operator
+#: stores once -- and it is minted here rather than through the mobile API so a
+#: leaked client can never mint a replacement for itself.
+@router.post("/settings/api-keys/generate")
+async def generate_api_key(request: Request, csrf_token: str = Form()):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    database = deps.database(request)
+    token, public_id, secret = new_token(KIND_API_KEY)
+    # One transaction: revoke the old key and insert the new one together, so
+    # the partial unique index can never see two valid keys (a double-submitted
+    # form would otherwise lose the race with a constraint error).
+    await database.replace_api_key(
+        label="移动端",
+        public_id=public_id,
+        secret_hash=hash_secret(secret),
+    )
+    # Shown once, by the GET that follows this redirect; see
+    # `app/web/settings_view.py`. Never in the cookie, the URL or the database.
+    request.app.state.pending_api_key = token
+    target = request.url_for("settings_section", section=SETTINGS_PASSWORDS)
+    return RedirectResponse(f"{target.path}?reveal=1", status_code=303)
+
+
+@router.post("/settings/api-keys/revoke")
+async def revoke_api_key(request: Request, csrf_token: str = Form()):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    await deps.database(request).revoke_active_api_key()
     return settings_redirect(request, SETTINGS_PASSWORDS)
 
 

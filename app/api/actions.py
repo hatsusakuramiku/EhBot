@@ -56,9 +56,9 @@ BATCH_JOB_ACTIONS: frozenset[str] = frozenset(JOB_ACTIONS) | {
 }
 
 
-def _guard(request: Request) -> str:
+async def _guard(request: Request) -> str:
     """Authenticate, verify CSRF, and return the operator name."""
-    deps.require_session(request)
+    await deps.require_session(request)
     deps.require_csrf(request)
     return str(request.session.get("username") or "admin")
 
@@ -347,7 +347,7 @@ async def batch_review(request: Request) -> dict:
     refusal; the loop lives in `apply_review_batch`, which the `/candidates`
     form posts through as well.
     """
-    operator = _guard(request)
+    operator = await _guard(request)
     payload = await _body(request)
     candidate_ids = _candidate_ids(payload.get("candidate_ids"))
     return await apply_review_batch(
@@ -453,7 +453,7 @@ async def batch_job_action(request: Request) -> dict:
     cannot leave half a selection switched and half not. The loop itself lives
     in `apply_job_batch`, which the `/activity` form posts through as well.
     """
-    _guard(request)
+    await _guard(request)
     payload = await _body(request)
     action = str(payload.get("action") or "")
     if action not in BATCH_JOB_ACTIONS:
@@ -485,7 +485,7 @@ async def set_priority(request: Request, job_id: int) -> dict:
     routes in declaration order, so `/jobs/5/priority` would otherwise be
     answered by `job_action` with ``action='priority'`` and refused as unknown.
     """
-    _guard(request)
+    await _guard(request)
     payload = await _body(request)
     priority = _required_priority(payload)
     service = deps.download_service(request)
@@ -509,7 +509,7 @@ async def switch_source(request: Request, job_id: int) -> dict:
     landed on `job_action`, which does not know the name and answered 400
     ACTION_UNKNOWN.
     """
-    _guard(request)
+    await _guard(request)
     payload = await _body(request)
     provider = _required_provider(payload)
     service = deps.download_service(request)
@@ -529,7 +529,7 @@ async def job_action(request: Request, job_id: int, action: str) -> dict:
     and `/jobs/5/switch-source`, and Starlette takes the first route that
     matches, so anything more specific has to be above it.
     """
-    _guard(request)
+    await _guard(request)
     method_name = JOB_ACTIONS.get(action)
     if method_name is None:
         raise ApiError(
@@ -560,7 +560,7 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     "locks": {"Title": true}}` pins the value it just wrote rather than the one
     it replaced.
     """
-    operator = _guard(request)
+    operator = await _guard(request)
     payload = await _body(request)
     fields = payload.get("fields")
     locks = payload.get("locks")

@@ -100,6 +100,9 @@ def create_app(
     # Failed-login counter, per application rather than per module, so two
     # applications in one test session cannot share a lockout.
     app.state.login_attempts = {}
+    # One freshly minted API key waiting to be displayed once; see
+    # `app/web/settings_view.py`.
+    app.state.pending_api_key = None
     app.state.templates = build_templates()
     # The process's log buffer, published so a route reads it off state like
     # every other service. Deliberately the module-level singleton and not a new

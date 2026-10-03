@@ -12,6 +12,7 @@ from fastapi import Request
 from fastapi.responses import RedirectResponse
 
 from app.api.settings import settings_snapshot
+from app.api.status import SETTINGS_PASSWORDS
 from app.web import deps
 
 
@@ -50,6 +51,19 @@ async def render_settings(
             "notice": notice,
         }
     )
+    # A freshly generated API key is shown exactly once. It travels from the
+    # POST that minted it to the GET that follows the redirect through this
+    # process-memory slot -- never through the session cookie, the database or
+    # the URL. Only the `?reveal=1` fetch consumes it, so a bare prefetch of
+    # the tab cannot swallow the one chance to read it.
+    if (
+        section == SETTINGS_PASSWORDS
+        and request.query_params.get("reveal") == "1"
+    ):
+        context["api_key_plaintext"] = getattr(
+            request.app.state, "pending_api_key", None
+        )
+        request.app.state.pending_api_key = None
     context.update(extra)
     return deps.templates(request).TemplateResponse(
         request=request,

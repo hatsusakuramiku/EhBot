@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api import deps
 from app.api.actions import router as actions_router
+from app.api.auth import router as auth_router
 from app.api.activity import router as activity_router
 from app.api.candidates import router as candidates_router
 from app.api.downloaded import router as downloaded_router
@@ -37,6 +38,9 @@ router = APIRouter(prefix="/api/v1", tags=["api"])
 # Read-only domains first, then the state-changing routes. Order is irrelevant
 # to matching here -- no two of these declare the same path -- but grouping them
 # this way keeps the read/write split visible at a glance.
+# Auth first: its literal paths must not be shadowed by a domain route,
+# and the login/refresh pair deliberately requires no session.
+router.include_router(auth_router)
 router.include_router(summary_router)
 router.include_router(candidates_router)
 router.include_router(works_router)
@@ -64,7 +68,7 @@ async def api_meta(request: Request) -> dict:
     from the same table Python uses, so a new backend state cannot show up in
     one place as Chinese and in another as a raw enum.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     settings = request.app.state.settings
     system = await request.app.state.system_settings_service.snapshot()
     return {
@@ -122,7 +126,7 @@ async def api_events(request: Request) -> StreamingResponse:
     which would otherwise hold frames until the buffer filled and defeat the
     entire point of the endpoint.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     bus = _event_bus(request)
     return StreamingResponse(
         bus.stream(),
@@ -138,7 +142,7 @@ async def api_events(request: Request) -> StreamingResponse:
 @router.get("/events/stats")
 async def api_event_stats(request: Request) -> dict:
     """Subscriber and drop counters, for diagnosing a stuck interface."""
-    deps.require_session(request)
+    await deps.require_session(request)
     bus = _event_bus(request)
     return {
         "subscribers": bus.subscriber_count,

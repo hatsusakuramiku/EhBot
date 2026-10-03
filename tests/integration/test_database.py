@@ -166,13 +166,32 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
         telegram_source_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(telegram_sources)")
         }
+        api_credential_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
+        }
 
-    assert migration_count == 22
+    assert migration_count == 23
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns
     assert "idx_telegram_sources_dismissed" in indexes
     assert "idx_download_jobs_candidate" in indexes
+    # Migration 023: mobile/API credentials. The partial unique index is the
+    # "at most one valid API key" invariant, so it is asserted by name.
+    assert "api_credentials" in tables
+    assert {
+        "kind",
+        "label",
+        "public_id",
+        "secret_hash",
+        "family_id",
+        "created_at",
+        "last_used_at",
+        "expires_at",
+        "revoked_at",
+        "rotated_from",
+    } <= api_credential_columns
+    assert "idx_api_credentials_single_key" in indexes
     assert "auto_approval_rules" in tables
     assert {
         "archive_tool_profiles",

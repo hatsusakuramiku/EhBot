@@ -35,6 +35,7 @@ from app.api.serializers import (
     ai_provider_key,
     ai_provider_model,
     ai_selectable_model,
+    api_key_view,
     log_entry_payload,
     archive_password,
     archive_path_rule,
@@ -109,6 +110,7 @@ from app.conversion.naming import (
 )
 from app.logs.reader import MAX_LIMIT, clamp_limit, read_log_tail
 from app.review.models import field_label
+from app.credentials import MAX_TOKEN_TTL_SECONDS, MIN_TOKEN_TTL_SECONDS
 from app.settings.service import (
     AI_CANDIDATE_FALLBACKS,
     MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
@@ -589,6 +591,9 @@ async def _passwords_section(request: Request) -> dict[str, Any]:
         "passwords": [
             archive_password(entry) for entry in await service.passwords()
         ],
+        # The single mobile API key, metadata only: the plaintext is shown once
+        # by the page that mints it and is never read back.
+        "api_key": api_key_view(await deps.database(request).active_api_key()),
         # The login password lives on this tab too, so the section reports the
         # one fact a form needs about it: whether the initial password is still
         # in place. The hash is never read here.
@@ -629,6 +634,14 @@ async def _system_section(request: Request) -> dict[str, Any]:
             "auto_approval_interval_minutes": {
                 "minimum": MIN_AUTO_APPROVAL_INTERVAL_MINUTES,
                 "maximum": MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
+            },
+            "mobile_access_ttl_seconds": {
+                "minimum": MIN_TOKEN_TTL_SECONDS,
+                "maximum": MAX_TOKEN_TTL_SECONDS,
+            },
+            "mobile_refresh_ttl_seconds": {
+                "minimum": MIN_TOKEN_TTL_SECONDS,
+                "maximum": MAX_TOKEN_TTL_SECONDS,
             },
         },
         **await _log_view(request, configured_level=str(system["log_level"])),
@@ -744,14 +757,14 @@ async def list_settings_sections(request: Request) -> dict:
 
     Declared above `/settings/{section}` so the literal path wins the match.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     return {"tabs": section_tabs("")}
 
 
 @router.get("/settings/{section}")
 async def get_settings_section(request: Request, section: str) -> dict:
     """One section's stored settings, read-only."""
-    deps.require_session(request)
+    await deps.require_session(request)
     try:
         return await settings_snapshot(request, section)
     except KeyError as exc:

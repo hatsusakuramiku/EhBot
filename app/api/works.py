@@ -548,7 +548,7 @@ async def effective_library_path(request: Request):
 @router.get("/works/{candidate_id}")
 async def get_work(request: Request, candidate_id: int) -> dict:
     """Detail, metadata, audit timeline and related tasks for one work."""
-    deps.require_session(request)
+    await deps.require_session(request)
     snapshot = await work_snapshot(
         deps.database(request),
         candidate_id,

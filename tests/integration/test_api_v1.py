@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -178,7 +179,7 @@ class TestEventStream:
 
     @staticmethod
     def _authenticated_request(app):
-        """Minimal stand-in carrying the two things the route reads."""
+        """Minimal stand-in for what the route and its auth gate read."""
 
         class FakeRequest:
             def __init__(self) -> None:
@@ -187,6 +188,10 @@ class TestEventStream:
                     "authenticated": True,
                     "csrf_token": "token-value",
                 }
+                # `require_session` looks for a bearer credential before the
+                # session, so the double needs the two slots that path reads.
+                self.headers: dict[str, str] = {}
+                self.state = SimpleNamespace()
 
         return FakeRequest()
 

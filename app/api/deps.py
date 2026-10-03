@@ -5,16 +5,29 @@ function can reach them. These helpers read the same `app.state` slots through
 the `Request`, which lets a router live in its own module without being handed
 a dozen constructor arguments, and keeps a missing service reported as 503
 rather than surfacing as `AttributeError`.
+
+`require_session` accepts either a browser session cookie or an
+`Authorization: Bearer` credential, so the same endpoints serve the web
+interface and the mobile client. `require_csrf` is only meaningful for the
+cookie path -- see its docstring.
 """
 
 from __future__ import annotations
 
 import hmac
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Request
 
 from app.api.contracts import ApiError
+from app.credentials import (
+    BEARER_KINDS,
+    ApiCredential,
+    parse_token,
+    secret_matches,
+)
 
 
 #: Header the browser sends for a state-changing JSON call. HTMX is configured
@@ -22,15 +35,86 @@ from app.api.contracts import ApiError
 #: without each caller remembering to add a form field.
 CSRF_HEADER = "X-CSRF-Token"
 
+#: `last_used_at` is rewritten at most this often, so a busy mobile client does
+#: not turn every read into a database write just to keep one timestamp warm.
+TOUCH_INTERVAL_SECONDS = 60
 
-def require_session(request: Request) -> None:
+
+def _last_used_is_stale(value: str | None) -> bool:
+    """Whether the stored timestamp is old enough to be worth rewriting.
+
+    The value comes from SQLite's `CURRENT_TIMESTAMP` (UTC, no zone suffix). A
+    value in any other shape is treated as stale rather than fatal: a bad clock
+    must not turn a working credential into a locked-out operator.
+    """
+    if not value:
+        return True
+    try:
+        seen = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return True
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - seen).total_seconds() >= TOUCH_INTERVAL_SECONDS
+
+
+async def _bearer_credential(request: Request) -> ApiCredential | None:
+    """Resolve an `Authorization: Bearer` credential, or None when absent.
+
+    A malformed or rejected header raises instead of falling back to the
+    session: a client that sent a token must hear why it was refused, and
+    silently using a cookie would hide a broken credential. Browser requests
+    never carry this header, so the page path is untouched.
+    """
+    # A real `Request` always carries headers; the directly-driven stream tests
+    # use a minimal double, for which "no header" is the safe reading.
+    headers = getattr(request, "headers", None)
+    header = headers.get("authorization") if headers is not None else None
+    if not header:
+        return None
+    scheme, _, value = header.partition(" ")
+    parsed = parse_token(value) if scheme.strip().lower() == "bearer" else None
+    if parsed is None:
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS", "凭据格式不正确", status_code=401
+        )
+    public_id, secret = parsed
+    database = _service(request, "database", "数据库")
+    record = await database.get_api_credential(public_id)
+    if record is None or not secret_matches(secret, record.secret_hash):
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS", "凭据无效或已失效", status_code=401
+        )
+    if record.kind not in BEARER_KINDS:
+        # A refresh token is only accepted at `POST /api/v1/auth/refresh`.
+        raise ApiError(
+            "AUTH_INVALID_CREDENTIALS", "凭据不能用于此处", status_code=401
+        )
+    if record.is_revoked:
+        raise ApiError("AUTH_TOKEN_REVOKED", "凭据已被撤销", status_code=401)
+    if record.is_expired(int(time.time())):
+        raise ApiError("AUTH_TOKEN_EXPIRED", "凭据已过期", status_code=401)
+    request.state.auth_source = "bearer"
+    request.state.api_credential = record
+    if _last_used_is_stale(record.last_used_at):
+        await database.touch_api_credential(record.id)
+    return record
+
+
+async def require_session(request: Request) -> None:
     """Reject an unauthenticated or password-change-pending JSON caller.
 
+    Accepts either a password-derived session cookie or a Bearer credential.
     The page layer redirects in this situation; an API must not, because a
     fetch would silently follow the redirect and hand the caller a login page
     with status 200. A 401 with a stable code lets the interface decide to
     navigate.
+
+    A bearer credential skips the `must_change_password` check by construction:
+    the login endpoint refuses to mint one while the bootstrap password is
+    still in place.
     """
+    if await _bearer_credential(request) is not None:
+        return
     if not request.session.get("authenticated"):
         raise ApiError(
             "NOT_AUTHENTICATED", "请先登录", status_code=401
@@ -43,13 +127,32 @@ def require_session(request: Request) -> None:
         )
 
 
+async def require_bearer(request: Request) -> ApiCredential:
+    """Require a bearer credential specifically (no session fallback).
+
+    Used by the endpoints that act on the credential itself -- logout has
+    nothing to revoke when the caller is a browser cookie.
+    """
+    credential = await _bearer_credential(request)
+    if credential is None:
+        raise ApiError("NOT_AUTHENTICATED", "请先登录", status_code=401)
+    return credential
+
+
 def require_csrf(request: Request) -> None:
     """Verify the CSRF token on a state-changing JSON call.
 
     Accepts the token from a header only. A cookie-plus-header pair cannot be
     forged cross-origin without the attacker being able to read the session,
     which is the property the form-field version also relies on.
+
+    A bearer credential is exempt: a browser never sends it automatically, so a
+    cross-site request cannot carry it, and a native client has no cookie
+    session to protect.
     """
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "auth_source", None) == "bearer":
+        return
     expected = request.session.get("csrf_token", "")
     supplied = request.headers.get(CSRF_HEADER, "")
     if not expected or not supplied or not hmac.compare_digest(
@@ -58,8 +161,6 @@ def require_csrf(request: Request) -> None:
         raise ApiError(
             "CSRF_INVALID", "请求校验失败，请刷新页面重试", status_code=403
         )
-
-
 def _service(request: Request, name: str, label: str) -> Any:
     service = getattr(request.app.state, name, None)
     if service is None:
@@ -155,6 +256,7 @@ __all__ = [
     "download_service",
     "exhentai_service",
     "optional_service",
+    "require_bearer",
     "require_csrf",
     "require_session",
     "review_orchestrator",

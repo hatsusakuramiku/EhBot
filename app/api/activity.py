@@ -111,7 +111,7 @@ async def get_queue(request: Request) -> dict:
     When it is false the client can stop polling entirely, which is what keeps
     an idle tab from waking the process every two seconds.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     return await queue_snapshot(deps.download_service(request))
 
 
@@ -125,7 +125,7 @@ async def get_history(
     Terminal rows are never deleted, so history is a query rather than a
     separate archive table.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     service = deps.download_service(request)
     jobs = await service.list_history_jobs(limit=limit)
     return {

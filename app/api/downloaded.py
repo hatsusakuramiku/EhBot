@@ -355,7 +355,7 @@ async def apply_downloaded_batch(
 @router.get("/downloaded")
 async def downloaded_list(request: Request) -> dict[str, Any]:
     """The 已下载内容 list, same snapshot the page renders."""
-    deps.require_session(request)
+    await deps.require_session(request)
     params = request.query_params
     tab = params.get("tab") or "all"
     if tab not in DOWNLOADED_PACK_FILTERS:
@@ -384,7 +384,7 @@ async def downloaded_list(request: Request) -> dict[str, Any]:
 @router.post("/downloaded/batch")
 async def downloaded_batch(request: Request) -> dict[str, Any]:
     """Run one action against a selection of downloaded works."""
-    deps.require_session(request)
+    await deps.require_session(request)
     deps.require_csrf(request)
     payload = await request.json()
     if not isinstance(payload, dict):

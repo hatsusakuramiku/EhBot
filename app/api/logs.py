@@ -210,7 +210,7 @@ def _log_file_exists(log_dir) -> bool:
 @router.get("/logs")
 async def get_logs(request: Request) -> dict[str, Any]:
     """The tail as JSON, for the page's own refresh and for a scripted read."""
-    deps.require_session(request)
+    await deps.require_session(request)
     return await log_snapshot(request)
 
 
@@ -228,7 +228,7 @@ async def stream_logs(request: Request) -> StreamingResponse:
     stream, and `X-Accel-Buffering: no` because nginx would otherwise hold frames
     until its buffer filled, which defeats the whole endpoint.
     """
-    deps.require_session(request)
+    await deps.require_session(request)
     broker = log_broker(request)
     return StreamingResponse(
         broker.stream(replay=STREAM_REPLAY),

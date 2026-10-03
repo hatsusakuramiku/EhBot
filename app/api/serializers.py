@@ -692,6 +692,24 @@ def archive_password(entry: Any) -> dict[str, Any]:
     }
 
 
+def api_key_view(credential: Any | None) -> dict[str, Any]:
+    """The API key's metadata -- never the secret and never its hash.
+
+    There is at most one valid key, so this is either its row or
+    ``{"configured": False}``; the template reads ``configured`` to choose
+    between the generate form and the revoke form.
+    """
+    if credential is None:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "label": credential.label,
+        "public_id": credential.public_id,
+        "created_at": credential.created_at,
+        "last_used_at": credential.last_used_at,
+    }
+
+
 def tool_profile(profile: Any) -> dict[str, Any]:
     """One registered extraction tool. Operators never submit raw commands."""
     return {
@@ -720,6 +738,7 @@ def safety_limits(limits: Any) -> dict[str, Any]:
 
 
 __all__ = [
+    "api_key_view",
     "archive_password",
     "auto_approval_dry_run",
     "auto_approval_rule",

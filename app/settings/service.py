@@ -35,6 +35,12 @@ from app.candidates.parse_rules import (
     validate_parse_rules,
 )
 from app.config import LOG_LEVEL_CHOICES
+from app.credentials import (
+    DEFAULT_ACCESS_TTL_SECONDS,
+    DEFAULT_REFRESH_TTL_SECONDS,
+    MAX_TOKEN_TTL_SECONDS,
+    MIN_TOKEN_TTL_SECONDS,
+)
 from app.db.database import Database
 from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 
@@ -45,6 +51,11 @@ SETTING_TIMEZONE = "timezone"
 SETTING_AUTO_APPROVAL_INTERVAL_MINUTES = "auto_approval_interval_minutes"
 SETTING_LOG_LEVEL = "log_level"
 SETTING_DOWNLOAD_SOURCE_PRIORITY = "download_source_priority"
+
+#: Mobile login token lifetimes, editable on 设置 › 系统. The API key is
+#: deliberately not here: it never expires by design.
+SETTING_MOBILE_ACCESS_TTL_SECONDS = "mobile_access_ttl_seconds"
+SETTING_MOBILE_REFRESH_TTL_SECONDS = "mobile_refresh_ttl_seconds"
 
 #: The AI candidate-admission switches. All four are one decision -- 「要不要让
 #: 模型先看一遍消息」 -- so they are read together and saved from one page.
@@ -214,6 +225,28 @@ class SystemSettingsService:
             ),
             MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
         )
+        mobile_access_ttl_seconds = min(
+            max(
+                _read_int(
+                    stored,
+                    SETTING_MOBILE_ACCESS_TTL_SECONDS,
+                    DEFAULT_ACCESS_TTL_SECONDS,
+                ),
+                MIN_TOKEN_TTL_SECONDS,
+            ),
+            MAX_TOKEN_TTL_SECONDS,
+        )
+        mobile_refresh_ttl_seconds = min(
+            max(
+                _read_int(
+                    stored,
+                    SETTING_MOBILE_REFRESH_TTL_SECONDS,
+                    DEFAULT_REFRESH_TTL_SECONDS,
+                ),
+                MIN_TOKEN_TTL_SECONDS,
+            ),
+            MAX_TOKEN_TTL_SECONDS,
+        )
         return {
             "ai_enabled": _read_bool(
                 stored, SETTING_AI_ENABLED, DEFAULT_AI_ENABLED
@@ -229,6 +262,8 @@ class SystemSettingsService:
             "log_level": log_level,
             "log_access": log_level == "DEBUG",
             "auto_approval_interval_minutes": auto_approval_interval_minutes,
+            "mobile_access_ttl_seconds": mobile_access_ttl_seconds,
+            "mobile_refresh_ttl_seconds": mobile_refresh_ttl_seconds,
             "download_source_priority": list(download_source_priority),
             # Whether the operator has moved this off the default. A row holding
             # an empty string is not an override -- that is how a cleared field is
@@ -250,6 +285,12 @@ class SystemSettingsService:
             ),
             "download_source_priority_overridden": bool(
                 stored.get(SETTING_DOWNLOAD_SOURCE_PRIORITY, "").strip()
+            ),
+            "mobile_access_ttl_overridden": bool(
+                stored.get(SETTING_MOBILE_ACCESS_TTL_SECONDS, "").strip()
+            ),
+            "mobile_refresh_ttl_overridden": bool(
+                stored.get(SETTING_MOBILE_REFRESH_TTL_SECONDS, "").strip()
             ),
         }
 
@@ -275,6 +316,12 @@ class SystemSettingsService:
         return tuple(
             (await self.snapshot())["download_source_priority"]
         )
+
+    async def mobile_access_ttl_seconds(self) -> int:
+        return int((await self.snapshot())["mobile_access_ttl_seconds"])
+
+    async def mobile_refresh_ttl_seconds(self) -> int:
+        return int((await self.snapshot())["mobile_refresh_ttl_seconds"])
 
     async def ai_enabled(self) -> bool:
         """Whether any AI feature may run at all (master switch)."""
@@ -452,6 +499,28 @@ class SystemSettingsService:
             cleaned[SETTING_DOWNLOAD_SOURCE_PRIORITY] = ",".join(
                 _validate_priority(
                     values[SETTING_DOWNLOAD_SOURCE_PRIORITY]
+                )
+            )
+        if SETTING_MOBILE_ACCESS_TTL_SECONDS in values:
+            cleaned[SETTING_MOBILE_ACCESS_TTL_SECONDS] = (
+                _validate_bounded_int(
+                    values[SETTING_MOBILE_ACCESS_TTL_SECONDS],
+                    minimum=MIN_TOKEN_TTL_SECONDS,
+                    maximum=MAX_TOKEN_TTL_SECONDS,
+                    code="MOBILE_ACCESS_TTL_INVALID",
+                    label="登录有效期",
+                    unit="秒",
+                )
+            )
+        if SETTING_MOBILE_REFRESH_TTL_SECONDS in values:
+            cleaned[SETTING_MOBILE_REFRESH_TTL_SECONDS] = (
+                _validate_bounded_int(
+                    values[SETTING_MOBILE_REFRESH_TTL_SECONDS],
+                    minimum=MIN_TOKEN_TTL_SECONDS,
+                    maximum=MAX_TOKEN_TTL_SECONDS,
+                    code="MOBILE_REFRESH_TTL_INVALID",
+                    label="刷新有效期",
+                    unit="秒",
                 )
             )
         if SETTING_LOG_LEVEL in values:

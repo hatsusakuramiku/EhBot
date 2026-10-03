@@ -11,7 +11,8 @@
   two controls are the topbar's own segmented buttons, and this section only says
   where they live -- it does not render a second pair that could disagree.
 
-  并发上限, 轮询间隔, 自动审批扫描间隔, 下载来源优先级 and 时区 are server
+  并发上限, 轮询间隔, 自动审批扫描间隔, 下载来源优先级, 时区 and 移动端令牌
+  有效期 are server
   state, read per job through a provider callable, so a save takes effect on the
   next task and nothing restarts. The
   bounds in the `min`/`max` attributes come from the same constants the service
@@ -70,6 +71,34 @@
             新候选入库时也会立即评估一次，不必等到下个周期。
             填 0 表示只在打开「待审核」页时评估。
             {%- if not system.auto_approval_interval_overridden %} 当前为默认值。{% endif %}
+          </small>
+        </div>
+        <div class="ui-field">
+          <label for="sys-access-ttl">移动端登录有效期（秒）</label>
+          <input class="ui-input" id="sys-access-ttl" name="mobile_access_ttl_seconds"
+                 type="number"
+                 min="{{ bounds.mobile_access_ttl_seconds.minimum }}"
+                 max="{{ bounds.mobile_access_ttl_seconds.maximum }}"
+                 value="{{ system.mobile_access_ttl_seconds }}">
+          <small>
+            密码登录得到的 access token 有效多久，{{ bounds.mobile_access_ttl_seconds.minimum }}–{{ bounds.mobile_access_ttl_seconds.maximum }} 秒。
+            默认 43200（12 小时）。到期由客户端用 refresh token 自动续期。
+            {%- if not system.mobile_access_ttl_overridden %} 当前为默认值。{% endif %}
+            置空恢复默认。
+          </small>
+        </div>
+        <div class="ui-field">
+          <label for="sys-refresh-ttl">移动端刷新有效期（秒）</label>
+          <input class="ui-input" id="sys-refresh-ttl" name="mobile_refresh_ttl_seconds"
+                 type="number"
+                 min="{{ bounds.mobile_refresh_ttl_seconds.minimum }}"
+                 max="{{ bounds.mobile_refresh_ttl_seconds.maximum }}"
+                 value="{{ system.mobile_refresh_ttl_seconds }}">
+          <small>
+            refresh token 有效多久，{{ bounds.mobile_refresh_ttl_seconds.minimum }}–{{ bounds.mobile_refresh_ttl_seconds.maximum }} 秒。
+            默认 2592000（30 天）。每次刷新都会轮换并重新计时。
+            {%- if not system.mobile_refresh_ttl_overridden %} 当前为默认值。{% endif %}
+            置空恢复默认。
           </small>
         </div>
         <div class="ui-field">

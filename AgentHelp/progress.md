@@ -5457,3 +5457,89 @@ imagetools inspect` 与本地 `docker images` 取回同一 index digest（本地
 冒烟在镜像内完成：启动时自动装好 7-Zip 26.02 与标签库，`/healthz` 得 `{"status":"ok"}`、`/login` 200；
 宿主端口映射在本环境的 shell 命名空间里连不上发布端口，故改用 `docker exec` 在容器内请求。容器已清理，
 本地镜像保留以便复测。
+
+## R53 — 移动端鉴权（B1）：凭据表、密码登录换令牌、Bearer 通道（v0.3.0rc2，2026-10-03）
+
+运营者批准 `MOBILE_CLIENT_PROPOSAL.md`（第二稿）后分两期实施；客户端 M0–M4 在另一个仓库
+`/home/coder/workspace/ehbot-mobile` 由另一会话开发。B1 只落服务端鉴权核心，B2（R54）补
+API Key 面板与令牌有效期设置。
+
+**迁移 `023_api_credentials.sql`。** 一张表装两族凭据（`kind` ∈ `api_key` / `access` /
+`refresh`）：`public_id` 唯一、只存 `sha256(secret)`、`family_id` 把一次登录的 access/refresh
+串成一家（`logout` 按它整族吊销）、`rotated_from` 留轮换链、`expires_at` 是 epoch 秒
+（NULL = 不过期）。部分唯一索引 `WHERE kind='api_key' AND revoked_at IS NULL` 把
+「任意时间最多一条有效 Key」做成数据库不变量，而不是靠路由自觉。
+
+**新模块。** `app/credentials.py` 是线格式与哈希的唯一来源：`<public_id>.<secret>`，
+前缀 `ehk_` / `eha_` / `ehr_`，形状在边缘用正则校验；`ApiCredential` 同时表达
+`is_revoked` 与 `is_expired`。`app/web/login_throttle.py` 把失败计数从
+`app/web/routes/auth.py` 抽出（原模块 re-export 旧名字，既有测试与 `app.state.login_attempts`
+的用法不变），页面登录与 JSON 登录共用同一桶与同一套 429 语义——换端点不刷新尝试预算。
+
+**端点（`app/api/auth.py`，挂 `/api/v1/auth`）。** `POST /auth/login` 用 `admin_users` +
+pwdlib 校验密码（初始密码未改一律 `403 PASSWORD_CHANGE_REQUIRED`，不签发），成功签发 access
+（默认 12h）+ refresh（默认 30d）；`POST /auth/refresh` 先把旧 refresh 标为已撤销再发新对
+（轮换，重放旧令牌得 `401 AUTH_TOKEN_REVOKED`）；`POST /auth/logout` 按 `family_id` 整族吊销，
+用 API Key 调用时是 no-op（Key 由网页端管理）；`GET /auth/whoami` 供连通测试与会话显示。
+
+**统一守卫。** `app/api/deps.py` 的 `require_session` 改成「会话或 Bearer」并改为 async：
+无 `Authorization` 头时行为与从前逐字相同；带 Bearer 时按 `public_id` 查表、常数时间比较、
+按 `kind` 拒绝把 refresh 当访问令牌、过期与撤销分别报 `AUTH_TOKEN_EXPIRED` /
+`AUTH_TOKEN_REVOKED`，并把 `last_used_at` 按 60 秒节流写回（`TOUCH_INTERVAL_SECONDS`）。
+`require_csrf` 对 Bearer 放行——浏览器不会自发携带该头，跨站请求带不上；cookie 会话照旧强制。
+17 个调用点与 `actions._guard`（改 async）全部改为 `await`。
+
+**改密语义（凭据族隔离）。** 改管理员密码时 `revoke_password_credentials()` 吊销所有
+access/refresh，但**不**动 API Key；网页 `/logout` 只清浏览器会话，移动端 `logout` 只吊销本设备。
+`app/settings/service.py` 同时加入 `mobile_access_ttl_seconds` / `mobile_refresh_ttl_seconds`
+两个键（默认 43200 / 2592000，边界 60–31536000）与读取方法，表单与快照在 R54 接上。
+
+**测试（+38，1690 → 1728 collected）。**
+
+- `tests/unit/test_credentials.py`（+22）：三种前缀的签发/解析往返、200 个不碰撞、未知 kind
+  报错、十种畸形形状拒绝、边界空白容忍；sha256 稳定性、常数时间比较、空哈希不匹配；
+  `is_expired` 的 None/边界/未来，以及「已撤销」与「已过期」是两个独立事实。
+- `tests/integration/test_api_auth.py`（+16）：登录签发可用对（`expires_in` 12h/30d、前缀正确）；
+  Bearer 不依赖 cookie 即达 `/api/v1/meta`；初始密码未改拒绝签发；错密码与空密码 401；
+  **API 登录与页面登录共享锁定**（5 次失败后第 6 次 429，且正确密码的页面登录也 429）；
+  畸形头 / 未签发的合规形状 / 把 refresh 当 Bearer 都是 401；过期 access 报
+  `AUTH_TOKEN_EXPIRED`（直接改库把 `expires_at` 置为过去）；**Bearer 跳过 CSRF 而 cookie
+  会话仍要求**；refresh 轮换后旧令牌失效；logout 整族吊销（access 与 refresh 都 401）；
+  无 Bearer 的 logout 401；whoami 报 `kind`/`label`；改密吊销密码令牌并可用新密码重新登录。
+
+**验证（本轮目标文件）**：`test_credentials.py`、`test_api_auth.py`、
+`test_authentication.py`、`test_api_v1.py`、`test_api_contracts.py`、
+`test_api_domains.py`、`test_settings_web.py`、`test_thumbnails_workflow.py` 全绿；
+全量基线见 R54 末尾的统一复核。
+
+**文档**：用户可见的移动端章节（README / `docs/USAGE.md` / `EHBot.md`）与 R54 的功能一起写；
+本轮页面行为零变化（新端点尚无页面入口）。
+
+## R54 — 移动端鉴权（B2）：单 API Key 面板与令牌有效期（v0.3.0rc2，2026-10-03）
+
+**密码库页新增「API 密钥（移动端）」面板**（`settings/_passwords.html`）：未生成时只有生成按钮；
+已生成时显示 `public_id`、创建时间、最近使用，并给出「刷新密钥」（危险确认：旧密钥立即失效）
+与「撤销」。生成走 `POST /settings/api-keys/generate`，先 `revoke_active_api_key()` 再插新行，
+满足部分唯一索引；撤销走 `POST /settings/api-keys/revoke`。两者都要求会话 + CSRF。
+
+**明文只显示一次，且不经过 cookie、URL 或数据库。** 生成路由把新 token 放进
+`app.state.pending_api_key`，303 到 `/settings/passwords?reveal=1`；`render_settings` 只在
+`reveal=1` 时取出并清空它，因此刷新页面看到的是元数据而不是密钥，普通预取也不会吞掉这一次展示。
+`GET /api/v1/settings/passwords` 只回 `api_key` 的 `public_id` / `label` / 时间，`serializers.api_key_view`
+没有任何密文或哈希字段。
+
+**令牌有效期可调。** 「设置 › 系统」新增「移动端登录有效期 / 刷新有效期」（秒，
+60–31536000，默认 43200 / 2592000）；`_system_section` 带出边界，`save_system_settings` 接上两个键，
+登录时由 `_issue_pair` 读取，立即生效。
+
+**测试（+13，1728 → 1741 collected）。**
+
+- `tests/integration/test_api_keys.py`（+13）：全新部署没有 Key（面板显示未生成、快照
+  `{"configured": False}`、库里 0 条）；密钥只在生成后那一次显示、重新加载不再出现；
+  快照与页面序列化里不含明文/哈希；再次生成使旧 Key 401 `AUTH_TOKEN_REVOKED`、新 Key 200、
+  库中有效 Key 恰好 1 条；撤销后 0 条且不可用；撤销后可再生成；Key 可作 Bearer 且跳过 CSRF；
+  改密后 Key 仍 200；access logout 不影响 Key；生成在未登录时 303 到 `/login`、错 CSRF 403；
+  保存的 TTL 到登录响应（3600 / 604800）；越界 TTL（1 秒）400 且报「登录有效期」。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q -p no:randomly` →
+**1741 collected / 0 failed**；`compileall` 与 `git diff --check` 干净。

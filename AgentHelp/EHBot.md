@@ -264,6 +264,22 @@ Stored / Deflate / Bzip2 / LZMA。
 边界：**搜索与过滤的整块重构（facet 侧栏、筛选 chips、`ArtistRaw`/`GroupRaw`、路径搜索）本轮不做**，
 决策与落点记在方案 §3.3，留给下一轮。
 
+### 4.10 移动客户端与 API 鉴权（2026-10-03，R53/R54）
+
+移动端是独立的 Flutter 仓库（`/home/coder/workspace/ehbot-mobile`），只通过 `/api/v1`
+与本服务通信；本仓库只提供契约与鉴权，不引入 Flutter 代码。设计记录见
+`MOBILE_CLIENT_PROPOSAL.md`。
+
+- **两种登录**：密码登录（`/api/v1/auth/login` 换 access + refresh，refresh 轮换）与 API Key。
+- **API Key**：网页「设置 › 密码库」手动生成，默认不生成；全局同时只有一条有效；不过期；
+  刷新立即吊销旧 Key；改管理员密码不影响它；明文只在生成那一次显示。
+- **凭据族隔离**：改密吊销全部密码派生的 access/refresh；刷新/撤销 Key 只影响 Key 认证的客户端。
+- **统一通道**：`Authorization: Bearer <public_id>.<secret>` 与浏览器会话同权（完整权限），
+  Bearer 请求不需要 CSRF；浏览器会话路径行为不变。
+- **令牌有效期**：「设置 › 系统」可调（60 秒 – 365 天），默认 access 12 小时、refresh 30 天。
+- **客户端范围**：MVP = 连接配置、两种登录、工作台 / 候选 / 审核 / 活动 / 已下载、缩略图、
+  SSE + 轮询回退；设置编辑、批量、推送留到后续版本。
+
 ## 5. 后端配套需求
 
 ### 5.1 JSON API（新增 `app/api/`）

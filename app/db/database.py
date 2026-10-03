@@ -29,6 +29,7 @@ from app.candidates.models import (
     TelegramSourceConfig,
 )
 from app.candidates.rules import evaluate_metadata_rules
+from app.credentials import ApiCredential
 from app.downloads.models import (
     CONVERSION_STATE_FAILED,
     CONVERSION_STATE_WAITING_PASSWORD,
@@ -45,6 +46,28 @@ from app.review.models import (
     ReviewActionEntry,
     statuses_allowing,
 )
+
+
+def _api_credential_from_row(row) -> ApiCredential:
+    """One `api_credentials` row, in the column order every reader selects.
+
+    Written once because four readers (lookup, active key, family revoke and the
+    tests) must agree on it; a second hand-written index map is how a column
+    gets swapped without anything failing loudly.
+    """
+    return ApiCredential(
+        id=int(row[0]),
+        kind=str(row[1]),
+        label=str(row[2]),
+        public_id=str(row[3]),
+        secret_hash=str(row[4]),
+        family_id=str(row[5] or ""),
+        created_at=row[6],
+        last_used_at=row[7],
+        expires_at=int(row[8]) if row[8] is not None else None,
+        revoked_at=row[9],
+        rotated_from=int(row[10]) if row[10] is not None else None,
+    )
 
 
 #: Status -> counter key. This is the single place a candidate state is mapped
@@ -1123,6 +1146,188 @@ class Database:
             )
             if cursor.rowcount != 1:
                 raise LookupError(f"Administrator account {username!r} does not exist")
+
+    # --- Mobile / API credentials (migration 023) -------------------------
+    #
+    # One table serves both families; see `app/credentials.py` for the wire
+    # format and the reasoning. Only hashes are stored -- these methods never
+    # see a plaintext secret on the way out.
+
+    async def create_api_credential(
+        self,
+        *,
+        kind: str,
+        label: str,
+        public_id: str,
+        secret_hash: str,
+        family_id: str = "",
+        expires_at: int | None = None,
+        rotated_from: int | None = None,
+    ) -> int:
+        """Insert one credential and return its row id."""
+        return await asyncio.to_thread(
+            self._create_api_credential_sync,
+            kind,
+            label,
+            public_id,
+            secret_hash,
+            family_id,
+            expires_at,
+            rotated_from,
+        )
+
+    def _create_api_credential_sync(
+        self,
+        kind: str,
+        label: str,
+        public_id: str,
+        secret_hash: str,
+        family_id: str,
+        expires_at: int | None,
+        rotated_from: int | None,
+    ) -> int:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO api_credentials "
+                "(kind, label, public_id, secret_hash, family_id, expires_at, "
+                "rotated_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    kind,
+                    label,
+                    public_id,
+                    secret_hash,
+                    family_id,
+                    expires_at,
+                    rotated_from,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    async def get_api_credential(self, public_id: str) -> ApiCredential | None:
+        return await asyncio.to_thread(self._get_api_credential_sync, public_id)
+
+    def _get_api_credential_sync(self, public_id: str) -> ApiCredential | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id, kind, label, public_id, secret_hash, family_id, "
+                "created_at, last_used_at, expires_at, revoked_at, rotated_from "
+                "FROM api_credentials WHERE public_id = ?",
+                (public_id,),
+            ).fetchone()
+        return _api_credential_from_row(row) if row is not None else None
+
+    async def active_api_key(self) -> ApiCredential | None:
+        """The one valid API key, or None when the operator has not minted one."""
+        return await asyncio.to_thread(self._active_api_key_sync)
+
+    def _active_api_key_sync(self) -> ApiCredential | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id, kind, label, public_id, secret_hash, family_id, "
+                "created_at, last_used_at, expires_at, revoked_at, rotated_from "
+                "FROM api_credentials "
+                "WHERE kind = 'api_key' AND revoked_at IS NULL "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return _api_credential_from_row(row) if row is not None else None
+
+    async def touch_api_credential(self, credential_id: int) -> None:
+        """Record use. Callers throttle this; it is a write on every call."""
+        await asyncio.to_thread(self._touch_api_credential_sync, credential_id)
+
+    def _touch_api_credential_sync(self, credential_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE api_credentials SET last_used_at = CURRENT_TIMESTAMP "
+                "WHERE id = ?",
+                (credential_id,),
+            )
+
+    async def revoke_api_credential(self, credential_id: int) -> None:
+        await asyncio.to_thread(self._revoke_api_credential_sync, credential_id)
+
+    def _revoke_api_credential_sync(self, credential_id: int) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND revoked_at IS NULL",
+                (credential_id,),
+            )
+
+    async def revoke_credential_family(self, family_id: str) -> int:
+        """Revoke every access/refresh row sharing a login family."""
+        return await asyncio.to_thread(
+            self._revoke_credential_family_sync, family_id
+        )
+
+    def _revoke_credential_family_sync(self, family_id: str) -> int:
+        if not family_id:
+            return 0
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE family_id = ? AND revoked_at IS NULL",
+                (family_id,),
+            )
+            return int(cursor.rowcount)
+
+    async def revoke_password_credentials(self) -> int:
+        """Revoke every password-derived token (used on a password change).
+
+        The API key is deliberately excluded: it is an independent long-lived
+        credential, and the operator asked that changing the password not
+        invalidate it.
+        """
+        return await asyncio.to_thread(self._revoke_password_credentials_sync)
+
+    def _revoke_password_credentials_sync(self) -> int:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE kind IN ('access', 'refresh') AND revoked_at IS NULL"
+            )
+            return int(cursor.rowcount)
+
+    async def replace_api_key(
+        self, *, label: str, public_id: str, secret_hash: str
+    ) -> None:
+        """Revoke the current key and insert its replacement, atomically.
+
+        One transaction rather than revoke-then-insert: the partial unique index
+        permits a single valid key, so a double-submitted form that interleaved
+        the two calls would make the second insert fail the constraint. Doing
+        both here means concurrent mints serialise on the write lock instead.
+        """
+        await asyncio.to_thread(
+            self._replace_api_key_sync, label, public_id, secret_hash
+        )
+
+    def _replace_api_key_sync(
+        self, label: str, public_id: str, secret_hash: str
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE kind = 'api_key' AND revoked_at IS NULL"
+            )
+            connection.execute(
+                "INSERT INTO api_credentials "
+                "(kind, label, public_id, secret_hash) "
+                "VALUES ('api_key', ?, ?, ?)",
+                (label, public_id, secret_hash),
+            )
+
+    async def revoke_active_api_key(self) -> int:
+        """Revoke the current key; returns how many rows changed (0 or 1)."""
+        return await asyncio.to_thread(self._revoke_active_api_key_sync)
+
+    def _revoke_active_api_key_sync(self) -> int:
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                "WHERE kind = 'api_key' AND revoked_at IS NULL"
+            )
+            return int(cursor.rowcount)
 
     async def save_telegram_updates(self, updates: list[dict]) -> int:
         return await asyncio.to_thread(self._save_telegram_updates_sync, updates)
