@@ -55,7 +55,7 @@
 | 项 | 要求 |
 |----|------|
 | 主题 | 深色为默认，浅色可切换，跟随系统偏好 |
-| 布局 | 桌面左侧固定侧栏（可折叠为图标栏）；移动端底部 Tab Bar + 抽屉，**不再维护两套导航结构** |
+| 布局 | 桌面左侧固定侧栏（可折叠为图标栏）；移动端底部 Tab Bar **直连各域首页**（无二级抽屉，子页走页内分区条），**不再维护两套导航结构** |
 | 密度 | 支持「舒适/紧凑」两档，列表类页面记忆用户选择 |
 | 响应式 | 断点 640 / 1024 / 1440；封面网格列数自适应 |
 | 无障碍 | 键盘可达、焦点可见、`aria-live` 播报异步结果、对比度 ≥ 4.5:1 |
@@ -157,7 +157,9 @@ R29 把 AI 接进路径决策（`path_source` + prompt + 指纹缓存 + 需干�
 AI 模式下的**整库重排**（计划只读缓存、需要新答案的交给「只移动不重打包」的重算路径任务、强制全库
 重新询问、试跑、批量/并发/流式开关）。R31 **按 AstrBot 的管理方式重写这一层**：供应商 → 模型两层、
 Key/模型批量录入、逐模型请求参数（默认不发任何参数）、配置不再有验证门槛；并引入「**全局默认模型**」
-与**页面级覆盖**——AI 页拥有全局默认链，路径页可选跟随或单独指定（迁移 `019`）。
+与**页面级覆盖**——AI 页拥有全局默认链，路径页可选跟随或单独指定（迁移 `019`）。R52 把「页面级覆盖」
+推广成**每功能控制链**：候选判定页也有自己的一张（或跟随全局），再加一个**全局总开关**，
+生效 = 总开关 AND 本功能开关，且**本功能配置的模型全部失败时不回退全局默认**。
 
 | 能力 | 要求 | 状态 |
 |------|------|------|
@@ -168,6 +170,9 @@ Key/模型批量录入、逐模型请求参数（默认不发任何参数）、�
 | 配置不做验证门槛 | 未验证 / 最近验证失败 / 已停用 / 供应商无可用 Key 的模型**都能进链**；「测试」是对某个模型或整条链的按钮，失败原因与时间落库并显示，但不阻塞保存 | ✅ R31 |
 | 全局默认模型 | AI 页顶部一张可跨供应商的有序链，第 0 位主力 + 备用；**其他页面不单独指定就用它** | ✅ R31 |
 | 页面级模型覆盖 | 路径页「路径决策模型」二选一：跟随全局默认，或本页单独指定一条链（`ai_settings.ai_model_source`）；两张列表互不影响，链按 `scope` 分行存储 | ✅ R31 |
+| AI 功能总开关 | `system_settings.ai_enabled`（缺省开）：关闭后任何功能都不产生模型调用，配置原样保留；「测试模型」不受影响。生效 = 总开关 AND 本功能开关 | ✅ R52 |
+| 每功能模型链 | 归档路径与候选判定各自可选「跟随全局默认 / 本页单独指定」，共用 `settings/_model_chain.html` 宏与同一套链动作（`<endpoint>/primary|append|shift|remove`）；**全部模型失败不回退全局默认**，错误文本带作用域名 | ✅ R52 |
+| 作用域注册表 | `AiProviderService` 用 `register_scope_source(scope, reader)` 解析「这张列表从哪来」，不再硬编码 `if scope == …`；未注册的作用域按「跟随全局」处理 | ✅ R52 |
 | AI 决定路径 | `path_source ∈ {template(默认), ai}`；AI 输出目录 + 文件名两段，`.cbz` 由本服务追加；缓存即语义（指纹 = 元数据 + prompt + 模型链 + 基础地址与请求参数，**Key 不进指纹**）；全链失败默认进「需干预」 | ✅ R29 |
 | AI 路径的来源标注 | 作品详情页「归档」面板与已下载列表给 AI 产出的路径打 `AI 生成` 徽标；判定＝缓存行存在且 `relative_path` == 当前记录在案的路径（纯读、不加列，人工改名后自动消失） | ✅ R29 |
 | AI 模式重排 | 计划阶段不调模型；需要新答案的按 `每批处理数量` 分批准备并入队，复用转换 worker（并发数只用于并发拉取元数据；模型调用发生在 job 内，逐件进行）；**强制＝全库重新询问**（含缓存已是当前答案的作品，并覆盖手动 pin）；已打包只移动、改名；同页提供只计划不执行的「试跑」 | ✅ R30 |
@@ -198,8 +203,9 @@ Key/模型批量录入、逐模型请求参数（默认不发任何参数）、�
 |------|------|------|
 | 解析规则页 | 「设置 → 解析规则」独立一页；默认方案 = **只解析含 ExHentai/e-hentai 画廊链接的消息**；可放宽到纯图片 / 压缩包附件（带格式白名单）/ 预览页，可要求标题 | ✅ R50 |
 | 严格写入、宽松读取 | 未知键 / 类型错误 / 非法格式在保存时拒绝并给出中文原因；读取时坏值回退默认，绝不因一行设置写坏而停摆 | ✅ R50 |
-| AI 候选判定 | 可选项：**已配置 AI 供应商 且 手动开启**才生效；判定在解析规则**之前**执行；可配置「AI 通过即完全覆盖解析规则」；模型链失败时 `reject`（默认）/ `accept` 兜底 | ✅ R50 |
-| AI 判定输入 | 只发消息正文、来源名称、链接与附件（类型 / 文件名），不含 chat id 或账户信息；复用全局默认模型链 | ✅ R50 |
+| AI 候选判定 | 可选项：**全局总开关与本功能开关都开 且 配了可用模型**才生效；判定在解析规则**之前**执行；可配置「AI 通过即完全覆盖解析规则」；模型链失败时 `reject`（默认）/ `accept` 兜底 | ✅ R50/R52 |
+| 候选判定模型 | 默认跟随全局默认链，也可在解析规则页「单独指定」一张自己的主力 + 备用（`system_settings.ai_candidate_model_source`，作用域 `candidate_admission`）；本页链全部失败不回退全局 | ✅ R52 |
+| AI 判定输入 | 只发消息正文、来源名称、链接与附件（类型 / 文件名），不含 chat id 或账户信息 | ✅ R50 |
 | 摄取路径收敛 | Bot API 与 MTProto 两条路径共用 `CandidateIngestor.admit_message`，准入逻辑只有一份 | ✅ R50 |
 | 彻底删除 | 候选详情页与候选列表都能删掉候选本身：消息、元数据、审核历史、该候选**全部**下载/打包任务与产物记录；留一条 `removed_works` 审计；可选连文件一起删（默认不删） | ✅ R50 |
 | 移除的定义修正 | `remove_work` 从「只删最新下载 + 打包行」改为删除该候选的**全部** job 与 artifacts——换过来源的作品不再残留兄弟行与文件 | ✅ R50 |
@@ -240,6 +246,23 @@ Stored / Deflate / Bzip2 / LZMA。
   生成一次后提交；仓库与镜像不含任何 rarlab 二进制）。
 - **比例门语义**：`7zz l -slt` 对 RAR 给出每成员自己的 `Packed Size` 且不带 `Block`，所以 RAR 与 ZIP 一样
   按成员判，只有 7z 固体块按块判。
+
+### 4.9 界面导航、卡片标签与自定义排序（2026-10-03，R52）
+
+运营者四项要求：非桌面版不要二级菜单选分区；卡片展示全部中文标签；来源纳入已下载搜索并加自定义排序
+（搜索与过滤的整块重构留到下一轮）；AI 侧改为「全局默认 + 每功能自配」的主力 + 备用控制链。设计记录在
+`UI_QUERY_AND_AI_CONTROLS_PROPOSAL.md`。
+
+| 能力 | 要求 | 状态 |
+|------|------|------|
+| 手机导航直连 | 窄屏底栏与桌面侧栏同构：每个域一个 `<a href>`，`aria-current` 判定不变；删除「底栏按钮 → 抽屉平铺所有子页」这一跳。唯一不在分区条里的「手动添加」放候选页页头 | ✅ R52 |
+| 卡片全量标签 | 候选列表/网格去掉 `[:6]`/`[:4]` 截断；已下载卡片的 SQL 补取 `Tags`/`TagsRaw`，列表与网格都渲染全部中文标签，网格加「来源 · 页数 · 大小」 | ✅ R52 |
+| 来源纳入搜索 | 已下载搜索除元数据外匹配 `download_jobs.provider` 的代码与中文名（「EH 归档」/`exhentai` 都命中） | ✅ R52 |
+| 自定义排序 | 两个列表页支持 `sort` + `dir=asc\|desc`（服务端渲染的 ↑/↓ 链接，默认方向不带参数）；顺带把失效的 `data-autosubmit` 提到全局 `ui.js` | ✅ R52 |
+| AI 控制链 | 见 §4.6「每功能模型链 / 总开关」：三处（全局、路径、候选判定）共用同一编辑器与同一套链动作 | ✅ R52 |
+
+边界：**搜索与过滤的整块重构（facet 侧栏、筛选 chips、`ArtistRaw`/`GroupRaw`、路径搜索）本轮不做**，
+决策与落点记在方案 §3.3，留给下一轮。
 
 ## 5. 后端配套需求
 
@@ -288,10 +311,10 @@ app/main.py     仅保留 create_app、lifespan、依赖装配（目标 < 500 �
 | `download_jobs.priority` | 队列优先级（`ORDER BY priority, id`，同优先级内保持 FIFO） | ✅ R2 |
 | `artifacts.page_count` | 打包页数（原先被错写进 `size_bytes`，R2 修正） | ✅ R2 |
 | `archive_settings` 键 | `keep_original`、`auto_pack_after_download`、`image_quality`、`library_path` / `work_path`、`library_template`（归档路径模板）、`library_title_source`、`path_source`（`template`/`ai`）、`ai_prompt`、`ai_fallback_to_rules`、`ai_model_source`（路径页跟随全局默认 / 单独指定）、`ai_batch_size` / `ai_concurrency` / `ai_stream` / `ai_default_include_current`（整库重排）、`torrent_*`（qBittorrent 客户端） | R8 / R29 |
-| `system_settings` 键 | `poll_interval_ms`、`source_concurrency`、`timezone`、`auto_approval_interval_minutes`、`log_level`（主题与密度**不**入库，存在浏览器 `localStorage`） | R13 |
+| `system_settings` 键 | `poll_interval_ms`、`source_concurrency`、`timezone`、`auto_approval_interval_minutes`、`log_level`（主题与密度**不**入库，存在浏览器 `localStorage`）；AI 总开关 `ai_enabled`；候选判定 `ai_candidate_enabled` / `_prompt` / `_override_parse_rules` / `_fallback` / `_model_source`；`parse_rules` | R13 / R50 / R52 |
 | `ai_providers` / `ai_provider_keys` / `ai_provider_models` | AI 供应商、其轮询 API Key（`cipher` 密文 + 冷却/失败计数）与可用模型名（含验证时间/结果/原因） | ✅ R28 |
 | `ai_providers.custom_headers` / `.default_params`、`ai_provider_models.params` | 供应商级请求头与默认参数、模型级参数覆盖（迁移 `019`，JSON 文本，默认 `{}`） | ✅ R31 |
-| `ai_model_chain` | 主力 + 备用模型链，一行一个 `scope`（`default` 全局 / `archive_path` 路径专用）+ position，position 0 是主力；迁移 `019` 把旧链作为 `scope='default'` | ✅ R28/R31 |
+| `ai_model_chain` | 主力 + 备用模型链，一行一个 `scope`（`default` 全局 / `archive_path` 路径专用 / `candidate_admission` 候选判定）+ position，position 0 是主力；迁移 `019` 把旧链作为 `scope='default'`，新增作用域无需迁移（scope 是自由文本列） | ✅ R28/R31/R52 |
 | `ai_path_suggestions` | AI 路径答案缓存（指纹 / prompt 哈希 / 目录 / 文件名 / 由谁回答） | ✅ R29 |
 
 **约束**：全部为新增表/新增列，不做破坏性迁移；既有迁移一律不改，只向后追加（现已到 `017_*`）。`016_` 是唯一例外：自动审批 DSL 重写后旧规则（正则分支、`CONTAINS`/`STARTS_WITH`/`HAS*`）无法等价迁移，迁移在加 `case_sensitive` 列的同时清空规则表——有操作者明确背书。

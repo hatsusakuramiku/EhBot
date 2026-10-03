@@ -37,7 +37,12 @@ from app.api.downloaded import (
 )
 from app.api.events import EVENT_DOWNLOAD
 from app.api.status import downloaded_tab_view
-from app.db.database import DOWNLOADED_PACK_FILTERS
+from app.db.database import (
+    DOWNLOADED_PACK_FILTERS,
+    DOWNLOADED_SORT_ORDERS,
+    SORT_DIRECTIONS,
+    sort_direction,
+)
 from app.web import deps
 
 
@@ -111,6 +116,15 @@ async def _render_downloaded(
         # Forgiving, like the candidate page: a bookmark carrying a sort we have
         # since renamed should still render the list.
         sort = "newest"
+    requested_direction = params.get("dir")
+    direction = sort_direction(DOWNLOADED_SORT_ORDERS, sort, requested_direction)
+    default_direction = sort_direction(DOWNLOADED_SORT_ORDERS, sort, None)
+    direction_param = (
+        requested_direction
+        if requested_direction in SORT_DIRECTIONS
+        and requested_direction != default_direction
+        else None
+    )
     view = params.get("view") if params.get("view") in {"grid", "list"} else "grid"
     page = PageParams.clamp(
         deps.int_param(params.get("page")), deps.int_param(params.get("page_size"))
@@ -120,6 +134,7 @@ async def _render_downloaded(
         tab=tab,
         search=search,
         sort=sort,
+        direction=direction,
         offset=page.offset,
         limit=page.limit,
     )
@@ -157,6 +172,11 @@ async def _render_downloaded(
             "list_href": deps.query_href(request, view="list"),
             "search": search,
             "sort": sort,
+            "direction": direction,
+            "default_direction": default_direction,
+            "direction_param": direction_param,
+            "dir_asc_href": deps.query_href(request, dir="asc"),
+            "dir_desc_href": deps.query_href(request, dir="desc"),
             "sorts": [
                 {"key": key, "label": label}
                 for key, label in DOWNLOADED_SORT_OPTIONS

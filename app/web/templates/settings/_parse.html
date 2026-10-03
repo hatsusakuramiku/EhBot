@@ -11,7 +11,13 @@
   Every checkbox is a real checkbox and the 恢复默认 button is a real submit, so
   the tab works with JavaScript off. Nothing here is a state label: the values
   come from `解析规则`'s snapshot, and the words beside them are page copy.
+
+  R52 adds the gate's own 「主力 + 备用」 editor here, with the same macro and the
+  same verbs as the AI tab and the archive-path tab. The model source radio says
+  whether this page follows the global default or carries its own list; a chain
+  that fails completely never falls back to the global one.
 #}
+{% from "settings/_model_chain.html" import model_chain %}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
@@ -93,8 +99,15 @@
     <section class="ui-panel">
       <h2 class="ui-section-title">AI 候选判定</h2>
       <p class="ui-hint">
-        可选项。开启且「AI 供应商」里配置了可用模型后，每条通过初步解析的消息都会
-        先交给模型判断是不是一部作品，通过的才继续走上面的解析规则。
+        可选项。总开关与下面的开关都开启、且配置了可用模型后，每条通过初步解析的
+        消息都会先交给模型判断是不是一部作品，通过的才继续走上面的解析规则。
+      </p>
+      <p class="ui-hint" data-field="ai-control-chain">
+        总开关：{{ "开" if ai_enabled else "关" }} · 本功能：{{ "开" if candidate_admission.enabled else "关" }} ·
+        当前模型（{{ "本页单独指定" if candidate_ai.model_source == "custom" else "跟随全局默认" }}）：
+        {% if candidate_ai.chain %}{% for entry in candidate_ai.chain %}{{ "主力" if entry.primary else "备用" }} {{ entry.label }}{% if not loop.last %} → {% endif %}{% endfor %}{% else %}尚未配置{% endif %} ·
+        <strong>全部模型失败时不回退全局默认</strong>，按下面的兜底动作处理。
+        {% if not ai_enabled %}总开关关闭，本功能不会调用任何模型，消息直接按解析规则处理。{% endif %}
       </p>
       {% if not candidate_admission.enabled_overridden %}
         <p class="ui-hint">当前为默认值：关闭。</p>
@@ -109,7 +122,8 @@
           <span>开启 AI 候选判定</span>
         </label>
         <small class="ui-hint">
-          未配置 AI 模型时该开关不会生效，消息仍按解析规则处理，也不会产生 AI 调用。
+          总开关关闭、或未配置 AI 模型时该开关不会生效，消息仍按解析规则处理，
+          也不会产生 AI 调用。
         </small>
 
         <div class="ui-field" style="margin-top: var(--s-3)">
@@ -157,6 +171,42 @@
         <summary class="ui-hint">查看默认提示词</summary>
         <pre class="ui-hint" style="white-space: pre-wrap">{{ candidate_prompt_default }}</pre>
       </details>
+
+      {#- 候选判定模型：AI 页拥有「全局默认」，这里只决定本页跟随它还是自建一张。
+          与归档路径页同一个编辑器、同一套动作，只是挂在 /settings/parse/chain。 -#}
+      <div style="margin-top: var(--s-5)">
+        <h3 class="ui-section-title">候选判定模型</h3>
+        <p class="ui-hint">
+          默认<strong>跟随全局默认</strong>——在「设置 → AI 供应商」页配置的主力 + 备用列表。
+          想让候选判定用别的模型，选「本页单独指定」并编辑下面的列表；列表为空是显式错误，
+          不会偷偷回退全局默认。
+        </p>
+        <form class="ui-form" method="post"
+              action="{{ url_for('save_ai_candidate_model_source') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <fieldset class="ui-fieldset">
+            <legend>本页使用哪份模型列表</legend>
+            {% for option in candidate_ai.model_sources %}
+              <label class="ui-checkline" data-layout="stack">
+                <input class="ui-radio" type="radio" name="ai_model_source"
+                       value="{{ option.code }}"
+                       {% if option.code == candidate_ai.model_source %}checked{% endif %}>
+                <span>{{ option.label }}<small>{{ option.hint }}</small></span>
+              </label>
+            {% endfor %}
+          </fieldset>
+          <div class="ui-form-actions">
+            <button class="ui-btn" type="submit">保存模型来源</button>
+          </div>
+        </form>
+
+        <div style="margin-top: var(--s-4)"
+             {% if candidate_ai.model_source != "custom" %}data-muted="true"{% endif %}>
+          <h4 class="ui-section-title">本页的模型列表{% if candidate_ai.model_source != "custom" %}（未启用）{% endif %}</h4>
+          {{ model_chain(candidate_ai.own_chain, candidate_ai.selectable_models, "/settings/parse/chain", csrf_token,
+                         "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。") }}
+        </div>
+      </div>
     </section>
   </div>
 </div>

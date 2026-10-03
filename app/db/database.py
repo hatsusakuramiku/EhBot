@@ -62,14 +62,65 @@ CANDIDATE_COUNT_KEYS: dict[str, str] = {
     "FAILED": "failed",
 }
 
-#: Allowed sort keys mapped to ORDER BY fragments. Values are interpolated into
+#: The two directions a `dir` query parameter may name.
+SORT_DIRECTIONS: frozenset[str] = frozenset({"asc", "desc"})
+
+
+@dataclass(frozen=True, slots=True)
+class SortSpec:
+    """One sortable order, both ways round.
+
+    Two whole ORDER BY bodies rather than an expression plus a direction: a
+    stable tiebreak carries its own direction and must not flip with the primary
+    column (`title_value IS NULL` always sorts missing titles last, whichever way
+    the title itself runs). `default` is what a request that names no direction
+    gets -- 「最新发现」 already means descending, and the URL does not have to
+    spell that out.
+    """
+
+    asc: str
+    desc: str
+    default: str = "desc"
+
+
+def order_by(
+    sorts: Mapping[str, SortSpec],
+    key: str,
+    direction: str | None,
+    fallback: str = "newest",
+) -> str:
+    """The ORDER BY body for one request. Whitelisted: an unknown key falls back
+    rather than reaching the statement text."""
+    spec = sorts.get(key) or sorts[fallback]
+    chosen = direction if direction in SORT_DIRECTIONS else spec.default
+    return spec.desc if chosen == "desc" else spec.asc
+
+
+def sort_direction(
+    sorts: Mapping[str, SortSpec],
+    key: str,
+    direction: str | None,
+    fallback: str = "newest",
+) -> str:
+    """The direction a request actually gets, for links and hidden fields."""
+    spec = sorts.get(key) or sorts[fallback]
+    return direction if direction in SORT_DIRECTIONS else spec.default
+
+
+#: Allowed sort keys mapped to their ORDER BY bodies. Values are interpolated into
 #: SQL, so this table is the boundary that keeps a query-string value out of the
 #: statement text -- nothing outside it may reach the ORDER BY clause.
-_CANDIDATE_SORTS: dict[str, str] = {
-    "newest": "c.id DESC",
-    "oldest": "c.id ASC",
-    "updated": "c.updated_at DESC, c.id DESC",
-    "title": "title_value IS NULL, title_value COLLATE NOCASE ASC, c.id DESC",
+CANDIDATE_SORT_ORDERS: dict[str, SortSpec] = {
+    "newest": SortSpec("c.id ASC", "c.id DESC"),
+    "oldest": SortSpec("c.id ASC", "c.id DESC", default="asc"),
+    "updated": SortSpec(
+        "c.updated_at ASC, c.id ASC", "c.updated_at DESC, c.id DESC"
+    ),
+    "title": SortSpec(
+        "title_value IS NULL, title_value COLLATE NOCASE ASC, c.id ASC",
+        "title_value IS NULL, title_value COLLATE NOCASE DESC, c.id DESC",
+        default="asc",
+    ),
 }
 
 #: Projection shared by the paged and legacy candidate queries. Both read the
@@ -122,13 +173,20 @@ _DOWNLOADED_ATTENTION_STATES: tuple[str, ...] = (
     CONVERSION_STATE_WAITING_PATH,
 )
 
-#: Whitelisted sorts, for the reason `_CANDIDATE_SORTS` is: nothing outside this
-#: table may reach the ORDER BY text.
-_DOWNLOADED_SORTS: dict[str, str] = {
-    "newest": "job_id DESC",
-    "oldest": "job_id ASC",
-    "title": "title_value IS NULL, title_value COLLATE NOCASE ASC, job_id DESC",
-    "largest": "archive_size IS NULL, archive_size DESC, job_id DESC",
+#: Whitelisted sorts, for the reason `CANDIDATE_SORT_ORDERS` is: nothing outside
+#: this table may reach the ORDER BY text.
+DOWNLOADED_SORT_ORDERS: dict[str, SortSpec] = {
+    "newest": SortSpec("job_id ASC", "job_id DESC"),
+    "oldest": SortSpec("job_id ASC", "job_id DESC", default="asc"),
+    "title": SortSpec(
+        "title_value IS NULL, title_value COLLATE NOCASE ASC, job_id ASC",
+        "title_value IS NULL, title_value COLLATE NOCASE DESC, job_id DESC",
+        default="asc",
+    ),
+    "largest": SortSpec(
+        "archive_size IS NULL, archive_size ASC, job_id ASC",
+        "archive_size IS NULL, archive_size DESC, job_id DESC",
+    ),
 }
 
 #: The download-plus-packaging join every downloaded-works query reads.
@@ -166,7 +224,16 @@ _DOWNLOADED_SELECT = (
     # The AI answer, joined so the badge is one column rather than a query per
     # row. Joined on the candidate (its primary key) so it cannot multiply rows;
     # a candidate with no suggestion simply gets NULL.
-    "sug.relative_path AS ai_relative_path "
+    "sug.relative_path AS ai_relative_path, "
+    # The Chinese tag list and the upstream one, read here so the 已下载 card
+    # can show every Chinese tag without a query per row -- the same shape
+    # the candidate list selects for its own cards.
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Tags' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = c.id AND mv.field_name = 'TagsRaw' "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) "
     "FROM download_jobs dj "
     "JOIN candidates c ON c.id = dj.candidate_id "
     "LEFT JOIN artifacts arch "
@@ -215,6 +282,8 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
         pinned_path=text(20),
         pinned_is_manual=bool(row[21]) if row[21] is not None else False,
         ai_relative_path=text(22),
+        tags=text(23),
+        raw_tags=text(24),
     )
 
 
@@ -1640,6 +1709,7 @@ class Database:
         search: str | None = None,
         facets: Mapping[str, Sequence[str]] | None = None,
         sort: str = "newest",
+        direction: str | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> tuple[list[CandidateListItem], int]:
@@ -1665,6 +1735,7 @@ class Database:
                 if values
             },
             sort,
+            direction,
             offset,
             limit,
         )
@@ -1675,6 +1746,7 @@ class Database:
         search: str,
         facets: Mapping[str, tuple[str, ...]],
         sort: str,
+        direction: str | None,
         offset: int,
         limit: int,
     ) -> tuple[list[CandidateListItem], int]:
@@ -1730,7 +1802,7 @@ class Database:
         # Whitelisted so a hand-typed query string can never reach the SQL
         # text; an unknown key falls back to the default rather than erroring,
         # because a bookmarked link with a stale sort should still render.
-        order = _CANDIDATE_SORTS.get(sort, _CANDIDATE_SORTS["newest"])
+        order = order_by(CANDIDATE_SORT_ORDERS, sort, direction)
 
         with self.connection() as connection:
             total = int(
@@ -1782,8 +1854,10 @@ class Database:
         self,
         *,
         search: str | None = None,
+        search_providers: Sequence[str] = (),
         pack_filter: str = "all",
         sort: str = "newest",
+        direction: str | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> tuple[list[DownloadedWork], int]:
@@ -1805,8 +1879,10 @@ class Database:
         return await asyncio.to_thread(
             self._list_downloaded_works_sync,
             (search or "").strip(),
+            tuple(search_providers),
             pack_filter,
             sort,
+            direction,
             offset,
             limit,
         )
@@ -1814,8 +1890,10 @@ class Database:
     def _list_downloaded_works_sync(
         self,
         search: str,
+        search_providers: tuple[str, ...],
         pack_filter: str,
         sort: str,
+        direction: str | None,
         offset: int,
         limit: int,
     ) -> tuple[list[DownloadedWork], int]:
@@ -1829,15 +1907,24 @@ class Database:
             PROVIDER_CONVERSION,
         ]
         if search:
-            where.append(
+            # The search box matches the book or the source that produced it:
+            # 「EH 归档」 is how an operator refers to a provider, and it lives on
+            # the job rather than in `metadata_values`, so it is an OR with the
+            # metadata match rather than a second filter.
+            clauses = [
                 "EXISTS (SELECT 1 FROM metadata_values mv "
                 " WHERE mv.candidate_id = c.id "
                 "   AND mv.field_name IN "
                 "       ('Title', 'JapaneseTitle', 'Artist', 'Group', "
                 "        'Tags', 'TagsRaw') "
                 "   AND mv.field_value LIKE ? ESCAPE '\\')"
-            )
+            ]
             params.append(f"%{_escape_like(search)}%")
+            if search_providers:
+                placeholders = ", ".join("?" for _ in search_providers)
+                clauses.append(f"dj.provider IN ({placeholders})")
+                params.extend(search_providers)
+            where.append("(" + " OR ".join(clauses) + ")")
         # Each filter is expressed against the CBZ artifact or the packing job's
         # state, never against the candidate's status: packaging leaves the
         # status alone, so the status cannot answer「打好包了吗」.
@@ -1854,7 +1941,7 @@ class Database:
             params.extend(_DOWNLOADED_ATTENTION_STATES)
 
         clause = " AND ".join(where)
-        order = _DOWNLOADED_SORTS.get(sort, _DOWNLOADED_SORTS["newest"])
+        order = order_by(DOWNLOADED_SORT_ORDERS, sort, direction)
         with self.connection() as connection:
             total = int(
                 connection.execute(

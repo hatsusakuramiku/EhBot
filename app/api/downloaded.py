@@ -29,9 +29,17 @@ from app.api.contracts import ApiError, PageParams
 from app.api.events import EVENT_DOWNLOAD
 from app.archive.service import PATH_SOURCE_AI
 from app.api.serializers import downloaded_work as serialize_work
-from app.api.status import DOWNLOADED_TAB_STATUS, downloaded_tab_view
+from app.api.status import (
+    DOWNLOADED_TAB_STATUS,
+    downloaded_tab_view,
+    provider_codes_matching,
+)
 from app.conversion.naming import LibraryPathError
-from app.db.database import DOWNLOADED_PACK_FILTERS
+from app.db.database import (
+    DOWNLOADED_PACK_FILTERS,
+    DOWNLOADED_SORT_ORDERS,
+    sort_direction,
+)
 
 
 router = APIRouter(tags=["downloaded"])
@@ -67,6 +75,7 @@ async def downloaded_snapshot(
     tab: str = "all",
     search: str = "",
     sort: str = "newest",
+    direction: str | None = None,
     offset: int = 0,
     limit: int = 50,
 ) -> dict[str, Any]:
@@ -78,8 +87,12 @@ async def downloaded_snapshot(
     """
     works, total = await database.list_downloaded_works(
         search=search,
+        # A word that names a provider matches the job, not the metadata; the
+        # translation from label to code happens in `provider_codes_matching`.
+        search_providers=provider_codes_matching(search),
         pack_filter=tab,
         sort=sort,
+        direction=direction,
         offset=offset,
         limit=limit,
     )
@@ -94,6 +107,9 @@ async def downloaded_snapshot(
         # put a dict where every one of those expected a string.
         "tab": tab,
         "tab_view": downloaded_tab_view(tab).to_payload(),
+        # The direction a request actually got, default included, so the page's
+        # arrow and a JSON client agree about which way the list is sorted.
+        "direction": sort_direction(DOWNLOADED_SORT_ORDERS, sort, direction),
         "works": items,
         "total": total,
         "counts": counts,
@@ -359,6 +375,7 @@ async def downloaded_list(request: Request) -> dict[str, Any]:
         tab=tab,
         search=(params.get("search") or "").strip(),
         sort=params.get("sort") or "newest",
+        direction=params.get("dir"),
         offset=page.offset,
         limit=page.limit,
     )

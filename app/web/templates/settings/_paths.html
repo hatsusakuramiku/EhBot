@@ -78,6 +78,11 @@
     </fieldset>
 
     <div data-ai-panel {% if path_source != "ai" %}hidden{% endif %}>
+      <p class="ui-hint" data-field="ai-control-chain">
+        总开关：{{ "开" if ai_enabled else "关" }} · 本功能：{{ "开" if path_source == "ai" else "关" }} ·
+        <strong>全部模型失败时不回退全局默认</strong>，按「路径来源」下方的兜底开关处理。
+        {% if not ai_enabled %}总开关关闭，当前按模板与规则归档，不会调用任何模型。{% endif %}
+      </p>
       {% if not ai.chain %}
         {{ ui.callout("还没有可用的模型", tone="waiting",
                       detail="AI 模式下打包需要一个模型。请先到「设置 → AI 供应商」添加供应商与模型并设好全局默认，或在本页下方「路径决策模型」里单独指定一张列表。未配置时作品会在打包时停在「待定归档路径」。") }}

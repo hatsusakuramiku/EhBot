@@ -7,9 +7,12 @@
   `nav_items` from `app/web/routes/shell.py`. Adding a section is one edit
   there, and the phone view cannot disagree with the desktop one.
 
-  Three renderings of ONE list is not three sources of truth: the sidebar shows
-  domains with their sub-pages, the tab bar shows the four domains, and the
-  drawer shows the sub-pages. Change the list and all three change together.
+  Two renderings of ONE list is not two sources of truth: the sidebar shows
+  domains with their sub-pages, and the phone tab bar shows the same domains as
+  one link each. Sub-pages are chosen on the page itself -- every domain with
+  children renders its own `ui.tabs` strip at the top of its content -- so the
+  phone deliberately has no second-level menu. The one page that is not in any
+  strip (手动添加) is linked from the candidates page head.
 
   R9 removed `main_attrs` and its `data-legacy="true"` default. It existed to
   pin an un-rewritten page's content column to the light palette while `app.css`
@@ -153,49 +156,21 @@
       <main class="{% block content_class %}ui-content{% endblock %}" id="main"
             hx-target="#main" hx-swap="innerHTML show:none">{% block content %}{% endblock %}</main>
 
-      {# -------- phone: the same list as a tab bar. Sub-pages move into a
-                 drawer rather than a second set of links. -------- #}
-      <nav class="ui-tabbar" aria-label="主导航" x-data="{ drawer: false }">
+      {#- -------- phone: the same list as a tab bar, every entry a plain link
+          to its domain. No drawer: a domain's sub-pages are already a `ui.tabs`
+          strip on the page itself, so opening a second menu to pick one would
+          be a redundant step. The parent marks itself `is-active` (a class) but
+          never `aria-current` -- only the exact route does, exactly like the
+          sidebar, so a screen reader still announces one current page. -------- #}
+      <nav class="ui-tabbar" aria-label="主导航">
         {% for item in nav_items %}
-          {% if item.children %}
-            <button class="ui-tab{% if item.is_active(current_path) %} is-active{% endif %}"
-                    type="button" @click="drawer = true" :aria-expanded="drawer"
-                    aria-haspopup="dialog">
-              <span class="ui-tab-icon" aria-hidden="true">{{ item.icon }}</span>
-              <span>{{ item.short }}</span>
-            </button>
-          {% else %}
-            <a class="ui-tab" href="{{ item.path }}"
-               {% if item.is_current(current_path) %}aria-current="page"{% endif %}>
-              <span class="ui-tab-icon" aria-hidden="true">{{ item.icon }}</span>
-              <span>{{ item.short }}</span>
-            </a>
-          {% endif %}
+          <a class="ui-tab{% if item.is_active(current_path) %} is-active{% endif %}"
+             href="{{ item.path }}"
+             {% if item.is_current(current_path) %}aria-current="page"{% endif %}>
+            <span class="ui-tab-icon" aria-hidden="true">{{ item.icon }}</span>
+            <span>{{ item.short }}</span>
+          </a>
         {% endfor %}
-
-        <template x-teleport="body">
-          <div x-show="drawer" x-cloak @keydown.escape.window="drawer = false">
-            <div class="ui-scrim" @click="drawer = false"></div>
-            <aside class="ui-drawer" data-side="bottom" role="dialog" aria-modal="true"
-                   aria-label="分区导航">
-              <header class="ui-drawer-head">
-                <h2 class="ui-drawer-title">分区</h2>
-                <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
-                        @click="drawer = false" aria-label="关闭">✕</button>
-              </header>
-              <div class="ui-drawer-body">
-                <nav class="ui-nav" aria-label="分区">
-                  {% for item in nav_items %}{% for child in item.children %}
-                    <a class="ui-nav-link ui-nav-link-plain" href="{{ child.path }}"
-                       {% if child.is_current(current_path) %}aria-current="page"{% endif %}>
-                      <span class="ui-nav-label">{{ item.label }} · {{ child.label }}</span>
-                    </a>
-                  {% endfor %}{% endfor %}
-                </nav>
-              </div>
-            </aside>
-          </div>
-        </template>
       </nav>
     </div>
   </div>

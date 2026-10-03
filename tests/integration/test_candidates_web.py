@@ -447,6 +447,32 @@ def test_the_filter_sidebar_offers_and_applies_the_values_it_lists(
     assert "Facet One" in unknown_facet.text and "Facet Two" in unknown_facet.text
 
 
+def test_a_card_shows_every_chinese_tag(tmp_path: Path) -> None:
+    """R52: the grid truncated to four tags and the list to six.
+
+    Eight tags prove the truncation is gone in both renderings; a fix applied to
+    only one of them is the drift this test exists to catch.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=400, message_id=160, title="Tagged One"
+        )
+    )
+    many = ("巨乳", "中出", "泳装", "校园", "姐姐", "黑丝", "足交", "调教")
+    set_metadata(database, candidate, "Tags", ", ".join(many))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        grid = client.get("/candidates").text
+        listing = client.get("/candidates", params={"view": "list"}).text
+
+    for tag in many:
+        assert f'<span class="ui-tag">{tag}</span>' in grid, tag
+        assert f'<span class="ui-tag">{tag}</span>' in listing, tag
+
+
 def test_too_many_values_in_one_facet_is_refused_with_a_message(
     tmp_path: Path,
 ) -> None:
@@ -769,3 +795,41 @@ def test_a_batch_purge_works_on_a_tab_that_cannot_review(
 
     assert response.status_code == 303
     assert listed.context["total"] == 0
+
+
+def test_the_sort_direction_reverses_the_candidate_list(tmp_path: Path) -> None:
+    """R52: the candidate list could be sorted, but never backwards.
+
+    「标题」 defaults to A→Z, so `dir=desc` is the interesting direction: it must
+    actually reverse the list the page hands the browser, not merely mark a link.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    first = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=410, message_id=170, title="Alpha"
+        )
+    )
+    second = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=411, message_id=171, title="Beta"
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        ascending = client.get(
+            "/candidates", params={"sort": "title", "dir": "asc"}
+        ).text
+        descending = client.get(
+            "/candidates", params={"sort": "title", "dir": "desc"}
+        ).text
+
+    def ids(body: str) -> list[int]:
+        return [
+            int(value)
+            for value in re.findall(r'data-candidate-id="(\d+)"', body)
+        ]
+
+    assert ids(ascending) == [first, second]
+    assert ids(descending) == [second, first]

@@ -178,11 +178,11 @@ class TestTabVocabulary:
         assert CANDIDATE_TABS["all"] == ()
 
     def test_sorts_match_the_database_whitelist(self) -> None:
-        from app.db.database import _CANDIDATE_SORTS
+        from app.db.database import CANDIDATE_SORT_ORDERS
 
         # Drift here means the API advertises an ordering the database silently
         # ignores.
-        assert CANDIDATE_SORTS == frozenset(_CANDIDATE_SORTS)
+        assert CANDIDATE_SORTS == frozenset(CANDIDATE_SORT_ORDERS)
 
 
 class FakeCandidate:

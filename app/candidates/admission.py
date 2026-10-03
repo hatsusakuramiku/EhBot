@@ -9,10 +9,11 @@ lets it through.
 
 Three properties this module is built around:
 
-* **Off unless asked for.** Both `ai_candidate_enabled` and a non-empty default
-  chain are required before a single token is spent; with either missing the gate
-  reports `skip` and the caller falls straight through to the parse rules. A
-  deployment that never configures AI sees no extra requests and no failures.
+* **Off unless asked for.** The global master switch, `ai_candidate_enabled`
+  and a non-empty chain are all required before a single token is spent; with
+  any missing the gate reports `skip` and the caller falls straight through to
+  the parse rules. A deployment that never configures AI sees no extra requests
+  and no failures.
 * **Failure has an operator-chosen shape.** A chain that is configured but
   unusable on this request (`ai_candidate_fallback`) either rejects (the default
   -- fail closed, and say so in the log) or accepts (fail open for an operator
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.ai.errors import AI_CANDIDATE_INVALID, AiError
-from app.ai.models import CHAIN_SCOPE_DEFAULT
+from app.ai.models import CHAIN_SCOPE_CANDIDATE
 from app.ai.prompt import build_messages, candidate_payload
 from app.ai.service import extract_json_object
 from app.candidates.models import ParsedSourceMessage
@@ -79,6 +80,11 @@ class CandidateAdmissionService:
 
     async def decide(self, message: ParsedSourceMessage) -> Admission:
         """Ask the model about one message, or report that the gate is off."""
+        # 生效 = 总开关 AND 本功能开关. The master switch is checked first so a
+        # deployment that turned AI off globally spends nothing here even if the
+        # gate's own switch is still on; the configuration is left untouched.
+        if not await self._settings.ai_enabled():
+            return Admission("skip", "AI 功能已全局关闭")
         config = await self._settings.candidate_admission()
         if not config["enabled"]:
             return Admission("skip", "AI 候选判定未开启")
@@ -87,7 +93,7 @@ class CandidateAdmissionService:
         # closed: 「配置了 AI 提供商并且手动开启」 is the condition for it to take
         # effect at all, and a deployment still setting up providers must not
         # stop ingesting. Logged so the operator can see why it did nothing.
-        if not await self._ai.effective_chain(CHAIN_SCOPE_DEFAULT):
+        if not await self._ai.effective_chain(CHAIN_SCOPE_CANDIDATE):
             logger.warning(
                 "ai_candidate_admission_inactive",
                 extra={"error_code": "AI_CANDIDATE_CHAIN_EMPTY"},
@@ -99,7 +105,7 @@ class CandidateAdmissionService:
                 build_messages(config["prompt"], candidate_payload(message)),
                 validate=lambda text: parse_candidate_decision(text),
                 stream=False,
-                scope=CHAIN_SCOPE_DEFAULT,
+                scope=CHAIN_SCOPE_CANDIDATE,
             )
             accepted, reason = parse_candidate_decision(answer.text)
         except AiError as exc:

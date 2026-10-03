@@ -43,6 +43,7 @@ from app.ai.client import (
 from app.ai.errors import (
     AI_CHAIN_DUPLICATE,
     AI_CHAIN_EMPTY,
+    AI_CHAIN_ENTRY_MISSING,
     AI_KEY_INVALID,
     AI_MODEL_INVALID,
     AI_MODEL_NOT_FOUND,
@@ -55,7 +56,10 @@ from app.ai.errors import (
 )
 from app.ai.models import (
     CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_CANDIDATE,
     CHAIN_SCOPE_DEFAULT,
+    MODEL_SOURCE_CUSTOM,
+    MODEL_SOURCE_DEFAULT,
     AiRequestParams,
 )
 from app.ai.service import AiProviderService, extract_json_object
@@ -757,6 +761,133 @@ class TestChainScopes:
         await service.save_chain([model_ids[0]], CHAIN_SCOPE_ARCHIVE_PATH)
         assert await service.effective_chain(CHAIN_SCOPE_DEFAULT) != ()
         assert await service.chain(CHAIN_SCOPE_ARCHIVE_PATH) != ()
+
+
+class _MutableSource:
+    """A stand-in for `SystemSettingsService.ai_candidate_model_source`."""
+
+    def __init__(self, value: str = MODEL_SOURCE_DEFAULT) -> None:
+        self.value = value
+
+    async def read(self) -> str:
+        return self.value
+
+
+class TestScopeRegistry:
+    """R52: a feature scope is a registration, not a hard-coded `if`."""
+
+    @pytest.mark.asyncio
+    async def test_a_registered_scope_inherits_until_it_says_custom(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service, model_names=("a", "b"))
+        source = _MutableSource()
+        service.register_scope_source(CHAIN_SCOPE_CANDIDATE, source.read)
+
+        inherited = await service.effective_chain(CHAIN_SCOPE_CANDIDATE)
+        assert [entry.model.model_id for entry in inherited] == model_ids
+
+        source.value = MODEL_SOURCE_CUSTOM
+        await service.save_chain([model_ids[1]], CHAIN_SCOPE_CANDIDATE)
+        own = await service.effective_chain(CHAIN_SCOPE_CANDIDATE)
+        assert [entry.model.model_id for entry in own] == [model_ids[1]]
+
+        source.value = MODEL_SOURCE_DEFAULT
+        back = await service.effective_chain(CHAIN_SCOPE_CANDIDATE)
+        assert [entry.model.model_id for entry in back] == model_ids
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_scope_follows_the_global_default(
+        self, tmp_path: Path
+    ) -> None:
+        """A scope nobody registered has no way to say 「custom」, so it must be
+        the safe 「跟随全局」 rather than an empty own chain."""
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        _, _, model_ids = await _ready_chain(service)
+        effective = await service.effective_chain(CHAIN_SCOPE_CANDIDATE)
+        assert [entry.model.model_id for entry in effective] == model_ids
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_scope_is_refused(self, tmp_path: Path) -> None:
+        database, settings = await _seed(tmp_path)
+        service = _service(database, settings)
+        with pytest.raises(AiError) as caught:
+            await service.effective_chain("nonsense")
+        assert caught.value.code == AI_CHAIN_ENTRY_MISSING
+
+    @pytest.mark.asyncio
+    async def test_the_candidate_scope_never_falls_back_to_the_global_default(
+        self, tmp_path: Path
+    ) -> None:
+        """Requirement 5: when every model of a feature's own list fails, the
+        call fails -- the global default chain is never consulted."""
+        database, settings = await _seed(tmp_path)
+        seen: list[tuple[str, str, str]] = []
+
+        def behavior(key: str, model: str, messages) -> str:
+            if _is_probe(messages):
+                return '{"ok": true}'
+            raise AiClientError(AI_TIMEOUT, f"{model} 超时", retryable=True)
+
+        service = _service(database, settings, behavior=behavior, seen=seen)
+        _, _, model_ids = await _catalogue(
+            service, model_names=("global-ok", "scope-bad")
+        )
+        for model_id in model_ids:
+            await service.verify_model(model_id)
+        # 全局默认是一把能答的模型；候选判定自建列表只有一把会失败的模型。
+        await service.save_chain([model_ids[0]], CHAIN_SCOPE_DEFAULT)
+        source = _MutableSource(MODEL_SOURCE_CUSTOM)
+        service.register_scope_source(CHAIN_SCOPE_CANDIDATE, source.read)
+        await service.save_chain([model_ids[1]], CHAIN_SCOPE_CANDIDATE)
+        seen.clear()
+
+        with pytest.raises(AiError) as caught:
+            await service.complete(
+                [{"role": "user", "content": "hi"}],
+                scope=CHAIN_SCOPE_CANDIDATE,
+            )
+        assert caught.value.code == AI_PATH_UNAVAILABLE
+        assert "AI 候选判定" in caught.value.public_message
+        assert "未回退全局默认" in caught.value.public_message
+        # 只碰过本作用域的模型；那把能答的全局模型一次都没被调用。
+        assert [call[2] for call in seen] == ["scope-bad"]
+        assert "global-ok" not in {call[2] for call in seen}
+
+    @pytest.mark.asyncio
+    async def test_the_archive_path_scope_also_never_falls_back(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        seen: list[tuple[str, str, str]] = []
+
+        def behavior(key: str, model: str, messages) -> str:
+            if _is_probe(messages):
+                return '{"ok": true}'
+            raise AiClientError(AI_TIMEOUT, f"{model} 超时", retryable=True)
+
+        service = _service(database, settings, behavior=behavior, seen=seen)
+        _, _, model_ids = await _catalogue(
+            service, model_names=("global-ok", "path-bad")
+        )
+        for model_id in model_ids:
+            await service.verify_model(model_id)
+        await service.save_chain([model_ids[0]], CHAIN_SCOPE_DEFAULT)
+        await settings.save_ai_model_source(MODEL_SOURCE_CUSTOM)
+        await service.save_chain([model_ids[1]], CHAIN_SCOPE_ARCHIVE_PATH)
+        seen.clear()
+
+        with pytest.raises(AiError) as caught:
+            await service.complete(
+                [{"role": "user", "content": "hi"}],
+                scope=CHAIN_SCOPE_ARCHIVE_PATH,
+            )
+        assert "归档路径" in caught.value.public_message
+        assert "未回退全局默认" in caught.value.public_message
+        assert [call[2] for call in seen] == ["path-bad"]
 
 
 # ---------------------------------------------------------------------------

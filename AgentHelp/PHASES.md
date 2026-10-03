@@ -80,14 +80,18 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R49 | v0.3.0rc1 · 2026-09-30 | 来源规则可读账户会话列表，选一个预填表单 | 1575 | `progress.md:5077` |
 | R50 | v0.3.0rc2 · 2026-10-01 | 彻底删除、解析规则页、AI 候选判定、来源批量 | 1650 | `progress.md:5146` |
 | R51 | v0.3.0rc2 · 2026-10-01 | 内置解压器读不了的加密 ZIP 回退到 7-Zip；修旧式 `.rNN` 分卷发现与跨挂载打包；补齐 RAR 实测 | 1672 | `progress.md:5264` |
+| R52 | v0.3.0rc2 · 2026-10-03 | 手机底栏直连（删抽屉）、卡片全量中文标签、来源纳入搜索 + 自定义排序、AI 总开关与每功能模型链 | 1690 | `progress.md:5356` |
 
-> 基线链（当前）：… → R48 1564 → R49 1575 → R50 1650 → **R51 1672**。以 `AGENTS.md` 的链为准。
+> 基线链（当前）：… → R49 1575 → R50 1650 → R51 1672 → **R52 1690**。以 `AGENTS.md` 的链为准。
 
 ## 三、当前状态
 
-- 最新阶段：**R51**（`1672 collected / 0 failed`）。
-- 已完成：R50 的四项需求（彻底删除、解析规则独立页、AI 候选判定、来源批量），
-  设计记录见 `CANDIDATE_ADMISSION_AND_DELETE_PROPOSAL.md`（实现偏差记在该文件 §9）；
-  R51 让内置解压器读不了的加密 ZIP 自动回退到 7-Zip，并补齐 RAR 实测与旧式 `.rNN` 分卷发现，
-  设计记录见 `ENCRYPTED_ARCHIVE_FALLBACK_PROPOSAL.md`（§9 为 RAR 工具链评估）。
+- 最新阶段：**R52**（`1690 collected / 0 failed`）。
+- 已完成：R52 的手机底栏直连（删除二级抽屉）、候选/已下载卡片全量中文标签、来源纳入已下载搜索、
+  `sort` + `dir=asc|desc` 自定义排序，以及 AI 控制链（`system_settings.ai_enabled` 总开关、
+  每功能「跟随全局默认 / 本页单独指定」模型链、全部失败不回退、三处共用同一编辑器），
+  设计记录见 `UI_QUERY_AND_AI_CONTROLS_PROPOSAL.md`；搜索与过滤的整块重构留给下一轮（方案 §3.3）。
+- 前序：R50 的四项需求（彻底删除、解析规则独立页、AI 候选判定、来源批量），设计记录见
+  `CANDIDATE_ADMISSION_AND_DELETE_PROPOSAL.md`；R51 让内置解压器读不了的加密 ZIP 自动回退到 7-Zip，
+  设计记录见 `ENCRYPTED_ARCHIVE_FALLBACK_PROPOSAL.md`。
 - 已知长期未验证项：1C512M 低资源档、真凭据 `docker compose up` 全链路、真机无障碍走查。

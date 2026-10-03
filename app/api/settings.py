@@ -88,6 +88,7 @@ from app.auto_approval.rules import (
 from app.auto_approval.service import DRY_RUN_SCAN_LIMIT
 from app.ai.models import (
     CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_CANDIDATE,
     CHAIN_SCOPE_DEFAULT,
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT_SECONDS,
@@ -95,12 +96,10 @@ from app.ai.models import (
     MAX_RETRIES,
     MAX_TIMEOUT_SECONDS,
     MIN_TIMEOUT_SECONDS,
+    MODEL_SOURCE_CUSTOM,
+    MODEL_SOURCE_DEFAULT,
     PROVIDER_CODE_LABELS,
     SUPPORTED_PROVIDER_CODES,
-)
-from app.archive.service import (
-    MODEL_SOURCE_DEFAULT,
-    MODEL_SOURCE_CUSTOM,
 )
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
@@ -194,6 +193,51 @@ async def _sources_section(request: Request) -> dict[str, Any]:
     }
 
 
+async def _chain_editor(ai_service: Any, scope: str) -> dict[str, Any]:
+    """Everything one scope's 「主力 + 备用」 editor needs, in one shape.
+
+    The global default, the archive-path override and the candidate-gate
+    override all render `settings/_model_chain.html`, so they must all be handed
+    the same three things: the *effective* list (what a call will actually use),
+    the scope's *own* list (what the editor writes to -- an empty custom list has
+    to look empty, not inherited), and every selectable model with its
+    `in_chain` flag. Factoring it here is what keeps a fourth scope from
+    re-deriving the payload slightly differently.
+    """
+    effective = await ai_service.effective_chain(scope)
+    own = await ai_service.chain(scope)
+    in_chain = {entry.model.model_id for entry in own}
+    selectable: list[dict[str, Any]] = []
+    for provider in await ai_service.providers():
+        for model in await ai_service.models(provider.provider_id):
+            selectable.append(
+                ai_selectable_model(
+                    provider, model, in_chain=model.model_id in in_chain
+                )
+            )
+    return {
+        "chain": [ai_chain_entry(entry) for entry in effective],
+        "own_chain": [ai_chain_entry(entry) for entry in own],
+        "selectable_models": selectable,
+    }
+
+
+def _model_source_choices(custom_hint: str) -> list[dict[str, str]]:
+    """The 「跟随全局默认 / 本页单独指定」 radio pair, worded per feature."""
+    return [
+        {
+            "code": MODEL_SOURCE_DEFAULT,
+            "label": "跟随全局默认",
+            "hint": "使用「设置 → AI 供应商」页的全局默认模型。",
+        },
+        {
+            "code": MODEL_SOURCE_CUSTOM,
+            "label": "本页单独指定",
+            "hint": custom_hint,
+        },
+    ]
+
+
 async def _parse_section(request: Request) -> dict[str, Any]:
     """The candidate-admission scheme and the AI gate over it.
 
@@ -203,13 +247,31 @@ async def _parse_section(request: Request) -> dict[str, Any]:
     and wonder why the other still fires. Nothing here is a secret.
     """
     settings = deps.system_settings_service(request)
+    admission = await settings.candidate_admission()
+    ai_service = deps.optional_service(request, "ai_service")
+    candidate_ai = (
+        await _chain_editor(ai_service, CHAIN_SCOPE_CANDIDATE)
+        if ai_service is not None
+        else {"chain": [], "own_chain": [], "selectable_models": []}
+    )
     return {
         "parse_rules": await settings.parse_rules(),
         "parse_defaults": DEFAULT_PARSE_RULES,
         "archive_formats": list(PARSE_ARCHIVE_FORMATS),
-        "candidate_admission": await settings.candidate_admission(),
+        "candidate_admission": admission,
         "candidate_prompt_default": DEFAULT_CANDIDATE_PROMPT,
         "candidate_fallbacks": list(AI_CANDIDATE_FALLBACKS),
+        "ai_enabled": await settings.ai_enabled(),
+        # The gate's own 「主力 + 备用」 list, or its inheritance of the global
+        # one -- the same editor and the same vocabulary as the archive-path
+        # page, just mounted on this tab.
+        "candidate_ai": {
+            "model_source": admission["model_source"],
+            "model_sources": _model_source_choices(
+                "候选判定用下面这张列表，与全局默认互不影响。"
+            ),
+            **candidate_ai,
+        },
     }
 
 
@@ -278,6 +340,7 @@ async def _paths_section(request: Request) -> dict[str, Any]:
     service = deps.archive_settings_service(request)
     database = deps.database(request)
     app_settings = request.app.state.settings
+    ai_enabled = await deps.system_settings_service(request).ai_enabled()
     library_path = await service.library_path() or app_settings.library_path
     limits = detect_library_limits(library_path)
     ai_service = deps.optional_service(request, "ai_service")
@@ -334,6 +397,7 @@ async def _paths_section(request: Request) -> dict[str, Any]:
         # 路径来源 and the AI sub-panel. One payload rather than two so the
         # template can render the radio set, the prompt and the toggles from the
         # same values the validator will accept.
+        "ai_enabled": ai_enabled,
         "path_source": await service.path_source(),
         "path_sources": [
             {
@@ -475,6 +539,7 @@ async def _ai_section(request: Request) -> dict[str, Any]:
             selected is not None and entry["provider_id"] == selected["provider_id"]
         )
     return {
+        "ai_enabled": await deps.system_settings_service(request).ai_enabled(),
         "providers": catalogue,
         "selected_provider": selected,
         # Every model of every provider, for the 「加为主力/备用」 pickers. The

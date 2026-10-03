@@ -73,7 +73,7 @@
     <td data-label="标签">
       {% if item.tags %}
       <div class="ui-card-tags">
-        {% for tag in item.tags[:6] %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
+        {% for tag in item.tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
       </div>
       {% else %}<span class="ui-table-secondary">—</span>{% endif %}
     </td>
@@ -90,6 +90,14 @@
     <h1 class="ui-title">{{ tab_title }}</h1>
     <p class="ui-subtitle">{{ tab_description }}</p>
   </div>
+  {#- 手动添加 is a child of this domain in the navigation but not one of the six
+      status tabs, so it is not in the strip below. The phone tab bar links a
+      domain straight to its index and has no drawer, which would otherwise
+      leave this page unreachable there; a head action also saves a desktop
+      round trip through the sidebar. -#}
+  <div class="ui-row-actions">
+    <a class="ui-btn" href="/manual-add">＋ 手动添加</a>
+  </div>
 </header>
 
 {{ ui.tabs(tabs, tab, "候选分区") }}
@@ -104,6 +112,9 @@
       filter does not throw away the operator's choice of grid or list. -#}
   <form class="ui-filters" id="candidate-filters" method="get" action="{{ tab_href }}">
     <input type="hidden" name="view" value="{{ view }}">
+    {#- The current direction rides along so switching sort keeps it; omitted
+        when it is the sort's default, which keeps the URL canonical. -#}
+    {% if direction_param %}<input type="hidden" name="dir" value="{{ direction_param }}">{% endif %}
     <div class="ui-field">
       <label for="candidate-search">搜索</label>
       <input class="ui-input" id="candidate-search" name="search" type="search"
@@ -117,6 +128,15 @@
         {% endfor %}
       </select>
     </div>
+    <div class="ui-field">
+      {#- A link group, not a form control: it rewrites `dir` in the query string
+          and keeps every other filter, so it works with JavaScript off. -#}
+      <span class="ui-field-label">排序方向</span>
+      <div class="ui-segmented" role="group" aria-label="排序方向">
+        <a href="{{ dir_asc_href }}" {% if direction == 'asc' %}aria-current="true"{% endif %}>↑ 升序</a>
+        <a href="{{ dir_desc_href }}" {% if direction == 'desc' %}aria-current="true"{% endif %}>↓ 降序</a>
+      </div>
+    </div>
     {% for group in filters %}
       {#- A facet with no values in this tab is omitted rather than rendered
           empty: 「语言」 with nothing under it reads as a broken filter. -#}
@@ -124,7 +144,7 @@
     {% endfor %}
     <div class="ui-row-actions">
       <button class="ui-btn" data-variant="primary" data-size="sm" type="submit">应用</button>
-      {% if search or active_filters or sort != "newest" %}
+      {% if search or active_filters or sort != "newest" or direction != default_direction %}
       <a class="ui-btn" data-size="sm" href="{{ tab_href }}">清除</a>
       {% endif %}
     </div>
@@ -182,7 +202,7 @@
                 href=item.href,
                 cover=item.cover,
                 meta=candidate_meta(item),
-                tags=item.tags[:4],
+                tags=item.tags,
                 status=item.status,
                 selectable=bulk_selectable,
                 value=item.candidate_id) %}

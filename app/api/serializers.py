@@ -362,6 +362,10 @@ def downloaded_work(work: Any) -> dict[str, Any]:
         "artist": work.artist,
         "category": work.category,
         "language": work.language,
+        # Split the same way the candidate payload splits them, so a card and
+        # a JSON client read one tag list rather than two spellings of it.
+        "tags": _split_tags(work.tags),
+        "raw_tags": _split_tags(work.raw_tags),
         "archive_path": work.archive_path,
         "archive_size": work.archive_size,
         "cbz_path": work.cbz_path,

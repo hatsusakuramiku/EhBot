@@ -257,6 +257,12 @@ class DownloadedWork:
     artist: str | None = None
     category: str | None = None
     language: str | None = None
+    #: Chinese and upstream tag strings, comma-joined, exactly as stored. The
+    #: 已下载 card shows every Chinese tag -- the same list the candidate grid
+    #: renders -- and `raw_tags` rides along for clients that search upstream
+    #: names.
+    tags: str | None = None
+    raw_tags: str | None = None
     thumb_url: str | None = None
     updated_at: str = ""
 

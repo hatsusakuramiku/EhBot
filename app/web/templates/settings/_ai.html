@@ -15,6 +15,35 @@
 #}
 {% from "settings/_model_chain.html" import model_chain %}
 
+{# ------------------------------------------------------ AI 功能总开关 #}
+<section class="ui-panel" style="margin-bottom: var(--s-5)">
+  <h2 class="ui-section-title">AI 功能总开关</h2>
+  <p class="ui-hint">
+    整条控制链：<strong>总开关 → 各功能开关 → 该功能模型</strong>（本页配置的主力 + 备用；
+    该功能未单独配置则用下面的全局默认主力 + 备用）→ <strong>全部失败不回退全局默认</strong>，
+    交给该功能自己的兜底（路径页回退模板与规则，候选页按「兜底动作」拒绝或放行）。
+  </p>
+  {% if not ai_enabled %}
+    {{ ui.callout("AI 功能已全局关闭", tone="waiting",
+                  detail="所有功能都不会再调用模型：归档路径按模板与规则处理，AI 候选判定自动跳过。供应商、Key、模型链与各功能开关都原样保留，重新打开即恢复。") }}
+  {% endif %}
+  <form class="ui-form" method="post" action="{{ url_for('save_ai_master_switch') }}"
+        style="margin-top: var(--s-4)">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="ui-checkline">
+      <input class="ui-checkbox" name="ai_enabled" type="checkbox"
+             {% if ai_enabled %}checked{% endif %}>
+      <span>启用 AI 功能</span>
+    </label>
+    <small class="ui-hint">
+      关闭后任何功能都不产生 AI 调用，但不会删除任何配置。「测试模型」按钮不受此开关影响。
+    </small>
+    <div class="ui-form-actions">
+      <button class="ui-btn" data-variant="primary" type="submit">保存总开关</button>
+    </div>
+  </form>
+</section>
+
 {# ------------------------------------------------------ 全局默认模型 #}
 <section class="ui-panel" style="margin-bottom: var(--s-5)">
   <h2 class="ui-section-title">全局默认模型</h2>

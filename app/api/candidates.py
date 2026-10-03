@@ -19,7 +19,12 @@ from fastapi import APIRouter, Query, Request
 from app.api import deps
 from app.api.contracts import ApiError, Page, PageParams
 from app.api.serializers import candidate_summary
-from app.db.database import CANDIDATE_COUNT_KEYS, CANDIDATE_FACETS
+from app.db.database import (
+    CANDIDATE_COUNT_KEYS,
+    CANDIDATE_FACETS,
+    CANDIDATE_SORT_ORDERS,
+    sort_direction,
+)
 
 
 router = APIRouter(tags=["candidates"])
@@ -105,6 +110,7 @@ async def list_candidates(
     tab: str = Query("pending"),
     search: str | None = Query(None),
     sort: str = Query("newest"),
+    dir: str | None = Query(None),
     tags: list[str] | None = Query(None),
     artist: list[str] | None = Query(None),
     language: list[str] | None = Query(None),
@@ -141,6 +147,7 @@ async def list_candidates(
         search=search,
         facets=facets,
         sort=sort,
+        direction=dir,
         offset=params.offset,
         limit=params.limit,
     )
@@ -155,6 +162,7 @@ async def list_candidates(
     payload["tab_counts"] = candidate_tab_counts(counts)
     payload["tab"] = tab
     payload["sort"] = sort
+    payload["direction"] = sort_direction(CANDIDATE_SORT_ORDERS, sort, dir)
     payload["search"] = search or ""
     payload["filters"] = {name: list(values) for name, values in facets.items()}
     return payload

@@ -473,6 +473,24 @@ def provider_label(code: str | None) -> str:
     return found.label if found is not None else code
 
 
+def provider_codes_matching(text: str) -> tuple[str, ...]:
+    """Provider codes a search word refers to, by code or by Chinese label.
+
+    The 已下载 search box is matched against the provider that produced the
+    download, which lives on the job rather than in `metadata_values`. The
+    operator types what the page shows them -- 「EH 归档」 -- not the raw code, so
+    the labels are translated here rather than duplicated in SQL.
+    """
+    needle = (text or "").strip().casefold()
+    if not needle:
+        return ()
+    return tuple(
+        code
+        for code, view in PROVIDER_STATUS.items()
+        if needle in code.casefold() or needle in view.label.casefold()
+    )
+
+
 def connection_view(state: str | None) -> StatusView:
     """Resolve a `ProviderStatus.state`, defaulting to「尚未配置」."""
     return CONNECTION_STATUS.get(

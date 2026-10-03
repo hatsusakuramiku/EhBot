@@ -29,8 +29,10 @@ from app.downloads.models import (
     CONVERSION_STATE_WAITING_PASSWORD,
     DOWNLOAD_STATE_COMPLETED,
     PROVIDER_CONVERSION,
+    PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
 )
+from app.api.status import provider_label
 from app.main import create_app
 from tests.integration.markup import (
     gated_targets,
@@ -101,6 +103,7 @@ class Library:
         self,
         *,
         title: str,
+        provider: str = PROVIDER_TELEGRAM,
         pack_state: str | None = None,
         packaged: bool = False,
         pack_error: str | None = None,
@@ -126,7 +129,7 @@ class Library:
                     (
                         candidate_id,
                         f"downloaded:{next(_KEYS)}",
-                        PROVIDER_TELEGRAM,
+                        provider,
                         DOWNLOAD_STATE_COMPLETED,
                     ),
                 ).lastrowid
@@ -194,6 +197,18 @@ class Library:
         work = asyncio.run(self.database.downloaded_work(candidate_id))
         return None if work is None else work.cbz_path
 
+    def set_metadata(
+        self, candidate_id: int, field_name: str, value: str
+    ) -> None:
+        """Write a scraped metadata value, the way an enrichment pass would."""
+        with self.database._connect() as connection:  # noqa: SLF001
+            connection.execute(
+                "INSERT INTO metadata_values (candidate_id, field_name, "
+                "field_value, value_source, confidence, is_manual) "
+                "VALUES (?, ?, ?, 'EXHENTAI', 0.9, 0)",
+                (candidate_id, field_name, value),
+            )
+
 
 def seeded(tmp_path: Path) -> tuple[Settings, Library, dict[str, int]]:
     """One work in each of the four non-trivial states."""
@@ -227,6 +242,20 @@ def logged_in(settings: Settings) -> TestClient:
 
 def work_ids(text: str) -> list[int]:
     return [int(value) for value in re.findall(r'data-work-id="(\d+)"', text)]
+
+
+def direction_marks(text: str) -> dict[str, bool]:
+    """The two 排序方向 links, mapped to whether each one is the current one.
+
+    The links are a page contract, not a form control: they rewrite `dir` in the
+    query string and keep every other filter, so what they point at and which one
+    is marked is exactly what a browser (and this test) reads.
+    """
+    block = text.split('aria-label="排序方向"', 1)[1].split("</div>", 1)[0]
+    return {
+        unescape(href): "aria-current" in rest
+        for href, rest in re.findall(r'<a href="([^"]+)"([^>]*)>', block)
+    }
 
 
 def test_each_tab_shows_exactly_the_works_it_is_named_for(
@@ -427,6 +456,36 @@ def test_the_grid_and_the_list_render_the_same_selection(
     # Both carry one checkbox per work, named for the batch endpoint.
     for body in (grid.text, listing.text):
         assert body.count('name="candidate_ids"') == len(ids)
+
+
+#: Eight tags, more than either rendering used to truncate to.
+CARD_TAGS = ("巨乳", "中出", "泳装", "校园", "姐姐", "黑丝", "足交", "调教")
+
+
+def test_the_card_shows_every_chinese_tag_and_the_work_facts(
+    tmp_path: Path,
+) -> None:
+    """R52: the 已下载 card carried artist/category/language and no tags at all."""
+    settings, library, ids = seeded(tmp_path)
+    library.set_metadata(ids["packed"], "Tags", ", ".join(CARD_TAGS))
+    library.set_metadata(ids["packed"], "TagsRaw", "big breasts, nakadashi")
+
+    client = logged_in(settings)
+    try:
+        grid = client.get("/downloaded", params={"view": "grid"}).text
+        listing = client.get("/downloaded", params={"view": "list"}).text
+    finally:
+        client.__exit__(None, None, None)
+
+    for tag in CARD_TAGS:
+        assert f'<span class="ui-tag">{tag}</span>' in grid, tag
+        assert f'<span class="ui-tag">{tag}</span>' in listing, tag
+    # 「这是哪来的、多大」 without opening the work.
+    assert "ui-card-facts" in grid
+    assert provider_label(PROVIDER_TELEGRAM) in grid
+    assert "12 页" in grid
+    # The upstream strings stay searchable, not printed under a Chinese card.
+    assert "big breasts" not in grid
 
 
 def test_a_state_word_is_never_written_by_the_page(tmp_path: Path) -> None:
@@ -1047,3 +1106,73 @@ def test_the_row_and_batch_buttons_opt_into_the_swap(tmp_path: Path) -> None:
     # Declared once on the shell, inherited by everything inside it.
     assert 'hx-target="#main"' in body
     assert "/downloaded/" in body and "/repack" in body
+
+
+def test_the_search_matches_the_provider_as_well_as_the_metadata(
+    tmp_path: Path,
+) -> None:
+    """R52: the search box also matches the provider that produced the download.
+
+    The provider lives on the job, not in `metadata_values`, so before this an
+    operator who remembered 「那件是 EH 归档的」 could not find it by that name --
+    only by the metadata they had already forgotten. The Chinese label and the
+    raw code both work, because that is the pair the operator may hold.
+    """
+    settings = make_settings(tmp_path)
+    library = Library(settings)
+    rare = library.add(title="Rare Book", provider=PROVIDER_EXHENTAI)
+    library.add(title="Common Book")
+    client = logged_in(settings)
+    try:
+        by_label = client.get(
+            "/downloaded",
+            params={"search": provider_label(PROVIDER_EXHENTAI)},
+        )
+        by_code = client.get("/downloaded", params={"search": "exhentai"})
+        by_title = client.get("/downloaded", params={"search": "Rare Book"})
+    finally:
+        client.__exit__(None, None, None)
+
+    assert work_ids(by_label.text) == [rare]
+    assert work_ids(by_code.text) == [rare]
+    assert work_ids(by_title.text) == [rare]
+
+
+def test_the_sort_direction_flips_the_list_and_is_visible_on_the_page(
+    tmp_path: Path,
+) -> None:
+    """R52: every sort key could only run the one way its default pointed.
+
+    「最新」 is descending and 「标题」 ascending, and there was no way to ask for
+    the other direction of either. `?dir=` fixes that; this asserts the list
+    really flips, and that the link group marks the direction the list is in.
+    """
+    settings, _library, ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        newest = client.get("/downloaded", params={"sort": "newest"})
+        ascending = client.get(
+            "/downloaded", params={"sort": "newest", "dir": "asc"}
+        )
+        titled = client.get(
+            "/downloaded", params={"sort": "title", "dir": "desc"}
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    descending_order = [ids["failed"], ids["attention"], ids["packed"], ids["unpacked"]]
+    assert work_ids(newest.text) == descending_order
+    assert work_ids(ascending.text) == list(reversed(descending_order))
+
+    # The default needs no parameter: `newest` already means descending, and
+    # spelling it out would make 「清除」 appear on an unfiltered page.
+    assert 'name="dir"' not in newest.text
+    assert 'name="dir" value="desc"' in titled.text
+
+    marks = direction_marks(titled.text)
+    assert marks[
+        next(href for href in marks if "dir=desc" in href)
+    ] is True
+    assert marks[
+        next(href for href in marks if "dir=asc" in href)
+    ] is False

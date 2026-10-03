@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.ai.errors import AI_CANDIDATE_INVALID, AI_PATH_UNAVAILABLE, AiError
-from app.ai.models import CHAIN_SCOPE_DEFAULT
+from app.ai.models import CHAIN_SCOPE_CANDIDATE, CHAIN_SCOPE_DEFAULT
 from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT, candidate_payload
 from app.candidates.admission import (
     Admission,
@@ -76,7 +76,10 @@ class FakeAi:
 
 
 class FakeSettings:
-    def __init__(self, **overrides: object) -> None:
+    def __init__(
+        self, *, ai_enabled: bool = True, **overrides: object
+    ) -> None:
+        self._ai_enabled = ai_enabled
         self._config = {
             "enabled": True,
             "prompt": DEFAULT_CANDIDATE_PROMPT,
@@ -87,6 +90,9 @@ class FakeSettings:
 
     async def candidate_admission(self) -> dict[str, object]:
         return dict(self._config)
+
+    async def ai_enabled(self) -> bool:
+        return self._ai_enabled
 
 
 class TestAnswerParsing:
@@ -182,10 +188,22 @@ class TestGate:
         assert admission.verdict == "reject"
         assert "广告" in admission.reason
 
-    def test_the_default_chain_scope_is_asked(self) -> None:
+    def test_the_candidate_scope_is_asked(self) -> None:
+        """R52: the gate has its own chain scope, not the global default."""
         ai = FakeAi()
         _decide(CandidateAdmissionService(ai, FakeSettings()))
-        assert ai.scopes == [CHAIN_SCOPE_DEFAULT]
+        assert ai.scopes == [CHAIN_SCOPE_CANDIDATE]
+
+    def test_the_master_switch_skips_before_any_call(self) -> None:
+        """生效 = 总开关 AND 本功能开关; off means zero model calls."""
+        ai = FakeAi()
+        admission = _decide(
+            CandidateAdmissionService(ai, FakeSettings(ai_enabled=False))
+        )
+        assert admission.verdict == "skip"
+        assert "全局关闭" in admission.reason
+        assert ai.messages == []
+        assert ai.scopes == []
 
     def test_a_malformed_answer_walks_to_the_fallback(self) -> None:
         ai = FakeAi(text="这不是 JSON")

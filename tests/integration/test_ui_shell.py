@@ -103,27 +103,71 @@ def test_every_page_marks_exactly_one_destination_as_current(
         client.__exit__(None, None, None)
 
 
-def test_the_two_navigations_render_the_same_destinations(
+#: The two navigations as rendered, so their links can be compared as sets.
+#: Matching the block first keeps a page's own links (the tab strips) out of it.
+_SIDEBAR = re.compile(r'<aside class="ui-sidebar">.*?</aside>', re.S)
+_TAB_BAR = re.compile(r'<nav class="ui-tabbar".*?</nav>', re.S)
+_HREF = re.compile(r'href="([^"]+)"')
+
+
+def _hrefs(block: str) -> set[str]:
+    return set(_HREF.findall(block))
+
+
+def test_the_phone_tab_bar_and_the_sidebar_offer_the_same_domains(
     tmp_path: Path,
 ) -> None:
-    # This is the regression the phase exists to close: the old `base.html` had
-    # two hand-written lists, and the mobile one carried a 历史 link the sidebar
-    # never gained. One data source means the sets cannot diverge -- so assert
-    # they do not.
+    # This is the regression the phase exists to close: `base.html` used to
+    # hardcode the navigation twice, and the mobile one carried a 历史 link the
+    # sidebar never gained. Both are rendered from NAV_ITEMS, so assert the
+    # top-level destinations cannot diverge.
     client, _ = _client(tmp_path)
     try:
         body = client.get("/candidates").text
     finally:
         client.__exit__(None, None, None)
 
-    expected = set()
-    for item in NAV_ITEMS:
-        expected.add(item.path)
-        for child in item.children:
-            expected.add(child.path)
+    sidebar = _SIDEBAR.search(body)
+    tabbar = _TAB_BAR.search(body)
+    assert sidebar is not None and tabbar is not None
+    top = {item.path for item in NAV_ITEMS}
+    assert _hrefs(sidebar.group(0)) & top == _hrefs(tabbar.group(0)) & top
+    # One link per domain: the phone bar is a navigator, not a menu.
+    assert tabbar.group(0).count('href="') == len(NAV_ITEMS)
 
-    for path in expected:
-        assert f'href="{path}"' in body, f"{path} is missing from the shell"
+
+def test_every_domain_page_reaches_its_own_children(tmp_path: Path) -> None:
+    # R52 removed the phone's second-level drawer: a domain's sub-pages are
+    # chosen on the page itself, through its `ui.tabs` strip -- plus the
+    # candidates page head for 手动添加, which is a nav child but not a status
+    # tab. So the invariant became per-domain reachability rather than "every
+    # destination rendered on every page".
+    client, _ = _client(tmp_path)
+    try:
+        for item in NAV_ITEMS:
+            if not item.children:
+                continue
+            body = client.get(item.path).text
+            missing = [
+                child.path
+                for child in item.children
+                if f'href="{child.path}"' not in body
+            ]
+            assert not missing, f"{item.path} cannot reach {missing}"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_the_phone_shell_has_no_second_level_menu(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+    try:
+        body = client.get("/downloaded").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert 'aria-label="分区导航"' not in body
+    assert 'data-side="bottom"' not in body
+    assert 'aria-haspopup="dialog"' not in body
 
 
 def test_shell_provides_the_accessibility_primitives(tmp_path: Path) -> None:

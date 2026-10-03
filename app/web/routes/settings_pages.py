@@ -16,7 +16,11 @@ from fastapi.responses import RedirectResponse
 from app.api.events import EVENT_DOWNLOAD
 from app.api.serializers import auto_approval_dry_run
 from app.ai.errors import AI_CHAIN_ENTRY_MISSING, AiError
-from app.ai.models import CHAIN_SCOPE_ARCHIVE_PATH, CHAIN_SCOPE_DEFAULT
+from app.ai.models import (
+    CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_CANDIDATE,
+    CHAIN_SCOPE_DEFAULT,
+)
 from app.api.status import (
     SETTINGS_AI,
     SETTINGS_ARCHIVE,
@@ -1694,6 +1698,26 @@ def _verify_summary(results) -> str:
     return f"测试完成：{ok}/{len(results)} 个模型通过。"
 
 
+@router.post("/settings/ai/master")
+async def save_ai_master_switch(request: Request, csrf_token: str = Form()):
+    """Toggle the global AI master switch.
+
+    State only: turning it off stops every feature from calling a model and
+    deletes nothing -- providers, keys, chains and per-feature switches all stay
+    where the operator left them, so turning it back on restores the exact
+    configuration that was there before.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    await deps.system_settings_service(request).save_ai_enabled(
+        form.get("ai_enabled") == "on"
+    )
+    return settings_redirect(request, SETTINGS_AI)
+
+
 async def _chain_model_id(request: Request, form) -> int:
     raw = str(form.get("model_id") or "").strip()
     if not raw.isdigit():
@@ -1749,6 +1773,69 @@ async def remove_ai_path_chain_model(request: Request, csrf_token: str = Form())
     )
 
 
+@router.post("/settings/parse/chain/primary")
+async def set_ai_candidate_chain_primary(request: Request, csrf_token: str = Form()):
+    return await _chain_action(
+        request, csrf_token, "primary", scope=CHAIN_SCOPE_CANDIDATE
+    )
+
+
+@router.post("/settings/parse/chain/append")
+async def append_ai_candidate_chain_model(request: Request, csrf_token: str = Form()):
+    return await _chain_action(
+        request, csrf_token, "append", scope=CHAIN_SCOPE_CANDIDATE
+    )
+
+
+@router.post("/settings/parse/chain/shift")
+async def shift_ai_candidate_chain_model(request: Request, csrf_token: str = Form()):
+    return await _chain_action(
+        request, csrf_token, "shift", scope=CHAIN_SCOPE_CANDIDATE
+    )
+
+
+@router.post("/settings/parse/chain/remove")
+async def remove_ai_candidate_chain_model(request: Request, csrf_token: str = Form()):
+    return await _chain_action(
+        request, csrf_token, "remove", scope=CHAIN_SCOPE_CANDIDATE
+    )
+
+
+@router.post("/settings/parse/model-source")
+async def save_ai_candidate_model_source(request: Request, csrf_token: str = Form()):
+    """Choose where the AI candidate gate gets its models from.
+
+    The same two values and the same wording as the archive-path switch:
+    「跟随全局默认」 reads the AI tab's list, 「本页单独指定」 reads the one edited
+    on this tab. The choice is stored rather than inferred from 「列表是不是空的」
+    so an intentionally empty custom list stays a loud error.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    try:
+        await deps.system_settings_service(
+            request
+        ).save_ai_candidate_model_source(str(form.get("ai_model_source") or ""))
+    except SystemSettingsError as exc:
+        return await render_settings(
+            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
+        )
+    return settings_redirect(request, SETTINGS_PARSE)
+
+
+#: Which settings tab owns each chain scope. One table instead of a ternary in
+#: each of the four verbs, because the section and the redirect must agree and
+#: a new scope should be one line here rather than two edits that can drift.
+_CHAIN_SECTIONS: dict[str, str] = {
+    CHAIN_SCOPE_DEFAULT: SETTINGS_AI,
+    CHAIN_SCOPE_ARCHIVE_PATH: SETTINGS_PATHS,
+    CHAIN_SCOPE_CANDIDATE: SETTINGS_PARSE,
+}
+
+
 async def _chain_action(
     request: Request, csrf_token: str, action: str, *, scope: str = CHAIN_SCOPE_DEFAULT
 ):
@@ -1765,7 +1852,7 @@ async def _chain_action(
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
     service = deps.ai_service(request)
-    section = SETTINGS_AI if scope == CHAIN_SCOPE_DEFAULT else SETTINGS_PATHS
+    section = _CHAIN_SECTIONS.get(scope, SETTINGS_AI)
     try:
         if action == "shift":
             delta = int(str(form.get("delta") or "").strip())
@@ -1789,10 +1876,9 @@ async def _chain_action(
         return await render_settings(
             request, section, error=message, status_code=400
         )
-    return RedirectResponse(
-        _ai_location() if scope == CHAIN_SCOPE_DEFAULT else f"/settings/{SETTINGS_PATHS}",
-        status_code=303,
-    )
+    if scope == CHAIN_SCOPE_DEFAULT:
+        return RedirectResponse(_ai_location(), status_code=303)
+    return RedirectResponse(f"/settings/{section}", status_code=303)
 
 
 @router.post("/archive-settings/paths/ai/models")

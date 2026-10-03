@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 import httpx
@@ -55,6 +55,7 @@ from app.ai.errors import (
 from app.ai.models import (
     CHAIN_SCOPE_ARCHIVE_PATH,
     CHAIN_SCOPE_DEFAULT,
+    CHAIN_SCOPE_LABELS,
     CHAIN_SCOPES,
     DEFAULT_MAX_RETRIES,
     DEFAULT_PROVIDER_CODE,
@@ -66,6 +67,7 @@ from app.ai.models import (
     MAX_RETRIES,
     MAX_TIMEOUT_SECONDS,
     MIN_TIMEOUT_SECONDS,
+    MODEL_SOURCE_CUSTOM,
     PROVIDER_CODE_LABELS,
     SUPPORTED_PROVIDER_CODES,
     AiAnswer,
@@ -136,9 +138,22 @@ class AiProviderService:
         *,
         http_client: httpx.AsyncClient,
         client_factory: Callable[..., OpenAiCompatibleClient] | None = None,
+        scope_sources: Mapping[str, Callable[[], Awaitable[str]]] | None = None,
     ) -> None:
         self._database = database
         self._archive_settings = archive_settings
+        # 「这张列表从哪来」 per feature scope: scope -> an async reader returning
+        # `default` or `custom`. A registry rather than an `if scope == ...`
+        # ladder so a third feature is a registration in `wiring`, not a new
+        # branch here. The archive-path reader is derived from the settings
+        # object this service has always taken, so the pre-R52 construction
+        # (and every unit test that uses it) keeps working unchanged.
+        self._scope_sources: dict[str, Callable[[], Awaitable[str]]] = dict(
+            scope_sources or {}
+        )
+        reader = getattr(archive_settings, "ai_model_source", None)
+        if reader is not None:
+            self._scope_sources.setdefault(CHAIN_SCOPE_ARCHIVE_PATH, reader)
         self._http = http_client
         self._client_factory = client_factory or OpenAiCompatibleClient
         # Rotation cursors, keyed by provider. Deliberately in memory: the
@@ -146,6 +161,19 @@ class AiProviderService:
         # restart starting again at the first key is harmless because a key in
         # cooldown is skipped from the database, not from this dict.
         self._cursors: dict[int, int] = {}
+
+    def register_scope_source(
+        self, scope: str, reader: Callable[[], Awaitable[str]]
+    ) -> None:
+        """Teach one feature scope how to say 「跟随全局」 or 「本页单独指定」.
+
+        Called by `wiring` for the candidate gate; the archive-path scope is
+        registered in `__init__` because this service has always carried that
+        settings object. An unregistered scope reads as 「跟随全局」, which is the
+        upgrade-safe default for a feature that has not configured its own list.
+        """
+        self._require_scope(scope)
+        self._scope_sources[scope] = reader
 
     # ------------------------------------------------------------------
     #  Providers
@@ -610,13 +638,13 @@ class AiProviderService:
         self._require_scope(scope)
         if scope == CHAIN_SCOPE_DEFAULT:
             return await self._database.list_ai_model_chain(CHAIN_SCOPE_DEFAULT)
-        if scope == CHAIN_SCOPE_ARCHIVE_PATH:
-            reader = getattr(self._archive_settings, "ai_model_source", None)
-            source = await reader() if reader is not None else "default"
-            if source != "custom":
-                return await self._database.list_ai_model_chain(
-                    CHAIN_SCOPE_DEFAULT
-                )
+        reader = self._scope_sources.get(scope)
+        # Unconfigured (no reader, or the source switch still says 「跟随全局」)
+        # inherits the global list; 「本页单独指定」 uses this scope's own list
+        # even when it is empty, which is a loud error rather than a silent
+        # second inheritance.
+        if reader is None or await reader() != MODEL_SOURCE_CUSTOM:
+            return await self._database.list_ai_model_chain(CHAIN_SCOPE_DEFAULT)
         return await self._database.list_ai_model_chain(scope)
 
     @staticmethod
@@ -801,11 +829,13 @@ class AiProviderService:
         and a feature that needs the default chain passes it explicitly rather
         than getting it by omission.
         """
+        label = CHAIN_SCOPE_LABELS.get(scope, scope)
         chain = await self.effective_chain(scope)
         if not chain:
             raise AiError(
                 AI_CHAIN_EMPTY,
-                "还没有配置 AI 模型，请到「设置 → AI 供应商」添加一个供应商与模型",
+                f"{label}：还没有配置 AI 模型，请到「设置 → AI 供应商」"
+                "添加一个供应商与模型",
             )
         # Resolved once per call, not once per attempt: the answer must not
         # change shape halfway down the fallback chain, and one settings read per
@@ -833,6 +863,7 @@ class AiProviderService:
                     "ai_path_model_failed",
                     extra={
                         "error_code": exc.code,
+                        "scope": scope,
                         "provider_id": entry.provider.provider_id,
                         "model": entry.model.name,
                     },
@@ -842,10 +873,17 @@ class AiProviderService:
         if not failures:
             raise AiError(
                 AI_CHAIN_EMPTY,
-                "AI 模型里的模型都已停用，请到「设置 → AI 供应商」启用至少一个",
+                f"{label}：AI 模型里的模型都已停用，"
+                "请到「设置 → AI 供应商」启用至少一个",
             )
+        # The wording is part of the contract (requirement A4): a caller that
+        # configured its own list must be told the failure did not fall back to
+        # the global default, because that is what 「全部失败也不回退」 means and
+        # an operator debugging a path needs to see it.
         raise AiError(
-            AI_PATH_UNAVAILABLE, "所有 AI 模型都不可用：" + "；".join(failures[:3])
+            AI_PATH_UNAVAILABLE,
+            f"{label}：配置的 {len(failures)} 个模型都失败"
+            "（未回退全局默认）：" + "；".join(failures[:3]),
         )
 
     async def _ask(

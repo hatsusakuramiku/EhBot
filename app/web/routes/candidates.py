@@ -30,6 +30,7 @@ from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.api.serializers import candidate_summary
 from app.api.status import candidate_tab_view
 from app.conversion.service import ConversionError
+from app.db.database import CANDIDATE_SORT_ORDERS, SORT_DIRECTIONS, sort_direction
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import REVIEWABLE_STATUSES
@@ -141,6 +142,18 @@ async def _render_candidates(
         # Forgiving on purpose, unlike the JSON endpoint: a bookmarked link
         # with a sort we have since renamed should still show the list.
         sort = "newest"
+    requested_direction = params.get("dir")
+    direction = sort_direction(CANDIDATE_SORT_ORDERS, sort, requested_direction)
+    default_direction = sort_direction(CANDIDATE_SORT_ORDERS, sort, None)
+    # Only an explicit, non-default direction travels in the form and the links:
+    # `?sort=title` and `?sort=title&dir=asc` are the same list, and carrying the
+    # redundant parameter would make 「清除」 appear on a page with no filter.
+    direction_param = (
+        requested_direction
+        if requested_direction in SORT_DIRECTIONS
+        and requested_direction != default_direction
+        else None
+    )
     view = params.get("view") if params.get("view") in {"grid", "list"} else "grid"
     try:
         facets = candidate_facet_selection(
@@ -166,6 +179,7 @@ async def _render_candidates(
             search=search,
             facets=facets,
             sort=sort,
+            direction=direction,
             offset=page.offset,
             limit=page.limit,
         )
@@ -178,6 +192,7 @@ async def _render_candidates(
         search=search,
         facets=facets,
         sort=sort,
+        direction=direction,
         offset=page.offset,
         limit=page.limit,
     )
@@ -230,6 +245,11 @@ async def _render_candidates(
             "grid_href": deps.query_href(request, view="grid"),
             "list_href": deps.query_href(request, view="list"),
             "sort": sort,
+            "direction": direction,
+            "default_direction": default_direction,
+            "direction_param": direction_param,
+            "dir_asc_href": deps.query_href(request, dir="asc"),
+            "dir_desc_href": deps.query_href(request, dir="desc"),
             "sorts": [
                 {"key": key, "label": label}
                 for key, label in CANDIDATE_SORT_OPTIONS

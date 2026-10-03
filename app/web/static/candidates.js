@@ -159,14 +159,8 @@
     event.preventDefault();
   });
 
-  /* -------------------------------------------------------------- filtering */
-
-  document.querySelectorAll("[data-autosubmit]").forEach(function (control) {
-    control.addEventListener("change", function () {
-      var owner = control.form;
-      if (owner) owner.requestSubmit ? owner.requestSubmit() : owner.submit();
-    });
-  });
+  /* Filtering's auto-submit lives in `ui.js`: it is one behaviour shared with
+   * the 已下载 page, and delegating it there survives an in-place update. */
 
   /* ------------------------------------------------------- metadata drawer */
 

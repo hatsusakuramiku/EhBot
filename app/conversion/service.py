@@ -24,6 +24,7 @@ from app.ai.errors import (
 from app.ai.paths import AiPathService
 from app.archive.service import (
     PATH_SOURCE_AI,
+    PATH_SOURCE_TEMPLATE,
     ArchiveSettingsService,
     TITLE_SOURCE_JAPANESE,
 )
@@ -160,6 +161,7 @@ class ConversionService:
         notify: Callable[..., object] | None = None,
         metadata_enricher: Callable[[int], object] | None = None,
         ai_service: object | None = None,
+        system_settings_service: object | None = None,
         refile: Callable[[int, str], object] | None = None,
     ) -> None:
         self._database = database
@@ -188,6 +190,11 @@ class ConversionService:
             if ai_service is not None
             else None
         )
+        # The global AI master switch. Optional so a test that builds this
+        # service directly keeps the pre-R52 behaviour (AI allowed); `wiring`
+        # always passes the real service, which is what makes the switch bite in
+        # production.
+        self._system_settings = system_settings_service
         # The move half of a 「重新计算路径」 job. Injected for the same reason the
         # metadata enricher is: this service must not import the archive service
         # (the two are constructed in dependency order in `wiring`), and a test
@@ -206,13 +213,21 @@ class ConversionService:
         return (library or self._library_path, work or self._work_path)
 
     async def path_source(self) -> str:
-        """Which layer decides a book's path right now.
+        """Which layer decides a book's path right now, master switch included.
 
         Exposed so a caller that manages pins itself -- the batch repack -- can
         branch without reading settings, and so a page can label a form with the
-        mode it will actually use.
+        mode it will actually use. The global AI master switch is folded in
+        here: with it off, AI mode is *configured* but not *in effect*, and every
+        routing decision must fall through to the template with no model call --
+        which is exactly what answering `template` makes them do.
         """
-        return await self._settings.path_source()
+        source = await self._settings.path_source()
+        if source != PATH_SOURCE_AI or self._system_settings is None:
+            return source
+        if await self._system_settings.ai_enabled():
+            return source
+        return PATH_SOURCE_TEMPLATE
 
     async def ai_sweep_settings(self) -> dict[str, object]:
         """The whole-library re-archive knobs, read in one place.
@@ -336,7 +351,7 @@ class ConversionService:
         """
         metadata = await self.metadata_for(candidate_id)
         title = self.title_of(metadata, candidate_id)
-        if await self._settings.path_source() != PATH_SOURCE_AI:
+        if await self.path_source() != PATH_SOURCE_AI:
             # Only reachable if the operator switched back to template mode
             # between planning the sweep and running the job. Rendering the
             # template is the honest answer: it is what the current setting says.
@@ -421,7 +436,7 @@ class ConversionService:
         # one question and 「两个都开」 would be a third rule engine. The pinned
         # path above still wins -- 「手动指定优先」 is older than this feature and
         # this branch does not touch it.
-        if await self._settings.path_source() == PATH_SOURCE_AI:
+        if await self.path_source() == PATH_SOURCE_AI:
             from_ai = await self._ai_relative_path(
                 candidate_id,
                 metadata,
@@ -495,7 +510,7 @@ class ConversionService:
 
         Raises `LibraryPathError`, which the batch turns into a per-work reason.
         """
-        if await self._settings.path_source() == PATH_SOURCE_AI:
+        if await self.path_source() == PATH_SOURCE_AI:
             # Cache only, never the model: this runs while an operator waits, and
             # an answer the packer has not committed to must not be shown as one
             # (proposal §7, 「操作员侧不撒谎」). No cache yet is a normal state for

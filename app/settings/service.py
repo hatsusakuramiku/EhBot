@@ -21,6 +21,10 @@ from __future__ import annotations
 
 import re
 
+from app.ai.models import (
+    MODEL_SOURCE_DEFAULT,
+    MODEL_SOURCES,
+)
 from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
 from app.candidates.parse_rules import (
     PARSE_RULES_KEY,
@@ -48,6 +52,16 @@ SETTING_AI_CANDIDATE_ENABLED = "ai_candidate_enabled"
 SETTING_AI_CANDIDATE_PROMPT = "ai_candidate_prompt"
 SETTING_AI_CANDIDATE_OVERRIDE = "ai_candidate_override_parse_rules"
 SETTING_AI_CANDIDATE_FALLBACK = "ai_candidate_fallback"
+#: Which models the gate asks: the global default chain, or a list of its own.
+#: Same vocabulary and semantics as the archive-path switch (`ai_model_source`).
+SETTING_AI_CANDIDATE_MODEL_SOURCE = "ai_candidate_model_source"
+
+#: The master switch over every AI feature. `1` (on) by default so an upgrade
+#: changes nothing; off means 「不产生任何 AI 调用」 while every per-feature
+#: switch and stored chain stays exactly where the operator left it. 生效 =
+#: 总开关 AND 本功能开关.
+SETTING_AI_ENABLED = "ai_enabled"
+DEFAULT_AI_ENABLED = True
 
 #: What to do when the gate is on but the chain cannot answer. `reject` keeps
 #: the gate's intent (keep things out) on error; `accept` is for an operator who
@@ -201,6 +215,9 @@ class SystemSettingsService:
             MAX_AUTO_APPROVAL_INTERVAL_MINUTES,
         )
         return {
+            "ai_enabled": _read_bool(
+                stored, SETTING_AI_ENABLED, DEFAULT_AI_ENABLED
+            ),
             "poll_interval_ms": poll_interval_ms,
             # A background tab must never poll faster than a foreground one, so
             # the floor is the active interval rather than the constant.
@@ -259,6 +276,16 @@ class SystemSettingsService:
             (await self.snapshot())["download_source_priority"]
         )
 
+    async def ai_enabled(self) -> bool:
+        """Whether any AI feature may run at all (master switch)."""
+        return bool((await self.snapshot())["ai_enabled"])
+
+    async def save_ai_enabled(self, enabled: bool) -> dict[str, object]:
+        await self._database.save_system_settings(
+            {SETTING_AI_ENABLED: "1" if enabled else "0"}
+        )
+        return await self.snapshot()
+
     async def parse_rules(self) -> dict[str, object]:
         """The candidate-admission parse scheme, always in the full shape."""
         stored = await self._database.system_settings()
@@ -295,6 +322,11 @@ class SystemSettingsService:
         if fallback not in AI_CANDIDATE_FALLBACKS:
             fallback = DEFAULT_AI_CANDIDATE_FALLBACK
         prompt = stored.get(SETTING_AI_CANDIDATE_PROMPT, "").strip()
+        source = (
+            stored.get(SETTING_AI_CANDIDATE_MODEL_SOURCE, "").strip().lower()
+        )
+        if source not in MODEL_SOURCES:
+            source = MODEL_SOURCE_DEFAULT
         return {
             "enabled": _read_bool(stored, SETTING_AI_CANDIDATE_ENABLED),
             "prompt": prompt or DEFAULT_CANDIDATE_PROMPT,
@@ -302,6 +334,7 @@ class SystemSettingsService:
                 stored, SETTING_AI_CANDIDATE_OVERRIDE
             ),
             "fallback": fallback,
+            "model_source": source,
             "prompt_overridden": bool(prompt),
             "enabled_overridden": bool(
                 stored.get(SETTING_AI_CANDIDATE_ENABLED, "").strip()
@@ -309,7 +342,32 @@ class SystemSettingsService:
             "override_overridden": bool(
                 stored.get(SETTING_AI_CANDIDATE_OVERRIDE, "").strip()
             ),
+            "model_source_overridden": bool(
+                stored.get(SETTING_AI_CANDIDATE_MODEL_SOURCE, "").strip()
+            ),
         }
+
+    async def ai_candidate_model_source(self) -> str:
+        """Where the gate's models come from (read by `AiProviderService`).
+
+        A reader method rather than only a field of `candidate_admission()` so
+        the provider-service registry can ask this one question without loading
+        the prompt and the switches on every call.
+        """
+        return str((await self.candidate_admission())["model_source"])
+
+    async def save_ai_candidate_model_source(
+        self, raw: str
+    ) -> dict[str, object]:
+        value = (raw or "").strip().lower()
+        if value not in MODEL_SOURCES:
+            raise SystemSettingsError(
+                "AI_MODEL_SOURCE_INVALID", "模型来源取值无效"
+            )
+        await self._database.save_system_settings(
+            {SETTING_AI_CANDIDATE_MODEL_SOURCE: value}
+        )
+        return await self.candidate_admission()
 
     async def save_candidate_admission(
         self, values: dict[str, object]

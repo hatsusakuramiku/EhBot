@@ -41,6 +41,11 @@ from app.archive.vault import (
 # settings page and the packing path cannot disagree about what is legal. The
 # module holds nothing but string handling, so importing it here creates no
 # archive -> conversion dependency worth the name.
+from app.ai.models import (
+    MODEL_SOURCE_CUSTOM,
+    MODEL_SOURCE_DEFAULT,
+    MODEL_SOURCES,
+)
 from app.ai.prompt import DEFAULT_AI_PROMPT
 from app.conversion.naming import (
     DEFAULT_LIBRARY_TEMPLATE,
@@ -114,9 +119,10 @@ SETTING_AI_DEFAULT_INCLUDE_CURRENT = "ai_default_include_current"
 #: default value here is `default` and why an empty custom list is an error
 #: rather than a second inheritance.
 SETTING_AI_MODEL_SOURCE = "ai_model_source"
-MODEL_SOURCE_DEFAULT = "default"
-MODEL_SOURCE_CUSTOM = "custom"
-MODEL_SOURCES: tuple[str, ...] = (MODEL_SOURCE_DEFAULT, MODEL_SOURCE_CUSTOM)
+#: `MODEL_SOURCE_*` / `MODEL_SOURCES` now live in `app.ai.models` (the candidate
+#: gate speaks the same vocabulary and must not import the archive service to
+#: say 「custom」); imported above and re-exported here so the archive settings
+#: keep one name for their own source switch.
 DEFAULT_AI_MODEL_SOURCE = MODEL_SOURCE_DEFAULT
 
 DEFAULT_AI_BATCH_SIZE = 20
@@ -1014,6 +1020,9 @@ __all__ = [
     "MAX_AI_CONCURRENCY",
     "MIN_AI_BATCH_SIZE",
     "MIN_AI_CONCURRENCY",
+    "MODEL_SOURCES",
+    "MODEL_SOURCE_CUSTOM",
+    "MODEL_SOURCE_DEFAULT",
     "PATH_SETTING_KEYS",
     "PATH_SOURCES",
     "PATH_SOURCE_AI",

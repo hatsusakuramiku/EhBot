@@ -60,6 +60,7 @@ from app.ai.prompt import (
 )
 from app.archive.service import (
     PATH_SOURCE_AI,
+    PATH_SOURCE_TEMPLATE,
     ArchiveSettingsService,
 )
 from app.conversion.convert import ConversionError
@@ -179,6 +180,16 @@ async def _seed(tmp_path: Path) -> tuple[Database, ArchiveSettingsService]:
     return database, settings
 
 
+class _MasterSwitch:
+    """A stand-in for `SystemSettingsService.ai_enabled`."""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    async def ai_enabled(self) -> bool:
+        return self.enabled
+
+
 def _conversion(
     database: Database,
     settings: ArchiveSettingsService,
@@ -186,6 +197,7 @@ def _conversion(
     ai: object | None,
     *,
     refile: object | None = None,
+    system_settings_service: object | None = None,
 ) -> ConversionService:
     return ConversionService(
         database,
@@ -194,6 +206,7 @@ def _conversion(
         settings_service=settings,
         data_path=tmp_path / "data",
         ai_service=ai,
+        system_settings_service=system_settings_service,
         refile=refile,
     )
 
@@ -624,6 +637,52 @@ class TestConversionServiceAiPaths:
             7, tmp_path / "library", _rows(Title="作品"), "作品"
         )
         assert target.as_posix().endswith("library/同人志/作者/作品.cbz")
+        assert len(ai.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_ai_master_switch_falls_back_without_calling(
+        self, tmp_path: Path
+    ) -> None:
+        """总开关关闭 = 等同未启用 AI 模式：按模板归档，且零调用。"""
+        database, settings = await _seed(tmp_path)
+        await _candidate(database)
+        ai = _FakeAi()
+        conversion = _conversion(
+            database,
+            settings,
+            tmp_path,
+            ai,
+            system_settings_service=_MasterSwitch(False),
+        )
+        await settings.save_path_source(PATH_SOURCE_AI)
+
+        assert await conversion.path_source() == PATH_SOURCE_TEMPLATE
+        target = await conversion._library_target(
+            7, tmp_path / "library", _rows(Title="作品"), "作品"
+        )
+        assert target.suffix == ".cbz"
+        assert ai.calls == []
+
+    @pytest.mark.asyncio
+    async def test_the_ai_master_switch_on_keeps_ai_mode(
+        self, tmp_path: Path
+    ) -> None:
+        database, settings = await _seed(tmp_path)
+        await _candidate(database)
+        ai = _FakeAi()
+        conversion = _conversion(
+            database,
+            settings,
+            tmp_path,
+            ai,
+            system_settings_service=_MasterSwitch(True),
+        )
+        await settings.save_path_source(PATH_SOURCE_AI)
+
+        assert await conversion.path_source() == PATH_SOURCE_AI
+        await conversion._library_target(
+            7, tmp_path / "library", _rows(Title="作品"), "作品"
+        )
         assert len(ai.calls) == 1
 
     @pytest.mark.asyncio

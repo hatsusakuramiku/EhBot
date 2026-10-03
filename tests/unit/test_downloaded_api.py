@@ -229,8 +229,12 @@ class TestSnapshot:
         assert database.calls == [
             {
                 "search": "  汉化  ",
+                # R52: the search word is also translated into provider codes,
+                # and the direction travels beside the sort key.
+                "search_providers": (),
                 "pack_filter": "packed",
                 "sort": "largest",
+                "direction": None,
                 "offset": 50,
                 "limit": 25,
             }

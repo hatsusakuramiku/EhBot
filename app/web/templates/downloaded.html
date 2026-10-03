@@ -83,6 +83,11 @@
       <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名作品" }}</a></span>
       {%- set meta = work_meta(item) -%}
       {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
+      {% if item.tags %}
+      <div class="ui-card-tags">
+        {% for tag in item.tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
+      </div>
+      {% endif %}
       {% if item.pack_error_message %}
       <span class="ui-table-secondary" data-field="pack-error">{{ item.pack_error_message }}</span>
       {% endif %}
@@ -126,6 +131,7 @@
 <div class="ui-filter-layout">
   <form class="ui-filters" id="downloaded-filters" method="get" action="{{ tab_href }}">
     <input type="hidden" name="view" value="{{ view }}">
+    {% if direction_param %}<input type="hidden" name="dir" value="{{ direction_param }}">{% endif %}
     <div class="ui-field">
       <label for="downloaded-search">搜索</label>
       <input class="ui-input" id="downloaded-search" name="search" type="search"
@@ -139,9 +145,18 @@
         {% endfor %}
       </select>
     </div>
+    <div class="ui-field">
+      {#- A link group, not a form control: it rewrites `dir` in the query string
+          and keeps every other filter, so it works with JavaScript off. -#}
+      <span class="ui-field-label">排序方向</span>
+      <div class="ui-segmented" role="group" aria-label="排序方向">
+        <a href="{{ dir_asc_href }}" {% if direction == 'asc' %}aria-current="true"{% endif %}>↑ 升序</a>
+        <a href="{{ dir_desc_href }}" {% if direction == 'desc' %}aria-current="true"{% endif %}>↓ 降序</a>
+      </div>
+    </div>
     <div class="ui-row-actions">
       <button class="ui-btn" data-variant="primary" data-size="sm" type="submit">应用</button>
-      {% if search or sort != "newest" %}
+      {% if search or sort != "newest" or direction != default_direction %}
       <a class="ui-btn" data-size="sm" href="{{ tab_href }}">清除</a>
       {% endif %}
     </div>
@@ -195,9 +210,11 @@
                 href=item.href,
                 cover=item.cover,
                 meta=work_meta(item),
+                tags=item.tags,
                 status=item.pack,
                 selectable=true,
                 value=item.candidate_id) %}
+            <span class="ui-card-facts">{{ item.provider.label }}{% if item.page_count is not none %} · {{ item.page_count }} 页{% endif %} · {{ size_text(item.cbz_size or item.archive_size) }}</span>
             {{ work_actions(item) }}
           {% endcall %}
         </div>

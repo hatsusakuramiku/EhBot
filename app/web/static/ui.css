@@ -727,6 +727,10 @@ canvas {
    inside it overflows the column instead of fitting it. */
 .ui-field { display: grid; gap: var(--s-2); min-width: 0; }
 .ui-field > label { color: var(--t-ink); font-size: var(--font-small); font-weight: 600; }
+/* A field whose control is a group of links rather than a labelled input: the
+   heading is a span, so it needs the label's weight without the `for` a
+   `<label>` would promise. */
+.ui-field > .ui-field-label { color: var(--t-ink); font-size: var(--font-small); font-weight: 600; }
 .ui-field small { color: var(--t-ink-muted); font-size: var(--font-small); }
 .ui-input, .ui-select, .ui-textarea {
   /* `width: 100%` is the fill, `max-width: 100%` is the promise: an input
@@ -838,6 +842,10 @@ canvas {
   display: grid;
   gap: var(--card-gap);
   grid-template-columns: repeat(auto-fill, minmax(var(--cover-width), 1fr));
+  /* Cards in a row carry different numbers of tags, so they end at different
+     heights. `start` keeps each card its own size instead of stretching the
+     shorter ones to the tallest. */
+  align-items: start;
   margin-top: var(--s-5);
 }
 
@@ -890,6 +898,9 @@ canvas {
 .ui-card-title a { color: inherit; text-decoration: none; }
 .ui-card-title a:hover { text-decoration: underline; }
 .ui-card-meta { color: var(--t-ink-muted); font-size: var(--font-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 来源 · 页数 · 大小 on a cover card. One line and ellipsised like the meta
+   line above it, so a long provider name cannot stretch the grid. */
+.ui-card-facts { color: var(--t-ink-muted); font-size: var(--font-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-card-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
 
 .ui-tag {

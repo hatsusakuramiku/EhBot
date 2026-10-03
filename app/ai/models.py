@@ -19,13 +19,34 @@ from typing import Any
 PROVIDER_CODE_OPENAI = "openai"
 
 #: Which feature a chain belongs to. One global default chain (managed next to
-#: the providers) and one optional per-feature override: the archive-path page
-#: either inherits the default or carries its own list. A str column rather
-#: than a second table because 「主力 + 备用」 is the same shape everywhere and
-#: the only difference is who reads it.
+#: the providers) and one optional per-feature override each: the archive-path
+#: page and the AI candidate gate either inherit the default or carry their own
+#: list. A str column rather than a second table because 「主力 + 备用」 is the
+#: same shape everywhere and the only difference is who reads it.
 CHAIN_SCOPE_DEFAULT = "default"
 CHAIN_SCOPE_ARCHIVE_PATH = "archive_path"
-CHAIN_SCOPES: tuple[str, ...] = (CHAIN_SCOPE_DEFAULT, CHAIN_SCOPE_ARCHIVE_PATH)
+CHAIN_SCOPE_CANDIDATE = "candidate_admission"
+CHAIN_SCOPES: tuple[str, ...] = (
+    CHAIN_SCOPE_DEFAULT,
+    CHAIN_SCOPE_ARCHIVE_PATH,
+    CHAIN_SCOPE_CANDIDATE,
+)
+
+#: Human names for the scopes, for the pages and the failure text that have to
+#: say 「哪一个功能」 without the reader knowing the raw code.
+CHAIN_SCOPE_LABELS: dict[str, str] = {
+    CHAIN_SCOPE_DEFAULT: "全局默认",
+    CHAIN_SCOPE_ARCHIVE_PATH: "归档路径",
+    CHAIN_SCOPE_CANDIDATE: "AI 候选判定",
+}
+
+#: 「这张列表从哪来」: follow the global default, or use this feature's own.
+#: Lives here rather than in the archive settings service because every scoped
+#: feature speaks it, and a candidate gate importing the archive service to say
+#: 「custom」 would be the odd dependency in the other direction.
+MODEL_SOURCE_DEFAULT = "default"
+MODEL_SOURCE_CUSTOM = "custom"
+MODEL_SOURCES: tuple[str, ...] = (MODEL_SOURCE_DEFAULT, MODEL_SOURCE_CUSTOM)
 
 SUPPORTED_PROVIDER_CODES: tuple[str, ...] = (PROVIDER_CODE_OPENAI,)
 
@@ -321,7 +342,9 @@ class AiVerification:
 __all__ = [
     "CHAIN_SCOPES",
     "CHAIN_SCOPE_ARCHIVE_PATH",
+    "CHAIN_SCOPE_CANDIDATE",
     "CHAIN_SCOPE_DEFAULT",
+    "CHAIN_SCOPE_LABELS",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_PROVIDER_CODE",
     "DEFAULT_TEMPERATURE",
@@ -335,6 +358,9 @@ __all__ = [
     "MAX_TAGS_IN_PROMPT",
     "MAX_TIMEOUT_SECONDS",
     "MIN_TIMEOUT_SECONDS",
+    "MODEL_SOURCES",
+    "MODEL_SOURCE_CUSTOM",
+    "MODEL_SOURCE_DEFAULT",
     "PROVIDER_CODE_LABELS",
     "PROVIDER_CODE_OPENAI",
     "SUPPORTED_PROVIDER_CODES",

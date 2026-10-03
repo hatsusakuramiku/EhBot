@@ -420,6 +420,24 @@
      * to elements Alpine had not adopted yet. */
     document.body.addEventListener("htmx:afterSettle", runContentCallbacks);
     document.body.addEventListener("htmx:afterSettle", settleOverlays);
+
+    /* A control that opts into auto-submission submits its own form the moment
+     * it changes. Delegated from `document`, not bound per control: an in-place
+     * update replaces the whole content column, and a listener on the old
+     * select would be swapped away with it -- which is why the 已下载 sort
+     * control silently did nothing before this moved here. */
+    document.addEventListener("change", function (event) {
+      var control =
+        event.target && event.target.closest
+          ? event.target.closest("[data-autosubmit]")
+          : null;
+      if (!control) return;
+      var owner = control.form;
+      if (owner) {
+        if (owner.requestSubmit) owner.requestSubmit();
+        else owner.submit();
+      }
+    });
   }
 
   if (document.readyState === "loading") {

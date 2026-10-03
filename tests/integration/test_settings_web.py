@@ -2714,3 +2714,125 @@ class TestParseRulesSection:
 
         assert response.status_code == 303
         assert response.headers["location"] == "/login"
+
+
+class TestAIControlChain:
+    """R52: 总开关 → 各功能开关 → 该功能模型 → 全部失败不回退全局默认。"""
+
+    def test_the_master_switch_saves_and_the_page_states_the_chain(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            page = client.get("/settings/ai")
+            assert page.status_code == 200
+            assert "AI 功能总开关" in page.text
+            assert "总开关 → 各功能开关 → 该功能模型" in page.text
+            assert "全部失败不回退全局默认" in page.text
+            assert page.context["ai_enabled"] is True
+
+            csrf = page.context["csrf_token"]
+            # A checkbox that is absent reads as off, the way every other one
+            # on this page does.
+            response = client.post(
+                "/settings/ai/master",
+                data={"csrf_token": csrf},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            closed = client.get("/settings/ai")
+            assert closed.context["ai_enabled"] is False
+            assert "AI 功能已全局关闭" in closed.text
+            # 「测试模型」 is an explicit verification action, not a feature
+            # call, so the master switch promises not to affect it.
+            assert "「测试模型」按钮不受此开关影响" in closed.text
+
+            client.post(
+                "/settings/ai/master",
+                data={"csrf_token": csrf, "ai_enabled": "on"},
+                follow_redirects=False,
+            )
+            assert client.get("/settings/ai").context["ai_enabled"] is True
+
+    def test_the_master_switch_shows_on_every_feature_page(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            client.post(
+                "/settings/ai/master",
+                data={"csrf_token": _csrf(client, "ai")},
+                follow_redirects=False,
+            )
+            parse_page = client.get("/settings/parse")
+            paths_page = client.get("/settings/paths")
+
+        for page in (parse_page, paths_page):
+            assert 'data-field="ai-control-chain"' in page.text
+            assert "总开关：关" in page.text
+            assert "全部模型失败时不回退全局默认" in page.text
+
+    def test_the_candidate_page_owns_its_own_model_list(
+        self, tmp_path: Path
+    ) -> None:
+        """候选判定的「本页单独指定」不动全局默认，切回跟随即恢复。"""
+        settings = _settings(tmp_path)
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            ai_csrf = _csrf(client, "ai")
+            _add_provider(client, ai_csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": ai_csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            for name in ("big", "small"):
+                client.post(
+                    "/settings/ai/providers/1/models",
+                    data={"csrf_token": ai_csrf, "model_name": name},
+                    follow_redirects=False,
+                )
+            client.post(
+                "/settings/ai/chain/primary",
+                data={"csrf_token": ai_csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+
+            page = client.get("/settings/parse")
+            assert "候选判定模型" in page.text
+            assert "跟随全局默认" in page.text
+            assert "本页单独指定" in page.text
+            parse_csrf = page.context["csrf_token"]
+
+            response = client.post(
+                "/settings/parse/model-source",
+                data={"csrf_token": parse_csrf, "ai_model_source": "custom"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            response = client.post(
+                "/settings/parse/chain/primary",
+                data={"csrf_token": parse_csrf, "model_id": "2"},
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+            page = client.get("/settings/parse")
+            assert page.context["candidate_ai"]["model_source"] == "custom"
+            assert "主力 本地 / small" in page.text
+
+            # 切回跟随：本页列表还在，但生效的是全局默认。
+            client.post(
+                "/settings/parse/model-source",
+                data={"csrf_token": parse_csrf, "ai_model_source": "default"},
+                follow_redirects=False,
+            )
+            page = client.get("/settings/parse")
+            assert page.context["candidate_ai"]["model_source"] == "default"
+            assert "主力 本地 / big" in page.text
+
+            ai_page = client.get("/settings/ai")
+        # 全局默认从头到尾没被动过。
+        assert "主力 · 本地 / big" in ai_page.text

@@ -35,6 +35,7 @@ from fastapi import FastAPI, HTTPException
 import httpx
 
 from app.api.events import EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
+from app.ai.models import CHAIN_SCOPE_CANDIDATE
 from app.ai.service import AiProviderService
 from app.archive.service import ArchiveSettingsService
 from app.bootstrap import (
@@ -541,6 +542,15 @@ def build_lifespan(
                 archive_settings_service,
                 http_client=ai_client,
             )
+            # The candidate gate's 「跟随全局 / 本页单独指定」 switch. Registered
+            # here because the system settings service owns that key and the
+            # provider service has no business importing it; the archive-path
+            # reader is derived in the service's own constructor.
+            application.state.ai_service.register_scope_source(
+                CHAIN_SCOPE_CANDIDATE,
+                application.state.system_settings_service
+                .ai_candidate_model_source,
+            )
             # The AI candidate gate is attached here rather than at construction
             # because the connection manager (which owns the ingestor) is built
             # before this service is. Attaching it also means a deployment with
@@ -586,6 +596,10 @@ def build_lifespan(
                 # change depending on whether the service happened to be
                 # attached when the worker claimed it.
                 ai_service=application.state.ai_service,
+                # The global AI master switch: off means AI mode falls back to
+                # the template without a model call, even while `/settings/paths`
+                # still shows 「AI 生成」 as the configured choice.
+                system_settings_service=application.state.system_settings_service,
                 # The move half of a 「重新计算路径」 job, resolved through
                 # `application.state` because the archive service is built
                 # immediately below this one -- the two depend on each other and

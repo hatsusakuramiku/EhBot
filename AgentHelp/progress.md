@@ -5351,3 +5351,109 @@ inspect` 与本地 `docker images` 取回同一 digest（本地镜像 ID 与 ind
 
 **提交说明**：与 R50 一并提交，tag `v0.3.0rc2`（详见 R50 条目末尾的说明）；
 「R50、R51 各自一个提交」的拆分未执行。
+
+
+## R52 — 手机导航直连、卡片全标签、来源搜索/自定义排序与 AI 控制链（v0.3.0rc2，2026-10-03）
+
+运营者四项要求（非桌面版不要二级菜单选分区；卡片展示全部中文标签；来源纳入搜索 + 自定义排序；
+AI 改为「全局默认 + 每功能自配、未配置才回退、全部失败不回退、总开关 + 各功能开关」）合并成一份已审方案
+`UI_QUERY_AND_AI_CONTROLS_PROPOSAL.md`（原 `WORK_QUERY_UI_PROPOSAL.md` / `AI_MODEL_SCOPING_PROPOSAL.md`
+收束为该文件的指针）。搜索与过滤的整块重构（facet 侧栏、筛选 chips、`ArtistRaw`/`GroupRaw`、路径搜索）
+经运营者明确**留到下一轮**，本轮只做点名的两项。
+
+**§1 手机导航删除二级抽屉。**
+
+- `base.html` 的窄屏 `.ui-tabbar` 与桌面侧栏同构：每个域一个 `<a href>`，`aria-current` / `is-active`
+  判定不变；整段 `<template x-teleport>` 抽屉（`role="dialog"`、`aria-label="分区导航"`）连同
+  `x-data` / `@click` 一并删除。
+- 唯一孤儿「手动添加」（候选子项，不在六个状态分区条里）改在候选页页头放动作链接到 `/manual-add`。
+- 测试从「在一个页面上断言全部子页 href」（它成立正因为抽屉平铺了全部子页）改成三条更强的不变式：
+  桌面侧栏与手机底栏的顶级链接集合相同；每个域首页都能到达该域全部子页；手机外壳没有第二个菜单
+  （无 `role="dialog"`）。
+
+**§2 卡片展示全部中文标签。**
+
+- 候选列表 / 网格去掉 `item.tags[:6]` / `[:4]` 截断。
+- 已下载：`_DOWNLOADED_SELECT` 末尾补取 `Tags` / `TagsRaw` 子查询（追加在末尾，既有列索引映射不变），
+  `DownloadedWork` 加 `tags` / `raw_tags`，`serializers.downloaded_work` 输出两者；列表与网格都渲染
+  全部中文标签，网格加「来源 · 页数 · 大小」（`.ui-card-facts`），`.ui-cover-grid` 加 `align-items: start`。
+
+**§3.1–3.2 来源搜索与自定义排序。**
+
+- `database.py` 新增 `SORT_DIRECTIONS` / `SortSpec` / `order_by()` / `sort_direction()`；候选与已下载的
+  排序表改为「正反两整条 ORDER BY」（稳定 tiebreak 自带方向，不随主列翻转），列表函数接受 `direction`。
+- 已下载搜索 OR 上 `download_jobs.provider IN (...)`；`status.provider_codes_matching()` 把搜索词同时
+  翻译成来源代码与中文名（「EH 归档」与 `exhentai` 都命中）。
+- 两个列表页加「↑ 升序 / ↓ 降序」链接组（服务端渲染，无 JS 可用），默认方向不带参数；页面与
+  `/api/v1/downloaded` 都回显 `direction`。
+- 顺带修一个真实死属性：`downloaded.html` 的 `data-autosubmit` 处理只写在 `candidates.js`，已提到全局
+  `ui.js`（幂等、事件委托），两个列表页的排序控件都即时生效。
+
+**§4 AI 控制链。**
+
+- `app/ai/models.py` 新增 `CHAIN_SCOPE_CANDIDATE = "candidate_admission"` 与 `CHAIN_SCOPE_LABELS`；
+  `MODEL_SOURCE_*` / `MODEL_SOURCES` 从 `archive/service.py` 提到这里（`archive` 侧保留 re-export，
+  候选判定不必反向依赖归档服务）。
+- `AiProviderService` 改成注册表：`register_scope_source(scope, reader)`；`archive_path` 由构造函数从
+  既有 settings 自动注册，`candidate_admission` 在 `wiring` 注册到 `system_settings
+  .ai_candidate_model_source`。`effective_chain()` 表驱动——未注册或来源 ≠ `custom` 走全局默认，`custom`
+  走本作用域自己的链（为空是显式报错，不静默继承）。
+- **失败语义（需求 5）**：`complete()` 只在解析出的那条链里走（链内主力→备用保留）；全部失败抛错，
+  错误文本带作用域标签并写明「未回退全局默认」，`ai_path_model_failed` 日志加 `scope`。用「全局是一把
+  会成功的模型、本作用域只有一把必失败的模型」的假 client 回归：断言失败、且全局模型**一次都没被调用**
+  （候选判定与归档路径各一条）。
+- **开关链（需求 6）**：新增 `system_settings.ai_enabled` 总开关（缺省开）。
+  - 候选判定：`decide()` 先看总开关，关则返回「AI 功能已全局关闭」的 skip、零调用；否则用
+    `CHAIN_SCOPE_CANDIDATE`。
+  - 归档路径：`ConversionService.path_source()` 在总开关关闭时返回 `template`，于是所有路由判断都退回
+    模板 / 规则、不调用模型；`rearchive` 与 `/api/downloaded` 都走这个访问器。已配置的 `path_source="ai"`
+    与各功能开关原样保留，重开即恢复。
+  - 「测试模型」按钮是显式验证操作，不受总开关影响。
+- **统一配置方式（需求 4/7）**：`/settings/parse` 新增「候选判定模型」区（模型来源单选 +
+  `settings/_model_chain.html` 同一个编辑器），路由 `/settings/parse/model-source` 与
+  `/settings/parse/chain/{primary,append,shift,remove}`；`_chain_action` 用一张 `_CHAIN_SECTIONS` 表
+  决定归属页与重定向，不再用两处 if/else。`/settings/ai` 顶部新增总开关区块；`/settings/parse` 与
+  `/settings/paths` 显示控制链状态行（总开关 / 本功能 / 当前模型 / 失败不回退）。
+
+**结果**：手机到任一域是一次点击、子页走页内分区条；卡片标签不再截断，已下载卡片补足来源 / 页数 / 大小；
+已下载搜索能按来源命中，两个列表页都能正反排序且方向可收藏；AI 侧为「全局默认 + 每功能自配」、
+未配置才回退、全部失败不回退、生效 = 总开关 AND 功能开关，三处共用同一套编辑器与同一套动作。
+无数据库迁移（`system_settings` / `archive_settings` 都是 k/v 表，`ai_model_chain.scope` 是自由文本列，
+迁移仍到 022）。
+
+**测试（+18，1672 → 1690 collected）。**
+
+- `tests/integration/test_ui_shell.py`（重写 1 为 3，净 +2）：顶级导航一致、每域首页可达全部子页、
+  手机外壳无二级菜单。
+- `tests/integration/test_candidates_web.py`（+2）：卡片全量标签（8 个）；`dir=desc` 真的反转列表。
+- `tests/integration/test_downloaded_web.py`（+3）：卡片全量标签 + 来源 / 页数 / 大小；搜索命中来源
+  标签与代码；`dir` 翻列表并标记当前方向、默认方向不带参数。
+- `tests/integration/test_settings_web.py`（+3）：`/settings/ai` 总开关保存与文案；两个功能页显示
+  「总开关：关」与「失败不回退」；`/settings/parse` 的「本页单独指定」不动全局默认、切回跟随即恢复。
+- `tests/unit/test_ai_candidates.py`（净 +1）：候选判定用 `CHAIN_SCOPE_CANDIDATE`；总开关关闭时零调用。
+- `tests/unit/test_ai_paths.py`（+2）：`ConversionService.path_source()` 在总开关关 / 开时的分支与调用数。
+- `tests/unit/test_ai_providers.py`（+5）：作用域注册表（继承 / custom / 未注册按跟随 / 未知作用域拒绝）；
+  候选判定与归档路径两条「全部失败不回退全局默认、全局模型零调用」回归。
+- `tests/unit/test_downloaded_api.py`（更新 1）：snapshot 透传新增的 `search_providers` / `direction`。
+- `tests/unit/test_api_read_layer.py`（更新导入）：`_CANDIDATE_SORTS` → `CANDIDATE_SORT_ORDERS`。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q -p no:randomly` → **1690 collected / 0 failed**；
+`--collect-only` 复核 1690；`compileall` 与 `git diff --check` 通过。
+
+**文档同步**：`README.md` 更新 AI 候选判定与 AI 路径两条，写清「总开关 → 各功能开关 → 该功能模型 →
+全部失败不回退」；`docs/USAGE.md` 更新 Web 界面（手机底栏直连）、已下载内容（全量标签、来源搜索、
+排序方向）、解析规则与 AI 候选判定（候选判定模型 / 不回退）、路径来源与 AI 路径（总开关 / 不回退）、
+AI 供应商（总开关）；`AgentHelp/EHBot.md` 更新 §4.6 / §4.7 表格、新增 §4.9，并把手机布局从
+「Tab Bar + 抽屉」改为「直连」（元数据编辑抽屉不变）；`AgentHelp/PHASES.md` 补 R52 行与基线链。
+本次没有新增环境变量（`.env.example` 无需改动）、没有数据库迁移（仍到 022）。
+
+**镜像与提交**（以最后一版为准）：按运营者节奏只构建并推送 `latest`（`docker buildx build --platform
+linux/amd64 -t hsmk/ehbot:latest --push .`）；运营者测过后要求提交，**不提升版本号**（仍 `v0.3.0rc2`、
+不打新 tag）。
+index digest `sha256:4e5b96678073ae3ca1bc4e61955dd23814ba5dbd83ee50bb3413118a713e3d52`，
+amd64 manifest `sha256:e9d6caadcced985f712217e85b51960982d9fb20bfaf8c8c7ccf85feb4d1578b`，
+config `sha256:b45a85df69cc05cada422ecd2a62a111d93ec865494cbb523619163623cf0e90`；`docker buildx
+imagetools inspect` 与本地 `docker images` 取回同一 index digest（本地镜像 ID 与 index digest 一致）。
+冒烟在镜像内完成：启动时自动装好 7-Zip 26.02 与标签库，`/healthz` 得 `{"status":"ok"}`、`/login` 200；
+宿主端口映射在本环境的 shell 命名空间里连不上发布端口，故改用 `docker exec` 在容器内请求。容器已清理，
+本地镜像保留以便复测。
