@@ -5543,3 +5543,26 @@ access/refresh，但**不**动 API Key；网页 `/logout` 只清浏览器会话�
 
 **验证（全量）**：`.venv/bin/python -m pytest tests -q -p no:randomly` →
 **1741 collected / 0 failed**；`compileall` 与 `git diff --check` 干净。
+
+## R55 — 发布 v0.3.0rc3 并推送 latest 镜像（v0.3.0rc3，2026-10-04）
+
+运营者指示：「推送一个 latest 的镜像，提交暂存更改，版本提升到 v0.3.0rc3」。本轮**没有代码改动**，
+只有版本事实与发布动作：`pyproject.toml` 与 `uv.lock` 的 `ehbot` 版本由 `0.3.0rc2` 提升到 `0.3.0rc3`
+（`uv lock` 只改锁文件里本包那一行，48 个依赖解析结果不变）。R53/R54 的移动端鉴权此前已提交
+（`3639561`），本次把它第一次带进发布镜像。
+
+**镜像**：按既定节奏构建并推送 `latest`（`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest
+--push .`）。index digest `sha256:0216391ec191c3f311c55b43b8efe9e38ad2aea6c4e4333016d2abe3b81ce52d`，
+amd64 manifest `sha256:a0631220b912be947d57dd5fb53f7104e08ec57d8f7b0b5941e2f1fef4b64e65`，config
+`sha256:c7b93300c69020d90b62ac3986486fb7752963e39a0bd42a78a888602cbae83a`。**从 registry 验证而不是只信
+本地构建**：`docker buildx imagetools inspect` 与 `docker pull` 取回同一 index digest，本地镜像 ID 与
+index digest 一致。冒烟容器（`--user 0:0`，`DATA_PATH=/tmp/ehbotdata`，`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`，
+容器内 8080）里 `/healthz` 得 `{"status":"ok"}`、`/readyz` 得 `{"status":"ready"}`；并确认镜像里确实是本版：
+`/app/pyproject.toml` 版本 `0.3.0rc3`、`app/credentials.py` 与 `app/api/auth.py` 在镜像内、迁移 `023`
+已执行（`schema_migrations` 到 23）、`api_credentials` 表与 `idx_api_credentials_single_key` 部分唯一索引
+存在、`POST /api/v1/auth/login` 返回 `401 AUTH_INVALID_CREDENTIALS`（而不是旧后端的 404）——即 R53/R54
+的端点确实随镜像发布。冒烟容器已清理，本地镜像保留以便复测。
+
+**验证**：无代码改动，测试基线沿用 R54 的 **1741 collected / 0 failed**（本轮未重跑全量；
+`git diff --check` 干净）。**文档同步**：`AgentHelp/PHASES.md` 补 R55 行并把「当前状态」更新到 R55；
+`README.md`、`docs/USAGE.md` 不再引用具体版本号，且本轮无用户可见行为变化，无需改动。
