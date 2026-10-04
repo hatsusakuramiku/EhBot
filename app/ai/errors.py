@@ -49,8 +49,14 @@ AI_PATH_INVALID = "AI_PATH_INVALID"
 #: Not a failure -- it is the prompt to ask, and asking happens in a packing job
 #: rather than while somebody waits for a page to render.
 AI_PATH_MISSING = "AI_PATH_MISSING"
-#: The whole model chain failed. The caller turns this into 需干预, or into the
-#: fallback template when the operator asked for that (proposal §7).
+#: The whole model chain failed, for any scope. Scope-neutral on purpose: the
+#: chain is shared by every AI feature, so the failure it reports is 「没有一个
+#: 模型答得出来」 and not something the path feature owns. `complete` raises this
+#: for every caller; the archive-path service translates it back to
+#: `AI_PATH_UNAVAILABLE`, so the documented operator contract does not move.
+AI_CHAIN_UNAVAILABLE = "AI_CHAIN_UNAVAILABLE"
+#: The archive-path feature's public code for the same failure. Kept as the wire
+#: value because `docs/USAGE.md` and the 需干预 job state name it by hand.
 AI_PATH_UNAVAILABLE = "AI_PATH_UNAVAILABLE"
 #: A candidate-admission answer that is not the `{"accept": bool, ...}` object we
 #: asked for. Like `AI_PATH_INVALID`, this walks the chain: a model that answers
@@ -72,6 +78,7 @@ __all__ = [
     "AI_CHAIN_DUPLICATE",
     "AI_CHAIN_EMPTY",
     "AI_CHAIN_ENTRY_MISSING",
+    "AI_CHAIN_UNAVAILABLE",
     "AI_KEY_INVALID",
     "AI_MODEL_DISABLED",
     "AI_MODEL_INVALID",

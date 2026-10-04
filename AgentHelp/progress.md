@@ -5566,3 +5566,31 @@ index digest 一致。冒烟容器（`--user 0:0`，`DATA_PATH=/tmp/ehbotdata`�
 **验证**：无代码改动，测试基线沿用 R54 的 **1741 collected / 0 failed**（本轮未重跑全量；
 `git diff --check` 干净）。**文档同步**：`AgentHelp/PHASES.md` 补 R55 行并把「当前状态」更新到 R55；
 `README.md`、`docs/USAGE.md` 不再引用具体版本号，且本轮无用户可见行为变化，无需改动。
+
+## R56 — 清理收口：死代码、无用依赖、部署参考、AI 链错误码（2026-10-04）
+
+运营者审阅后指示：「提交暂不推送，其他的先改」。本轮只做审阅发现的清理项，**没有用户可见行为变化**：
+候选解析、AI 判定、归档路径的对外契约（错误码、页面、消息）一字未改。
+
+- **删除死代码 `app/candidates/reference.py`（248 行）**。它是旧 Telegram「参考格式」的解析器，
+  grep 与 CodeGraph 都确认零引用；`progress.md` 自己记录过它在 `b69030b` 被**故意排除在提交之外**
+  （「nothing imports it and it still has no tests」），但 `6f2d71f`（2026-08-22）把它扫进了仓库、
+  并随镜像发布至今。删除后 `progress.md:436` 那条「不存在于文件系统与 CodeGraph」的记录重新成立。
+- **移除无用开发依赖 `httpx2`**（`pyproject.toml` 的 dev 组）。它自 bootstrap 提交 `6a6b976` 起就在，
+  全仓库零 import（测试用的是运行期依赖 `httpx`）；`uv lock` 连带移除 `httpcore2` / `httpx2-jsfetch` /
+  `truststore`，解析结果 48 → 44。它本来就不进生产镜像（Dockerfile `uv sync --no-dev`），
+  清理只是让 dev 环境与锁文件更小。
+- **`compose.deploy.yaml` 补 `THUMBNAILS_ENABLED`**。README 称这份文件「环境变量逐条带注释」，
+  它是唯一漏掉的一项（默认值 `true` 与 `.env.example` 一致，抄过去的行为因此不变）。
+- **AI 链错误码去路径化**。`complete()` 是全局默认 / 归档路径 / 候选判定共用的模型链，全链失败时却抛
+  `AI_PATH_UNAVAILABLE`——候选判定的失败日志因此报着一个「路径」错误码。新增中性的
+  `AI_CHAIN_UNAVAILABLE` 由 `complete()` 抛出；归档路径服务把链失败翻译回 `AI_PATH_UNAVAILABLE`，
+  所以 `docs/USAGE.md` 与「需干预」任务状态里承诺的**对外错误码没有变化**。同一处的日志事件
+  `ai_path_model_failed` 改为 `ai_model_failed`，与 R52 方案
+  （`UI_QUERY_AND_AI_CONTROLS_PROPOSAL.md:221`）本来就写的名字对齐——那份文档当时写的就是
+  `ai_model_failed`，只是代码没跟上。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q` → **1741 collected / 0 failed**；
+AI 三个文件（`test_ai_providers.py` / `test_ai_candidates.py` / `test_ai_paths.py`）先行单跑通过。
+**文档同步**：本 R56 条目 + `PHASES.md` 一行；`README.md` / `docs/USAGE.md` 无变化
+（对外错误码契约未动，`THUMBNAILS_ENABLED` 本就已在 `.env.example` 与 USAGE 里）。

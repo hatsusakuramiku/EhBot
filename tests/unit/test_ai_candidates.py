@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai.errors import AI_CANDIDATE_INVALID, AI_PATH_UNAVAILABLE, AiError
+from app.ai.errors import AI_CANDIDATE_INVALID, AI_CHAIN_UNAVAILABLE, AiError
 from app.ai.models import CHAIN_SCOPE_CANDIDATE, CHAIN_SCOPE_DEFAULT
 from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT, candidate_payload
 from app.candidates.admission import (
@@ -218,7 +218,7 @@ class TestGate:
         assert admission.verdict == "accept"
 
     def test_a_chain_failure_uses_the_fallback(self) -> None:
-        ai = FakeAi(error=AiError(AI_PATH_UNAVAILABLE, "所有 AI 模型都不可用"))
+        ai = FakeAi(error=AiError(AI_CHAIN_UNAVAILABLE, "所有 AI 模型都不可用"))
         admission = _decide(CandidateAdmissionService(ai, FakeSettings()))
         assert admission.verdict == "reject"
         assert "不可用" in admission.reason

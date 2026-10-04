@@ -44,12 +44,12 @@ from app.ai.errors import (
     AI_CHAIN_DUPLICATE,
     AI_CHAIN_EMPTY,
     AI_CHAIN_ENTRY_MISSING,
+    AI_CHAIN_UNAVAILABLE,
     AI_KEY_INVALID,
     AI_MODEL_INVALID,
     AI_MODEL_NOT_FOUND,
     AI_NO_KEY,
     AI_PARAMS_INVALID,
-    AI_PATH_UNAVAILABLE,
     AI_PROVIDER_INVALID,
     AI_PROVIDER_NAME_TAKEN,
     AiError,
@@ -521,7 +521,7 @@ class TestChainFallback:
 
         with pytest.raises(AiError) as caught:
             await service.complete([{"role": "user", "content": "hi"}])
-        assert caught.value.code == AI_PATH_UNAVAILABLE
+        assert caught.value.code == AI_CHAIN_UNAVAILABLE
         # 「哪一个供应商/模型失败了」 is the sentence the 需干预 state shows.
         assert "first" in caught.value.public_message
         assert "second" in caught.value.public_message
@@ -600,7 +600,7 @@ class TestAnswerValidation:
             await service.complete(
                 [{"role": "user", "content": "hi"}], validate=reject
             )
-        assert caught.value.code == AI_PATH_UNAVAILABLE
+        assert caught.value.code == AI_CHAIN_UNAVAILABLE
         assert "first" in caught.value.public_message
 
 
@@ -850,7 +850,7 @@ class TestScopeRegistry:
                 [{"role": "user", "content": "hi"}],
                 scope=CHAIN_SCOPE_CANDIDATE,
             )
-        assert caught.value.code == AI_PATH_UNAVAILABLE
+        assert caught.value.code == AI_CHAIN_UNAVAILABLE
         assert "AI 候选判定" in caught.value.public_message
         assert "未回退全局默认" in caught.value.public_message
         # 只碰过本作用域的模型；那把能答的全局模型一次都没被调用。
@@ -1170,7 +1170,7 @@ class TestStreamingTransport:
         # came up empty of answers rather than that HTTP broke.
         with pytest.raises(AiError) as caught:
             await service.complete([{"role": "user", "content": "hi"}])
-        assert caught.value.code == "AI_PATH_UNAVAILABLE"
+        assert caught.value.code == "AI_CHAIN_UNAVAILABLE"
         assert "没有可读的文本内容" in caught.value.public_message
 
 

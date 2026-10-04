@@ -37,6 +37,9 @@ services:
       # Fetches the pinned official 7-Zip build into /app/data/tools on first
       # start and verifies its SHA-256; required for RAR and 7z archives.
       ARCHIVE_TOOLCHAIN_AUTO_INSTALL: "true"
+      # Serve candidate covers through the local thumbnail proxy. Off renders
+      # placeholders and fetches nothing from the image host.
+      THUMBNAILS_ENABLED: "true"
       TELEGRAPH_ENABLED: "true"
       TELEGRAPH_CONCURRENCY: "3"
       TELEGRAPH_MAX_IMAGES: "400"

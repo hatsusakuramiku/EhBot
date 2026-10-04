@@ -40,12 +40,12 @@ from app.ai.errors import (
     AI_CHAIN_DUPLICATE,
     AI_CHAIN_EMPTY,
     AI_CHAIN_ENTRY_MISSING,
+    AI_CHAIN_UNAVAILABLE,
     AI_KEY_INVALID,
     AI_MODEL_INVALID,
     AI_MODEL_NOT_FOUND,
     AI_NO_KEY,
     AI_PARAMS_INVALID,
-    AI_PATH_UNAVAILABLE,
     AI_PROVIDER_INVALID,
     AI_PROVIDER_NAME_TAKEN,
     AI_PROVIDER_NOT_FOUND,
@@ -860,7 +860,7 @@ class AiProviderService:
                     f"{entry.provider.name}/{entry.model.name}：{exc.public_message}"
                 )
                 logging.getLogger(__name__).warning(
-                    "ai_path_model_failed",
+                    "ai_model_failed",
                     extra={
                         "error_code": exc.code,
                         "scope": scope,
@@ -881,7 +881,7 @@ class AiProviderService:
         # the global default, because that is what 「全部失败也不回退」 means and
         # an operator debugging a path needs to see it.
         raise AiError(
-            AI_PATH_UNAVAILABLE,
+            AI_CHAIN_UNAVAILABLE,
             f"{label}：配置的 {len(failures)} 个模型都失败"
             "（未回退全局默认）：" + "；".join(failures[:3]),
         )

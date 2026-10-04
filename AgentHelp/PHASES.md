@@ -84,12 +84,17 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R53 | v0.3.0rc2 · 2026-10-03 | 移动端鉴权 B1：凭据表 `023`、密码登录换令牌、Bearer 通道、共享登录锁定 | 1728 | `progress.md:5461` |
 | R54 | v0.3.0rc2 · 2026-10-03 | 移动端鉴权 B2：密码库单 API Key 面板（明文只显示一次）、令牌有效期可调 | 1741 | `progress.md:5518` |
 | R55 | v0.3.0rc3 · 2026-10-04 | 发布：版本提升到 `v0.3.0rc3`，构建并推送 `latest` 镜像（无代码/测试变化） | — | `progress.md:5547` |
+| R56 | 2026-10-04 | 清理收口：删死代码 `reference.py`、移除 `httpx2`、补 `THUMBNAILS_ENABLED`、AI 链错误码去路径化 | — | `progress.md:5569` |
 
 > 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → **R54 1741**。以 `AGENTS.md` 的链为准。
 
 ## 三、当前状态
 
-- 最新阶段：**R55**（`v0.3.0rc3`，发布镜像；无代码改动，测试基线沿用 R54 的 `1741 collected / 0 failed`）。
+- 最新阶段：**R56**（清理收口；无用户可见行为变化，测试基线仍是 `1741 collected / 0 failed`）。
+- R56 清掉审阅发现的三处遗留（死代码 `app/candidates/reference.py`、dev 依赖 `httpx2`、
+  `compose.deploy.yaml` 漏掉的 `THUMBNAILS_ENABLED`），并把共用的模型链失败码从 `AI_PATH_UNAVAILABLE`
+  拆出中性的 `AI_CHAIN_UNAVAILABLE`（路径服务再翻译回原码，对外契约不变）；详见 `progress.md:R56`。
+- 前序：**R55**（`v0.3.0rc3`，发布镜像；无代码改动，测试基线沿用 R54 的 `1741 collected / 0 failed`）。
 - 已完成：R52 的手机底栏直连（删除二级抽屉）、候选/已下载卡片全量中文标签、来源纳入已下载搜索、
   `sort` + `dir=asc|desc` 自定义排序，以及 AI 控制链（`system_settings.ai_enabled` 总开关、
   每功能「跟随全局默认 / 本页单独指定」模型链、全部失败不回退、三处共用同一编辑器），

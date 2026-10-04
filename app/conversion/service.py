@@ -17,6 +17,7 @@ from app.archive.processor import ArchiveProcessor
 from app.archive.quality import quality_note
 from app.ai.errors import (
     AI_CHAIN_EMPTY,
+    AI_CHAIN_UNAVAILABLE,
     AI_PATH_MISSING,
     AI_PATH_UNAVAILABLE,
     AiError,
@@ -320,7 +321,7 @@ class ConversionService:
                 return None
             message = (
                 exc.public_message
-                if exc.code == AI_PATH_UNAVAILABLE
+                if exc.code in (AI_PATH_UNAVAILABLE, AI_CHAIN_UNAVAILABLE)
                 else f"AI 路径不可用：{exc.public_message}"
             )
             raise LibraryPathError(AI_PATH_UNAVAILABLE, message) from exc
