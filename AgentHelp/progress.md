@@ -5594,3 +5594,38 @@ index digest 一致。冒烟容器（`--user 0:0`，`DATA_PATH=/tmp/ehbotdata`�
 AI 三个文件（`test_ai_providers.py` / `test_ai_candidates.py` / `test_ai_paths.py`）先行单跑通过。
 **文档同步**：本 R56 条目 + `PHASES.md` 一行；`README.md` / `docs/USAGE.md` 无变化
 （对外错误码契约未动，`THUMBNAILS_ENABLED` 本就已在 `.env.example` 与 USAGE 里）。
+
+## R57 — 修复 Web 登录表单被 API 同名路由劫持（2026-10-06）
+
+运营者报告：「web ui 使用密码登陆时出现上面的异常」——日志为 `POST /api/v1/auth/login`
+`BODY_INVALID`「请求体必须是 JSON 对象」。（同一条消息里的「压缩率异常不是已经修了吗」是另一件事，
+不在本轮。）
+
+**根因：跨层路由函数名冲突，与鉴权逻辑无关。** `app/api/auth.py:115` 的 `login()` 与
+`app/web/routes/auth.py:50` 的 `login()` 同名；`app/main.py:135` 先注册 `api_v1_router`、
+`:155` 才注册 Web 的 `auth_router`，而 `url_for('login')` 返回**最先注册**的同名路由，
+于是 `app/web/templates/login.html:58` 渲染出的表单 action 成了 `/api/v1/auth/login`。
+浏览器按 `application/x-www-form-urlencoded` 提交，JSON 端点的 `_json_body`（`app/api/auth.py:51`）
+解不出 JSON，抛 `BODY_INVALID`——网页登录自 R53（`3639561`，v0.3.0rc2）起完全不可用，
+`v0.3.0rc3` 镜像带着它。既有测试全部直接 `POST /login`、从不经过模板渲染的 action，所以一路全绿，
+没接住这个回归。
+
+**修法：只把 API 侧的同名处理函数改名，页面侧保留「页面名」。** URL、模板、请求/响应、
+OpenAPI 路径一字未动（API 端点仍是 `/api/v1/auth/login`，手机端 / curl 不受影响）：
+
+- `app/api/auth.py`：`login` → `api_login`，`logout` → `api_logout`
+- `app/api/actions.py`：`batch_review` → `api_batch_review`
+
+修复后 `url_path_for('login')` → `/login`、`'logout'` → `/logout`、`'batch_review'` →
+`/candidates/batch-review`；`GET /login` 的表单 action 恢复为 `/login`。
+
+**测试（+2，1741 → 1743）**
+- `tests/integration/test_authentication.py::test_web_route_names_stay_ahead_of_the_json_api`：
+  钉住 `url_path_for` 三个名字解析到页面路由，防止再次被 API 路由抢占。
+- 同文件 `test_login_form_action_points_at_the_page_route`：渲染 `GET /login` 并断言表单
+  action 以 `/login` 结尾、不含 `/api/v1/`。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q` → **1743 collected / 0 failed**。
+**文档同步**：本 R57 条目 + `PHASES.md` 一行 + `AGENTS.md` 基线链与「路由处理函数名跨层唯一」
+一条；`README.md` / `docs/USAGE.md` 无变化（API 端点 URL 未变，这是恢复既有行为而非新功能）。
+设计记录：`AgentHelp/LOGIN_ROUTE_COLLISION_PROPOSAL.md`。

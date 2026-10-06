@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -48,6 +49,31 @@ def test_anonymous_user_is_redirected_to_login(tmp_path: Path) -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "/login"
+
+
+def test_web_route_names_stay_ahead_of_the_json_api(tmp_path: Path) -> None:
+    """R57: the page routes own the bare names `login` / `logout`.
+
+    The JSON handlers are `api_login` / `api_logout`. While the API one was also
+    called `login`, `url_for('login')` resolved to `/api/v1/auth/login` -- the
+    API router is registered first -- so the browser form posted form-encoded
+    data to the JSON endpoint and every web login answered `BODY_INVALID`.
+    """
+    app = create_app(make_settings(tmp_path))
+
+    assert app.url_path_for("login") == "/login"
+    assert app.url_path_for("logout") == "/logout"
+    assert app.url_path_for("batch_review") == "/candidates/batch-review"
+
+
+def test_login_form_action_points_at_the_page_route(tmp_path: Path) -> None:
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        page = client.get("/login")
+
+    action = re.search(r'<form[^>]*action="([^"]*)"', page.text)
+    assert action is not None
+    assert action.group(1).endswith("/login")
+    assert "/api/v1/" not in action.group(1)
 
 
 def test_root_path_is_included_in_generated_web_urls(tmp_path: Path) -> None:

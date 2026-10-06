@@ -85,12 +85,14 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R54 | v0.3.0rc2 · 2026-10-03 | 移动端鉴权 B2：密码库单 API Key 面板（明文只显示一次）、令牌有效期可调 | 1741 | `progress.md:5518` |
 | R55 | v0.3.0rc3 · 2026-10-04 | 发布：版本提升到 `v0.3.0rc3`，构建并推送 `latest` 镜像（无代码/测试变化） | — | `progress.md:5547` |
 | R56 | 2026-10-04 | 清理收口：删死代码 `reference.py`、移除 `httpx2`、补 `THUMBNAILS_ENABLED`、AI 链错误码去路径化 | — | `progress.md:5569` |
+| R57 | 2026-10-06 | 修复 Web 登录表单被 API 同名 `login` 路由劫持（R53 回归）：API 侧改名 `api_login`/`api_logout`/`api_batch_review` | 1741→1743 | `progress.md:5598` |
 
-> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → **R54 1741**。以 `AGENTS.md` 的链为准。
+> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → **R57 1743**。以 `AGENTS.md` 的链为准。
 
 ## 三、当前状态
 
-- 最新阶段：**R56**（清理收口；无用户可见行为变化，测试基线仍是 `1741 collected / 0 failed`）。
+- 最新阶段：**R57**（修复 R53 回归：Web 登录表单被 API 同名 `login` 路由劫持；全量 1741 → 1743）。
+- R57 只改 API 侧同名处理函数的名字（`api_login`/`api_logout`/`api_batch_review`），页面侧 `login`/`logout`/`batch_review` 不变，URL 与模板一字未动；回归前 `url_for('login')` 指向 `/api/v1/auth/login`，网页登录因此报 `BODY_INVALID`。设计记录 `LOGIN_ROUTE_COLLISION_PROPOSAL.md`，详见 `progress.md:R57`。
 - R56 清掉审阅发现的三处遗留（死代码 `app/candidates/reference.py`、dev 依赖 `httpx2`、
   `compose.deploy.yaml` 漏掉的 `THUMBNAILS_ENABLED`），并把共用的模型链失败码从 `AI_PATH_UNAVAILABLE`
   拆出中性的 `AI_CHAIN_UNAVAILABLE`（路径服务再翻译回原码，对外契约不变）；详见 `progress.md:R56`。

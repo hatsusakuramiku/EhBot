@@ -340,7 +340,7 @@ async def apply_candidate_delete_batch(
 
 
 @router.post("/candidates/batch")
-async def batch_review(request: Request) -> dict:
+async def api_batch_review(request: Request) -> dict:
     """Approve or reject several candidates at once.
 
     Reports per-candidate outcomes instead of failing the selection on the first

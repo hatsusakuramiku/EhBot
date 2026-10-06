@@ -112,7 +112,7 @@ async def _issue_pair(
 
 
 @router.post("/auth/login")
-async def login(request: Request) -> dict[str, object]:
+async def api_login(request: Request) -> dict[str, object]:
     """Exchange the administrator password for an access/refresh pair.
 
     Shares `app.state.login_attempts` with the page login, so switching
@@ -201,7 +201,7 @@ async def refresh(request: Request) -> dict[str, object]:
 
 
 @router.post("/auth/logout")
-async def logout(request: Request) -> dict[str, object]:
+async def api_logout(request: Request) -> dict[str, object]:
     """Revoke the caller's login family.
 
     An API key is not a login family and is not revoked here -- keys are managed
