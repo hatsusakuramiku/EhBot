@@ -574,6 +574,37 @@ class TestDryRun:
         assert page.context["dry_run"]["matched"] == 1
         assert page.context["dry_run"]["scanned"] >= 1
 
+    def test_dry_run_reports_the_rule_action(self, tmp_path: Path) -> None:
+        """A trial run of a reject rule must not describe itself as approving.
+
+        The editor submits the action with the condition, so the answer says
+        what the rule would do -- otherwise a rule that will reject everything
+        it matches reads exactly like one that will approve it.
+        """
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        _seed_candidate(database, "Matching Title")
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            page = client.post(
+                "/auto-approval-rules/dry-run",
+                data={
+                    "csrf_token": csrf,
+                    "action": "REJECT",
+                    "condition_field": ["Title"],
+                    "condition_operator": ["="],
+                    "condition_value": ["Matching Title"],
+                },
+            )
+
+        assert page.status_code == 200
+        assert page.context["dry_run"]["matched"] == 1
+        assert page.context["dry_run"]["action"] == "REJECT"
+        assert page.context["dry_run"]["action_view"]["label"] == "自动驳回"
+        assert "将会自动驳回" in page.text
+
     def test_dry_run_with_no_match_returns_zero(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
         database = Database(settings.data_path / "ehbot.db")
@@ -724,6 +755,96 @@ class TestRuleSaving:
         assert saved.status_code == 303
         assert saved.headers["location"] == "/settings/auto-approval"
         assert "Only Doujinshi" in page.text
+
+    def test_a_rule_saves_its_action_and_shows_it(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            saved = client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Reject NTR",
+                    "priority": "10",
+                    "action": "REJECT",
+                    "enabled": "on",
+                    "condition_field": ["Title"],
+                    "condition_operator": ["LIKE"],
+                    "condition_value": ["%ntr%"],
+                },
+                follow_redirects=False,
+            )
+            page = client.get("/settings/auto-approval")
+
+        assert saved.status_code == 303
+        stored = asyncio.run(database.list_auto_approval_rules())
+        assert stored[0].action == "REJECT"
+        # The card carries the action as a badge, not only in the DSL text.
+        assert "自动驳回" in page.text
+
+    def test_editing_a_reject_rule_preselected_the_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        asyncio.run(
+            database.save_auto_approval_rule(
+                rule_id=None,
+                name="Reject NTR",
+                enabled=True,
+                priority=10,
+                condition={
+                    "kind": "condition",
+                    "field": "Title",
+                    "operator": "LIKE",
+                    "value": "%ntr%",
+                },
+                dsl_snapshot='{Title} LIKE "%ntr%"',
+                action="REJECT",
+            )
+        )
+        rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            page = client.get(f"/auto-approval-rules/{rule_id}/edit")
+
+        assert page.status_code == 200
+        assert page.context["edit_rule"]["action"] == "REJECT"
+        assert 'value="REJECT" selected' in page.text
+
+    def test_an_unknown_action_is_refused_at_save(self, tmp_path: Path) -> None:
+        """The route validates the action before the column CHECK can raise."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+
+        with TestClient(create_app(settings)) as client:
+            csrf = _authenticate(client, settings)
+            response = client.post(
+                "/auto-approval-rules",
+                data={
+                    "csrf_token": csrf,
+                    "name": "Bogus",
+                    "priority": "10",
+                    "action": "DELETE",
+                    "enabled": "on",
+                    "condition_field": ["Title"],
+                    "condition_operator": ["LIKE"],
+                    "condition_value": ["%x%"],
+                },
+            )
+
+        assert response.status_code == 400
+        with sqlite3.connect(database.path) as connection:
+            stored = connection.execute(
+                "SELECT COUNT(*) FROM auto_approval_rules"
+            ).fetchone()[0]
+        assert stored == 0
 
     def test_a_rule_can_be_edited_in_place(self, tmp_path: Path) -> None:
         """编辑 loads the stored rule and 保存 overwrites it.

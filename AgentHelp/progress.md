@@ -5643,3 +5643,66 @@ config `sha256:cb9e76c7b33b584e24c1e7b5f2f97d88791da5e715467174c6f19a0e3f8df491`
 
 **版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`。
 
+
+## R58 — 自动审批规则增加「自动驳回」动作（2026-10-06）
+
+运营者新需求：「自动审批加一个自动驳回的选项，即将规则的操作进行分类，分为审批通过还是自动驳回类型。
+共用同一个规则池，通过相同的优先级进行处理。」四点答复：命名用**自动通过 / 自动驳回**；把命中的规则名
+写进被驳回候选的记录（`filter_reason`）；**不加**保存二次确认；扫描器返回值/日志按 `approved/rejected`
+分开计数。设计记录 `AUTO_RULE_ACTIONS_PROPOSAL.md`。
+
+**设计：给规则加一个动作，规则池与优先级算法一行不动。** `auto_approval_rules` 新增
+`action TEXT NOT NULL DEFAULT 'APPROVE' CHECK (action IN ('APPROVE','REJECT'))`（迁移 `024`）。
+默认 `APPROVE` 把既有规则与所有不传动作的调用方逐字回填成原行为，升级不需要人工干预。
+`AutomaticApprovalService.matching_rule` 仍旧 `ORDER BY priority, id` 取第一条命中的启用规则——
+通过与驳回两类规则在同一条队列里竞争，由胜出者的动作决定去向（`app/auto_approval/models.py`
+的 `RULE_ACTION_APPROVE`/`RULE_ACTION_REJECT` 直接复用 `REVIEW_APPROVE`/`REVIEW_REJECT` 的值，
+规则动作与审计动词不会漂移成两套拼写）。
+
+**执行：`apply_automatic_approval` 改名 `apply_automatic_decision`。** 旧名在一个动作的时代成立，
+现在同时覆盖通过与驳回，沿用会撒谎；两个调用点（`sweeper.py`、`candidates.py`）与测试 fake 一并改名。
+动作分派：
+- `APPROVE`：完全沿用 `approve_and_enqueue` + `AUTO_APPROVE` 审计；
+- `REJECT`：复用 `ReviewOrchestrator.reject`（状态机、`REVIEWABLE_STATUSES` 门禁、审计仍走同一条路），
+  note 传 `命中规则「<name>」`，落进候选的 `filter_reason`，所以「已驳回」行直接说明是谁驳回的；
+  再写一条 `AUTO_REJECT` 审计，快照键与自动通过同形（`download_job_ids: []`）。
+- `services.py:reject_candidate` 增加可选 `note`，人工批量驳回不传、形态不变。
+- `ReviewOrchestrator.apply_automatic_decision` 返回动作码（`str | None`），sweeper 据此分别计数，
+  日志改为 `auto_approval_sweep_completed approved=%d rejected=%d scanned=%d`，`sweep_once` 返回
+  两者之和（既有「== 1 / == 2 / == 0」断言语义不变）。
+
+**界面/词汇**：编辑器新增「动作」下拉（默认自动通过）；规则卡片加动作徽章；试跑结果按动作说
+「将会自动通过 / 将会自动驳回」；页首提示写明两类规则共用一条优先级队列、误伤可「重新排队」恢复；
+删除确认文案改为「自动通过或驳回」。`review_actions` 时间线新增 `AUTO_REJECT → 自动驳回`，
+`_review_reason` 对两种自动决策都显示「命中规则「X」」。`/api/v1/settings/auto-approval` 的规则
+与试跑载荷新增 `action` + `action_view`（新 `RULE_ACTION_STATUS`）；路径页试跑不传动作、默认通过，
+渲染不受影响。
+
+**测试（+9，1743 → 1752）**
+- `tests/integration/test_auto_approval_workflow.py`（+4）：驳回规则命中即 `REJECTED`、不入队、
+  `filter_reason` 与 `AUTO_REJECT` 快照正确；优先级让驳回规则压过通过规则（mirror 用例验证通过规则
+  在前时胜出）；停用的驳回规则不触发。
+- `tests/integration/test_settings_web.py`（+4）：试跑报告动作、保存动作并显示徽章、编辑回填选中
+  `REJECT`、未知动作保存被 400 拒绝且不落库。
+- `tests/integration/test_database.py`（+1，另扩既有往返用例）：迁移 024 的 `action` 列缺省回填为 `APPROVE`（原本
+  不带动作的旧规则不会变成驳回）；既有往返用例扩展 `APPROVE` 默认、`REJECT` 往返、非法动作被列级 CHECK 拒绝；
+  迁移计数 23 → 24、`action` 列纳入列集合断言。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q` → **1752 collected / 0 failed**。
+**文档同步**：本 R58 条目 + `PHASES.md` 一行与基线链 + `AGENTS.md` 基线/链；`README.md`「审核先行」、
+`docs/USAGE.md`「自动审批规则」与 `EHBot.md` 的规则编辑器/迁移编号描述均改写以覆盖动作、共用优先级、
+驳回恢复路径与试跑文案。
+环境变量与 `.env.example` 无变化（纯功能/界面变更）。
+
+**镜像（R58 发布动作）**：`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest --push .`，
+index digest `sha256:c8044cb72dc1d9825539c1d6a1c9951e6106a2714d06cde785ee34bbde88f6d2`，
+amd64 manifest `sha256:438c7dd4e99e16e377580cdaf5b7cce8d54ae1e7048fd5e9fd5e3c63e156cc30`，
+config `sha256:9f9cc36261728b82947c1d71ea042be7af71bad050ee937a5848b5fb64661209`（替换掉 R57 的 index
+`sha256:3498f037…`）。**从 registry 复核而不是只信本地构建**：`docker buildx imagetools inspect` 与
+`docker pull` 取回同一 index digest。取回镜像冒烟（`--user 0:0`、`DATA_PATH=/tmp/…`、
+`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`）：`/healthz` 200 `{"status":"ok"}`、`/readyz` 200
+`{"status":"ready"}`、`GET /login` 的表单 action 指回 `/login`（R57 未回归）；库内
+`schema_migrations` 24 条、`auto_approval_rules.action` 已存在且为 `NOT NULL DEFAULT 'APPROVE'`。
+冒烟容器已停止并随 `--rm` 清理。
+
+**版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`。

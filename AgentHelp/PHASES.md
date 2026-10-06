@@ -86,12 +86,14 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R55 | v0.3.0rc3 · 2026-10-04 | 发布：版本提升到 `v0.3.0rc3`，构建并推送 `latest` 镜像（无代码/测试变化） | — | `progress.md:5547` |
 | R56 | 2026-10-04 | 清理收口：删死代码 `reference.py`、移除 `httpx2`、补 `THUMBNAILS_ENABLED`、AI 链错误码去路径化 | — | `progress.md:5569` |
 | R57 | 2026-10-06 | 修复 Web 登录表单被 API 同名 `login` 路由劫持（R53 回归）：API 侧改名 `api_login`/`api_logout`/`api_batch_review` | 1741→1743 | `progress.md:5598` |
+| R58 | 2026-10-06 | 自动审批规则增加「自动驳回」动作，与「自动通过」共用同一规则池与优先级 | 1743→1752 | `progress.md:5647` |
 
-> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → **R57 1743**。以 `AGENTS.md` 的链为准。
+> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → **R58 1752**。以 `AGENTS.md` 的链为准。
 
 ## 三、当前状态
 
-- 最新阶段：**R57**（修复 R53 回归：Web 登录表单被 API 同名 `login` 路由劫持；全量 1741 → 1743）。
+- 最新阶段：**R58**（自动审批规则新增「自动驳回」动作；全量 1743 → 1752）。
+- R58 给 `auto_approval_rules` 加 `action`（迁移 `024`，默认 `APPROVE` 回填既有规则）：命中「自动驳回」规则即置为已驳回（记 `filter_reason` 与 `AUTO_REJECT` 审计，可「重新排队」恢复），命中「自动通过」照旧入队；两类规则共用同一规则池与 `(priority, id)` 顺序，`apply_automatic_approval` 因此改名 `apply_automatic_decision`。设计记录 `AUTO_RULE_ACTIONS_PROPOSAL.md`，详见 `progress.md:R58`。
 - R57 只改 API 侧同名处理函数的名字（`api_login`/`api_logout`/`api_batch_review`），页面侧 `login`/`logout`/`batch_review` 不变，URL 与模板一字未动；回归前 `url_for('login')` 指向 `/api/v1/auth/login`，网页登录因此报 `BODY_INVALID`。设计记录 `LOGIN_ROUTE_COLLISION_PROPOSAL.md`，详见 `progress.md:R57`。
 - R56 清掉审阅发现的三处遗留（死代码 `app/candidates/reference.py`、dev 依赖 `httpx2`、
   `compose.deploy.yaml` 漏掉的 `THUMBNAILS_ENABLED`），并把共用的模型链失败码从 `AI_PATH_UNAVAILABLE`

@@ -28,6 +28,7 @@ from app.api.status import (
     queue_group_view,
     review_action_view,
     row_note_view,
+    rule_action_view,
     status_view,
     toggle_view,
     log_level_view,
@@ -35,6 +36,7 @@ from app.api.status import (
 )
 from app.review.models import (
     REVIEW_AUTO_APPROVE,
+    REVIEW_AUTO_REJECT,
     REVIEW_LOCK_METADATA,
     REVIEWABLE_STATUSES,
     field_label,
@@ -184,7 +186,7 @@ def _review_reason(action: str, details: Any) -> str | None:
     explicit = details.get("note") or details.get("reason")
     if explicit:
         return str(explicit)
-    if action == REVIEW_AUTO_APPROVE:
+    if action in (REVIEW_AUTO_APPROVE, REVIEW_AUTO_REJECT):
         name = details.get("rule_name")
         return f"命中规则「{name}」" if name else None
     field = details.get("field")
@@ -500,6 +502,8 @@ def auto_approval_rule(rule: Any) -> dict[str, Any]:
         "condition": rule.condition,
         "dsl": rule.dsl_snapshot,
         "case_sensitive": rule.case_sensitive,
+        "action": rule.action,
+        "action_view": rule_action_view(rule.action).to_payload(),
         "created_at": rule.created_at,
         "updated_at": rule.updated_at,
     }
@@ -535,6 +539,8 @@ def auto_approval_dry_run(result: Any) -> dict[str, Any]:
         "scanned": result.scanned,
         "matched": result.matched,
         "truncated": result.truncated,
+        "action": result.action,
+        "action_view": rule_action_view(result.action).to_payload(),
         "hits": [
             {
                 "candidate_id": hit.candidate_id,

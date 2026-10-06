@@ -71,6 +71,39 @@ async def test_auto_approval_rule_case_sensitive_round_trips(
     assert reread is not None
     assert reread.case_sensitive is False
 
+    # Migration 024: the action round-trips, and a rule saved without one keeps
+    # the historical APPROVE behaviour instead of silently becoming a reject.
+    assert reread.action == "APPROVE"
+    reject_rule = await database.save_auto_approval_rule(
+        rule_id=None,
+        name="Reject NTR",
+        enabled=True,
+        priority=5,
+        condition=condition,
+        dsl_snapshot='{Title} LIKE "%ntr%"',
+        action="REJECT",
+    )
+    assert reject_rule.action == "REJECT"
+    listed = {
+        rule.name: rule
+        for rule in await database.list_auto_approval_rules()
+    }
+    assert listed["Reject NTR"].action == "REJECT"
+
+    # The column CHECK is the last line of defence behind the route's own
+    # validation, so an unknown action cannot be stored even if a caller skips
+    # the web layer.
+    with pytest.raises(sqlite3.IntegrityError):
+        await database.save_auto_approval_rule(
+            rule_id=None,
+            name="Bogus action",
+            enabled=True,
+            priority=1,
+            condition=condition,
+            dsl_snapshot="x",
+            action="DELETE",
+        )
+
 
 @pytest.mark.asyncio
 async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
@@ -133,6 +166,12 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
                 "PRAGMA table_info(archive_path_rules)"
             )
         }
+        auto_approval_rule_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(auto_approval_rules)"
+            )
+        }
         ai_model_columns = {
             row[1]
             for row in connection.execute(
@@ -170,7 +209,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
         }
 
-    assert migration_count == 23
+    assert migration_count == 24
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns
@@ -193,6 +232,9 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
     } <= api_credential_columns
     assert "idx_api_credentials_single_key" in indexes
     assert "auto_approval_rules" in tables
+    # Migration 024: the rule's action. `case_sensitive` came from 016 and is
+    # asserted beside it so the rule row's shape is checked in one place.
+    assert {"case_sensitive", "action"} <= auto_approval_rule_columns
     assert {
         "archive_tool_profiles",
         "archive_passwords",
@@ -633,3 +675,29 @@ async def test_bulk_add_revives_a_dismissed_source(tmp_path: Path) -> None:
     listed = await database.list_telegram_sources()
     assert [row.source_id for row in listed] == [source_id]
     assert listed[0].enabled is False
+
+
+@pytest.mark.asyncio
+async def test_migration_024_backfills_a_missing_action_to_approve(
+    tmp_path: Path,
+) -> None:
+    """The migration's safety property: no rule becomes a reject by accident.
+
+    `024` adds the column with `DEFAULT 'APPROVE'`, which is what backfills the
+    rows that already existed when the ALTER ran. A raw insert that names no
+    action exercises the same default, so an upgraded database keeps behaving
+    exactly as it did before the feature existed.
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO auto_approval_rules "
+            "(name, condition_json, dsl_snapshot) VALUES (?, ?, ?)",
+            ("Legacy", '{"kind": "condition"}', "x"),
+        )
+
+    rule = (await database.list_auto_approval_rules())[0]
+    assert rule.action == "APPROVE"

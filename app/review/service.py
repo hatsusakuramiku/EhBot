@@ -43,14 +43,24 @@ class ReviewService:
         )
 
     async def reject_candidate(
-        self, candidate_id: int, operator_name: str
+        self,
+        candidate_id: int,
+        operator_name: str,
+        note: str | None = None,
     ) -> None:
+        """Reject a candidate.
+
+        `note` is stored on the candidate as its `filter_reason` and in the
+        audit row's details. Manual rejection passes nothing, so a hand-made
+        rejection keeps its existing shape; automatic rejection passes the rule
+        it matched, so 「已驳回」 can say why without opening the timeline.
+        """
         await self._apply_status_transition(
             candidate_id,
             operator_name,
             REVIEW_REJECT,
             STATUS_REJECTED,
-            None,
+            note,
         )
 
     async def request_revision(

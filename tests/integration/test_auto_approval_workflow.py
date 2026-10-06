@@ -9,6 +9,7 @@ from app.config import Settings
 from app.db.database import Database
 from app.downloads.service import DownloadService
 from app.main import create_app
+from app.review.models import REVIEW_APPROVE, REVIEW_REJECT
 from tests.ingest_admission import permit_all_message_types
 
 
@@ -180,11 +181,11 @@ def test_one_unapprovable_candidate_does_not_stop_the_sweep() -> None:
         def __init__(self) -> None:
             self.seen: list[int] = []
 
-        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+        async def apply_automatic_decision(self, candidate_id: int) -> str | None:
             self.seen.append(candidate_id)
             if candidate_id == 2:
                 raise RuntimeError("provider is not configured")
-            return True
+            return REVIEW_APPROVE
 
     class FakeSettings:
         async def auto_approval_interval_minutes(self) -> int:
@@ -238,9 +239,9 @@ def test_the_sweep_reads_the_oldest_candidates_first(tmp_path: Path) -> None:
     seen: list[int] = []
 
     class RecordingOrchestrator:
-        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+        async def apply_automatic_decision(self, candidate_id: int) -> str | None:
             seen.append(candidate_id)
-            return False
+            return None
 
     class FakeSettings:
         async def auto_approval_interval_minutes(self) -> int:
@@ -278,9 +279,9 @@ def test_the_sweep_fetches_metadata_before_it_judges_the_batch() -> None:
             return (7, 8)
 
     class FakeOrchestrator:
-        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+        async def apply_automatic_decision(self, candidate_id: int) -> str | None:
             order.append(f"judge:{candidate_id}")
-            return False
+            return None
 
     class FakeSettings:
         async def auto_approval_interval_minutes(self) -> int:
@@ -314,9 +315,9 @@ def test_an_unreachable_metadata_source_does_not_stop_the_sweep() -> None:
             return (1, 2)
 
     class FakeOrchestrator:
-        async def apply_automatic_approval(self, candidate_id: int) -> bool:
+        async def apply_automatic_decision(self, candidate_id: int) -> str | None:
             judged.append(candidate_id)
-            return True
+            return REVIEW_APPROVE
 
     class FakeSettings:
         async def auto_approval_interval_minutes(self) -> int:
@@ -353,3 +354,178 @@ def test_the_running_app_wires_metadata_enrichment_into_the_sweep(
         # answers「nothing to do」 without an HTTP call.
         assert asyncio.run(sweeper._enrich_metadata((1,))) is None  # noqa: SLF001
 
+
+def _matching_condition() -> dict:
+    return {
+        "kind": "condition",
+        "field": "Title",
+        "operator": "=",
+        "value": "Automatic Title",
+    }
+
+
+def test_a_reject_rule_rejects_and_audits_the_rule(tmp_path: Path) -> None:
+    """驳回 is the same shared rule pool, dispatched to the other action.
+
+    No download is enqueued, the candidate lands in REJECTED, and the audit
+    records the full rule snapshot exactly the way an automatic approval does --
+    so a dispute can be settled against the rule version that fired.
+    """
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(_seed_candidate(database))
+    rule = asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="No NTR",
+            enabled=True,
+            priority=10,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_REJECT,
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        sweeper = client.app.state.auto_approval_sweeper
+        assert asyncio.run(sweeper.sweep_once()) == 1
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "REJECTED"
+    # The rule name is the candidate's reason, so 「已驳回」 says why without
+    # opening the timeline.
+    assert detail.filter_reason == "命中规则「No NTR」"
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert not jobs
+    actions = asyncio.run(database.list_review_actions(candidate_id))
+    audit = next(action for action in actions if action.action == "AUTO_REJECT")
+    assert audit.details["rule_id"] == rule.rule_id
+    assert audit.details["rule_version"] == 1
+    assert audit.details["metadata"]["Title"] == "Automatic Title"
+    assert audit.details["download_job_ids"] == []
+
+
+def test_priority_interleaves_approve_and_reject_rules(tmp_path: Path) -> None:
+    """One pool, one order: the first match wins whatever its action is.
+
+    The reject rule is given the smaller priority, so it decides first even
+    though an approve rule also matches -- the configuration that lets an
+    operator say 「先剔除，再放行」.
+    """
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(_seed_candidate(database))
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="Reject first",
+            enabled=True,
+            priority=10,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_REJECT,
+        )
+    )
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="Approve the rest",
+            enabled=True,
+            priority=20,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_APPROVE,
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 1
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "REJECTED"
+    assert detail.filter_reason == "命中规则「Reject first」"
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert not jobs
+
+
+def test_an_approve_rule_outranks_a_reject_rule_when_it_is_first(
+    tmp_path: Path,
+) -> None:
+    """Priority also cuts the other way: the reject rule loses if it is second.
+
+    This is the mirror of `test_priority_interleaves_approve_and_reject_rules`;
+    together they pin the ordering to `(priority, id)` rather than to the action.
+    """
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(_seed_candidate(database))
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="Approve first",
+            enabled=True,
+            priority=10,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_APPROVE,
+        )
+    )
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="Reject the rest",
+            enabled=True,
+            priority=20,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_REJECT,
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 1
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status in {"APPROVED", "PROCESSING", "DOWNLOADED"}
+    jobs = asyncio.run(
+        DownloadService(database, settings.work_path).list_jobs_for_candidate(
+            candidate_id
+        )
+    )
+    assert len(jobs) == 1
+
+
+def test_a_disabled_reject_rule_never_fires(tmp_path: Path) -> None:
+    """`enabled` gates both actions; the pool filter did not move."""
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(_seed_candidate(database))
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="Parked reject",
+            enabled=False,
+            priority=1,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+            action=REVIEW_REJECT,
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 0
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "PENDING_REVIEW"

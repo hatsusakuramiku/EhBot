@@ -185,7 +185,7 @@ async def _render_candidates(
         )
         await deps.exhentai_service(request).enrich_candidates_for_review(first)
         for candidate in first:
-            await deps.review_orchestrator(request).apply_automatic_approval(candidate.candidate_id)
+            await deps.review_orchestrator(request).apply_automatic_decision(candidate.candidate_id)
 
     items, total = await deps.database(request).list_candidates_page(
         statuses=statuses,

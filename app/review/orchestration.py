@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 
+from app.auto_approval.models import AutoApprovalMatch
 from app.auto_approval.service import AutomaticApprovalService
 from app.downloads.models import (
     AUTO_DOWNLOAD_PROVIDERS,
@@ -28,7 +29,14 @@ from app.downloads.models import (
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError
-from app.review.models import AUTO_OPERATOR, REVIEWABLE_STATUSES
+from app.review.models import (
+    AUTO_OPERATOR,
+    REVIEWABLE_STATUSES,
+    REVIEW_APPROVE,
+    REVIEW_AUTO_APPROVE,
+    REVIEW_AUTO_REJECT,
+    REVIEW_REJECT,
+)
 from app.review.service import ReviewError, ReviewService
 
 
@@ -241,27 +249,68 @@ class ReviewOrchestrator:
             )
         return result.job_id
 
-    async def reject(self, candidate_ids: list[int], operator: str) -> None:
-        """Reject a batch, validating all of it before writing any of it."""
+    async def reject(
+        self,
+        candidate_ids: list[int],
+        operator: str,
+        note: str | None = None,
+    ) -> None:
+        """Reject a batch, validating all of it before writing any of it.
+
+        `note` is optional so the manual batch path is unchanged; automatic
+        rejection passes the rule it matched so the rejected row can explain
+        itself without opening the timeline.
+        """
         for candidate_id in candidate_ids:
             await self._load_reviewable(candidate_id)
         for candidate_id in candidate_ids:
             await self._review_service().reject_candidate(
-                candidate_id, operator
+                candidate_id, operator, note
             )
 
-    async def apply_automatic_approval(self, candidate_id: int) -> bool:
-        """Approve a candidate if a rule matches it.
+    async def apply_automatic_decision(self, candidate_id: int) -> str | None:
+        """Apply the first matching automatic rule to a candidate.
 
-        Returns False rather than raising when no rule matches or the approval
-        cannot proceed: automatic approval is an optimisation, and a candidate
-        it declines simply stays in the queue for a human.
+        Returns the action taken -- `REVIEW_APPROVE` or `REVIEW_REJECT` -- or
+        `None` when no rule matched, so the sweeper can count the two kinds
+        apart. Declines rather than raising when the decision cannot proceed:
+        automatic rules are an optimisation, and a candidate they decline
+        simply stays in the queue for a human.
+
+        Approve and reject share one rule pool and one priority order --
+        `matching_rule` already returns the first enabled match -- so this
+        method only dispatches on the winner's action. It never applies a
+        second rule: a candidate is decided by exactly one rule or by nobody.
         """
         match = await AutomaticApprovalService(self._database).matching_rule(
             candidate_id
         )
         if match is None:
-            return False
+            return None
+        if match.rule.action == REVIEW_REJECT:
+            # The rule name goes on the candidate as its filter_reason, so the
+            # 「已驳回」 row says why it was rejected. Manual rejection passes no
+            # note and keeps its empty reason, exactly as before.
+            try:
+                await self.reject(
+                    [candidate_id],
+                    AUTO_OPERATOR,
+                    f"命中规则「{match.rule.name}」",
+                )
+            except ReviewError as exc:
+                LOGGER.info(
+                    "auto_reject_skipped candidate=%d error=%s",
+                    candidate_id,
+                    exc.public_message,
+                )
+                return None
+            await self._record_automatic_decision(
+                candidate_id,
+                REVIEW_AUTO_REJECT,
+                match,
+                download_job_ids=[],
+            )
+            return REVIEW_REJECT
         try:
             job_ids = await self.approve_and_enqueue(
                 [candidate_id], AUTO_OPERATOR
@@ -272,12 +321,33 @@ class ReviewOrchestrator:
                 candidate_id,
                 exc.public_message,
             )
-            return False
-        # The full rule snapshot is recorded so a later dispute can be settled
-        # against the rule as it was, not as it has since been edited.
+            return None
+        await self._record_automatic_decision(
+            candidate_id,
+            REVIEW_AUTO_APPROVE,
+            match,
+            download_job_ids=list(job_ids),
+        )
+        return REVIEW_APPROVE
+
+    async def _record_automatic_decision(
+        self,
+        candidate_id: int,
+        action: str,
+        match: AutoApprovalMatch,
+        *,
+        download_job_ids: list[int],
+    ) -> None:
+        """Record one rule-driven decision against the rule as it was.
+
+        The full rule snapshot is stored so a later dispute can be settled
+        against the rule at the version that fired, not as it has since been
+        edited. Both actions write the same keys; a rejection's job list is
+        empty because there is nothing to download.
+        """
         await self._database.record_review_action(
             candidate_id,
-            "AUTO_APPROVE",
+            action,
             AUTO_OPERATOR,
             {
                 "rule_id": match.rule.rule_id,
@@ -287,10 +357,9 @@ class ReviewOrchestrator:
                 "condition": match.rule.condition,
                 "conditions": match.conditions,
                 "metadata": match.metadata,
-                "download_job_ids": list(job_ids),
+                "download_job_ids": download_job_ids,
             },
         )
-        return True
 
 
 __all__ = [

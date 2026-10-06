@@ -3,7 +3,7 @@
 Why this exists
 ---------------
 Rules used to fire from exactly one place: `_render_candidates` in
-`app/web/routes/candidates.py` called `apply_automatic_approval` for every row it
+`app/web/routes/candidates.py` called the automatic decision for every row it
 was about to draw on the 待审核 tab. That made approval a side effect of
 *rendering a page*, with three consequences an operator eventually hits.
 
@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.review.models import REVIEW_APPROVE, REVIEW_REJECT
 from app.settings.service import SystemSettingsService
 
 
@@ -131,12 +132,16 @@ class AutoApprovalSweeper:
                 )
 
     async def sweep_once(self) -> int:
-        """Apply rules to the pending queue once, returning how many approved.
+        """Apply rules to the pending queue once, returning how many were decided.
+
+        The return value counts both outcomes -- approved plus rejected -- because
+        「本轮做了几件事」 is what the caller and the log line want; the two kinds
+        are counted apart below so the log can say which happened.
 
         Public and separately callable because that is what makes the schedule
         testable without waiting for it: a test drives this directly rather than
-        starting the task and sleeping. `apply_automatic_approval` is already the
-        only path that may approve, and it declines rather than raising when no
+        starting the task and sleeping. `apply_automatic_decision` is already the
+        only path that may decide, and it declines rather than raising when no
         rule matches, so this method does not need to know what a rule is.
         """
         candidate_ids = await self._database.pending_candidate_ids(
@@ -156,16 +161,16 @@ class AutoApprovalSweeper:
         # requests rather than a hundred.
         await self._enrich_metadata(candidate_ids)
         approved = 0
+        rejected = 0
         for candidate_id in candidate_ids:
             try:
-                if await self._orchestrator.apply_automatic_approval(
+                decision = await self._orchestrator.apply_automatic_decision(
                     candidate_id
-                ):
-                    approved += 1
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - one candidate must not stop the sweep
-                # A single unapprovable candidate -- an enqueue whose provider is
+                # A single undecidable candidate -- an enqueue whose provider is
                 # misconfigured, a metadata row that will not parse -- is a
                 # reason to skip that candidate, not to abandon the other
                 # ninety-nine. The candidate stays pending for a human.
@@ -176,16 +181,23 @@ class AutoApprovalSweeper:
                         "error_code": "AUTO_APPROVAL_CANDIDATE_FAILED",
                     },
                 )
-        if approved:
-            # Logged only when something happened: a sweep that approves nothing
+                continue
+            if decision == REVIEW_APPROVE:
+                approved += 1
+            elif decision == REVIEW_REJECT:
+                rejected += 1
+        if approved or rejected:
+            # Logged only when something happened: a sweep that decides nothing
             # is the normal case and would otherwise write a line every 30
-            # minutes forever, burying the ones that mean something.
+            # minutes forever, burying the ones that mean something. The two
+            # counts are split so a silently-firing reject rule is visible.
             LOGGER.info(
-                "auto_approval_sweep_completed approved=%d scanned=%d",
+                "auto_approval_sweep_completed approved=%d rejected=%d scanned=%d",
                 approved,
+                rejected,
                 len(candidate_ids),
             )
-        return approved
+        return approved + rejected
 
     async def _enrich_metadata(self, candidate_ids: tuple[int, ...]) -> None:
         """Fill in missing gallery metadata for a batch, tolerating failure.

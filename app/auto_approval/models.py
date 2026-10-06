@@ -2,6 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.review.models import REVIEW_APPROVE, REVIEW_REJECT
+
+
+#: What a matching rule does to the candidate. The values are the review verbs
+#: themselves rather than a parallel pair, so the rule's stored action and the
+#: audit action it eventually writes can never drift into synonyms.
+RULE_ACTION_APPROVE = REVIEW_APPROVE
+RULE_ACTION_REJECT = REVIEW_REJECT
+RULE_ACTIONS: tuple[str, ...] = (RULE_ACTION_APPROVE, RULE_ACTION_REJECT)
+
 
 @dataclass(frozen=True, slots=True)
 class AutoApprovalRule:
@@ -17,6 +27,10 @@ class AutoApprovalRule:
     #: Whether this rule's text and tag comparisons are case-sensitive. Off by
     #: default: matching is case-insensitive unless the operator turns it on.
     case_sensitive: bool = False
+    #: `APPROVE` (approve and enqueue) or `REJECT` (reject). Defaulted to the
+    #: old behaviour so every existing construction -- tests included -- keeps
+    #: meaning what it meant before `action` existed.
+    action: str = RULE_ACTION_APPROVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,3 +64,6 @@ class AutoApprovalDryRun:
     matched: int
     truncated: bool
     hits: tuple[AutoApprovalDryRunHit, ...]
+    #: What the tried rule would do to the matches. Carried so the trial run can
+    #: say 「将会自动驳回」 rather than describing every rule as if it approved.
+    action: str = RULE_ACTION_APPROVE

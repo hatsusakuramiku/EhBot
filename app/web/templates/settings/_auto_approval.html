@@ -2,12 +2,15 @@
   自动审批 tab: the rule editor, and the trial run that says what a rule would do
   before it is allowed to do it.
 
-  A rule that fires approves a candidate for download without an operator seeing
-  it, so the editor is built around not being able to save something you have not
-  checked. The condition rows and the two buttons are ONE form: 试跑 and 保存
-  submit the same fields to different `formaction`s, so what was tried is exactly
-  what gets saved -- a separate preview form could drift from the editor above it
-  by a character and still look right.
+  A rule that fires decides a candidate without an operator seeing it -- approve
+  and enqueue, or reject -- so the editor is built around not being able to save
+  something you have not checked. Both kinds live in one list and one priority
+  order: the first matching enabled rule decides, whatever its action.
+
+  The condition rows and the two buttons are ONE form: 试跑 and 保存 submit the
+  same fields to different `formaction`s, so what was tried is exactly what gets
+  saved -- a separate preview form could drift from the editor above it by a
+  character and still look right.
 
   A row is one comparison (`{Field} OPERATOR value`). Rows are combined by the
   group operator into the `group` node `validate_rule_ast` already understands.
@@ -38,7 +41,10 @@
         {{ ui.callout("这条规则无法在此编辑", tone="waiting",
                       detail="它包含嵌套的条件组，而编辑器只表达一层。可以试跑或删除后重建，避免保存时把规则改成别的意思。") }}
       {% endif %}
-      <p class="ui-hint">命中即自动加入下载队列；未命中的候选始终保留人工审核。保存前请先试跑。</p>
+      <p class="ui-hint">
+        命中「自动通过」即加入下载队列，命中「自动驳回」即置为已驳回；两类规则共用同一条优先级队列，
+        排在前面的先决定（想先驳回就给驳回规则更小的优先级）。未命中的候选始终保留人工审核。保存前请先试跑。
+      </p>
       <form class="ui-form" method="post" action="{{ url_for('save_auto_approval_rule') }}"
             data-rule-editor style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -58,6 +64,14 @@
             <input class="ui-input" id="rule-priority" name="priority" type="number"
                    value="{{ edit_rule.priority if edit_rule else 100 }}" required>
             <small>从小到大执行。</small>
+          </div>
+          <div class="ui-field">
+            <label for="rule-action">动作</label>
+            <select class="ui-select" id="rule-action" name="action">
+              <option value="APPROVE" {% if not edit_rule or edit_rule.action == 'APPROVE' %}selected{% endif %}>自动通过</option>
+              <option value="REJECT" {% if edit_rule and edit_rule.action == 'REJECT' %}selected{% endif %}>自动驳回</option>
+            </select>
+            <small>命中后对候选做什么。</small>
           </div>
           <div class="ui-field">
             <label for="group-operator">条件组合</label>
@@ -135,7 +149,7 @@
         <h2 class="ui-section-title">试跑结果</h2>
         <p class="ui-hint">
           在最近 {{ dry_run.scanned }} 个候选中命中 {{ dry_run.matched }} 个{% if dry_run.truncated %}（历史还有更早的候选未纳入本次试跑，上限 {{ dry_run_scan_limit }}）{% endif %}。
-          试跑不写入任何数据，也不会触发下载。
+          命中后将会{{ dry_run.action_view.label }}。试跑不写入任何数据，也不会触发下载。
         </p>
         {% if dry_run.hits %}
           <ul class="ui-form" style="margin: var(--s-4) 0 0; padding-left: var(--s-5)">
@@ -170,7 +184,10 @@
           <div class="ui-record-head">
             <span class="ui-record-title">{{ rule.name }}</span>
             <span class="ui-record-meta">优先级 {{ rule.priority }} · 版本 {{ rule.version }}</span>
-            <div class="ui-record-badges">{{ ui.badge(rule.enablement) }}</div>
+            <div class="ui-record-badges">
+              {{ ui.badge(rule.action_view) }}
+              {{ ui.badge(rule.enablement) }}
+            </div>
           </div>
           {#- The stored rendering, not one recomputed here: the browser has no
               business owning a second DSL writer. -#}
@@ -193,7 +210,7 @@
                 never requires deleting it. `key` disambiguates the dialog id,
                 because every rule in this loop renders the same label. -#}
             {{ ui.confirm("删除", "删除这条规则",
-                          "规则会被移除，之后的候选不再受它影响。已经由它自动通过的作品不受影响，历史记录里仍保留当时的规则内容。",
+                          "规则会被移除，之后的候选不再受它影响。已经由它自动通过或驳回的作品不受影响，历史记录里仍保留当时的规则内容。",
                           confirm_label="确认删除",
                           action=url_for('delete_auto_approval_rule', rule_id=rule.rule_id).path,
                           csrf_token=csrf_token, size="sm", key=rule.rule_id) }}

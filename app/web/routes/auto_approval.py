@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 
 from app.api.serializers import auto_approval_dry_run
 from app.api.status import SETTINGS_AUTO_APPROVAL
+from app.auto_approval.models import RULE_ACTION_APPROVE, RULE_ACTIONS
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
@@ -74,6 +75,12 @@ async def save_auto_approval_rule(request: Request):
         # meant is how an operator ends up with two rules approving everything.
         raw_rule_id = str(form.get("rule_id") or "").strip()
         rule_id = int(raw_rule_id) if raw_rule_id else None
+        # Validated here, not left to the column CHECK: an unknown action is a
+        # form the operator cannot produce, and a 400 with the reason beats a
+        # 500 from a constraint violation.
+        action = str(form.get("action") or RULE_ACTION_APPROVE)
+        if action not in RULE_ACTIONS:
+            raise RuleValidationError("未知的规则动作")
         # `validate_rule_ast` is the gate, not the editor: every operator and
         # value is checked here, so something the browser accepted and the
         # engine cannot is refused at the moment it would be stored.
@@ -89,6 +96,7 @@ async def save_auto_approval_rule(request: Request):
             condition=ast,
             dsl_snapshot=render_rule_dsl(ast),
             case_sensitive=form.get("case_sensitive") == "on",
+            action=action,
         )
     except LookupError:
         # The rule was deleted between the page render and the save. Reported as
@@ -124,6 +132,9 @@ async def dry_run_auto_approval_rule(request: Request):
         if condition is None:
             raise RuleValidationError("请至少填写一个条件")
         condition = validate_rule_ast(condition)
+        action = str(form.get("action") or RULE_ACTION_APPROVE)
+        if action not in RULE_ACTIONS:
+            raise RuleValidationError("未知的规则动作")
     except (RuleValidationError, ValueError) as exc:
         return await render_settings(
             request,
@@ -132,7 +143,9 @@ async def dry_run_auto_approval_rule(request: Request):
             status_code=400,
         )
     result = await AutomaticApprovalService(deps.database(request)).dry_run(
-        condition, case_sensitive=form.get("case_sensitive") == "on"
+        condition,
+        case_sensitive=form.get("case_sensitive") == "on",
+        action=action,
     )
     return await render_settings(
         request,
@@ -194,6 +207,7 @@ async def edit_auto_approval_rule(rule_id: int, request: Request):
             "enabled": rule.enabled,
             "group_operator": group_operator,
             "case_sensitive": rule.case_sensitive,
+            "action": rule.action,
             "rows": list(rows),
         },
     )

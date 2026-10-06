@@ -22,7 +22,12 @@ from app.downloads.models import (
     CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
 )
-from app.review.models import AUTO_OPERATOR, SYSTEM_OPERATOR
+from app.review.models import (
+    AUTO_OPERATOR,
+    REVIEW_APPROVE,
+    REVIEW_REJECT,
+    SYSTEM_OPERATOR,
+)
 
 #: Packing states that are waiting on the operator rather than broken.
 _PACK_ATTENTION_STATES: frozenset[str] = frozenset(
@@ -358,7 +363,19 @@ REVIEW_ACTION_STATUS: dict[str, StatusView] = {
     "EDIT_METADATA": _view("EDIT_METADATA", "编辑元数据", TONE_NEUTRAL),
     "LOCK_METADATA": _view("LOCK_METADATA", "锁定字段", TONE_NEUTRAL),
     "AUTO_APPROVE": _view("AUTO_APPROVE", "自动通过", TONE_ACTIVE),
+    "AUTO_REJECT": _view("AUTO_REJECT", "自动驳回", TONE_MUTED),
     "METADATA_RULE": _view("METADATA_RULE", "规则判定", TONE_NEUTRAL),
+}
+
+#: What a stored automatic-approval rule does when it matches. Separate from
+#: `REVIEW_ACTION_STATUS` because the same code reads differently in the two
+#: places: an audit verb `APPROVE` is 「通过」, while a rule whose action is
+#: `APPROVE` is 「自动通过」 -- the rule is the thing being described, and it acts
+#: without a person. Both kinds share the one rule pool, so the two entries sit
+#: side by side with nothing else to distinguish them.
+RULE_ACTION_STATUS: dict[str, StatusView] = {
+    REVIEW_APPROVE: _view(REVIEW_APPROVE, "自动通过", TONE_ACTIVE),
+    REVIEW_REJECT: _view(REVIEW_REJECT, "自动驳回", TONE_MUTED),
 }
 
 #: Who did it. The audit trail stores a name, not a kind, so the kind is
@@ -736,6 +753,13 @@ def review_action_view(action: str | None) -> StatusView:
     return REVIEW_ACTION_STATUS.get(action, _view(action, action, TONE_NEUTRAL))
 
 
+def rule_action_view(action: str | None) -> StatusView:
+    """Resolve an automatic-rule action, falling back to the raw code."""
+    if not action:
+        return _view("", "—", TONE_MUTED)
+    return RULE_ACTION_STATUS.get(action, _view(action, action, TONE_NEUTRAL))
+
+
 def actor_kind(operator_name: str | None) -> str:
     """Which of the three actors a stored `operator_name` is.
 
@@ -785,6 +809,7 @@ __all__ = [
     "QUEUE_GROUP_STATUS",
     "REVIEW_ACTION_STATUS",
     "ROW_NOTE_STATUS",
+    "RULE_ACTION_STATUS",
     "SETTINGS_AI",
     "SETTINGS_ARCHIVE",
     "SETTINGS_AUTO_APPROVAL",
@@ -827,6 +852,7 @@ __all__ = [
     "queue_group_view",
     "review_action_view",
     "row_note_view",
+    "rule_action_view",
     "settings_section_view",
     "status_label",
     "status_tone",

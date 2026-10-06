@@ -19,7 +19,7 @@ from app.ai.models import (
     parse_request_params,
 )
 from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
-from app.auto_approval.models import AutoApprovalRule
+from app.auto_approval.models import AutoApprovalRule, RULE_ACTION_APPROVE
 from app.candidates.links import GALLERY_URL_PATTERN
 from app.candidates.models import (
     CandidateDetail,
@@ -3200,6 +3200,7 @@ class Database:
             created_at=str(row[7]),
             updated_at=str(row[8]),
             case_sensitive=bool(row[9]),
+            action=str(row[10]),
         )
 
     async def list_auto_approval_rules(
@@ -3216,7 +3217,7 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at, case_sensitive "
+                "dsl_snapshot, created_at, updated_at, case_sensitive, action "
                 "FROM auto_approval_rules "
                 + where_sql
                 + "ORDER BY priority, id"
@@ -3234,7 +3235,7 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at, case_sensitive "
+                "dsl_snapshot, created_at, updated_at, case_sensitive, action "
                 "FROM auto_approval_rules "
                 "WHERE id = ?",
                 (rule_id,),
@@ -3251,6 +3252,7 @@ class Database:
         condition: dict,
         dsl_snapshot: str,
         case_sensitive: bool = False,
+        action: str = RULE_ACTION_APPROVE,
     ) -> AutoApprovalRule:
         return await asyncio.to_thread(
             self._save_auto_approval_rule_sync,
@@ -3261,6 +3263,7 @@ class Database:
             condition,
             dsl_snapshot,
             case_sensitive,
+            action,
         )
 
     def _save_auto_approval_rule_sync(
@@ -3272,13 +3275,14 @@ class Database:
         condition: dict,
         dsl_snapshot: str,
         case_sensitive: bool = False,
+        action: str = RULE_ACTION_APPROVE,
     ) -> AutoApprovalRule:
         with self.connection() as connection:
             if rule_id is None:
                 cursor = connection.execute(
                     "INSERT INTO auto_approval_rules "
                     "(name, enabled, priority, condition_json, dsl_snapshot, "
-                    "case_sensitive) VALUES (?, ?, ?, ?, ?, ?)",
+                    "case_sensitive, action) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         name,
                         int(enabled),
@@ -3286,6 +3290,7 @@ class Database:
                         json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
                         dsl_snapshot,
                         int(case_sensitive),
+                        action,
                     ),
                 )
                 rule_id = int(cursor.lastrowid)
@@ -3293,7 +3298,7 @@ class Database:
                 cursor = connection.execute(
                     "UPDATE auto_approval_rules SET name = ?, enabled = ?, "
                     "priority = ?, condition_json = ?, dsl_snapshot = ?, "
-                    "case_sensitive = ?, "
+                    "case_sensitive = ?, action = ?, "
                     "version = version + 1, updated_at = CURRENT_TIMESTAMP "
                     "WHERE id = ?",
                     (
@@ -3303,6 +3308,7 @@ class Database:
                         json.dumps(condition, ensure_ascii=False, separators=(",", ":")),
                         dsl_snapshot,
                         int(case_sensitive),
+                        action,
                         rule_id,
                     ),
                 )

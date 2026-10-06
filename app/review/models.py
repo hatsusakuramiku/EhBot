@@ -19,19 +19,21 @@ REVIEW_ACTIONS: tuple[str, ...] = (
     REVIEW_LOCK_METADATA,
 )
 
-#: Audit-trail entries nobody typed. `AUTO_APPROVE` is written by the automatic
-#: approval rules, `METADATA_RULE` by a source's own filters re-evaluating a
-#: candidate. They are not in `REVIEW_ACTIONS` because no operator can perform
-#: them, but the timeline has to read them, so they are named here rather than
-#: as bare strings at their two write sites.
+#: Audit-trail entries nobody typed. `AUTO_APPROVE` / `AUTO_REJECT` are written
+#: by the automatic approval rules, `METADATA_RULE` by a source's own filters
+#: re-evaluating a candidate. They are not in `REVIEW_ACTIONS` because no
+#: operator can perform them, but the timeline has to read them, so they are
+#: named here rather than as bare strings at their write sites.
 REVIEW_AUTO_APPROVE = "AUTO_APPROVE"
+REVIEW_AUTO_REJECT = "AUTO_REJECT"
 REVIEW_METADATA_RULE = "METADATA_RULE"
 
 #: The two reserved `operator_name` values. Everything else in that column is a
 #: real login. They live here, next to the actions they sign, so the timeline can
 #: tell an operator's decision from a rule's without a second copy of either
-#: string: `AUTO_OPERATOR` is what `ReviewOrchestrator` records for a rule-driven
-#: approval, `SYSTEM_OPERATOR` what the metadata-rule re-evaluation records.
+#: string: `AUTO_OPERATOR` is what `ReviewOrchestrator` records for any
+#: rule-driven decision (approve or reject), `SYSTEM_OPERATOR` what the
+#: metadata-rule re-evaluation records.
 AUTO_OPERATOR = "自动审批"
 SYSTEM_OPERATOR = "system"
 

@@ -5,6 +5,7 @@ from app.auto_approval.models import (
     AutoApprovalDryRunHit,
     AutoApprovalMatch,
     AutoApprovalRule,
+    RULE_ACTION_APPROVE,
 )
 from app.auto_approval.rules import RuleValidationError, evaluate_rule
 from app.db.database import Database
@@ -65,6 +66,7 @@ class AutomaticApprovalService:
         condition: dict,
         *,
         case_sensitive: bool = False,
+        action: str = RULE_ACTION_APPROVE,
         scan_limit: int = DRY_RUN_SCAN_LIMIT,
         sample_limit: int = DRY_RUN_SAMPLE_LIMIT,
     ) -> AutoApprovalDryRun:
@@ -120,6 +122,7 @@ class AutomaticApprovalService:
             matched=matched,
             truncated=total > len(candidates),
             hits=tuple(hits),
+            action=action,
         )
 
 
