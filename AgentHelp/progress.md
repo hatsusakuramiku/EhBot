@@ -5629,3 +5629,17 @@ OpenAPI 路径一字未动（API 端点仍是 `/api/v1/auth/login`，手机端 /
 **文档同步**：本 R57 条目 + `PHASES.md` 一行 + `AGENTS.md` 基线链与「路由处理函数名跨层唯一」
 一条；`README.md` / `docs/USAGE.md` 无变化（API 端点 URL 未变，这是恢复既有行为而非新功能）。
 设计记录：`AgentHelp/LOGIN_ROUTE_COLLISION_PROPOSAL.md`。
+
+**镜像（R57 发布动作）**：`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest --push .`，
+index digest `sha256:3498f0376bdd093f28cb5a0b0e7f26d3d0a245f9149fff3709795db3c23bef31`，
+amd64 manifest `sha256:09d182c95b73046239877540112593469e543e437574c5070169a8b8cf2b0779`，
+config `sha256:cb9e76c7b33b584e24c1e7b5f2f97d88791da5e715467174c6f19a0e3f8df491`（替换掉 R55 的 index
+`sha256:0216391e…`）。**从 registry 复核而不是只信本地构建**：`docker buildx imagetools inspect` 与
+`docker pull` 取回同一 index digest。取回镜像冒烟（`DATA_PATH=/tmp/ehbotdata`、
+`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`）：`/healthz` 200 `{"status":"ok"}`、`/readyz` 200
+`{"status":"ready"}`、`GET /login` 的表单 action 为 `/login`（修好前是 `/api/v1/auth/login`）；
+`POST /api/v1/auth/login` 用 JSON 错密码仍 401 `AUTH_INVALID_CREDENTIALS`、用表单编码仍
+400 `BODY_INVALID`——即 API 端点未变。冒烟容器已清理。
+
+**版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`。
+
