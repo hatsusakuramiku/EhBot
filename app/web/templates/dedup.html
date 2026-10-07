@@ -1,0 +1,85 @@
+{#
+  一键去重 (R59): one gallery id, one candidate.
+
+  A plan page, not an action page. Every duplicate group is listed with the row
+  that would be kept and the rows that would go, and the removal only happens on
+  the confirm below. That split exists because the ranking is a policy
+  ("打包完成优先 / 页数多者优先 / 最旧者优先") and the operator is about to delete
+  books with it: reading the decision is the point, not a formality.
+
+  The page writes no state word itself -- the packaging state and every
+  candidate status arrive as resolved `StatusView` payloads through
+  `ui.badge_for`, the same rule `/downloaded` follows.
+#}
+{% extends layout %}
+{% import "components/ui.html" as ui %}
+
+{% block title %}一键去重 · 已下载 · EhBot{% endblock %}
+
+{% block content_class %}ui-content{% endblock %}
+
+{% block content %}
+<div class="ui-page-head">
+  <div>
+    <span class="ui-eyebrow">下载</span>
+    <h1 class="ui-title">一键去重</h1>
+    <p class="ui-subtitle">同一个画廊 ID 只保留一件作品。保留顺序：已完成打包的优先，其次页数较多者，再次最早入库者；其余记录与文件会被移除，且不可恢复。</p>
+  </div>
+</div>
+
+{% if group_count == 0 %}
+{{ ui.empty_state("没有发现重复作品", "每个画廊 ID 只对应一条候选，无需处理") }}
+<p class="ui-hint"><a href="/downloaded">返回已下载内容</a></p>
+{% else %}
+{{ ui.callout(
+     "将移除 " ~ removable ~ " 件重复作品",
+     tone="waiting",
+     detail="涉及 " ~ group_count ~ " 个画廊；每组的保留项已按上述顺序选定，确认前请逐组核对。",
+     role="status") }}
+
+<form id="dedup-form" method="post" action="/downloaded/dedup">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  {% for group in groups %}
+  <section class="ui-section" aria-labelledby="dedup-group-{{ group.ex_gid }}">
+    <h2 class="ui-section-title" id="dedup-group-{{ group.ex_gid }}">画廊 #{{ group.ex_gid }}</h2>
+    {% call ui.table([
+        {"key": "work", "label": "作品"},
+        {"key": "status", "label": "状态"},
+        {"key": "pack", "label": "打包"},
+        {"key": "pages", "label": "页数", "numeric": true},
+        {"key": "decision", "label": "处置"},
+        {"key": "reason", "label": "原因"},
+      ], caption="画廊 #" ~ group.ex_gid ~ " 的重复项") %}
+      {% set entry = group.keep %}
+      <tr data-candidate-id="{{ entry.candidate_id }}">
+        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.title or "未命名作品" }}</a></td>
+        <td data-label="状态">{{ ui.badge_for(entry.status) }}</td>
+        <td data-label="打包">{{ ui.badge_for("packed" if entry.packaged else "unpacked") }}</td>
+        <td data-label="页数" data-numeric="true">{{ entry.page_count if entry.page_count is not none else "—" }}</td>
+        <td data-label="处置"><span class="ui-tag">保留</span></td>
+        <td data-label="原因"><span class="ui-table-secondary">该组最优</span></td>
+      </tr>
+      {% for entry in group.remove %}
+      <tr data-candidate-id="{{ entry.candidate_id }}">
+        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.title or "未命名作品" }}</a></td>
+        <td data-label="状态">{{ ui.badge_for(entry.status) }}</td>
+        <td data-label="打包">{{ ui.badge_for("packed" if entry.packaged else "unpacked") }}</td>
+        <td data-label="页数" data-numeric="true">{{ entry.page_count if entry.page_count is not none else "—" }}</td>
+        <td data-label="处置"><span class="ui-tag">移除</span></td>
+        <td data-label="原因"><span class="ui-table-secondary">{{ entry.reason }}</span></td>
+      </tr>
+      {% endfor %}
+    {% endcall %}
+  </section>
+  {% endfor %}
+
+  <div class="ui-row">
+    {{ ui.confirm("一键去重", "移除重复作品",
+                  "将移除 " ~ removable ~ " 件重复作品，连同记录与磁盘文件；每组只保留列表中标为「保留」的那一件，此操作不可恢复。",
+                  confirm_label="确认去重", form="dedup-form") }}
+    <a class="ui-btn" data-variant="ghost" href="/downloaded">返回已下载内容</a>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

@@ -87,12 +87,14 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R56 | 2026-10-04 | 清理收口：删死代码 `reference.py`、移除 `httpx2`、补 `THUMBNAILS_ENABLED`、AI 链错误码去路径化 | — | `progress.md:5569` |
 | R57 | 2026-10-06 | 修复 Web 登录表单被 API 同名 `login` 路由劫持（R53 回归）：API 侧改名 `api_login`/`api_logout`/`api_batch_review` | 1741→1743 | `progress.md:5598` |
 | R58 | 2026-10-06 | 自动审批规则增加「自动驳回」动作，与「自动通过」共用同一规则池与优先级 | 1743→1752 | `progress.md:5647` |
+| R59 | 2026-10-07 | 按画廊 ID 去重：摄取闸门忽略重复作品、无 ID 候选不被自动规则处理、已下载页一键去重 | 1752→1775 | `progress.md:5710` |
 
-> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → **R58 1752**。以 `AGENTS.md` 的链为准。
+> 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → R58 1752 → **R59 1775**。以 `AGENTS.md` 的链为准。
 
 ## 三、当前状态
 
-- 最新阶段：**R58**（自动审批规则新增「自动驳回」动作；全量 1743 → 1752）。
+- 最新阶段：**R59**（按画廊 ID 去重：摄取闸门、无 ID 候选的审核限制、一键去重；全量 1752 → 1775，无数据库迁移）。
+- R59 让「一个画廊一件候选」成为硬规则：摄取的 `_gate` 在 AI 准入前查同 ID 候选，命中即忽略（不建/不并入/不刮削，编辑消息除外），并发通道由 `save_candidate_message` 再裁决一次；放宽解析规则产生的无 ID 候选仍可存在、可人工通过，但自动通过与自动驳回都跳过它（`pending_candidate_ids(require_gallery=True)` + `matching_rule` 早退，防窗口饿死），候选行/详情页标注「无画廊 ID」；已下载页新增「一键去重」，按「已打包 > 页数多 > 最旧」每组保留一件，其余连同文件删除、在途下载自动取消、打包中的跳过。设计记录 `CANDIDATE_DEDUPLICATION_PROPOSAL.md`，详见 `progress.md:R59`。
 - R58 给 `auto_approval_rules` 加 `action`（迁移 `024`，默认 `APPROVE` 回填既有规则）：命中「自动驳回」规则即置为已驳回（记 `filter_reason` 与 `AUTO_REJECT` 审计，可「重新排队」恢复），命中「自动通过」照旧入队；两类规则共用同一规则池与 `(priority, id)` 顺序，`apply_automatic_approval` 因此改名 `apply_automatic_decision`。设计记录 `AUTO_RULE_ACTIONS_PROPOSAL.md`，详见 `progress.md:R58`。
 - R57 只改 API 侧同名处理函数的名字（`api_login`/`api_logout`/`api_batch_review`），页面侧 `login`/`logout`/`batch_review` 不变，URL 与模板一字未动；回归前 `url_for('login')` 指向 `/api/v1/auth/login`，网页登录因此报 `BODY_INVALID`。设计记录 `LOGIN_ROUTE_COLLISION_PROPOSAL.md`，详见 `progress.md:R57`。
 - R56 清掉审阅发现的三处遗留（死代码 `app/candidates/reference.py`、dev 依赖 `httpx2`、

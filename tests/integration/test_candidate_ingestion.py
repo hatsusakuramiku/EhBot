@@ -4,6 +4,7 @@ import pytest
 
 from app.ai.models import AiPathSuggestion
 from app.candidates.ingestor import CandidateIngestor
+from app.candidates.models import ParsedSourceMessage
 from app.db.database import Database
 from tests.ingest_admission import permit_all_message_types
 
@@ -227,9 +228,16 @@ async def test_unrelated_text_update_is_ignored_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_exhentai_gallery_reference_merges_across_chats(
+async def test_same_exhentai_gallery_reference_in_another_chat_is_ignored(
     tmp_path: Path,
 ) -> None:
+    """One gallery id is one candidate, whichever chat re-posts it (R59).
+
+    This used to merge the second message into the first candidate. It is now
+    dropped before a candidate is even looked for: the work already exists, and
+    attaching the re-post would let it rewrite the metadata and review trail of
+    a book that may already be downloaded.
+    """
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
     await permit_all_message_types(database)
@@ -271,10 +279,21 @@ async def test_same_exhentai_gallery_reference_merges_across_chats(
     candidates = await database.list_candidates()
 
     assert result.created_candidates == 1
+    assert result.ignored_updates == 1
     assert len(candidates) == 1
-    assert candidates[0].message_count == 2
+    # Only the first message: the re-post is ignored, not attached.
+    assert candidates[0].message_count == 1
     assert candidates[0].ex_gid == 67890
-    assert candidates[0].title == "Gallery Title"
+    assert candidates[0].title == "ExHentai #67890"
+    # The update row says why it was dropped, which is what makes「这条消息去哪了」
+    # answerable without reading the log.
+    with database.connection() as connection:
+        row = connection.execute(
+            "SELECT processing_result, processing_reason FROM telegram_bot_updates "
+            "WHERE update_id = 206"
+        ).fetchone()
+    assert row[0] == "IGNORE"
+    assert row[1] == "该画廊已有候选"
 
 
 @pytest.mark.asyncio
@@ -353,19 +372,21 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
             model_name="m",
         )
     )
-    # A reply that joins the first candidate while carrying the second's gallery
-    # id is what makes the two merge into one.
+    # An edit of the first candidate's own message that now carries the
+    # second's gallery id is what makes the two merge into one. It has to be an
+    # edit: a *new* message naming an existing gallery is ignored outright by
+    # the ingestion gate (R59), so the merge is now reachable only when an
+    # already-linked message changes which gallery it points at.
     await database.save_telegram_updates(
         [
             {
                 "update_id": 303,
-                "message": {
-                    "message_id": 12,
+                "edited_message": {
+                    "message_id": 10,
                     "date": 1_700_003_020,
                     "chat": {"id": 600, "username": "u"},
                     "from": {"id": 600},
                     "text": "extra\nhttps://exhentai.org/g/22222/tokB/",
-                    "reply_to_message": {"message_id": 10},
                 },
             }
         ]
@@ -1106,3 +1127,68 @@ async def test_an_edit_that_drops_the_preview_link_clears_it(
     assert before.preview_url == "https://telegra.ph/Edited-Book-08-21"
     assert after is not None
     assert after.preview_url is None
+
+
+@pytest.mark.asyncio
+async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
+    tmp_path: Path,
+) -> None:
+    """The gate decides first; this is the arbiter behind it (R59).
+
+    The two ingestion channels can both read the same gallery before either has
+    written it, and `save_candidate_message` is also a public entry point. Both
+    reach the same conclusion here rather than creating a second candidate --
+    which the `(ex_gid, ex_gallery_token)` unique key would otherwise turn into
+    an `IntegrityError`.
+    """
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await permit_all_message_types(database)
+    await allow_sources(database, -100123)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 700,
+                "channel_post": {
+                    "message_id": 70,
+                    "date": 1_700_000_700,
+                    "chat": {"id": -100123, "title": "Fixture Channel"},
+                    "caption": "First Post\nhttps://exhentai.org/g/5150/tokC/",
+                },
+            }
+        ]
+    )
+    await CandidateIngestor(database).process_pending_updates()
+    candidate_id = (await database.list_candidates())[0].candidate_id
+
+    created = await database.save_candidate_message(
+        None,
+        ParsedSourceMessage(
+            is_edit=False,
+            chat_id=-100123,
+            chat_title="Fixture Channel",
+            message_id=71,
+            sender_id=None,
+            reply_to_message_id=None,
+            media_group_id=None,
+            message_text="Re-post\nhttps://exhentai.org/g/5150/tokC/",
+            attachments=(),
+            file_unique_id=None,
+            message_date="2023-11-14T22:13:20+00:00",
+            title="Re-post",
+            title_source="TELEGRAM",
+            title_confidence=0.9,
+            filter_result="ACCEPT",
+            filter_reason="包含 ExHentai 画廊链接",
+            ex_gid=5150,
+            ex_gallery_token="tokC",
+        ),
+    )
+
+    assert created is False
+    candidates = await database.list_candidates()
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id == candidate_id
+    # The re-post is not attached to the existing candidate either: one gallery
+    # is one work, and the message that introduced it is the one that counts.
+    assert candidates[0].message_count == 1

@@ -35,6 +35,14 @@ class AutomaticApprovalService:
         candidate = await self._database.get_candidate(candidate_id)
         if candidate is None or candidate.status != STATUS_PENDING_REVIEW:
             return None
+        if candidate.ex_gid is None:
+            # A work with no gallery id cannot be recognised again, so a rule
+            # that decides it is a decision the operator can never audit
+            # against anything: the same book re-posted tomorrow is a new
+            # candidate. Automatic approval is therefore gallery-linked only
+            # (R59), and a no-id candidate waits for a human who has been told
+            # why.
+            return None
         metadata = await self._database.effective_metadata(candidate_id)
         for rule in await self._database.list_auto_approval_rules(enabled_only=True):
             try:
@@ -53,7 +61,12 @@ class AutomaticApprovalService:
 
     async def preview(self, rule: AutoApprovalRule) -> tuple[int, ...]:
         matched: list[int] = []
-        for candidate_id in await self._database.pending_candidate_ids():
+        # Gallery-linked only, the same population the sweep and the rule can
+        # actually decide (R59); counting the rest would make the trial run
+        # promise matches the automatic path is never allowed to take.
+        for candidate_id in await self._database.pending_candidate_ids(
+            require_gallery=True
+        ):
             metadata = await self._database.effective_metadata(candidate_id)
             if evaluate_rule(
                 rule.condition, metadata, case_sensitive=rule.case_sensitive

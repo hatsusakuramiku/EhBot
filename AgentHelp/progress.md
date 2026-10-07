@@ -5706,3 +5706,80 @@ config `sha256:9f9cc36261728b82947c1d71ea042be7af71bad050ee937a5848b5fb64661209`
 冒烟容器已停止并随 `--rm` 清理。
 
 **版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`。
+
+## R59 — 按画廊 ID 去重：摄取闸门、无 ID 候选的审核限制、一键去重（2026-10-07）
+
+运营者需求：「必须要加上去重的内容。通过画廊ID判断作品是否已存在，已存在的不再加入候选直接忽略掉；
+如果无法获取到画廊ID也不加入候选，也直接忽略掉；再加个一键去重的功能，移除掉重复的作品仅保留一项：
+1. 优先移除掉未完成下载或打包的作品，优先保留已完成打包的作品；2. 如果都已完成打包，保留页数较多的；
+3. 如果都完成打包且页数一致，保留最旧的。」八点答复随后定稿，其中第 1 条**推翻 v1 的「无 ID 消息
+一律不入候选」**：无 ID 消息照旧可以入候选，限制改到审核侧；2–8 按建议采纳（去重键用 `ex_gid`、
+范围含全部状态、去重直接删文件、在途任务自动取消、打包中的跳过、硬删过的画廊可重新进候选）。
+设计记录 `CANDIDATE_DEDUPLICATION_PROPOSAL.md`。本轮**不需要数据库迁移**，版本号不变。
+
+**设计 A：摄取闸门（只作用于带画廊 ID 的消息）。** `CandidateIngestor._gate` 在 AI 准入之前先查
+`candidate_id_for_gallery(ex_gid)`（只按 ID、不按 token，沿 `UNIQUE (ex_gid, ex_gallery_token)` 的前导列，
+不新增索引），命中即 `RuleDecision("IGNORE", "该画廊已有候选")`——不建候选、不并入、不追附件、不改元数据，
+也不花模型钱、不触发 gdata。编辑消息不走这道闸门（对原消息的编辑仍更新原候选）。Bot 与 MTProto
+两个通道并发时，`_save_candidate_message_sync` 里保留 `ex_candidate_id` 分支作为**最终裁决**：拿到同 ID
+的别的候选时写 `IGNORE`/「该画廊已有候选」到 `telegram_bot_updates` 并早退，不写 `candidate_messages`。
+原有的「启发式候选 + 画廊候选」合并分支保留（答复 1 让无 ID 候选继续存在，这条分支经编辑消息仍可达）。
+
+**设计 B：无 ID 候选的审核限制。** 三道口子一起堵：`AutomaticApprovalService.matching_rule` 对
+`ex_gid is None` 直接返回 `None`（自动通过与自动驳回都拿不到规则）；`pending_candidate_ids` 新增
+`require_gallery=False`，`AutoApprovalSweeper.sweep_once` 传 `True`（**防饿死**：批次是最旧 100 条 + LIMIT，
+队首堆着上百条永不被处理的无 ID 候选会把窗口卡死）；`preview()` 同样只列带 ID 的候选，试跑命中数与
+实际可落地条数一致。人工侧：`app/api/status.py` 新增 `CANDIDATE_FLAG_STATUS`（`NO_GALLERY → 无画廊 ID`）
+与 `NO_GALLERY_HINT`「没有画廊 ID：不会被自动审批规则处理，也无法参与去重；通过后无法识别重复作品。」，
+并提供 `candidate_flag_hint` / `candidate_flag_views`；候选/作品载荷新增 `has_gallery`、`warnings`、
+`warning_hint`。候选列表行与网格卡片在状态旁渲染警示徽章，「通过并下载」改 `ui.confirm` 二次确认，
+批量通过文案报出**本页**无 ID 条数；作品详情页同样渲染徽章与提示，行内通过改确认框；自动审批设置页
+提示写明无 ID 候选不被任何规则处理、试跑也不统计。
+
+**设计 C：一键去重。** 新增 `app/downloads/dedup.py`：`duplicate_gallery_groups()` 每条候选一行
+（candidate_id、ex_gid、status、Title、是否已有 CBZ 产物、page_count，`LEFT JOIN pack ON
+idempotency_key='convert:'||id`），`group_candidates()` 纯函数按 `(packaged, pages, -candidate_id)` 排序取
+赢家——已完成打包 > 页数多 > 最早入库，`removal_reason()` 给出去掉的三种理由。`apply_dedup()` 对每个
+落败者先 `_cancel_open_downloads`（跳过打包任务与终态任务）再 `purge_work(delete_files=True)`；打包中的
+任务由 worker 持有、没有取消接口，这种落败者记为 `skipped` 并带原因，其余非领域故障**直接抛**，不把
+「文件系统坏了」读成「12 件已移除」。Web：`GET /downloaded/dedup` 渲染 `dedup.html`（逐组列出保留项与
+移除项，确认才 POST），`POST /downloaded/dedup` 执行后 303 回 `/downloaded`；API 同址 GET（计划）/
+POST（执行，需 CSRF）。已下载页页头新增「一键去重」入口（链接，不是选中批处理 —— 重复组是候选，
+可能一条都不在这个列表里）。
+
+**测试（+23，1752 → 1775）**
+- `tests/unit/test_dedup.py`（新增 11）：8 条排序/分组纯函数（打包优先、页数多优先、最旧优先、
+  三键齐用、`None` 页数、单成员组不成组、payload 形状、理由文案）；3 条 `apply_dedup`（先取消在途再连文件
+  删除、打包中记 `skipped`、非领域故障重新抛出）。
+- `tests/integration/test_downloaded_web.py`（+5）：去重页按组列出保留/移除项；执行移除落败者与文件且
+  幂等；在途下载先取消再移除；该动作要会话与 CSRF；API 计划与 POST 与页面一致。
+- `tests/integration/test_database.py`（+3）：`candidate_id_for_gallery` 按 ID 不按 token、
+  `duplicate_gallery_groups` 只列共享 ID、`pending_candidate_ids(require_gallery=True)`。
+- `tests/integration/test_candidate_ingestion.py`（+1，另改写 1）：重发的同画廊消息被忽略（不建候选、
+  更新行 `IGNORE`/「该画廊已有候选」）；直连 `save_candidate_message` 的竞态路径也被裁决器忽略且不报外键错。
+- `tests/integration/test_auto_approval_workflow.py`（+1）：无画廊 ID 的候选 `matching_rule`/`preview`/`sweep`
+  全部不动它，补上 `ex_gid` 后立即能被规则命中。
+- `tests/integration/test_candidates_web.py`（+1）：人工通过无 ID 候选先弹确认框。
+- `tests/integration/test_work_detail_web.py`（+1）：无 ID 作品页标注「无画廊 ID」并提示不会被自动规则处理，
+  通过按钮是确认态。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q` → **1775 collected / 0 failed**。
+**文档同步**：本 R59 条目 + `PHASES.md` 一行与基线链 + `AGENTS.md` 基线/链；`README.md`「主要能力」
+新增「一个画廊一件候选」与「一键去重」两条；`docs/USAGE.md`「解析规则」「自动审批规则」「已下载内容」
+三节分别补闸门 / 无 ID 限制 / 一键去重；`AgentHelp/EHBot.md` §4.4 / §4.5 / §4.7 同步。
+环境变量与 `.env.example` 无变化（纯功能/界面变更），无数据库迁移。
+
+**镜像（R59 发布动作）**：`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest --push .`，
+index digest `sha256:b7b9bfc9120b71d310d0b51ba0eb482a65181ed6d88f552902289fc5005d4228`，
+amd64 manifest `sha256:f1240ce8bdb7918ab01d10e14d0684711e00f397c0c94afbae7bca783836ef5c`，
+config `sha256:a7ce92a35b56ade97efc2699c29c3038ea0eedc135c8a9cf14c776be89b62ae1`（替换掉 R58 的 index
+`sha256:c8044cb7…`）。**从 registry 复核而不是只信本地构建**：`docker buildx imagetools inspect` 与
+`docker pull` 取回同一 index digest。取回镜像冒烟（`--user 0:0`、`DATA_PATH=/tmp/…`、
+`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`）：`/healthz` 200 `{"status":"ok"}`、`/readyz` 200
+`{"status":"ready"}`、`GET /login` 的表单 action 指回 `/login`；`GET /downloaded/dedup` 303 → `/login`
+（字面路由没有被 `/downloaded/{candidate_id}` 类路由截走），`GET /api/v1/downloaded/dedup` 401
+`NOT_AUTHENTICATED`；库内 `schema_migrations` 仍 24 条（R59 无迁移），镜像内 `app.downloads.dedup`
+就位。本机 shell 与 docker 的端口映射不在同一网络命名空间，冒烟改在容器内执行；冒烟容器已停止并随
+`--rm` 清理。
+
+**版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`（代码与测试随之提交）。

@@ -902,6 +902,10 @@ canvas {
    line above it, so a long provider name cannot stretch the grid. */
 .ui-card-facts { color: var(--t-ink-muted); font-size: var(--font-small); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-card-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+/* Candidate quality flags (R59), beside the tags on a card and beside the
+   status badge in a row. Same wrapping as the tag list so a long flag set
+   grows the card instead of overflowing it. */
+.ui-card-flags { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
 
 .ui-tag {
   display: inline-block;

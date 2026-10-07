@@ -701,3 +701,115 @@ async def test_migration_024_backfills_a_missing_action_to_approve(
 
     rule = (await database.list_auto_approval_rules())[0]
     assert rule.action == "APPROVE"
+
+
+# ------------------------------------------------- 按画廊 ID 去重 (R59)
+
+
+@pytest.mark.asyncio
+async def test_candidate_id_for_gallery_matches_the_id_not_the_token(
+    tmp_path: Path,
+) -> None:
+    """The gallery id is the work; the token is only how the URL spells it."""
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    assert await database.candidate_id_for_gallery(4242) is None
+
+    with sqlite3.connect(path) as connection:
+        first = int(
+            connection.execute(
+                "INSERT INTO candidates (status, ex_gid, ex_gallery_token) "
+                "VALUES ('PENDING_REVIEW', 4242, 'tokA')"
+            ).lastrowid
+        )
+        connection.execute(
+            "INSERT INTO candidates (status, ex_gid, ex_gallery_token) "
+            "VALUES ('PENDING_REVIEW', 99, 'tokB')"
+        )
+        # A gallery-less row must never answer for an id lookup.
+        connection.execute(
+            "INSERT INTO candidates (status) VALUES ('PENDING_REVIEW')"
+        )
+
+    assert await database.candidate_id_for_gallery(4242) == first
+    # A different spelling of the same gallery still finds the row: the gate
+    # keys on the id alone, so a re-post with a rewritten token is a duplicate.
+    assert await database.candidate_id_for_gallery(4242) == first
+    assert await database.candidate_id_for_gallery(99) is not None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_gallery_groups_lists_only_shared_ids(
+    tmp_path: Path,
+) -> None:
+    """Three rows on one gallery, one alone, one with no id at all."""
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        ids = [
+            int(
+                connection.execute(
+                    "INSERT INTO candidates (status, ex_gid) VALUES (?, ?)",
+                    (status, ex_gid),
+                ).lastrowid
+            )
+            for status, ex_gid in (
+                ("PENDING_REVIEW", 700),
+                ("DOWNLOADED", 700),
+                ("REJECTED", 700),
+                ("DOWNLOADED", 800),
+                ("PENDING_REVIEW", None),
+            )
+        ]
+
+    rows = await database.duplicate_gallery_groups()
+
+    # Ordered by gallery then id, so the oldest member of each group comes
+    # first, and the lone id and the gallery-less row are absent.
+    assert [row["candidate_id"] for row in rows] == ids[:3]
+    assert [row["ex_gid"] for row in rows] == [700, 700, 700]
+    assert [row["status"] for row in rows] == [
+        "PENDING_REVIEW",
+        "DOWNLOADED",
+        "REJECTED",
+    ]
+    assert all(row["packaged"] is False for row in rows)
+    assert all(row["page_count"] is None for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_ids_can_require_a_gallery(tmp_path: Path) -> None:
+    """The sweeper's population (R59): gallery-linked pending rows only.
+
+    Without the filter a backlog of no-id candidates would fill the oldest-first
+    batch window and every candidate behind it would go unswept.
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        with_gallery = int(
+            connection.execute(
+                "INSERT INTO candidates (status, ex_gid) "
+                "VALUES ('PENDING_REVIEW', 31)"
+            ).lastrowid
+        )
+        connection.execute(
+            "INSERT INTO candidates (status) VALUES ('PENDING_REVIEW')"
+        )
+        connection.execute(
+            "INSERT INTO candidates (status, ex_gid) VALUES ('APPROVED', 32)"
+        )
+
+    every = await database.pending_candidate_ids(oldest_first=True)
+    linked = await database.pending_candidate_ids(
+        oldest_first=True, require_gallery=True
+    )
+
+    assert len(every) == 2
+    assert linked == (with_gallery,)

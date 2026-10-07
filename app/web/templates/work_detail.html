@@ -120,6 +120,17 @@
         {"label": "筛选结果", "value": work.filter_result, "note": work.filter_reason},
       ] %}
     {{ ui.kv(overview) }}
+      {#- The no-gallery restriction (R59): the same badge the candidate row
+          carries, beside the same sentence, so the two pages cannot disagree.
+          Rendered from the resolved views in the payload, never a raw test. -#}
+      {% if work.warnings %}
+      <div class="ui-card-flags">
+        {%- for flag in work.warnings %}{{ ui.badge(flag) }}{% endfor -%}
+      </div>
+      {% endif %}
+      {% if work.warning_hint %}
+      <p class="ui-hint">{{ work.warning_hint }}</p>
+      {% endif %}
       {% if work.preview_url %}
       <p class="ui-hint">预览页：{{ work.preview_url }}</p>
       {% endif %}
@@ -358,7 +369,15 @@
   <div class="ui-actionbar-actions">
     {% set base = "/candidates/" ~ work.candidate_id %}
     {% if work.actions.approve %}
-    {{ post_button(base ~ "/approve", "通过并下载", csrf_token, variant="primary") }}
+      {% if work.warning_hint %}
+      {{ ui.confirm("通过并下载", "这件作品没有画廊 ID",
+                    work.warning_hint ~ "确认仍然通过并下载？",
+                    confirm_label="仍然通过", action=base ~ "/approve",
+                    csrf_token=csrf_token, variant="primary", size="sm",
+                    swap=true) }}
+      {% else %}
+      {{ post_button(base ~ "/approve", "通过并下载", csrf_token, variant="primary") }}
+      {% endif %}
     {% endif %}
     {% if work.actions.needs_revision %}
     {{ post_button(base ~ "/needs-revision", "要求修订", csrf_token) }}

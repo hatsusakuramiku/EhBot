@@ -42,6 +42,8 @@ from app.api.status import (
     STAGE_CANDIDATE,
     STAGE_DOWNLOAD,
     attachment_kind_view,
+    candidate_flag_hint,
+    candidate_flag_views,
     is_live,
     work_stage_view,
 )
@@ -476,6 +478,13 @@ async def work_snapshot(
         "filter_reason": candidate.filter_reason,
         "ex_gid": candidate.ex_gid,
         "ex_gallery_token": candidate.ex_gallery_token,
+        # Same resolved facts the candidate list carries (R59): the detail page
+        # and the row must not disagree about「没有画廊 ID」.
+        "has_gallery": candidate.ex_gid is not None,
+        "warnings": [
+            view.to_payload() for view in candidate_flag_views(candidate)
+        ],
+        "warning_hint": candidate_flag_hint(candidate),
         "preview_url": candidate.preview_url,
         # `None` means gdata has not answered yet, which is a different thing
         # from a gallery genuinely having no torrent; the interface needs to

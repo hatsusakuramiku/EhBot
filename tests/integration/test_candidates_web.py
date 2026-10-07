@@ -107,6 +107,20 @@ async def seed_candidate(
     await CandidateIngestor(database).process_pending_updates()
 
 
+async def seed_candidate_with_gallery(database: Database) -> None:
+    """The photo fixture plus a gallery id.
+
+    Two R59 rules read the gallery id: a candidate without one is still created
+    (and still approvable by hand) but its approve button asks first, and no
+    automatic rule will decide it. Tests that are about the ordinary approve
+    path need the gallery-linked shape, which is also the only shape new
+    gallery posts have.
+    """
+    await seed_candidate(database)
+    candidate_id = (await database.list_candidates())[0].candidate_id
+    await database.set_candidate_eh_ref(candidate_id, 5150, "fixtureTok")
+
+
 async def seed_archive_candidate(
     database: Database,
     *,
@@ -674,7 +688,7 @@ def test_a_batch_rejection_asks_before_it_runs(tmp_path: Path) -> None:
     """
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
-    asyncio.run(seed_candidate(database))
+    asyncio.run(seed_candidate_with_gallery(database))
 
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
@@ -693,9 +707,32 @@ def test_a_batch_rejection_asks_before_it_runs(tmp_path: Path) -> None:
     assert 'name="action"' in reject
     assert 'value="reject"' in reject
 
-    # Approving is not gated: it is the action the queue exists for, and it is
-    # reversible from the 已通过 tab.
+    # Approving a gallery-linked candidate is not gated: it is the action the
+    # queue exists for, and it is reversible from the 已通过 tab.
     assert "/candidates/1/approve" in ungated_targets(body)
+
+
+def test_approving_a_candidate_without_a_gallery_id_asks_first(
+    tmp_path: Path,
+) -> None:
+    """R59: a no-id candidate is approvable, but never silently.
+
+    It cannot be deduplicated and no automatic rule will ever decide it, so the
+    one-click approve is replaced by a dialog that says so; the same sentence is
+    on the row as a badge.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        body = client.get("/candidates").text
+
+    assert "无画廊 ID" in body
+    assert "不会被自动审批规则处理" in body
+    assert "/candidates/1/approve" in gated_targets(body)
+    assert "/candidates/1/approve" not in ungated_targets(body)
 
 
 # ------------------------------------------------- the purge from the list

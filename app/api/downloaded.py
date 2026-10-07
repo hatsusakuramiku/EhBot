@@ -40,6 +40,7 @@ from app.db.database import (
     DOWNLOADED_SORT_ORDERS,
     sort_direction,
 )
+from app.downloads.dedup import apply_dedup, build_dedup_plan
 
 
 router = APIRouter(tags=["downloaded"])
@@ -396,6 +397,35 @@ async def downloaded_batch(request: Request) -> dict[str, Any]:
         _work_ids(payload.get("candidate_ids")),
         delete_files=bool(payload.get("delete_files")),
         repack=bool(payload.get("repack")),
+        operator_name=str(request.session.get("username") or "admin"),
+        announce=lambda candidate_id: request.app.state.event_bus.publish(
+            EVENT_DOWNLOAD, candidate_id=candidate_id
+        ),
+    )
+
+
+@router.get("/downloaded/dedup")
+async def downloaded_dedup_plan(request: Request) -> dict[str, Any]:
+    """The duplicate groups and the row each one would keep. No writes.
+
+    The GET is the preview the operator confirms; the POST below is the same
+    plan executed. Two verbs rather than a `dry_run` flag for the reason the
+    delete endpoints split the same way: a read that cannot write is one that
+    prefetchers and reloads cannot turn into a removal.
+    """
+    await deps.require_session(request)
+    return await build_dedup_plan(deps.database(request))
+
+
+@router.post("/downloaded/dedup")
+async def downloaded_dedup(request: Request) -> dict[str, Any]:
+    """Run the whole dedup pass: one winner per gallery, the rest removed."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    return await apply_dedup(
+        deps.database(request),
+        deps.archived_work_service(request),
+        deps.download_service(request),
         operator_name=str(request.session.get("username") or "admin"),
         announce=lambda candidate_id: request.app.state.event_bus.publish(
             EVENT_DOWNLOAD, candidate_id=candidate_id

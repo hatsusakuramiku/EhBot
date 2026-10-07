@@ -1414,3 +1414,28 @@ class TestPurgeFromThePage:
 
         assert f'action="/candidates/{candidate_id}/delete"' in page.text
         assert 'value="delete-files"' in page.text
+
+
+def test_a_work_without_a_gallery_id_says_so_and_asks_before_approving(
+    tmp_path: Path,
+) -> None:
+    """R59: the restriction is stated on the page, not only in the dialog.
+
+    A no-id work can still be approved by hand; what it cannot be is quietly
+    deduplicated or decided by a rule, so the overview carries the sentence and
+    the approve button is a confirm.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    assert page.status_code == 200
+    assert "无画廊 ID" in page.text
+    assert "不会被自动审批规则处理" in page.text
+    base = f"/candidates/{candidate_id}"
+    assert f"{base}/approve" in gated_targets(page.text)
+    assert f"{base}/approve" not in ungated_targets(page.text)

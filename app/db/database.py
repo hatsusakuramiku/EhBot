@@ -1728,9 +1728,30 @@ class Database:
                         (message.ex_gid, message.ex_gallery_token),
                     ).fetchone()
                     ex_candidate_id = int(row[0]) if row is not None else None
-                if candidate_id is None:
-                    candidate_id = ex_candidate_id
-                elif ex_candidate_id is not None and ex_candidate_id != candidate_id:
+                if candidate_id is None and ex_candidate_id is not None:
+                    # A message that carries a gallery id which already has a
+                    # candidate is a re-post of a work this deployment already
+                    # tracks. It is ignored rather than attached: one gallery is
+                    # one candidate (R59), and attaching would let a re-post
+                    # rewrite the metadata and review trail of a work that may
+                    # already be downloaded. `CandidateIngestor.admit_message`
+                    # reaches this decision first; this is the arbiter for the
+                    # two ingestion channels racing each other, and for the
+                    # direct `save_candidate_message` callers that bypass the
+                    # gate.
+                    connection.execute(
+                        "UPDATE telegram_bot_updates SET "
+                        "processed_at = CURRENT_TIMESTAMP, "
+                        "processing_result = ?, processing_reason = ? "
+                        "WHERE update_id = ?",
+                        ("IGNORE", "该画廊已有候选", update_id),
+                    )
+                    return False
+                if (
+                    candidate_id is not None
+                    and ex_candidate_id is not None
+                    and ex_candidate_id != candidate_id
+                ):
                     connection.execute(
                         "INSERT OR IGNORE INTO candidate_messages "
                         "(candidate_id, source_message_id) SELECT ?, "
@@ -3156,8 +3177,71 @@ class Database:
             metadata.setdefault(str(field_name), str(field_value))
         return metadata
 
+    async def candidate_id_for_gallery(self, ex_gid: int) -> int | None:
+        """The candidate that already owns this gallery id, if any.
+
+        Keyed on the id alone, not the `(id, token)` pair the table is unique
+        on: the token is part of the URL rather than part of the work's
+        identity, and a re-post that spells it differently still names the same
+        gallery. Used by the ingestion gate (R59) and by the dedup pass.
+        """
+        return await asyncio.to_thread(self._candidate_id_for_gallery_sync, ex_gid)
+
+    def _candidate_id_for_gallery_sync(self, ex_gid: int) -> int | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM candidates WHERE ex_gid = ? ORDER BY id LIMIT 1",
+                (int(ex_gid),),
+            ).fetchone()
+        return int(row[0]) if row is not None else None
+
+    async def duplicate_gallery_groups(self) -> list[dict]:
+        """Every candidate that shares a gallery id with at least one other.
+
+        One row per candidate, ordered by gallery then by id, so the caller can
+        group in one pass and the oldest member of each group is the first it
+        sees. Read for the 一键去重 pass (R59); the ranking (packed, pages,
+        oldest) is decided in `app.downloads.dedup`, not in SQL, because the
+        three keys are a policy the operator stated in words.
+        """
+        return await asyncio.to_thread(self._duplicate_gallery_groups_sync)
+
+    def _duplicate_gallery_groups_sync(self) -> list[dict]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT c.id, c.ex_gid, c.status, "
+                "(SELECT mv.field_value FROM metadata_values mv "
+                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
+                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+                "cbz.id IS NOT NULL, cbz.page_count "
+                "FROM candidates c "
+                "LEFT JOIN download_jobs pack "
+                "  ON pack.idempotency_key = 'convert:' || c.id "
+                "LEFT JOIN artifacts cbz "
+                "  ON cbz.job_id = pack.id AND cbz.artifact_type = 'CBZ' "
+                "WHERE c.ex_gid IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM candidates other "
+                "  WHERE other.ex_gid = c.ex_gid AND other.id != c.id) "
+                "ORDER BY c.ex_gid, c.id"
+            ).fetchall()
+        return [
+            {
+                "candidate_id": int(row[0]),
+                "ex_gid": int(row[1]),
+                "status": str(row[2]),
+                "title": str(row[3]) if row[3] is not None else None,
+                "packaged": bool(row[4]),
+                "page_count": int(row[5]) if row[5] is not None else None,
+            }
+            for row in rows
+        ]
+
     async def pending_candidate_ids(
-        self, limit: int = 100, *, oldest_first: bool = False
+        self,
+        limit: int = 100,
+        *,
+        oldest_first: bool = False,
+        require_gallery: bool = False,
     ) -> tuple[int, ...]:
         """Candidates awaiting review, newest first unless asked otherwise.
 
@@ -3168,18 +3252,29 @@ class Database:
         would simply never see the oldest book in a backlog. A trial run wants
         the opposite order, because what an operator is checking is the rule
         against what just arrived, so the caller says which it needs.
+
+        `require_gallery` is the same kind of necessity for the sweeper (R59):
+        automatic rules never decide a candidate without a gallery id, so an
+        unfiltered batch would let a backlog of them occupy the whole window
+        and starve every candidate behind it.
         """
         return await asyncio.to_thread(
-            self._pending_candidate_ids_sync, limit, oldest_first
+            self._pending_candidate_ids_sync, limit, oldest_first, require_gallery
         )
 
     def _pending_candidate_ids_sync(
-        self, limit: int, oldest_first: bool = False
+        self,
+        limit: int,
+        oldest_first: bool = False,
+        require_gallery: bool = False,
     ) -> tuple[int, ...]:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id FROM candidates WHERE status = 'PENDING_REVIEW' "
-                "ORDER BY id " + ("ASC" if oldest_first else "DESC") + " LIMIT ?",
+                + ("AND ex_gid IS NOT NULL " if require_gallery else "")
+                + "ORDER BY id "
+                + ("ASC" if oldest_first else "DESC")
+                + " LIMIT ?",
                 (limit,),
             ).fetchall()
         return tuple(int(row[0]) for row in rows)

@@ -447,8 +447,46 @@ PATH_ORIGIN_STATUS: dict[str, StatusView] = {
     PATH_ORIGIN_AI: _view(PATH_ORIGIN_AI, "AI 生成", TONE_ACTIVE),
 }
 
+#: Qualities of a candidate that are not its status (R59). One entry today:
+#: a candidate with no gallery id. It gets a vocabulary of its own rather than
+#: being written into the template because the row, the work detail page and
+#: the JSON payload all have to say the same thing about it.
+CANDIDATE_FLAG_STATUS: dict[str, StatusView] = {
+    "NO_GALLERY": _view("NO_GALLERY", "无画廊 ID", TONE_WAITING),
+}
+
+
+#: The sentence shown beside the label. It lives here rather than in a template
+#: because the candidate row, the work detail page and the JSON payload all show
+#: it, and two paraphrases of one restriction is how they stop matching.
+NO_GALLERY_HINT = (
+    "没有画廊 ID：不会被自动审批规则处理，也无法参与去重；"
+    "通过后无法识别重复作品。"
+)
+
+
+def candidate_flag_hint(candidate: Any) -> str | None:
+    """The explanation for the flags above, or None when there is nothing to say."""
+    if getattr(candidate, "ex_gid", None) is None:
+        return NO_GALLERY_HINT
+    return None
+
+
+def candidate_flag_views(candidate: Any) -> list[StatusView]:
+    """The flags to show for one candidate.
+
+    Takes the row rather than a boolean so the caller cannot pass the wrong
+    field order, and returns a list because the set is expected to grow.
+    """
+    flags: list[StatusView] = []
+    if getattr(candidate, "ex_gid", None) is None:
+        flags.append(CANDIDATE_FLAG_STATUS["NO_GALLERY"])
+    return flags
+
+
 _REGISTRIES: tuple[dict[str, StatusView], ...] = (
     CANDIDATE_STATUS,
+    CANDIDATE_FLAG_STATUS,
     DOWNLOAD_STATUS,
     CONVERSION_STATUS,
     PROVIDER_STATUS,
@@ -793,8 +831,12 @@ __all__ = [
     "AI_VERIFY_UNVERIFIED",
     "AI_VERIFY_VERIFIED",
     "ATTENTION_STATUS",
+    "CANDIDATE_FLAG_STATUS",
     "CANDIDATE_STATUS",
     "CANDIDATE_TAB_STATUS",
+    "NO_GALLERY_HINT",
+    "candidate_flag_hint",
+    "candidate_flag_views",
     "CONNECTION_STATUS",
     "CONVERSION_STATUS",
     "DEPENDENCY_MISSING",

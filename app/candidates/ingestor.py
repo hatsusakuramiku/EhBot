@@ -85,14 +85,30 @@ class CandidateIngestor:
     async def _gate(
         self, message: ParsedSourceMessage, rules: dict
     ) -> RuleDecision:
-        """The two pre-source gates: AI admission, then the parse scheme.
+        """The three pre-source gates: the gallery dedup, AI admission, then the
+        parse scheme.
 
-        The AI gate runs first (an operator decision recorded in the proposal):
+        The gallery gate runs first because it is one indexed read and it can
+        save everything behind it: a message that re-posts a gallery this
+        deployment already tracks must not spend a model call on admission or
+        reach the enrichment queue (R59). It is keyed on the gallery id alone --
+        the token is a spelling of the URL, not part of the work's identity --
+        and it deliberately does not apply to edits: an edit of a message that
+        already belongs to a candidate is an update of that work, not a new
+        arrival.
+
+        The AI gate runs next (an operator decision recorded in the proposal):
         it is the expensive, semantic judgement, and when the operator lets it
         override the parse scheme a message can be admitted on the model's word
         alone. With the override off, the two are an AND -- the model's `accept`
         still has to survive the structural rules.
         """
+        if message.ex_gid is not None and not message.is_edit:
+            existing = await self._database.candidate_id_for_gallery(
+                int(message.ex_gid)
+            )
+            if existing is not None:
+                return RuleDecision("IGNORE", "该画廊已有候选")
         if self._admission is not None:
             admission = await self._admission.decide(message)  # type: ignore[attr-defined]
             if admission.verdict == "reject":

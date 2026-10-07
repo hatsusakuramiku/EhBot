@@ -18,6 +18,8 @@ from app.downloads.models import (
     OPEN_DOWNLOAD_STATES,
 )
 from app.api.status import (
+    candidate_flag_hint,
+    candidate_flag_views,
     downloaded_pack_view,
     NOTE_SEEDING,
     actor_view,
@@ -90,6 +92,15 @@ def candidate_summary(item: Any) -> dict[str, Any]:
         "updated_at": item.updated_at,
         "ex_gid": item.ex_gid,
         "ex_gallery_token": item.ex_gallery_token,
+        # The quality flags (R59). A raw `ex_gid` of None is already in the
+        # payload, but a client would have to know that None means「this work
+        # cannot be deduplicated or auto-decided」; `has_gallery` states it and
+        # the resolved view and its sentence are the same ones the page renders.
+        "has_gallery": item.ex_gid is not None,
+        "warnings": [
+            view.to_payload() for view in candidate_flag_views(item)
+        ],
+        "warning_hint": candidate_flag_hint(item),
         "cover": _cover(getattr(item, "thumb_url", None)),
         # Which review actions this candidate can still take, decided here
         # rather than in the template: the grid, the list and a JSON client all

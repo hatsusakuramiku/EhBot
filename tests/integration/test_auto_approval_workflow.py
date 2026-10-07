@@ -1,8 +1,10 @@
 import asyncio
 from pathlib import Path
+import sqlite3
 
 from fastapi.testclient import TestClient
 
+from app.auto_approval.service import AutomaticApprovalService
 from app.auto_approval.sweeper import SWEEP_BATCH_SIZE, AutoApprovalSweeper
 from app.candidates.ingestor import CandidateIngestor
 from app.config import Settings
@@ -41,7 +43,10 @@ async def _seed_candidate(database: Database) -> int:
                 "message_id": 1,
                 "date": 1_700_000_000,
                 "chat": {"id": -100987, "title": "Automatic Approval"},
-                "caption": "Automatic Title",
+                # A gallery link, because automatic rules never decide a
+                # candidate without a gallery id (R59) -- the message would
+                # still become a candidate, but no rule would ever see it.
+                "caption": "Automatic Title\nhttps://exhentai.org/g/4242/fixtureTok/",
                 "document": {
                     "file_id": "archive",
                     "file_unique_id": "archive-unique",
@@ -52,7 +57,18 @@ async def _seed_candidate(database: Database) -> int:
         }]
     )
     await CandidateIngestor(database).process_pending_updates()
-    return (await database.list_candidates())[0].candidate_id
+    candidate_id = (await database.list_candidates())[0].candidate_id
+    # One EXHENTAI-sourced value, so the sweeper's enrichment step finds nothing
+    # to fetch. A gallery-linked pending candidate is exactly what the enricher
+    # looks for, and these tests must not depend on the network.
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            "INSERT INTO metadata_values (candidate_id, field_name, field_value,"
+            " value_source, confidence, is_manual) VALUES (?, 'Pages', '12',"
+            " 'EXHENTAI', 0.9, 0)",
+            (candidate_id,),
+        )
+    return candidate_id
 
 
 def _authenticate(client: TestClient, settings: Settings) -> None:
@@ -170,11 +186,17 @@ def test_one_unapprovable_candidate_does_not_stop_the_sweep() -> None:
 
     class FakeDatabase:
         async def pending_candidate_ids(
-            self, limit: int = 100, *, oldest_first: bool = False
+            self,
+            limit: int = 100,
+            *,
+            oldest_first: bool = False,
+            require_gallery: bool = False,
         ) -> tuple[int, ...]:
-            # The sweeper asks for oldest-first, so the fake has to accept it or
-            # this test would pass against a sweeper that stopped asking.
+            # The sweeper asks for oldest-first and for gallery-linked rows
+            # only; the fake has to accept both or this test would pass against
+            # a sweeper that stopped asking.
             assert oldest_first is True
+            assert require_gallery is True
             return (1, 2, 3)
 
     class FakeOrchestrator:
@@ -216,18 +238,28 @@ def test_the_sweep_reads_the_oldest_candidates_first(tmp_path: Path) -> None:
 
     def _add_pending(count: int) -> None:
         with database._connect() as connection:  # noqa: SLF001
-            for _ in range(count):
+            for index in range(count):
+                # Distinct gallery ids: the sweeper only reads gallery-linked
+                # rows (R59), so a row without one would never be examined and
+                # this test would be asserting on a population the sweeper does
+                # not use.
                 connection.execute(
-                    "INSERT INTO candidates (status, filter_result, filter_reason) "
-                    "VALUES ('PENDING_REVIEW', 'ACCEPT', '')"
+                    "INSERT INTO candidates "
+                    "(status, filter_result, filter_reason, ex_gid) "
+                    "VALUES ('PENDING_REVIEW', 'ACCEPT', '', ?)",
+                    (90_000 + index,),
                 )
 
     _add_pending(SWEEP_BATCH_SIZE + 5)
 
-    newest = asyncio.run(database.pending_candidate_ids(limit=SWEEP_BATCH_SIZE))
+    newest = asyncio.run(
+        database.pending_candidate_ids(
+            limit=SWEEP_BATCH_SIZE, require_gallery=True
+        )
+    )
     oldest = asyncio.run(
         database.pending_candidate_ids(
-            limit=SWEEP_BATCH_SIZE, oldest_first=True
+            limit=SWEEP_BATCH_SIZE, oldest_first=True, require_gallery=True
         )
     )
 
@@ -274,7 +306,11 @@ def test_the_sweep_fetches_metadata_before_it_judges_the_batch() -> None:
 
     class FakeDatabase:
         async def pending_candidate_ids(
-            self, limit: int = 100, *, oldest_first: bool = False
+            self,
+            limit: int = 100,
+            *,
+            oldest_first: bool = False,
+            require_gallery: bool = False,
         ) -> tuple[int, ...]:
             return (7, 8)
 
@@ -310,7 +346,11 @@ def test_an_unreachable_metadata_source_does_not_stop_the_sweep() -> None:
 
     class FakeDatabase:
         async def pending_candidate_ids(
-            self, limit: int = 100, *, oldest_first: bool = False
+            self,
+            limit: int = 100,
+            *,
+            oldest_first: bool = False,
+            require_gallery: bool = False,
         ) -> tuple[int, ...]:
             return (1, 2)
 
@@ -529,3 +569,84 @@ def test_a_disabled_reject_rule_never_fires(tmp_path: Path) -> None:
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
     assert detail.status == "PENDING_REVIEW"
+
+
+async def _seed_galleryless_candidate(database: Database) -> int:
+    """A photo-only candidate: a work with no gallery id.
+
+    Allowed as a candidate (R59 kept the relaxation), but no rule may decide it.
+    """
+    await database.initialize()
+    await permit_all_message_types(database)
+    await database.configure_telegram_source(
+        source_type="CHANNEL",
+        chat_id=-100986,
+        display_name="No Gallery",
+        enabled=True,
+        allowed_archive_formats=("zip",),
+        max_attachment_size_mb=0,
+    )
+    await database.save_telegram_updates(
+        [{
+            "update_id": 986,
+            "channel_post": {
+                "message_id": 2,
+                "date": 1_700_000_100,
+                "chat": {"id": -100986, "title": "No Gallery"},
+                "caption": "Automatic Title",
+                "photo": [
+                    {
+                        "file_id": "no-gallery-photo",
+                        "file_unique_id": "no-gallery-photo-unique",
+                        "width": 800,
+                        "height": 1200,
+                    }
+                ],
+            },
+        }]
+    )
+    await CandidateIngestor(database).process_pending_updates()
+    return (await database.list_candidates())[0].candidate_id
+
+
+def test_a_candidate_without_a_gallery_id_is_never_decided(tmp_path: Path) -> None:
+    """R59: automatic rules need an identity they can recognise again.
+
+    A work with no gallery id cannot be deduplicated, so a rule that decided it
+    would be unauditable -- the same book re-posted tomorrow is a new candidate.
+    It stays for a human, and it is excluded from the sweep's batch (or a
+    backlog of them would starve every candidate behind it) and from the trial
+    run. The last assertion shows the only thing that changed for the second
+    lookup is the gallery id: the metadata is identical.
+    """
+    settings = _settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(_seed_galleryless_candidate(database))
+    asyncio.run(
+        database.save_auto_approval_rule(
+            rule_id=None,
+            name="ByTitle",
+            enabled=True,
+            priority=5,
+            condition=_matching_condition(),
+            dsl_snapshot='{Title} = "Automatic Title"',
+        )
+    )
+    rule = asyncio.run(database.list_auto_approval_rules())[0]
+    service = AutomaticApprovalService(database)
+
+    assert asyncio.run(service.matching_rule(candidate_id)) is None
+    assert asyncio.run(service.preview(rule)) == ()
+
+    with TestClient(create_app(settings)) as client:
+        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 0
+
+    detail = asyncio.run(database.get_candidate(candidate_id))
+    assert detail is not None
+    assert detail.status == "PENDING_REVIEW"
+
+    asyncio.run(database.set_candidate_eh_ref(candidate_id, 31337, "tokZ"))
+    match = asyncio.run(service.matching_rule(candidate_id))
+    assert match is not None
+    assert match.rule.name == "ByTitle"
+    assert asyncio.run(service.preview(rule)) == (candidate_id,)

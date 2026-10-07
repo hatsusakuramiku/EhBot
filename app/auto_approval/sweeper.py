@@ -63,6 +63,11 @@ DISABLED_RECHECK_SECONDS = 60.0
 #: the top of it forever and everything older than the hundredth row is never
 #: evaluated at all. Oldest-first makes the ceiling a queue -- the candidate that
 #: has waited longest is the one examined next.
+#:
+#: The batch is gallery-linked only (R59). Automatic rules never decide a
+#: candidate without a gallery id, so letting those fill the window would make
+#: it exactly the never-moving kind this ordering exists to avoid: a hundred
+#: undecidable rows at the head and every candidate behind them invisible.
 SWEEP_BATCH_SIZE = 100
 
 
@@ -145,7 +150,7 @@ class AutoApprovalSweeper:
         rule matches, so this method does not need to know what a rule is.
         """
         candidate_ids = await self._database.pending_candidate_ids(
-            limit=SWEEP_BATCH_SIZE, oldest_first=True
+            limit=SWEEP_BATCH_SIZE, oldest_first=True, require_gallery=True
         )
         if not candidate_ids:
             return 0

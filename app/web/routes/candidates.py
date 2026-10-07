@@ -234,6 +234,12 @@ async def _render_candidates(
             # card and an API client describe a candidate identically -- the
             # cover URL included, which is a proxy path and never upstream.
             "candidates": [candidate_summary(item) for item in items],
+            # How many rows on this page cannot be deduplicated or decided by
+            # an automatic rule (R59). The batch approve dialog says the count
+            # out loud: approving one is allowed, doing it by accident is not.
+            "no_gallery_count": sum(
+                1 for item in items if item.ex_gid is None
+            ),
             "total": total,
             "page": page.page,
             "page_size": page.page_size,

@@ -35,6 +35,13 @@
   {{- [item.artist, item.category, item.language] | select | join(" · ") -}}
 {%- endmacro %}
 
+{%- macro candidate_flags(item) -%}
+  {#- The R59 quality flags: 「无画廊 ID」 rides beside the status in the row,
+      the grid card and anywhere else the candidate is named. Rendered from the
+      payload's resolved views, never from a raw `ex_gid` test here. -#}
+  {%- for flag in item.warnings %} {{ ui.badge(flag) }}{% endfor -%}
+{%- endmacro %}
+
 {% macro candidate_actions(item) -%}
   {#- `formaction` rather than a nested form: the row lives inside the batch
       form, and HTML has no way to nest another one. Quick approve therefore
@@ -43,8 +50,20 @@
       `tab` field in the form is what brings the operator back to this tab. -#}
   <div class="ui-row-actions">
     {% if item.actions.approve %}
+    {% if item.warning_hint %}
+    {#- A candidate with no gallery id can still be approved by hand -- it is
+        the operator's call -- but not without being told what it costs (R59).
+        The dialog carries the same sentence the badge shows, and `form=` is
+        how a teleported dialog reconnects to the row's batch form. -#}
+    {{ ui.confirm("通过并下载", "这件候选没有画廊 ID",
+                  item.warning_hint ~ "确认仍然通过并下载？",
+                  confirm_label="仍然通过", form="candidate-batch",
+                  formaction="/candidates/" ~ item.candidate_id ~ "/approve",
+                  variant="primary", size="sm", key=item.candidate_id|string) }}
+    {% else %}
     <button class="ui-btn" data-size="sm" type="submit" data-quick-approve
             formaction="/candidates/{{ item.candidate_id }}/approve">通过并下载</button>
+    {% endif %}
     {% endif %}
     {#- Hidden until `candidates.js` runs: the drawer is the one control here
         that cannot work without it, and a dead button is worse than none. -#}
@@ -69,7 +88,7 @@
       {%- set meta = candidate_meta(item) -%}
       {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
     </td>
-    <td data-label="状态">{{ ui.badge(item.status) }}</td>
+    <td data-label="状态">{{ ui.badge(item.status) }}{{ candidate_flags(item) }}</td>
     <td data-label="标签">
       {% if item.tags %}
       <div class="ui-card-tags">
@@ -207,6 +226,7 @@
                 selectable=bulk_selectable,
                 value=item.candidate_id) %}
             {{ candidate_actions(item) }}
+            {% if item.warnings %}<div class="ui-card-flags">{{ candidate_flags(item) }}</div>{% endif %}
           {% endcall %}
         </div>
         {% endfor %}
@@ -217,8 +237,18 @@
       <div x-show="selected > 0" x-cloak>
         {% call ui.bulk_toolbar(0, total=total, noun="条候选", count_binding="selected") %}
           {% if batch_enabled %}
+          {% if no_gallery_count %}
+          {#- The count is the whole page's, not the selection's -- the server
+              has the rows, the dialog cannot look at checkboxes -- which is
+              why it is described as 「本页」 rather than 「选中」 (R59). -#}
+          {{ ui.confirm("批量通过并下载", "通过选中的候选",
+                        "本页有 " ~ no_gallery_count ~ " 件候选没有画廊 ID：它们不会被自动审批规则处理，也无法参与去重。通过后仍可手动删除，确认继续？",
+                        confirm_label="确认通过", form="candidate-batch",
+                        field="action", value="approve", variant="primary", size="sm") }}
+          {% else %}
           <button class="ui-btn" data-variant="primary" data-size="sm" type="submit"
                   name="action" value="approve">批量通过并下载</button>
+          {% endif %}
           {#- 驳回 moves a whole page of works at once, so it gets a second
               step like the 彻底删除 dialogs below. Its button carries
               `form="candidate-batch"`

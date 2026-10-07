@@ -37,6 +37,7 @@ from app.api.downloaded import (
 )
 from app.api.events import EVENT_DOWNLOAD
 from app.api.status import downloaded_tab_view
+from app.downloads.dedup import apply_dedup, build_dedup_plan
 from app.db.database import (
     DOWNLOADED_PACK_FILTERS,
     DOWNLOADED_SORT_ORDERS,
@@ -299,6 +300,60 @@ def _summarise(result: dict) -> tuple[str | None, str | None]:
     return (
         f"{applied} 件已执行，{len(skipped)} 件跳过：{skipped[0]['message']}",
         None,
+    )
+
+
+#: The dedup routes, declared above the typed `/downloaded/{candidate_id}/...`
+#: pair for the reason the module docstring gives: a literal path must never be
+#: answered by an action route that would read it as an id.
+@router.get("/downloaded/dedup")
+async def downloaded_dedup_preview(request: Request):
+    """The dedup plan as a page the operator reads before anything moves.
+
+    A GET that writes nothing, so a reload or a prefetch can never remove a
+    book; the removal is the POST below, from a real form with a CSRF token.
+    """
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    plan = await build_dedup_plan(deps.database(request))
+    return deps.templates(request).TemplateResponse(
+        request=request,
+        name="dedup.html",
+        context={
+            **plan,
+            "csrf_token": request.session["csrf_token"],
+            "layout": deps.page_layout(request),
+        },
+    )
+
+
+@router.post("/downloaded/dedup")
+async def downloaded_dedup_run(
+    request: Request,
+    csrf_token: str = Form(),
+):
+    """Execute the plan: one winner per gallery, everything else removed."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    result = await apply_dedup(
+        deps.database(request),
+        deps.archived_work_service(request),
+        deps.download_service(request),
+        operator_name=str(request.session.get("username") or "admin"),
+        announce=lambda candidate_id: request.app.state.event_bus.publish(
+            EVENT_DOWNLOAD, candidate_id=candidate_id
+        ),
+    )
+    removed = len(result["removed"])
+    skipped = result["skipped"]
+    if not skipped:
+        return _redirect("all", notice=f"去重完成：移除 {removed} 件重复作品")
+    return _redirect(
+        "all",
+        error=f"已移除 {removed} 件，{len(skipped)} 件跳过：{skipped[0]['message']}",
     )
 
 

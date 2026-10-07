@@ -23,11 +23,13 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db.database import Database
+from app.api.deps import CSRF_HEADER
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_FAILED,
     CONVERSION_STATE_WAITING_PASSWORD,
     DOWNLOAD_STATE_COMPLETED,
+    DOWNLOAD_STATE_PENDING,
     PROVIDER_CONVERSION,
     PROVIDER_EXHENTAI,
     PROVIDER_TELEGRAM,
@@ -108,11 +110,14 @@ class Library:
         packaged: bool = False,
         pack_error: str | None = None,
         cbz_relative: str = None,
+        ex_gid: int | None = None,
+        download_state: str = DOWNLOAD_STATE_COMPLETED,
     ) -> int:
         with self.database._connect() as connection:  # noqa: SLF001
             candidate_id = int(
                 connection.execute(
-                    "INSERT INTO candidates (status) VALUES ('DOWNLOADED')"
+                    "INSERT INTO candidates (status, ex_gid) VALUES ('DOWNLOADED', ?)",
+                    (ex_gid,),
                 ).lastrowid
             )
             connection.execute(
@@ -130,7 +135,7 @@ class Library:
                         candidate_id,
                         f"downloaded:{next(_KEYS)}",
                         provider,
-                        DOWNLOAD_STATE_COMPLETED,
+                        download_state,
                     ),
                 ).lastrowid
             )
@@ -850,7 +855,7 @@ def test_the_page_tells_its_script_whether_to_poll(tmp_path: Path) -> None:
 def test_every_action_needs_a_session_and_a_token(tmp_path: Path) -> None:
     settings, library, ids = seeded(tmp_path)
     with TestClient(create_app(settings)) as anonymous:
-        for path in DOWNLOADED_TABS:
+        for path in DOWNLOADED_TABS + ("/downloaded/dedup",):
             response = anonymous.get(path, follow_redirects=False)
             assert response.status_code == 303
             assert response.headers["location"] == "/login"
@@ -1176,3 +1181,161 @@ def test_the_sort_direction_flips_the_list_and_is_visible_on_the_page(
     assert marks[
         next(href for href in marks if "dir=asc" in href)
     ] is False
+
+
+# ------------------------------------------------------------- 一键去重 (R59)
+
+
+def _duplicate_pair(
+    library: Library,
+    *,
+    gid: int = 77001,
+    loser_kwargs: dict | None = None,
+) -> tuple[int, int]:
+    """One gallery id, two works: the packed one and the unpacked one."""
+    keeper = library.add(
+        title="重复作品·已打包",
+        pack_state=CONVERSION_STATE_COMPLETED,
+        packaged=True,
+        ex_gid=gid,
+    )
+    loser = library.add(
+        title="重复作品·未打包", ex_gid=gid, **(loser_kwargs or {})
+    )
+    return keeper, loser
+
+
+def test_the_dedup_page_lists_the_groups_and_what_each_would_keep(
+    tmp_path: Path,
+) -> None:
+    """The preview is the point: the ranking deletes books, so it is read first."""
+    settings, library, _ = seeded(tmp_path)
+    keeper, loser = _duplicate_pair(library)
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded/dedup")
+        listed = client.get("/downloaded")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert page.status_code == 200
+    assert f"画廊 #77001" in page.text
+    # Both rows are named, and the removal carries the rule it lost on.
+    assert f'data-candidate-id="{keeper}"' in page.text
+    assert f'data-candidate-id="{loser}"' in page.text
+    assert "保留" in page.text
+    assert "未完成下载或打包" in page.text
+    # The page is reachable from the tab it belongs to, on every tab and even
+    # for a library with nothing duplicated.
+    assert "/downloaded/dedup" in listed.text
+
+
+def test_dedup_removes_the_loser_with_its_files_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    settings, library, _ = seeded(tmp_path)
+    keeper, loser = _duplicate_pair(library)
+    keeper_file = Path(library.cbz_path(keeper))
+    loser_archive = settings.work_path / f"source-{loser}.zip"
+    assert loser_archive.exists()
+
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded/dedup")
+        response = client.post(
+            "/downloaded/dedup",
+            data={"csrf_token": page.context["csrf_token"]},
+            follow_redirects=False,
+        )
+        # A second pass has no group left to act on.
+        again = client.get("/downloaded/dedup")
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/downloaded?notice=")
+    assert keeper_file.exists()
+    assert not loser_archive.exists()
+    # The loser is recorded as a removal with its files, the same audit any
+    # other 彻底删除 writes.
+    assert library.removals() == [(loser, 1)]
+    assert "没有发现重复作品" in again.text
+
+
+def test_dedup_cancels_an_in_flight_download_before_removing(tmp_path: Path) -> None:
+    """One click, no manual cancel (R59): the open job must not block the purge.
+
+    Without the cancel, `purge_work` refuses an open download and the loser
+    would be reported as skipped -- exactly the extra step the operator asked
+    not to have.
+    """
+    settings, library, _ = seeded(tmp_path)
+    keeper, loser = _duplicate_pair(
+        library, loser_kwargs={"download_state": DOWNLOAD_STATE_PENDING}
+    )
+
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded/dedup")
+        response = client.post(
+            "/downloaded/dedup",
+            data={"csrf_token": page.context["csrf_token"]},
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert response.status_code == 303
+    assert "error=" not in response.headers["location"]
+    assert library.removals() == [(loser, 1)]
+    assert library.job_states(loser) == []
+
+
+def test_the_dedup_action_needs_a_session_and_a_token(tmp_path: Path) -> None:
+    settings, library, _ = seeded(tmp_path)
+    _duplicate_pair(library)
+
+    with TestClient(create_app(settings)) as anonymous:
+        assert anonymous.get("/api/v1/downloaded/dedup").status_code == 401
+
+    client = logged_in(settings)
+    try:
+        forged = client.post(
+            "/downloaded/dedup",
+            data={"csrf_token": "wrong"},
+            follow_redirects=False,
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+    assert forged.status_code == 403
+    assert library.removals() == []
+
+
+def test_the_dedup_plan_is_available_over_the_api_and_matches_the_page(
+    tmp_path: Path,
+) -> None:
+    settings, library, _ = seeded(tmp_path)
+    keeper, loser = _duplicate_pair(library, gid=88002)
+
+    client = logged_in(settings)
+    try:
+        token = client.get("/").context["csrf_token"]
+        payload = client.get("/api/v1/downloaded/dedup").json()
+        executed = client.post(
+            "/api/v1/downloaded/dedup",
+            headers={CSRF_HEADER: token},
+        ).json()
+    finally:
+        client.__exit__(None, None, None)
+
+    assert payload["group_count"] == 1
+    assert payload["removable"] == 1
+    group = payload["groups"][0]
+    assert group["ex_gid"] == 88002
+    assert group["keep"]["candidate_id"] == keeper
+    assert [entry["candidate_id"] for entry in group["remove"]] == [loser]
+    assert executed["groups"] == 1
+    assert executed["kept"] == [keeper]
+    assert [entry["candidate_id"] for entry in executed["removed"]] == [loser]
+    assert executed["skipped"] == []
