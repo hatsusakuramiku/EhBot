@@ -94,6 +94,7 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 ## 三、当前状态
 
 - 最新阶段：**R59**（按画廊 ID 去重：摄取闸门、无 ID 候选的审核限制、一键去重；全量 1752 → 1775，无数据库迁移）。
+- R60 让手动添加沿用同一条不变量：同画廊 ID（按 ID 单列、不看 token）或同 infohash 的第二次粘贴返回 409 并提示「查看已有候选 #N」（不再 500），磁链也开始判重；自动通过与自动驳回的条目下读出审计里早已存好的「匹配详情」（条件命中与否 + 判定时读到的值），详情页/列表行标明判定来自自动规则 / 人工 / 来源元数据规则；准入侧从 `telegra.ph/ehentai-<gid>-<token>-MM-DD` 这类预览 slug 里解析出画廊 ID（不用 AI），纯预览消息因此进入去重与自动规则。设计记录 `MANUAL_ADD_AND_MATCHING_PROPOSAL.md`，详见 `progress.md:R60`。
 - R59 让「一个画廊一件候选」成为硬规则：摄取的 `_gate` 在 AI 准入前查同 ID 候选，命中即忽略（不建/不并入/不刮削，编辑消息除外），并发通道由 `save_candidate_message` 再裁决一次；放宽解析规则产生的无 ID 候选仍可存在、可人工通过，但自动通过与自动驳回都跳过它（`pending_candidate_ids(require_gallery=True)` + `matching_rule` 早退，防窗口饿死），候选行/详情页标注「无画廊 ID」；已下载页新增「一键去重」，按「已打包 > 页数多 > 最旧」每组保留一件，其余连同文件删除、在途下载自动取消、打包中的跳过。设计记录 `CANDIDATE_DEDUPLICATION_PROPOSAL.md`，详见 `progress.md:R59`。
 - R58 给 `auto_approval_rules` 加 `action`（迁移 `024`，默认 `APPROVE` 回填既有规则）：命中「自动驳回」规则即置为已驳回（记 `filter_reason` 与 `AUTO_REJECT` 审计，可「重新排队」恢复），命中「自动通过」照旧入队；两类规则共用同一规则池与 `(priority, id)` 顺序，`apply_automatic_approval` 因此改名 `apply_automatic_decision`。设计记录 `AUTO_RULE_ACTIONS_PROPOSAL.md`，详见 `progress.md:R58`。
 - R57 只改 API 侧同名处理函数的名字（`api_login`/`api_logout`/`api_batch_review`），页面侧 `login`/`logout`/`batch_review` 不变，URL 与模板一字未动；回归前 `url_for('login')` 指向 `/api/v1/auth/login`，网页登录因此报 `BODY_INVALID`。设计记录 `LOGIN_ROUTE_COLLISION_PROPOSAL.md`，详见 `progress.md:R57`。

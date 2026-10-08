@@ -813,3 +813,65 @@ async def test_pending_candidate_ids_can_require_a_gallery(tmp_path: Path) -> No
 
     assert len(every) == 2
     assert linked == (with_gallery,)
+
+
+@pytest.mark.asyncio
+async def test_manual_add_rejects_a_duplicate_gallery_id(tmp_path: Path) -> None:
+    from app.db.database import DuplicateGalleryCandidate
+
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    first = await database.create_manual_candidate(
+        filter_reason="x", ex_gid=4242, ex_gallery_token="aaaa", title=None
+    )
+    # A different token is a different spelling of the same URL, not a
+    # different work: the judgement is on the id alone (R59/R60).
+    with pytest.raises(DuplicateGalleryCandidate) as caught:
+        await database.create_manual_candidate(
+            filter_reason="x", ex_gid=4242, ex_gallery_token="bbbb", title=None
+        )
+    assert caught.value.existing_candidate_id == first
+    assert "该画廊已有候选" in str(caught.value)
+    with sqlite3.connect(tmp_path / "ehbot.db") as connection:
+        rows = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    assert rows == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_add_rejects_a_duplicate_infohash_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    from app.db.database import DuplicateTorrentCandidate
+
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    first = await database.create_manual_candidate(
+        filter_reason="x",
+        magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
+        torrent_hash="aabbccddeeff00112233445566778899aabbccdd",
+        title=None,
+    )
+    with pytest.raises(DuplicateTorrentCandidate) as caught:
+        await database.create_manual_candidate(
+            filter_reason="x",
+            magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
+            torrent_hash="AABBCCDDEEFF00112233445566778899AABBCCDD",
+            title=None,
+        )
+    assert caught.value.existing_candidate_id == first
+    assert "该磁力链接已有候选" in str(caught.value)
+
+    # The gate reads the table, not a cache: remove the first row and the same
+    # infohash may be added again.
+    with sqlite3.connect(tmp_path / "ehbot.db") as connection:
+        connection.execute("DELETE FROM candidates WHERE id = ?", (first,))
+    # Inserting the same infohash again must simply succeed now.
+    await database.create_manual_candidate(
+        filter_reason="x",
+        magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
+        torrent_hash="aabbccddeeff00112233445566778899aabbccdd",
+        title=None,
+    )
+    with sqlite3.connect(tmp_path / "ehbot.db") as connection:
+        rows = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    assert rows == 1

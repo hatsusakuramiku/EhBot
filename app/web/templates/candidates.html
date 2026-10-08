@@ -88,7 +88,12 @@
       {%- set meta = candidate_meta(item) -%}
       {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
     </td>
-    <td data-label="状态">{{ ui.badge(item.status) }}{{ candidate_flags(item) }}</td>
+    <td data-label="状态">
+      {{ ui.badge(item.status) }}{{ candidate_flags(item) }}
+      {#- Only rows where it explains something carry this; a line on every
+          row would be noise. -#}
+      {% if item.filter_note %}<span class="ui-table-secondary" data-field="filter-reason">{{ item.filter_note }}</span>{% endif %}
+    </td>
     <td data-label="标签">
       {% if item.tags %}
       <div class="ui-card-tags">

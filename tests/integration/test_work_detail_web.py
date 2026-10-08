@@ -1439,3 +1439,92 @@ def test_a_work_without_a_gallery_id_says_so_and_asks_before_approving(
     base = f"/candidates/{candidate_id}"
     assert f"{base}/approve" in gated_targets(page.text)
     assert f"{base}/approve" not in ungated_targets(page.text)
+
+
+def test_an_automatic_rejection_shows_what_the_rule_matched(
+    tmp_path: Path,
+) -> None:
+    """R60: a rejection has to be readable back, not just announced.
+
+    The audit row already stored the per-condition verdicts and the metadata the
+    rule read; this pins that the detail page renders them instead of leaving
+    「命中规则「X」」 as the whole explanation.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="REJECTED"))
+    asyncio.run(
+        database.record_review_action(
+            candidate_id,
+            "AUTO_REJECT",
+            AUTO_OPERATOR,
+            {
+                "rule_id": 3,
+                "rule_name": "拒 cosplay",
+                "rule_version": 2,
+                "dsl_snapshot": '{Category} LIKE "%cosplay%"',
+                "condition": {"kind": "group"},
+                "conditions": [
+                    {
+                        "dsl": '{Category} LIKE "%cosplay%"',
+                        "field": "Category",
+                        "operator": "LIKE",
+                        "matched": False,
+                    },
+                    {
+                        "dsl": '{TAG} EXISTS("NTR")',
+                        "field": "TAG",
+                        "operator": "EXISTS",
+                        "matched": True,
+                    },
+                ],
+                "metadata": {"Category": "Manga", "Tags": "netorare"},
+                "download_job_ids": [],
+            },
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    assert page.status_code == 200
+    assert "匹配详情" in page.text
+    assert "TAG} EXISTS" in page.text
+    assert "NTR" in page.text
+    assert "判定时读到的值" in page.text
+    assert "Category = Manga" in page.text
+
+
+def test_a_metadata_rule_rejection_names_its_source(tmp_path: Path) -> None:
+    """R60: the third rejection path is labelled for what it is.
+
+    A source's own metadata rules can reject during enrichment. Read from the
+    audit trail, the origin has to say 「来源元数据规则」 rather than being folded
+    in with an automatic approval rule.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database, status="REJECTED"))
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "UPDATE candidates SET filter_result = 'IGNORE', "
+            "filter_reason = ? WHERE id = ?",
+            ("包含禁用 Tag NTR", candidate_id),
+        )
+    asyncio.run(
+        database.record_review_action(
+            candidate_id,
+            "METADATA_RULE",
+            "system",
+            {"result": "IGNORE", "reason": "包含禁用 Tag NTR", "source_id": 1},
+        )
+    )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}")
+
+    assert page.status_code == 200
+    assert "来源元数据规则" in page.text
+    assert "包含禁用 Tag NTR" in page.text

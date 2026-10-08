@@ -870,3 +870,42 @@ def test_the_sort_direction_reverses_the_candidate_list(tmp_path: Path) -> None:
 
     assert ids(ascending) == [first, second]
     assert ids(descending) == [second, first]
+
+
+def test_a_rejected_row_says_why_and_an_accepted_one_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    """R60: the filter reason rides on the row, but only where it explains.
+
+    A line that appeared on every accepted row would be noise -- every one
+    carries 「包含 …链接」 -- so the note is withheld unless the row is rejected,
+    needs info, or the filter result itself is not a plain accept.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+    candidate_id = asyncio.run(database.list_candidates())[0].candidate_id
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            "UPDATE candidates SET status = 'REJECTED', filter_result = 'IGNORE',"
+            " filter_reason = ? WHERE id = ?",
+            ("命中规则「拒 NTR」", candidate_id),
+        )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        rejected = client.get("/candidates/rejected", params={"view": "list"})
+        assert rejected.status_code == 200
+        assert "命中规则" in rejected.text
+
+        # The same fixture left pending is an ordinary accept, so its row has no
+        # note even though the reason string exists in the database.
+        with sqlite3.connect(database.path) as connection:
+            connection.execute(
+                "UPDATE candidates SET status = 'PENDING_REVIEW', "
+                "filter_result = 'ACCEPT', filter_reason = ? WHERE id = ?",
+                ("包含图片预览", candidate_id),
+            )
+        pending = client.get("/candidates", params={"view": "list"})
+        assert pending.status_code == 200
+        assert "包含图片预览" not in pending.text

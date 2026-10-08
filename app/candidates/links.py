@@ -37,6 +37,18 @@ _BARE_URL_PATTERN = re.compile(
 # Telegraph publishes on both domains; graph.org is the shorter alias.
 PREVIEW_HOSTS = frozenset({"telegra.ph", "graph.org"})
 
+# A Telegraph page that previews an EH gallery is named
+# `ehentai-<gid>-<token>-<MM-DD>`, so the identity is already in the URL when
+# the message carries no EH link of its own (R60). The trailing date -- and the
+# optional `-N` a busy day appends -- belongs to the page, not the gallery; the
+# id/token pair is exactly the two segments of an EH gallery path. The id must
+# be all digits: `C108-…` and `diletta-…` are real-person titles and must not
+# be read as a gallery.
+PREVIEW_GALLERY_PATTERN = re.compile(
+    r"^/ehentai-(\d+)-([A-Za-z0-9]{4,})-\d{2}-\d{2}(?:-\d+)?/?$",
+    flags=re.IGNORECASE,
+)
+
 
 def entity_urls(message: dict) -> tuple[str, ...]:
     """Collect the targets of every ``text_link`` entity in a message.
@@ -122,6 +134,33 @@ def find_gallery_ref(
     return int(match.group(1)), match.group(2)
 
 
+def find_preview_gallery_ref(
+    urls: tuple[str, ...],
+) -> tuple[int, str] | None:
+    """Read a gallery reference out of a Telegraph preview page's slug.
+
+    The fallback for a message that previews a gallery without linking to it
+    (R60): `https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06` names gallery
+    4137423 with token 9ce70ddc26. Deliberately narrow -- a known preview host,
+    that one slug shape, a numeric id -- because the failure mode of a wrong
+    match is a candidate that fetches nothing, and an unrelated page must not
+    become one. `find_gallery_ref` stays strict; this is a separate, explicitly
+    named source so a caller can tell the two apart.
+    """
+    for url in urls:
+        try:
+            parts = urlsplit(url.strip())
+        except ValueError:
+            continue
+        host = (parts.hostname or "").lower().removeprefix("www.")
+        if host not in PREVIEW_HOSTS:
+            continue
+        match = PREVIEW_GALLERY_PATTERN.match(parts.path)
+        if match is not None:
+            return int(match.group(1)), match.group(2)
+    return None
+
+
 def find_magnet_ref(text: str) -> tuple[str, str] | None:
     """Return ``(btih, magnet_url)`` when ``text`` names a magnet link, else None.
 
@@ -138,10 +177,12 @@ def find_magnet_ref(text: str) -> tuple[str, str] | None:
 __all__ = [
     "GALLERY_URL_PATTERN",
     "MAGNET_PATTERN",
+    "PREVIEW_GALLERY_PATTERN",
     "PREVIEW_HOSTS",
     "entity_urls",
     "find_gallery_ref",
     "find_magnet_ref",
+    "find_preview_gallery_ref",
     "message_urls",
     "normalize_preview_url",
     "preview_urls",

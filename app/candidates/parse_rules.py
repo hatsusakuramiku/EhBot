@@ -196,6 +196,11 @@ def message_qualifies(
     which is what 「只解析含 Eh 链接的消息」 means.
     """
     if message.ex_gid is not None:
+        # The parser knows whether the id came from an explicit link or from a
+        # preview page's slug (R60); the wording says which, so an operator can
+        # tell why a message with no EH URL of its own became a candidate.
+        if message.gallery_from_preview:
+            return True, "由预览页链接识别 ExHentai 画廊"
         return True, "包含 ExHentai 画廊链接"
     if rules.get("require_gallery_link", True):
         return False, "解析规则要求消息包含 ExHentai 画廊链接"

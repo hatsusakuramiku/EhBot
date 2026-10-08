@@ -13,3 +13,4 @@ __pycache__/
 /secrets/
 .codegraph/
 /TG*
+/AgentHelp/reference_messages/

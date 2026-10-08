@@ -112,12 +112,19 @@
       {#- `torrent_count` of `None` means gdata has not answered yet, which is a
           different thing from a gallery with no torrent, so the two read
           differently rather than both showing「0」. -#}
+      {#- 「为什么」 with the path that produced it when there is one (R60):
+          「命中规则「X」」 alone does not say whether an automatic rule, a
+          person or the source's own metadata rules decided. -#}
+      {% set filter_note = work.filter_reason %}
+      {% if work.filter_origin %}
+      {% set filter_note = work.filter_origin ~ "：" ~ (work.filter_reason or "") %}
+      {% endif %}
       {% set overview = [
         {"label": "阶段", "value": work.stage.label},
         {"label": "状态", "value": work.status.label},
         {"label": "画廊", "value": work.ex_gid},
         {"label": "种子", "value": work.torrent_count, "note": "尚未查询" if work.torrent_count is none else none},
-        {"label": "筛选结果", "value": work.filter_result, "note": work.filter_reason},
+        {"label": "筛选结果", "value": work.filter_result, "note": filter_note},
       ] %}
     {{ ui.kv(overview) }}
       {#- The no-gallery restriction (R59): the same badge the candidate row
@@ -348,8 +355,34 @@
             {% endif %}
           {% endcall %}
         {% else %}
-          {{ ui.timeline_node(node.at, node.action.label, actor=node.actor,
-                              actor_name=node.operator_name, reason=node.reason) }}
+          {% call ui.timeline_node(node.at, node.action.label, actor=node.actor,
+                                   actor_name=node.operator_name, reason=node.reason) %}
+            {% if node.details.conditions %}
+            {#- The rule's own explanation, stored when it decided (R60): which
+                conditions fired and, below, the metadata values it read. A
+                rejection that cannot be read back looks random. -#}
+            <details class="ui-match">
+              <summary>匹配详情</summary>
+              <ul class="ui-match-list">
+                {% for condition in node.details.conditions %}
+                <li class="ui-match-item" {% if condition.matched %}data-matched="true"{% endif %}>
+                  <span class="ui-match-mark" aria-hidden="true">{{ "✓" if condition.matched else "✗" }}</span>
+                  <code class="ui-code-inline">{{ condition.dsl }}</code>
+                  <span class="ui-match-verdict">{{ "命中" if condition.matched else "未命中" }}</span>
+                </li>
+                {% endfor %}
+              </ul>
+              {% if node.details.metadata %}
+              <p class="ui-match-meta-label">判定时读到的值</p>
+              <div class="ui-match-meta">
+                {% for field, value in node.details.metadata | dictsort %}
+                <span class="ui-match-value" title="{{ value }}">{{ field }} = {{ value }}</span>
+                {% endfor %}
+              </div>
+              {% endif %}
+            </details>
+            {% endif %}
+          {% endcall %}
         {% endif %}
         {% endfor %}
       {% endcall %}

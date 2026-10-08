@@ -23,11 +23,20 @@
   <div>
     <span class="ui-eyebrow">下载</span>
     <h1 class="ui-title">手动添加任务</h1>
-    <p class="ui-subtitle">粘贴 ExHentai 画廊链接或磁力链接，自动解析元数据并加入下载队列；手动添加视为已审批。</p>
+    <p class="ui-subtitle">粘贴 ExHentai 画廊链接、预览链接或磁力链接，自动解析元数据并加入下载队列；手动添加视为已审批，重复链接会被指出。</p>
   </div>
 </div>
 
 {% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
+{#- A duplicate is not an error to fix, it is a work that already exists, so
+    the row offers the one useful move: open it. A plain link, not a
+    redirect, because the paste doing nothing is exactly what the operator
+    needs to see. -#}
+{% if existing_candidate_id %}
+<p class="ui-hint">
+  <a class="ui-btn" data-size="sm" href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">查看已有候选 #{{ existing_candidate_id }}</a>
+</p>
+{% endif %}
 
 <section class="ui-section" aria-labelledby="manual-add-heading">
   <h2 class="ui-section-title" id="manual-add-heading">添加任务</h2>
@@ -44,6 +53,7 @@
                   placeholder="https://exhentai.org/g/... 或 magnet:?xt=urn:btih:..."></textarea>
         <small id="manual-input-hint">
           <strong>ExHentai 链接</strong>：<code class="ui-code-inline">https://exhentai.org/g/123456/abcdef12/</code>，需要已配置 ExHentai 来拉取元数据 ·
+          <strong>预览链接</strong>：<code class="ui-code-inline">https://telegra.ph/ehentai-123456-abcdef12-10-06</code>，slug 里带画廊 ID 时同样识别 ·
           <strong>磁力链接</strong>：<code class="ui-code-inline">magnet:?xt=urn:btih:...</code>，需要已配置 qBittorrent
         </small>
       </div>

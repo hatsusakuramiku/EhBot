@@ -50,8 +50,14 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         return None
     text = str(getattr(message, "message", "") or "").strip()
     urls = links.message_urls({"entities": _text_link_entities(message)}, text)
-    gallery_ref = links.find_gallery_ref(urls, text)
     page_urls = links.preview_urls(urls)
+    gallery_ref = links.find_gallery_ref(urls, text)
+    # Same fallback as the Bot API parser: a Telegraph preview slug names the
+    # gallery when the message itself links nothing (R60).
+    gallery_ref_from_preview = False
+    if gallery_ref is None:
+        gallery_ref = links.find_preview_gallery_ref(page_urls)
+        gallery_ref_from_preview = gallery_ref is not None
     attachments = _attachments(message, chat_id, message_id)
     if not attachments and gallery_ref is None and not page_urls:
         return None
@@ -89,6 +95,8 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         filter_reason = "包含压缩包附件"
     elif attachments:
         filter_reason = "包含图片预览"
+    elif gallery_ref_from_preview:
+        filter_reason = "由预览页链接识别 ExHentai 画廊"
     elif gallery_ref is not None:
         filter_reason = "包含 ExHentai 画廊链接"
     else:
@@ -117,6 +125,7 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         ex_gid=ex_gid,
         ex_gallery_token=gallery_ref[1] if gallery_ref is not None else None,
         preview_urls=page_urls,
+        gallery_from_preview=gallery_ref_from_preview,
     )
 
 

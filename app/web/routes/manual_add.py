@@ -13,7 +13,8 @@ import re
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from app.candidates.links import find_gallery_ref
+from app.candidates.links import find_gallery_ref, find_preview_gallery_ref
+from app.db.database import DuplicateCandidateError
 from app.downloads.models import PROVIDER_EH_TORRENT, PROVIDER_TELEGRAPH
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
@@ -55,7 +56,9 @@ async def _ingest_manual_link(request: Request, raw: str) -> int:
     text = raw.strip()
     if not text:
         raise ReviewError("INVALID_LINK", "请输入 ExHentai 画廊链接或磁力链接")
-    gallery_ref = find_gallery_ref((text,), text)
+    gallery_ref = find_gallery_ref((text,), text) or find_preview_gallery_ref(
+        (text,)
+    )
     magnet_match = _MAGNET_PATTERN.search(text)
     if gallery_ref is None and magnet_match is None:
         raise ReviewError("INVALID_LINK", "无法识别链接：仅支持 ExHentai 画廊或磁力链接")
@@ -153,6 +156,7 @@ async def manual_add_page(request: Request):
             "torrent_configured": await _torrent_configured(request),
             "error": None,
             "success": None,
+            "existing_candidate_id": None,
         },
     )
 
@@ -167,6 +171,23 @@ async def manual_add_submit(request: Request):
     raw = str(form.get("input") or "").strip()
     try:
         candidate_id = await _ingest_manual_link(request, raw)
+    except DuplicateCandidateError as exc:
+        # The work is already here. Stop at the form and say so -- a redirect
+        # would hide that the paste did nothing -- and hand the operator the
+        # existing candidate to open if that is what they wanted.
+        return deps.templates(request).TemplateResponse(
+            request=request,
+            name="manual_add.html",
+            context={
+                "csrf_token": request.session["csrf_token"],
+                "exhentai_configured": await _exhentai_configured(request),
+                "torrent_configured": await _torrent_configured(request),
+                "error": f"{exc}，本次未重复添加。",
+                "success": None,
+                "existing_candidate_id": exc.existing_candidate_id,
+            },
+            status_code=409,
+        )
     except (ReviewError, ExHentaiDownloadError) as exc:
         return deps.templates(request).TemplateResponse(
             request=request,
@@ -177,6 +198,7 @@ async def manual_add_submit(request: Request):
                 "torrent_configured": await _torrent_configured(request),
                 "error": str(getattr(exc, "public_message", exc)),
                 "success": None,
+                "existing_candidate_id": None,
             },
             status_code=400,
         )

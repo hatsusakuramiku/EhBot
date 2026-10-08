@@ -24,6 +24,10 @@ class ParsedSourceMessage:
     ex_gid: int | None = None
     ex_gallery_token: str | None = None
     preview_urls: tuple[str, ...] = ()
+    #: True when `ex_gid` was read from a preview page's slug rather than an
+    #: explicit EH link (R60). Kept so the filter reason can say which, without
+    #: the qualification rules having to re-parse the message.
+    gallery_from_preview: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,9 @@ class CandidateListItem:
     #: `metadata_values` because it is routing state for the thumbnail proxy,
     #: not a metadata field an operator reviews or edits.
     thumb_url: str | None = None
+    #: Why the candidate was flagged, shown on the row when it explains
+    #: something (R60). Read for every row, rendered for few.
+    filter_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

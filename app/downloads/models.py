@@ -265,6 +265,11 @@ class DownloadedWork:
     raw_tags: str | None = None
     thumb_url: str | None = None
     updated_at: str = ""
+    #: The candidate's filter verdict, carried so a flagged row can say why
+    #: (R60). Mostly `ACCEPT`; the serializer renders it only when it explains,
+    #: which on this page is rare -- a work is normally here because it passed.
+    filter_result: str | None = None
+    filter_reason: str | None = None
 
     @property
     def archive_relative_path(self) -> str | None:

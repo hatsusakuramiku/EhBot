@@ -40,7 +40,11 @@ from app.review.models import (
     REVIEW_AUTO_APPROVE,
     REVIEW_AUTO_REJECT,
     REVIEW_LOCK_METADATA,
+    REVIEW_METADATA_RULE,
+    REVIEW_REJECT,
     REVIEWABLE_STATUSES,
+    STATUS_NEEDS_INFO,
+    STATUS_REJECTED,
     field_label,
 )
 from app.thumbnails import THUMBNAIL_VARIANT_CARD, identity_hash
@@ -82,6 +86,11 @@ def candidate_summary(item: Any) -> dict[str, Any]:
         "candidate_id": item.candidate_id,
         "status": status_payload(item.status),
         "filter_result": item.filter_result,
+        "filter_reason": item.filter_reason,
+        # Only when it explains something; see `filter_note`.
+        "filter_note": filter_note(
+            item.status, item.filter_result, item.filter_reason
+        ),
         "title": item.title,
         "artist": item.artist,
         "category": item.category,
@@ -220,6 +229,7 @@ def review_action(entry: Any) -> dict[str, Any]:
     rule or the system -- which the stored name alone does not give, since it
     holds a login for a person and a reserved word otherwise.
     """
+    details = entry.details if isinstance(entry.details, dict) else {}
     return {
         "action": entry.action,
         "action_view": review_action_view(entry.action).to_payload(),
@@ -227,8 +237,74 @@ def review_action(entry: Any) -> dict[str, Any]:
         "actor": actor_view(entry.operator_name).to_payload(),
         "reason": _review_reason(entry.action, entry.details),
         "details": entry.details,
+        # The automatic-rule explanation, lifted to the top level as well. It is
+        # already inside `details`, but a client rendering「命中了哪一条条件」
+        # should not have to know which action happens to write which keys:
+        # `conditions` is the per-condition verdict and the dsl that produced
+        # it, `metadata` the values the rule read when it decided.
+        "conditions": details.get("conditions"),
+        "metadata": details.get("metadata"),
         "created_at": entry.created_at,
     }
+
+
+#: The three things that can set a candidate's filter verdict, mapped to the
+#: audit verb each leaves behind and the word for it. Ordered by how the verdict
+#: is reached, but which one *explains this row* is decided by recency, not by
+#: this order: `_FILTER_ORIGIN_ACTIONS` is only the lookup table.
+_FILTER_ORIGIN_ACTIONS: tuple[tuple[str, str], ...] = (
+    (REVIEW_AUTO_REJECT, "自动规则"),
+    (REVIEW_REJECT, "人工"),
+    (REVIEW_METADATA_RULE, "来源元数据规则"),
+)
+
+#: Statuses whose 「为什么」 is the answer rather than noise. A rejected or
+#: needs-info row must say why even when its filter result is unremarkable.
+_EXPLAINED_STATUSES: frozenset[str] = frozenset(
+    {STATUS_REJECTED, STATUS_NEEDS_INFO}
+)
+
+
+def explains_filter(status: str | None, filter_result: str | None) -> bool:
+    """Whether a row's filter verdict has anything worth saying.
+
+    True for a rejected or needs-info candidate, and for any filter result that
+    is not a plain accept. Every accepted row carries a reason like 「包含
+    Exhentai 画廊链接」; a line that appears on every row is not an explanation.
+    """
+    return status in _EXPLAINED_STATUSES or (
+        filter_result is not None and filter_result != "ACCEPT"
+    )
+
+
+def filter_note(
+    status: str | None,
+    filter_result: str | None,
+    filter_reason: str | None,
+) -> str | None:
+    """The one-line 「为什么」 a list row shows, or None when there is none."""
+    if not filter_reason or not explains_filter(status, filter_result):
+        return None
+    return str(filter_reason)
+
+
+def filter_origin(
+    actions: Any, status: str | None, filter_result: str | None
+) -> str | None:
+    """Which of the three paths last set this candidate's filter verdict.
+
+    A rejection arrives three ways -- an automatic rule, an operator, or a
+    source's own metadata rules during enrichment -- and the operator asked to
+    see which. Read from the audit trail, newest first, so it is right for rows
+    written before the feature existed; `None` when there is nothing to explain.
+    """
+    if not explains_filter(status, filter_result):
+        return None
+    for entry in actions or ():
+        for action, label in _FILTER_ORIGIN_ACTIONS:
+            if entry.action == action:
+                return label
+    return None
 
 
 def _kib(value: int) -> str:
@@ -371,6 +447,13 @@ def downloaded_work(work: Any) -> dict[str, Any]:
         ).to_payload(),
         "pack_job_id": work.pack_job_id,
         "pack_error_message": work.pack_error_message,
+        # Why this work was flagged, when it was. Same rule as the candidate
+        # list: silence unless it explains something.
+        "filter_result": work.filter_result,
+        "filter_reason": work.filter_reason,
+        "filter_note": filter_note(
+            None, work.filter_result, work.filter_reason
+        ),
         "title": work.title,
         "artist": work.artist,
         "category": work.category,
@@ -761,6 +844,9 @@ __all__ = [
     "auto_approval_rule",
     "candidate_summary",
     "connection_snapshot",
+    "explains_filter",
+    "filter_note",
+    "filter_origin",
     "job_summary",
     "metadata_entry",
     "downloaded_work",

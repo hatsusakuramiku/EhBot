@@ -206,8 +206,15 @@ class CandidateIngestor:
             return None
         text = str(message.get("caption") or message.get("text") or "").strip()
         urls = links.message_urls(message, text)
-        gallery_ref = links.find_gallery_ref(urls, text)
         page_urls = links.preview_urls(urls)
+        gallery_ref = links.find_gallery_ref(urls, text)
+        # Only when the message links no gallery of its own: a Telegraph slug
+        # like `ehentai-<gid>-<token>` names the same work, so a preview-only
+        # post stops being an anonymous candidate (R60).
+        gallery_ref_from_preview = False
+        if gallery_ref is None:
+            gallery_ref = links.find_preview_gallery_ref(page_urls)
+            gallery_ref_from_preview = gallery_ref is not None
         photo = None
         if message.get("photo"):
             photo = max(
@@ -313,6 +320,8 @@ class CandidateIngestor:
                 if photo is not None
                 else "包含压缩包附件"
                 if archive is not None
+                else "由预览页链接识别 ExHentai 画廊"
+                if gallery_ref_from_preview
                 else "包含 ExHentai 画廊链接"
                 if gallery_ref is not None
                 else "包含预览页链接"
@@ -322,4 +331,5 @@ class CandidateIngestor:
                 gallery_ref[1] if gallery_ref is not None else None
             ),
             preview_urls=page_urls,
+            gallery_from_preview=gallery_ref_from_preview,
         )

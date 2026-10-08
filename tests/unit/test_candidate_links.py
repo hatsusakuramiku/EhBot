@@ -1,6 +1,7 @@
 from app.candidates.links import (
     find_gallery_ref,
     find_magnet_ref,
+    find_preview_gallery_ref,
     message_urls,
     normalize_preview_url,
     preview_urls,
@@ -139,3 +140,51 @@ def test_magnet_is_found_embedded_in_a_longer_message() -> None:
 def test_a_non_magnet_link_returns_none() -> None:
     assert find_magnet_ref("https://exhentai.org/g/1/tok/") is None
     assert find_magnet_ref("") is None
+
+# --- preview-slug gallery ids (R60) -------------------------------------
+
+
+def test_preview_slug_carries_the_gallery_identity() -> None:
+    assert find_preview_gallery_ref(
+        ("https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06",)
+    ) == (4137423, "9ce70ddc26")
+
+
+def test_preview_slug_accepts_a_day_suffix_and_the_graph_alias() -> None:
+    assert find_preview_gallery_ref(
+        ("https://telegra.ph/ehentai-4181134-55431c0ecd-11-19",)
+    ) == (4181134, "55431c0ecd")
+    assert find_preview_gallery_ref(
+        ("https://graph.org/ehentai-4181134-55431c0ecd-09-12-2",)
+    ) == (4181134, "55431c0ecd")
+
+
+def test_preview_slug_rejects_pages_that_are_not_galleries() -> None:
+    for url in (
+        # Real-person titles that share the date suffix shape.
+        "https://telegra.ph/C108-Some-Artist-08-21",
+        "https://telegra.ph/diletta-attachments-08-21",
+        # Right shape, but the id is not a number.
+        "https://telegra.ph/ehentai-abc-55431c0ecd-09-12",
+        # Missing the token.
+        "https://telegra.ph/ehentai-4137423-09-12",
+        # Not a preview host.
+        "https://example.com/ehentai-4137423-55431c0ecd-09-12",
+    ):
+        assert find_preview_gallery_ref((url,)) is None
+
+
+def test_preview_slug_parser_reads_every_url_it_is_given() -> None:
+    assert find_preview_gallery_ref(
+        (
+            "https://telegra.ph/Unrelated-Title-08-21",
+            "https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06",
+        )
+    ) == (4137423, "9ce70ddc26")
+
+
+def test_find_gallery_ref_stays_strict_about_preview_links() -> None:
+    # The strict parser must not start accepting the loose shape: the two are
+    # separate on purpose, so a caller can say which source it read.
+    urls = ("https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06",)
+    assert find_gallery_ref(urls, "预览") is None

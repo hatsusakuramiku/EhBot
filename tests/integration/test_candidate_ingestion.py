@@ -1192,3 +1192,93 @@ async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
     # The re-post is not attached to the existing candidate either: one gallery
     # is one work, and the message that introduced it is the one that counts.
     assert candidates[0].message_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_preview_slug_gives_a_message_its_gallery_id(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await permit_all_message_types(database)
+    await allow_sources(database, -100700)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 700,
+                "channel_post": {
+                    "message_id": 700,
+                    "date": 1_700_020_000,
+                    "chat": {"id": -100700, "title": "Preview Slug"},
+                    "text": (
+                        "Preview Slug Book\n"
+                        "https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06"
+                    ),
+                },
+            },
+            # The same gallery again: with the id read from the slug the R59
+            # gate now recognises the re-post and ignores it.
+            {
+                "update_id": 701,
+                "channel_post": {
+                    "message_id": 701,
+                    "date": 1_700_020_100,
+                    "chat": {"id": -100700, "title": "Preview Slug"},
+                    "text": (
+                        "Another Title\n"
+                        "https://telegra.ph/ehentai-4137423-9ce70ddc26-10-07"
+                    ),
+                },
+            },
+        ]
+    )
+
+    result = await CandidateIngestor(database).process_pending_updates()
+    candidate = await database.get_candidate(1)
+
+    assert result.created_candidates == 1
+    assert result.ignored_updates == 1
+    assert candidate is not None
+    assert candidate.ex_gid == 4137423
+    assert candidate.ex_gallery_token == "9ce70ddc26"
+    assert candidate.filter_reason == "由预览页链接识别 ExHentai 画廊"
+    assert (
+        candidate.preview_url
+        == "https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_eh_link_wins_over_the_preview_slug(tmp_path: Path) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    await database.initialize()
+    await permit_all_message_types(database)
+    await allow_sources(database, -100701)
+    await database.save_telegram_updates(
+        [
+            {
+                "update_id": 710,
+                "channel_post": {
+                    "message_id": 710,
+                    "date": 1_700_020_200,
+                    "chat": {"id": -100701, "title": "Both Links"},
+                    "text": (
+                        "Both Links Book\n"
+                        "预览 https://telegra.ph/ehentai-111111-aaaa111111-10-06\n"
+                        "原始地址 https://exhentai.org/g/222222/bbbb222222/"
+                    ),
+                },
+            }
+        ]
+    )
+
+    result = await CandidateIngestor(database).process_pending_updates()
+    candidate = await database.get_candidate(1)
+
+    assert result.created_candidates == 1
+    assert candidate is not None
+    # The explicit EH link is authoritative; the preview slug is only a fallback.
+    assert candidate.ex_gid == 222222
+    assert candidate.ex_gallery_token == "bbbb222222"
+    assert candidate.filter_reason == "包含 ExHentai 画廊链接"
+    assert candidate.preview_url == "https://telegra.ph/ehentai-111111-aaaa111111-10-06"

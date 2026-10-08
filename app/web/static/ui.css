@@ -1229,6 +1229,21 @@ canvas {
    until it has something to say. */
 .ui-timeline-reason:empty { display: none; }
 .ui-timeline-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: var(--s-1); }
+
+/* R60: the automatic rule's own explanation, folded into the timeline node that
+   it decided. A rejection that cannot be read back looks random, so the matched
+   condition and the values the rule read are kept beside the verdict. */
+.ui-match { margin-top: var(--s-2); }
+.ui-match > summary { cursor: pointer; color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-match-list { list-style: none; margin: var(--s-2) 0 0; padding: 0; display: grid; gap: 4px; }
+.ui-match-item { display: flex; align-items: baseline; gap: var(--s-2); font-size: var(--font-small); }
+.ui-match-item[data-matched="true"] { font-weight: 600; }
+.ui-match-mark { flex: none; width: 1em; color: var(--t-ink-muted); }
+.ui-match-item[data-matched="true"] .ui-match-mark { color: var(--t-ok, var(--t-ink)); }
+.ui-match-verdict { flex: none; color: var(--t-ink-muted); }
+.ui-match-meta-label { margin: var(--s-2) 0 4px; color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-match-meta { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.ui-match-value { color: var(--t-ink-muted); font-size: var(--font-small); overflow-wrap: anywhere; }
 .ui-timeline-actions form { margin: 0; }
 
 .ui-kv { display: grid; gap: var(--s-2); margin: 0; }

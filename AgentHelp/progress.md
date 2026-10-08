@@ -5783,3 +5783,67 @@ config `sha256:a7ce92a35b56ade97efc2699c29c3038ea0eedc135c8a9cf14c776be89b62ae1`
 `--rm` 清理。
 
 **版本**：按运营者指示**不提升**，仍为 `v0.3.0rc3`；本轮只重推 `latest`（代码与测试随之提交）。
+
+## R60 — 手动添加判重 + 自动决策的匹配详情 + 预览链接里的画廊 ID（2026-10-08）
+
+运营者 2026-10-08 三条指示合成一个交付：① 手动添加（画廊**与磁链**）判重；② 自动审批规则命中时给出
+「匹配详情」；③ 候选准入解析预览链接里的画廊 ID。另把参考消息导出移入忽略目录（
+`AgentHelp/reference_messages/`，不入库、不上远程）。四项待定答复（列表行两处都显示、重复只提示不自动跳转、
+手动添加允许预览链接、样本可保留原标题）已按答复落地。设计记录 `MANUAL_ADD_AND_MATCHING_PROPOSAL.md`。
+本轮**不需要数据库迁移**，版本号不变（仍是 `v0.3.0rc3`）。
+
+**设计 A：手动添加判重（画廊 + 磁链）。** 线上 500 的根因是 R59 的「一个画廊一件候选」只落在摄取管线，
+手动添加是第三条入池路径：同链接贴两次直接撞 `UNIQUE (ex_gid, ex_gallery_token)`，未捕获 -> 500。
+`app/db/database.py` 新增 `DuplicateCandidateError(ValueError)` 及 `DuplicateGalleryCandidate` /
+`DuplicateTorrentCandidate`（`label` 分别是「画廊」「磁力链接」，携带 `existing_candidate_id`）；
+`_create_manual_candidate_sync` 在**同一事务内**先查（`_manual_duplicate_sync`：画廊按 `ex_gid` **单列**、
+磁链按 `LOWER(torrent_hash)`），再 `INSERT` 外套 `try/except sqlite3.IntegrityError` 作并发裁决——
+捕获后按画廊 ID 复读，查到即抛重复，**查不到原样重抛**，真正的约束故障绝不被读成「重复」。路由
+`app/web/routes/manual_add.py` 捕获后渲染表单、HTTP **409**，文案「该<label>已有候选 #N，本次未重复添加。」
+并给模板 `existing_candidate_id`；`manual_add.html` 在提示下方渲染「查看已有候选 #N」链接（**停在表单，
+不自动跳转**）。不抓元数据、不入队、不建行。
+
+**设计 B：自动决策的匹配详情（纯读）。** 先复核运营者那条 REJECT 规则：用整条真实链路（表单 -> 解析 ->
+校验 -> 落库 -> `sweep_once`）跑了一遍，对「无 NTR/cosplay/AI/3D、Category=Manga」的候选 `decided: 0`，
+**没有复现「不命中却驳回」**，所以交付的是**可解释性**而非改判定。三条把候选置为 `REJECTED` 的路径
+（自动规则 `AUTO_REJECT`、人工 `REJECT`、来源元数据规则 `METADATA_RULE`）在时间线上本就有痕迹，本轮把它读出来：
+`app/api/serializers.py` 的 `review_action()` 顶层增 `conditions` / `metadata`（审计快照早已写入
+`details_json`）；`work_detail.html` 的 `AUTO_APPROVE` / `AUTO_REJECT` 条目下新增「匹配详情」——
+规则当时那版 DSL、逐条条件命中与否、判定时读到的字段值；`app/api/works.py` 载荷新增 `filter_origin`
+（`filter_origin()` 从审计轨迹取最近一条，标明**自动规则 / 人工 / 来源元数据规则**），详情页「筛选结果」
+一行前置来源标签。**列表行**（候选页与已下载页**两处**）新增 `filter_note`（`filter_note()` /
+`explains_filter()`）：只在**解释得通**时显示——状态为已驳回/待补充，或 `filter_result != ACCEPT`；
+正常通过的行不显示（每行都有的「包含…链接」不是「为什么」）。为此 `CandidateListItem` 增 `filter_reason`、
+`DownloadedWork` 增 `filter_result` / `filter_reason`，两条 SELECT 各补列。全程无新写路径、不改
+`matching_rule`。
+
+**设计 C：预览链接里的画廊 ID。** `app/candidates/links.py` 新增 `PREVIEW_GALLERY_PATTERN` 与
+`find_preview_gallery_ref(urls)`：只认已知预览站（`PREVIEW_HOSTS`）路径上
+`/ehentai-<gid>-<token>-MM-DD(-N)?` 这一种 slug，id 必须全数字（`C108-…`、`diletta-…` 这类真人标题
+不匹配）；`find_gallery_ref` **保持严格**。两个解析器（`ingestor._parse_message`、`mtproto.parse_user_message`）
+改成「先严格、再预览 slug」的兜底，`filter_reason` 区分「包含 ExHentai 画廊链接」与「由预览页链接识别
+ExHentai 画廊」。`ParsedSourceMessage` 新增 `gallery_from_preview` 布尔，`message_qualifies` 用它挑文案。
+效果：参考数据里那 15 条 slug 型纯预览消息从「无 ID 候选」变成正常候选，从此参与去重闸门与自动规则；
+**合集帖仍不拆分**（一条消息只取第一个画廊 ID，沿用现状）。手动添加也接受该形状。DB 侧的去重/重算路径
+（`_recompute…`）同步按存储的 `preview_urls_json` 复读 slug，避免编辑消息后丢掉身份。**不用 AI**：这条解析
+是纯字符串规则。
+
+**测试（+17，1775 → 1792）**
+- `tests/unit/test_candidate_links.py`（+5）：运营者例子解析为 `(4137423, "9ce70ddc26")`、`-11-19` 与
+  `-09-12-2` 两种形状、`C108-…`/`diletta-…`/非数字 id/非预览站的反例、多 URL 逐个看、`find_gallery_ref`
+  仍不认预览链接。
+- `tests/integration/test_database.py`（+2）：重复 `ex_gid`（不同 token）抛 `DuplicateGalleryCandidate`
+  且带 `existing_candidate_id`；重复 infohash 大小写无关，删行后可重加（门读表不读缓存）。
+- `tests/integration/test_manual_add.py`（+5）：同画廊第二次 409 +「该画廊已有候选」+「查看已有候选 #N」
+  且不跳转、候选仍一行；同 ID 不同 token 也拦；同磁链第二次 409 且只入队一次；预览链接可添加并解析出
+  gid/token；被拒的重复不改动已有行的状态与原因。
+- `tests/integration/test_candidate_ingestion.py`（+2）：预览 slug 消息解析出画廊 ID、`filter_reason` 说明
+  来源、同画廊第二条被闸门忽略；同时带 Eh 链接与预览链接时以 Eh 链接为准。
+- `tests/integration/test_work_detail_web.py`（+2）：`AUTO_REJECT` 条目渲染命中条件与判定读到的值；
+  来源元数据规则驳回标注「来源元数据规则」。
+- `tests/integration/test_candidates_web.py`（+1）：已驳回行显示筛选原因、正常通过行不显示。
+
+**验证（全量）**：`.venv/bin/python -m pytest tests -q` → **1792 collected / 0 failed**。
+**文档同步**：本 R60 条目 + `PHASES.md` 一行与基线链 + `AGENTS.md` 基线/链；`README.md`「主要能力」补
+手动添加判重；`docs/USAGE.md`「解析规则」「自动审批规则」「已下载内容」三节补预览 slug / 匹配详情 / 列表行原因；
+`AgentHelp/EHBot.md` §4.4 / §4.7 同步。环境变量与 `.env.example` 无变化，无数据库迁移。

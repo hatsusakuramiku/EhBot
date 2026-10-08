@@ -32,6 +32,7 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError
 from app.api.serializers import (
+    filter_origin,
     job_summary,
     metadata_entry,
     review_action,
@@ -476,6 +477,12 @@ async def work_snapshot(
         "title": candidate.title,
         "filter_result": candidate.filter_result,
         "filter_reason": candidate.filter_reason,
+        # Which of the three paths produced that verdict -- 自动规则 / 人工 /
+        # 来源元数据规则 -- so 「为什么被驳回」 is answerable without reading the
+        # timeline (R60). None when there is nothing to explain.
+        "filter_origin": filter_origin(
+            actions, candidate.status, candidate.filter_result
+        ),
         "ex_gid": candidate.ex_gid,
         "ex_gallery_token": candidate.ex_gallery_token,
         # Same resolved facts the candidate list carries (R59): the detail page

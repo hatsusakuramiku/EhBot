@@ -91,6 +91,11 @@
       {% if item.pack_error_message %}
       <span class="ui-table-secondary" data-field="pack-error">{{ item.pack_error_message }}</span>
       {% endif %}
+      {#- The candidate's own filter note, when there is one worth showing
+          (R60). Rare here: a work is normally downloaded because it passed. -#}
+      {% if item.filter_note %}
+      <span class="ui-table-secondary" data-field="filter-reason">{{ item.filter_note }}</span>
+      {% endif %}
     </td>
     <td data-label="打包"><span data-field="pack">{{ ui.badge(item.pack) }}</span></td>
     <td data-label="来源">{{ item.provider.label }}</td>

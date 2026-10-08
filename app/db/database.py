@@ -20,7 +20,7 @@ from app.ai.models import (
 )
 from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
 from app.auto_approval.models import AutoApprovalRule, RULE_ACTION_APPROVE
-from app.candidates.links import GALLERY_URL_PATTERN
+from app.candidates.links import GALLERY_URL_PATTERN, find_preview_gallery_ref
 from app.candidates.models import (
     CandidateDetail,
     CandidateListItem,
@@ -87,6 +87,30 @@ CANDIDATE_COUNT_KEYS: dict[str, str] = {
 
 #: The two directions a `dir` query parameter may name.
 SORT_DIRECTIONS: frozenset[str] = frozenset({"asc", "desc"})
+
+class DuplicateCandidateError(ValueError):
+    """A manual add named a work this deployment already holds.
+
+    Raised in place of letting the gallery unique index surface as a 500: a
+    duplicate is the *expected* outcome of pasting the same link twice, so it
+    travels as a value the route can render rather than as an integrity
+    failure. The existing row rides along so the page can offer to open it.
+    """
+
+    #: The noun for what was duplicated, used verbatim in the message.
+    label = "候选"
+
+    def __init__(self, existing_candidate_id: int) -> None:
+        self.existing_candidate_id = int(existing_candidate_id)
+        super().__init__(f"该{self.label}已有候选 #{self.existing_candidate_id}")
+
+
+class DuplicateGalleryCandidate(DuplicateCandidateError):
+    label = "画廊"
+
+
+class DuplicateTorrentCandidate(DuplicateCandidateError):
+    label = "磁力链接"
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +194,7 @@ _CANDIDATE_LIST_SELECT = (
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
-    "c.ex_gallery_token, c.thumb_url "
+    "c.ex_gallery_token, c.thumb_url, c.filter_reason "
     "FROM candidates c LEFT JOIN candidate_messages cm "
     "ON cm.candidate_id = c.id"
 )
@@ -256,7 +280,10 @@ _DOWNLOADED_SELECT = (
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     "(SELECT mv.field_value FROM metadata_values mv "
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'TagsRaw' "
-    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) "
+    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
+    # The filter verdict travels with the work so a flagged row can say why
+    # without a second read (R60); the serializer decides whether it is shown.
+    "c.filter_result, c.filter_reason "
     "FROM download_jobs dj "
     "JOIN candidates c ON c.id = dj.candidate_id "
     "LEFT JOIN artifacts arch "
@@ -307,6 +334,8 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
         ai_relative_path=text(22),
         tags=text(23),
         raw_tags=text(24),
+        filter_result=text(25),
+        filter_reason=text(26),
     )
 
 
@@ -580,6 +609,7 @@ def _candidate_list_item(row: Sequence[object]) -> CandidateListItem:
         category=str(row[7]) if row[7] is not None else None,
         language=str(row[8]) if row[8] is not None else None,
         thumb_url=str(row[13]) if row[13] is not None else None,
+        filter_reason=str(row[14]) if row[14] is not None else None,
     )
 
 
@@ -1458,16 +1488,30 @@ class Database:
                     preview_urls_json,
                 ) in remaining_messages:
                     text = str(message_text or "").strip()
+                    previews = json.loads(preview_urls_json or "[]")
                     gallery_match = GALLERY_URL_PATTERN.search(text)
-                    if gallery_match is not None and ex_gid is None:
-                        ex_gid = int(gallery_match.group(1))
-                        ex_gallery_token = gallery_match.group(2)
-                    if preview_url is None:
-                        remaining_previews = json.loads(
-                            preview_urls_json or "[]"
+                    gid: int | None = None
+                    token: str | None = None
+                    gid_from_preview = False
+                    if gallery_match is not None:
+                        gid = int(gallery_match.group(1))
+                        token = gallery_match.group(2)
+                    else:
+                        # The message linked no gallery, but its preview page's
+                        # slug may still name one (R60); read it back so an
+                        # edit that retires the original message does not drop
+                        # the identity the parser had found.
+                        preview_ref = find_preview_gallery_ref(
+                            tuple(str(item) for item in previews)
                         )
-                        if remaining_previews:
-                            preview_url = str(remaining_previews[0])
+                        if preview_ref is not None:
+                            gid, token = preview_ref
+                            gid_from_preview = True
+                    if gid is not None and ex_gid is None:
+                        ex_gid = gid
+                        ex_gallery_token = token
+                    if preview_url is None and previews:
+                        preview_url = str(previews[0])
                     attachments = json.loads(attachment_json)
                     explicit_title = next(
                         (
@@ -1494,8 +1538,8 @@ class Database:
                         title = Path(str(archive.get("file_name") or "")).stem
                         title_source = "FILENAME"
                         title_confidence = 0.5
-                    elif gallery_match is not None:
-                        title = f"ExHentai #{gallery_match.group(1)}"
+                    elif gid is not None:
+                        title = f"ExHentai #{gid}"
                         title_source = "INFERRED"
                         title_confidence = 0.2
                     else:
@@ -1510,7 +1554,9 @@ class Database:
                         filter_reason = "包含图片预览"
                     elif archive is not None and filter_reason != "包含图片预览":
                         filter_reason = "包含压缩包附件"
-                    elif gallery_match is not None and filter_reason == "包含候选内容":
+                    elif gid_from_preview and filter_reason == "包含候选内容":
+                        filter_reason = "由预览页链接识别 ExHentai 画廊"
+                    elif gid is not None and filter_reason == "包含候选内容":
                         filter_reason = "包含 ExHentai 画廊链接"
                     elif preview_url is not None and filter_reason == "包含候选内容":
                         filter_reason = "包含预览页链接"
@@ -2911,6 +2957,50 @@ class Database:
             title,
         )
 
+    @staticmethod
+    def _manual_duplicate_sync(
+        connection: sqlite3.Connection,
+        ex_gid: int | None,
+        torrent_hash: str | None,
+    ) -> DuplicateCandidateError | None:
+        """The existing candidate a manual add would duplicate, if any.
+
+        Gallery first because it is the indexed, authoritative identity; the
+        magnet check compares lowercased because a btih is hex and case is a
+        spelling, not a different torrent. There is no unique index on
+        `torrent_hash` -- adding one would fail on a database that already
+        holds duplicates -- so this in-transaction read is the whole gate on
+        the magnet side.
+        """
+        if ex_gid is not None:
+            existing = Database._gallery_candidate_id_sync(connection, ex_gid)
+            if existing is not None:
+                return DuplicateGalleryCandidate(existing)
+        if torrent_hash:
+            row = connection.execute(
+                "SELECT id FROM candidates "
+                "WHERE LOWER(torrent_hash) = ? ORDER BY id LIMIT 1",
+                (str(torrent_hash).lower(),),
+            ).fetchone()
+            if row is not None:
+                return DuplicateTorrentCandidate(int(row[0]))
+        return None
+
+    @staticmethod
+    def _gallery_candidate_id_sync(
+        connection: sqlite3.Connection, ex_gid: int
+    ) -> int | None:
+        """Read the gallery's existing candidate id on an open connection.
+
+        The body of `candidate_id_for_gallery`, shared so the in-transaction
+        dup check and the gate read the same row the same way.
+        """
+        row = connection.execute(
+            "SELECT id FROM candidates WHERE ex_gid = ? ORDER BY id LIMIT 1",
+            (int(ex_gid),),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
     def _create_manual_candidate_sync(
         self,
         filter_reason: str,
@@ -2921,19 +3011,43 @@ class Database:
         title: str | None,
     ) -> int:
         with self.connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO candidates "
-                "(status, ex_gid, ex_gallery_token, filter_result, "
-                "filter_reason, magnet_url, torrent_hash) "
-                "VALUES ('APPROVED', ?, ?, 'ACCEPT', ?, ?, ?)",
-                (
-                    ex_gid,
-                    ex_gallery_token,
-                    filter_reason,
-                    magnet_url,
-                    torrent_hash,
-                ),
-            )
+            # A manual add is the third way into `candidates`, and the only one
+            # that does not pass the ingestion gate, so it carries the R59
+            # invariant itself: one gallery is one work (keyed on the id alone
+            # -- the token is a spelling of the URL), and one infohash is one
+            # magnet. Checking and inserting in one transaction is what makes
+            # the check an arbiter instead of a race.
+            duplicate = self._manual_duplicate_sync(connection, ex_gid, torrent_hash)
+            if duplicate is not None:
+                raise duplicate
+            try:
+                cursor = connection.execute(
+                    "INSERT INTO candidates "
+                    "(status, ex_gid, ex_gallery_token, filter_result, "
+                    "filter_reason, magnet_url, torrent_hash) "
+                    "VALUES ('APPROVED', ?, ?, 'ACCEPT', ?, ?, ?)",
+                    (
+                        ex_gid,
+                        ex_gallery_token,
+                        filter_reason,
+                        magnet_url,
+                        torrent_hash,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # The check above cannot see a row another writer commits in
+                # the window between it and the INSERT; the unique index is the
+                # arbiter for that. Re-read and report a duplicate only when the
+                # row is really there -- any other constraint failure is a real
+                # fault and must not be read as "duplicate".
+                existing = (
+                    self._gallery_candidate_id_sync(connection, ex_gid)
+                    if ex_gid is not None
+                    else None
+                )
+                if existing is not None:
+                    raise DuplicateGalleryCandidate(existing) from None
+                raise
             candidate_id = int(cursor.lastrowid)
             if title:
                 connection.execute(
@@ -3189,11 +3303,7 @@ class Database:
 
     def _candidate_id_for_gallery_sync(self, ex_gid: int) -> int | None:
         with self.connection() as connection:
-            row = connection.execute(
-                "SELECT id FROM candidates WHERE ex_gid = ? ORDER BY id LIMIT 1",
-                (int(ex_gid),),
-            ).fetchone()
-        return int(row[0]) if row is not None else None
+            return self._gallery_candidate_id_sync(connection, ex_gid)
 
     async def duplicate_gallery_groups(self) -> list[dict]:
         """Every candidate that shares a gallery id with at least one other.
