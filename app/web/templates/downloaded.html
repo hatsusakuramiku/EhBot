@@ -83,11 +83,7 @@
       <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名作品" }}</a></span>
       {%- set meta = work_meta(item) -%}
       {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
-      {% if item.tags %}
-      <div class="ui-card-tags">
-        {% for tag in item.tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
-      </div>
-      {% endif %}
+      {% if item.tags %}{{ ui.tag_list(item.tags, tag_hrefs) }}{% endif %}
       {% if item.pack_error_message %}
       <span class="ui-table-secondary" data-field="pack-error">{{ item.pack_error_message }}</span>
       {% endif %}
@@ -149,7 +145,8 @@
     <div class="ui-field">
       <label for="downloaded-search">搜索</label>
       <input class="ui-input" id="downloaded-search" name="search" type="search"
-             value="{{ search }}" placeholder="标题、作者或标签">
+             value="{{ search }}" placeholder="标题、作者或标签，或用 $tag:值$ 过滤">
+      {{ ui.search_chips(search_chips, search_degraded) }}
     </div>
     <div class="ui-field">
       <label for="downloaded-sort">排序</label>
@@ -227,7 +224,8 @@
                 tags=item.tags,
                 status=item.pack,
                 selectable=true,
-                value=item.candidate_id) %}
+                value=item.candidate_id,
+                tag_hrefs=tag_hrefs) %}
             <span class="ui-card-facts">{{ item.provider.label }}{% if item.page_count is not none %} · {{ item.page_count }} 页{% endif %} · {{ size_text(item.cbz_size or item.archive_size) }}</span>
             {{ work_actions(item) }}
           {% endcall %}

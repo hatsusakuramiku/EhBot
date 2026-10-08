@@ -32,7 +32,6 @@ from app.api.serializers import downloaded_work as serialize_work
 from app.api.status import (
     DOWNLOADED_TAB_STATUS,
     downloaded_tab_view,
-    provider_codes_matching,
 )
 from app.conversion.naming import LibraryPathError
 from app.db.database import (
@@ -41,6 +40,7 @@ from app.db.database import (
     sort_direction,
 )
 from app.downloads.dedup import apply_dedup, build_dedup_plan
+from app.search.query import PAGE_DOWNLOADED, parse_query
 
 
 router = APIRouter(tags=["downloaded"])
@@ -88,9 +88,6 @@ async def downloaded_snapshot(
     """
     works, total = await database.list_downloaded_works(
         search=search,
-        # A word that names a provider matches the job, not the metadata; the
-        # translation from label to code happens in `provider_codes_matching`.
-        search_providers=provider_codes_matching(search),
         pack_filter=tab,
         sort=sort,
         direction=direction,
@@ -108,6 +105,13 @@ async def downloaded_snapshot(
         # put a dict where every one of those expected a string.
         "tab": tab,
         "tab_view": downloaded_tab_view(tab).to_payload(),
+        "search": search,
+        # What the search box was read as (R61): the conditions it produced,
+        # the free words, and anything that degraded, so a JSON client can draw
+        # the same chip bar the page does.
+        "search_filters": parse_query(
+            search, page=PAGE_DOWNLOADED
+        ).to_payload(),
         # The direction a request actually got, default included, so the page's
         # arrow and a JSON client agree about which way the list is sorted.
         "direction": sort_direction(DOWNLOADED_SORT_ORDERS, sort, direction),

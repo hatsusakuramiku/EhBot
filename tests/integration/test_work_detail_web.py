@@ -18,6 +18,7 @@ import itertools
 import json
 from pathlib import Path
 import re
+from urllib.parse import unquote_plus
 
 from fastapi.testclient import TestClient
 
@@ -1528,3 +1529,37 @@ def test_a_metadata_rule_rejection_names_its_source(tmp_path: Path) -> None:
     assert page.status_code == 200
     assert "来源元数据规则" in page.text
     assert "包含禁用 Tag NTR" in page.text
+
+
+def _href_with(text: str, marker: str) -> str:
+    """The `href` of the element carrying `marker`, as a browser reads it."""
+    match = re.search(r'href="([^"]*)"[^>]*' + marker, text) or re.search(
+        marker + r'[^>]*href="([^"]*)"', text
+    )
+    assert match, f"no element matching {marker}"
+    return match.group(1)
+
+
+def test_the_metadata_tags_carry_the_filter_actions(tmp_path: Path) -> None:
+    """R61: a tag on the detail page is also a way into the filtered list.
+
+    The metadata rows are editable fields, so the values are repeated below the
+    input as chips; clicking one goes to the 全部 tab, because 「show me
+    everything with this tag」 is not a question about this work's status.
+    """
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate_id = asyncio.run(seed_work(database))
+    set_metadata(database, candidate_id, Tags="巨乳, big breasts")
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get(f"/works/{candidate_id}").text
+
+    assert 'data-tag="巨乳"' in page
+    assert unquote_plus(
+        _href_with(page, 'aria-label="过滤标签 big breasts"')
+    ) == '/candidates/all?search=$tag:"big breasts"$'
+    assert unquote_plus(
+        _href_with(page, 'aria-label="排除标签 big breasts"')
+    ) == '/candidates/all?search=$-tag:"big breasts"$'

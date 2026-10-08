@@ -917,6 +917,28 @@ canvas {
   font-size: 11px;
 }
 
+/* The 过滤 / 排除 actions on a tag (R61). Small and quiet: they sit inside
+   every tag, so anything louder than the tag's own text would make a card of
+   tags unreadable. The focus ring is the keyboard's only way to see them. */
+.ui-tag-action { margin-left: 2px; text-decoration: none; opacity: .55; }
+.ui-tag-action:hover, .ui-tag-action:focus-visible { opacity: 1; }
+
+/* The search box's own reading (R61): one chip per parsed `$field:value$`. */
+.ui-search-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-2); }
+.ui-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 1px var(--s-2);
+  border: 1px solid var(--t-line);
+  border-radius: var(--r-full);
+  background: var(--t-surface-sunken);
+  color: var(--t-ink);
+  font-size: var(--font-small);
+}
+.ui-chip-x { text-decoration: none; color: var(--t-ink-muted); font-weight: 700; }
+.ui-chip-x:hover, .ui-chip-x:focus-visible { color: var(--t-ink); }
+
 /* --------------------------------------------------------------------------
    8. Data table
    -------------------------------------------------------------------------- */

@@ -44,6 +44,7 @@ from app.db.database import (
     SORT_DIRECTIONS,
     sort_direction,
 )
+from app.search.query import PAGE_DOWNLOADED
 from app.web import deps
 
 
@@ -172,6 +173,8 @@ async def _render_downloaded(
             "grid_href": deps.query_href(request, view="grid"),
             "list_href": deps.query_href(request, view="list"),
             "search": search,
+            # The box's own reading: chips, degraded notes, tag links (R61).
+            **deps.search_context(request, search, page=PAGE_DOWNLOADED),
             "sort": sort,
             "direction": direction,
             "default_direction": default_direction,

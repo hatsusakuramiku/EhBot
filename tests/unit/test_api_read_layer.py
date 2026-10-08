@@ -136,14 +136,30 @@ class TestCandidatePaging:
         assert total == 1
         assert items[0].candidate_id == 1
 
-    def test_search_treats_a_wildcard_as_a_literal(self, tmp_path: Path) -> None:
+    def test_search_reads_a_bare_wildcard_as_a_wildcard(
+        self, tmp_path: Path
+    ) -> None:
         database = build_database(
             tmp_path, [(1, "PENDING_REVIEW", "Plain"), (2, "PENDING_REVIEW", "Also")]
         )
         _, total = asyncio.run(database.list_candidates_page(search="%"))
 
-        # An unescaped `%` would match everything and read as a broken filter.
-        assert total == 0
+        # R61: `%` is the rule DSL's wildcard -- the operator asked for the same
+        # semantics in the search box -- so on its own it matches every row.
+        assert total == 2
+
+    def test_bracket_escape_makes_a_wildcard_literal(
+        self, tmp_path: Path
+    ) -> None:
+        database = build_database(
+            tmp_path,
+            [(1, "PENDING_REVIEW", "100%"), (2, "PENDING_REVIEW", "Plain")],
+        )
+        _, total = asyncio.run(database.list_candidates_page(search="[%]"))
+
+        # `[%]` names the literal character, so only the row that really has a
+        # per cent sign in it is returned.
+        assert total == 1
 
 
 class TestCandidateCounts:

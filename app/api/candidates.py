@@ -25,6 +25,7 @@ from app.db.database import (
     CANDIDATE_SORT_ORDERS,
     sort_direction,
 )
+from app.search.query import PAGE_CANDIDATES, parse_query
 
 
 router = APIRouter(tags=["candidates"])
@@ -165,6 +166,13 @@ async def list_candidates(
     payload["direction"] = sort_direction(CANDIDATE_SORT_ORDERS, sort, dir)
     payload["search"] = search or ""
     payload["filters"] = {name: list(values) for name, values in facets.items()}
+    # What the search box was read as (R61): the conditions it produced, the
+    # words outside blocks, and anything that degraded. Named `search_filters`
+    # rather than `filters`, which on this endpoint already means the sidebar's
+    # facet selection.
+    payload["search_filters"] = parse_query(
+        search or "", page=PAGE_CANDIDATES
+    ).to_payload()
     return payload
 
 

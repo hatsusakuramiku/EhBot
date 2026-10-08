@@ -33,6 +33,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.api.status import SETTINGS_PASSWORDS
 from app.review.service import ReviewService
+from app.search.query import parse_query
 
 
 def templates(request: Request) -> Jinja2Templates:
@@ -258,6 +259,81 @@ def query_href(request: Request, **params: object) -> str:
     """
     url = request.url.include_query_params(**params)
     return f"{url.path}?{url.query}" if url.query else url.path
+
+
+def search_href(request: Request, search: str, *, base: str | None = None) -> str:
+    """This URL with the search box replaced and the page cursor dropped.
+
+    A chip's × and a tag's 「过滤」/「排除」 are links, so both work without
+    JavaScript. Page 5 of the old result is not page 5 of the new one, hence
+    `page` goes; the sidebar's facets are deliberately left alone, because the
+    chips and the sidebar are two different filters that do not overwrite each
+    other (R61 proposal §3.3). `base` retargets the link at another page -- the
+    work-detail metadata tags point back at the candidate list -- and starts
+    from an empty query string rather than carrying this page's parameters over.
+    """
+    url = request.url
+    if base is not None:
+        url = url.replace(path=base, query="")
+    url = url.remove_query_params(["page", "search"])
+    if search:
+        url = url.include_query_params(search=search)
+    return f"{url.path}?{url.query}" if url.query else url.path
+
+
+def tag_search_term(tag: str, *, exclude: bool = False) -> str:
+    """The `$tag:值$` condition a tag chip would add to the search box.
+
+    A value with a space goes in double quotes, which is the one spelling the
+    parser reads back as a single value (proposal §2.1).
+    """
+    value = tag.strip()
+    if any(char.isspace() for char in value):
+        value = f'"{value}"'
+    return f"${'-' if exclude else ''}tag:{value}$"
+
+
+def tag_hrefs(request: Request, search: str = "", *, base: str | None = None):
+    """Build the 「🔍 过滤」/「🚫 排除」 links for a tag.
+
+    A condition already in the search box is not added twice, so clicking a tag
+    twice re-submits the same list instead of stacking duplicates.
+    """
+
+    def build(tag: str) -> dict[str, str]:
+        links: dict[str, str] = {}
+        for key, exclude in (("filter", False), ("exclude", True)):
+            term = tag_search_term(tag, exclude=exclude)
+            combined = search if term in search else f"{search} {term}".strip()
+            links[key] = search_href(request, combined, base=base)
+        return links
+
+    return build
+
+
+def search_context(request: Request, search: str, *, page: str) -> dict[str, object]:
+    """What the search box needs besides its own text: chips, notes, tag links.
+
+    One function so the candidate page and the 已下载 page cannot render two
+    different readings of the same box.
+    """
+    parsed = parse_query(search, page=page)
+    return {
+        "search_chips": [
+            {
+                "label": item.chip,
+                "remove_href": search_href(
+                    request, parsed.without(item.raw)
+                ),
+            }
+            for item in parsed.filters
+        ],
+        "search_degraded": [
+            {"text": item.text, "reason": item.reason}
+            for item in parsed.degraded
+        ],
+        "tag_hrefs": tag_hrefs(request, search),
+    }
 
 
 #: The element an in-place update replaces the contents of. `base.html` puts

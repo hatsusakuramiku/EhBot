@@ -875,3 +875,199 @@ async def test_manual_add_rejects_a_duplicate_infohash_case_insensitively(
     with sqlite3.connect(tmp_path / "ehbot.db") as connection:
         rows = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
     assert rows == 1
+
+
+# --------------------------------------------------------------- search (R61)
+
+
+def _seed_candidate(
+    path: Path, candidate_id: int, fields: dict[str, str]
+) -> None:
+    """One candidate with the metadata a search can look at."""
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO candidates (id, status) VALUES (?, 'PENDING_REVIEW')",
+            (candidate_id,),
+        )
+        for name, value in fields.items():
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, "
+                " confidence, is_manual) "
+                "VALUES (?, ?, ?, 'EXHENTAI', 1.0, 0)",
+                (candidate_id, name, value),
+            )
+
+
+def _seed_downloaded(
+    path: Path, candidate_id: int, fields: dict[str, str], *, provider: str
+) -> None:
+    """One downloaded, archived work: a job, an ARCHIVE artifact, metadata."""
+    _seed_candidate(path, candidate_id, fields)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE candidates SET status = 'DOWNLOADED' WHERE id = ?",
+            (candidate_id,),
+        )
+        connection.execute(
+            "INSERT INTO download_jobs "
+            "(candidate_id, idempotency_key, provider, state) "
+            "VALUES (?, ?, ?, 'COMPLETED')",
+            (candidate_id, f"job:{candidate_id}", provider),
+        )
+        job_id = connection.execute(
+            "SELECT id FROM download_jobs WHERE candidate_id = ?",
+            (candidate_id,),
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO artifacts (job_id, artifact_type, path, size_bytes) "
+            "VALUES (?, 'ARCHIVE', ?, 10)",
+            (job_id, f"/tmp/{candidate_id}.zip"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_a_tag_does_not_match_another_field(tmp_path: Path) -> None:
+    """The old substring search hit `Artist`/`Title` for a tag query.
+
+    `$tag:ntr$` is a filter on the tag collection, so a row whose artist
+    happens to contain those letters must not come back (R61 §2.3).
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_candidate(
+        path, 1, {"Title": "Country road", "Artist": "Entry", "Tags": "romance"}
+    )
+    _seed_candidate(
+        path, 2, {"Title": "Quiet", "Artist": "Someone", "Tags": "ntr, big breasts"}
+    )
+
+    items, total = await database.list_candidates_page(search="$tag:ntr$")
+
+    assert total == 1
+    assert [item.candidate_id for item in items] == [2]
+
+
+@pytest.mark.asyncio
+async def test_search_defaults_to_a_whole_value_match(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_candidate(path, 1, {"Title": "A", "Tags": "solomale"})
+    _seed_candidate(path, 2, {"Title": "B", "Tags": "solo"})
+
+    _, whole = await database.list_candidates_page(search="$tag:solo$")
+    _, fuzzy = await database.list_candidates_page(search="$tag:%solo%$")
+
+    # `solomale` is a different tag: only the explicit wildcard reaches it.
+    assert whole == 1
+    assert fuzzy == 2
+
+
+@pytest.mark.asyncio
+async def test_search_excludes_and_targets_a_field(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_candidate(path, 1, {"Title": "NTR story", "Tags": "romance"})
+    _seed_candidate(path, 2, {"Title": "Quiet", "Tags": "ntr"})
+
+    items, total = await database.list_candidates_page(search="$-tag:ntr$")
+
+    assert [item.candidate_id for item in items] == [1]
+    assert total == 1
+
+    items, total = await database.list_candidates_page(search="$title:%quiet%$")
+
+    assert [item.candidate_id for item in items] == [2]
+    assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_free_text_words_are_anded(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_candidate(path, 1, {"Title": "Summer ntr"})
+    _seed_candidate(path, 2, {"Title": "Summer"})
+
+    items, total = await database.list_candidates_page(search="Summer ntr")
+
+    # 「ntr cosplay」 used to find nothing; now both words have to be there.
+    assert [item.candidate_id for item in items] == [1]
+    assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_the_downloaded_search_shares_the_grammar(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_downloaded(
+        path,
+        1,
+        {"Title": "First", "Tags": "ntr", "ArtistRaw": "sample circle"},
+        provider="EXHENTAI",
+    )
+    _seed_downloaded(
+        path,
+        2,
+        {"Title": "Second", "Tags": "romance", "ArtistRaw": "other"},
+        provider="TELEGRAM",
+    )
+
+    # The upstream spelling is searched too -- the old downloaded search had
+    # dropped `ArtistRaw`/`GroupRaw` from its field list.
+    _, by_artist = await database.list_downloaded_works(search="sample")
+    items, by_tag = await database.list_downloaded_works(search="$tag:ntr$")
+
+    assert by_artist == 1
+    assert [item.candidate_id for item in items] == [1]
+
+
+@pytest.mark.asyncio
+async def test_the_page_scoped_fields_stay_on_their_own_page(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_downloaded(
+        path, 1, {"Title": "First", "Tags": "ntr"}, provider="EXHENTAI"
+    )
+    _seed_downloaded(path, 2, {"Title": "Second"}, provider="TELEGRAM")
+
+    items, total = await database.list_downloaded_works(search="$source:eh_torrent$")
+
+    assert items == []
+    assert total == 0
+
+    items, total = await database.list_downloaded_works(search="$source:exhentai$")
+
+    assert [item.candidate_id for item in items] == [1]
+    assert total == 1
+
+    # `status:` means nothing here -- it is refused rather than matched against
+    # a column that is not part of this query.
+    _, total = await database.list_downloaded_works(search="$status:待审核$")
+
+    assert total == 0
+
+
+@pytest.mark.asyncio
+async def test_a_broken_search_degrades_instead_of_raising(tmp_path: Path) -> None:
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+    _seed_candidate(path, 1, {"Title": "Kept", "Tags": "ntr"})
+
+    # A valid block beside a word keeps both conditions, all ANDed.
+    items, total = await database.list_candidates_page(search="$tag:ntr$ Kept")
+
+    assert [item.candidate_id for item in items] == [1]
+    assert total == 1
+
+    # A stray `$` degrades to free text -- which finds nothing here -- rather
+    # than raising and blanking the page.
+    _, total = await database.list_candidates_page(search="$tag:ntr")
+
+    assert total == 0

@@ -95,10 +95,7 @@
       {% if item.filter_note %}<span class="ui-table-secondary" data-field="filter-reason">{{ item.filter_note }}</span>{% endif %}
     </td>
     <td data-label="标签">
-      {% if item.tags %}
-      <div class="ui-card-tags">
-        {% for tag in item.tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
-      </div>
+      {% if item.tags %}{{ ui.tag_list(item.tags, tag_hrefs) }}
       {% else %}<span class="ui-table-secondary">—</span>{% endif %}
     </td>
     <td data-label="消息" data-numeric="true">{{ item.message_count }}</td>
@@ -142,7 +139,8 @@
     <div class="ui-field">
       <label for="candidate-search">搜索</label>
       <input class="ui-input" id="candidate-search" name="search" type="search"
-             value="{{ search }}" placeholder="标题、作者或标签">
+             value="{{ search }}" placeholder="标题、作者或标签，或用 $tag:值$ 过滤">
+      {{ ui.search_chips(search_chips, search_degraded) }}
     </div>
     <div class="ui-field">
       <label for="candidate-sort">排序</label>
@@ -229,7 +227,8 @@
                 tags=item.tags,
                 status=item.status,
                 selectable=bulk_selectable,
-                value=item.candidate_id) %}
+                value=item.candidate_id,
+                tag_hrefs=tag_hrefs) %}
             {{ candidate_actions(item) }}
             {% if item.warnings %}<div class="ui-card-flags">{{ candidate_flags(item) }}</div>{% endif %}
           {% endcall %}

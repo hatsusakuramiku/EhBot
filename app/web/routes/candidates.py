@@ -35,6 +35,7 @@ from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import REVIEWABLE_STATUSES
 from app.review.service import ReviewError
+from app.search.query import PAGE_CANDIDATES
 from app.telegraph.models import TelegraphError
 from app.torrent.models import TorrentError
 from app.web import deps
@@ -261,6 +262,8 @@ async def _render_candidates(
                 for key, label in CANDIDATE_SORT_OPTIONS
             ],
             "search": search,
+            # The box's own reading: chips, degraded notes, tag links (R61).
+            **deps.search_context(request, search, page=PAGE_CANDIDATES),
             "view": view,
             "columns": [
                 *(

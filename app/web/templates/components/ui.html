@@ -32,9 +32,49 @@
   {{ badge(status_view(code)) }}
 {%- endmacro %}
 
+{# --------------------------------------------------------------- tag chips #}
+
+{% macro tag_list(tags, tag_hrefs=None) -%}
+  {#- A read-only tag list, or -- when the page hands in `tag_hrefs` -- the same
+      list with the two actions asmr.one offers: 🔍 过滤 adds `$tag:值$`, 🚫 排除
+      adds `$-tag:值$`. Plain links, so both work with JavaScript off (R61 §3.2). -#}
+  <div class="ui-card-tags">
+    {% for raw_tag in tags %}
+      {% set tag = raw_tag.strip() %}
+      {% if tag %}
+      {% set links = tag_hrefs(tag) if tag_hrefs else None %}
+      {% if links %}
+      <span class="ui-tag" data-tag="{{ tag }}">{{ tag }}<a class="ui-tag-action" href="{{ links.filter }}" title="过滤「{{ tag }}」" aria-label="过滤标签 {{ tag }}">🔍</a><a class="ui-tag-action" href="{{ links.exclude }}" title="排除「{{ tag }}」" aria-label="排除标签 {{ tag }}">🚫</a></span>
+      {% else %}
+      <span class="ui-tag">{{ tag }}</span>
+      {% endif %}
+      {% endif %}
+    {% endfor %}
+  </div>
+{%- endmacro %}
+
+{# ------------------------------------------------------------- search chips #}
+
+{% macro search_chips(chips, degraded=()) -%}
+  {#- What the search box was read as: one chip per parsed condition with a ×
+      link that removes just that one, and a line for every fragment the parser
+      could not read. Both are links/text, so the whole thing survives a
+      no-JavaScript page load (R61 §3.1). -#}
+  {% if chips or degraded %}
+  <div class="ui-search-chips">
+    {% for chip in chips %}
+    <span class="ui-chip">{{ chip.label }}<a class="ui-chip-x" href="{{ chip.remove_href }}" title="移除条件「{{ chip.label }}」" aria-label="移除条件 {{ chip.label }}">×</a></span>
+    {% endfor %}
+  </div>
+  {% for note in degraded %}
+  <p class="ui-hint" data-field="search-degraded">「{{ note.text }}」解析失败（{{ note.reason }}），已按全局搜索处理</p>
+  {% endfor %}
+  {% endif %}
+{%- endmacro %}
+
 {# ------------------------------------------------------------ cover card #}
 
-{% macro cover_card(title, href=None, cover=None, meta=None, tags=None, status=None, selectable=false, value=None, selected=false) -%}
+{% macro cover_card(title, href=None, cover=None, meta=None, tags=None, status=None, selectable=false, value=None, selected=false, tag_hrefs=None) -%}
   {#- `cover` is the `cover` object from a candidate payload:
       {"url": "/api/v1/thumbnails/<hash>", "hash": "..."} or None. The URL is
       used verbatim — never rebuilt here, and never pointed at an upstream
@@ -64,11 +104,7 @@
         {% if href %}<a href="{{ href }}">{{ title }}</a>{% else %}{{ title }}{% endif %}
       </h3>
       {% if meta %}<span class="ui-card-meta">{{ meta }}</span>{% endif %}
-      {% if tags %}
-        <div class="ui-card-tags">
-          {% for tag in tags %}<span class="ui-tag">{{ tag }}</span>{% endfor %}
-        </div>
-      {% endif %}
+      {% if tags %}{{ tag_list(tags, tag_hrefs) }}{% endif %}
       {#- Card actions belong to the page: which ones a candidate offers is a
           policy question the DTO answers, and a macro that guessed would answer
           it a second time. Called with `{% raw %}{% call %}{% endraw %}`, absent otherwise. -#}

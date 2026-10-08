@@ -211,6 +211,11 @@
             {% else %}
             {{ entry.field_value or "—" }}
             {% endif %}
+            {#- The editable field above, and below it the same values as chips
+                that carry the 过滤/排除 actions (R61 §3.2). -#}
+            {% if entry.field_name in ("Tags", "TagsRaw") and entry.field_value %}
+            {{ ui.tag_list(entry.field_value.split(","), tag_hrefs) }}
+            {% endif %}
           </dd>
         </div>
         {% endfor %}

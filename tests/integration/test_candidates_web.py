@@ -1,6 +1,7 @@
 import asyncio
 from html import unescape
 from pathlib import Path
+from urllib.parse import unquote_plus
 import re
 import sqlite3
 
@@ -483,8 +484,11 @@ def test_a_card_shows_every_chinese_tag(tmp_path: Path) -> None:
         listing = client.get("/candidates", params={"view": "list"}).text
 
     for tag in many:
-        assert f'<span class="ui-tag">{tag}</span>' in grid, tag
-        assert f'<span class="ui-tag">{tag}</span>' in listing, tag
+        # R61: a tag is a chip now, carrying its two filter actions, so the
+        # count still proves nothing was truncated -- the marker is the chip's
+        # own data attribute rather than an immediately closed span.
+        assert f'data-tag="{tag}"' in grid, tag
+        assert f'data-tag="{tag}"' in listing, tag
 
 
 def test_too_many_values_in_one_facet_is_refused_with_a_message(
@@ -909,3 +913,97 @@ def test_a_rejected_row_says_why_and_an_accepted_one_stays_quiet(
         pending = client.get("/candidates", params={"view": "list"})
         assert pending.status_code == 200
         assert "包含图片预览" not in pending.text
+
+
+# --------------------------------------------------------------- search (R61)
+
+
+def test_the_search_box_draws_a_chip_per_condition(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        response = client.get(
+            "/candidates", params={"search": "$tag:ntr tag:cosplay$"}
+        )
+
+    assert response.status_code == 200
+    assert "标签 = ntr" in response.text
+    assert "标签 = cosplay" in response.text
+    # The × removes its own condition and leaves the neighbour alone.
+    remove = unquote_plus(
+        href_with(response.text, 'aria-label="移除条件 标签 = ntr"')
+    )
+    assert remove.endswith("search=$ tag:cosplay$")
+
+
+def test_a_condition_that_cannot_be_parsed_is_announced(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        response = client.get("/candidates", params={"search": "$tag:ntr$ $坏$"})
+
+    # Degrading is not an error: the page renders, the readable condition
+    # still filters, and the operator is told which fragment was not read.
+    assert response.status_code == 200
+    assert "标签 = ntr" in response.text
+    assert 'data-field="search-degraded"' in response.text
+    assert "已按全局搜索处理" in response.text
+
+
+def test_clicking_a_tag_offers_filter_and_exclude(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    candidate = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=401, message_id=161, title="Tagged Two"
+        )
+    )
+    set_metadata(database, candidate, "Tags", "巨乳, big breasts")
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        card = client.get("/candidates").text
+
+    # A value with a space goes in double quotes, which is the one spelling the
+    # parser reads back as a single value.
+    assert unquote_plus(
+        href_with(card, 'aria-label="过滤标签 big breasts"')
+    ) == '/candidates?search=$tag:"big breasts"$'
+    assert unquote_plus(
+        href_with(card, 'aria-label="排除标签 big breasts"')
+    ) == '/candidates?search=$-tag:"big breasts"$'
+
+
+def test_the_candidate_payload_carries_the_parsed_search_filters(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        payload = client.get(
+            "/api/v1/candidates", params={"search": "$tag:ntr$"}
+        ).json()
+
+    # A JSON client can draw the same chip bar without re-implementing the
+    # grammar. `search_filters` rather than `filters`: that key already means
+    # the sidebar's facet selection on this endpoint.
+    assert payload["search"] == "$tag:ntr$"
+    assert payload["search_filters"]["filters"] == [
+        {
+            "field": "TAG",
+            "label": "标签",
+            "value": "ntr",
+            "exclude": False,
+            "fuzzy": False,
+            "raw": "tag:ntr",
+        }
+    ]

@@ -627,8 +627,10 @@ def test_review_views_show_original_and_chinese_tag_rows(tmp_path: Path) -> None
         # has no room for both rows -- and keeps the originals reachable through
         # the 「标签」 facet, which reads `Tags` and `TagsRaw` together. Both
         # halves of a bilingual candidate are therefore still on the page.
-        assert '<span class="ui-tag">巨乳</span>' in queue.text
-        assert '<span class="ui-tag">汉语</span>' in queue.text
+        # R61: the tag chips carry their 过滤/排除 links, so the marker is the
+        # chip's own data attribute rather than an immediately closed span.
+        assert 'data-tag="巨乳"' in queue.text
+        assert 'data-tag="汉语"' in queue.text
         assert 'name="tags" value="female:big breasts"' in queue.text
         assert 'name="tags" value="language:chinese"' in queue.text
 

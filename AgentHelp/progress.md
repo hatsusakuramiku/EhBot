@@ -5847,3 +5847,97 @@ ExHentai 画廊」。`ParsedSourceMessage` 新增 `gallery_from_preview` 布尔�
 **文档同步**：本 R60 条目 + `PHASES.md` 一行与基线链 + `AGENTS.md` 基线/链；`README.md`「主要能力」补
 手动添加判重；`docs/USAGE.md`「解析规则」「自动审批规则」「已下载内容」三节补预览 slug / 匹配详情 / 列表行原因；
 `AgentHelp/EHBot.md` §4.4 / §4.7 同步。环境变量与 `.env.example` 无变化，无数据库迁移。
+
+## R61 — 搜索与过滤语法：`$…$` 过滤块、分段退化、chips 与「点标签即过滤/排除」（2026-10-08）
+
+运营者给出一套语法（与 asmr.one 同源，2026-10-08 抓线上 bundle 逐条核对过）：不用 `$…$` 包裹的是**全局搜索**，
+`$[-]字段:值$` 是**条件**（`-` 表示不含），值里 `%`/`_` 通配、`[%]`/`[_]` 字面量、带空格用双引号，
+多个条件用空格分隔。七条待定逐条定稿（方案 §8）：**分段退化**、自由文本也当通配、**接受双引号**、支持 `-` 排除、
+chips 显示全字/模糊、**数值字段不参与过滤**、加 `status:`（候选）与 `source:`（已下载）；并明确 asmr.one 的
+「🔃 反转」「⛔ 永久排除」**不做**。设计记录 `SEARCH_FILTER_PROPOSAL.md`。本轮**不需要数据库迁移**，
+版本号不变（仍是 `v0.3.0rc3`）。
+
+**为什么必须改**：候选与已下载的搜索框都是**一个 `LIKE '%关键词%'` 子串**，一次扫八个字段——搜 `NTR`
+会命中作者/社团/日文标题里的字母（`Artist` 与 `ArtistRaw` 还把同一事实匹配两次），而「ntr cosplay」
+两个词几乎搜不到；侧栏 facet 反倒是精确的，但它只列 24 个值（`CANDIDATE_FACET_LIMIT`）。
+
+**新模块 `app/search/query.py`（纯函数）**：`parse_query(text, *, page)` 返回
+`ParsedQuery(filters, terms, degraded)`；`candidate_search_sql()` / `downloaded_search_sql()` 把条件编译成
+`EXISTS (SELECT 1 FROM metadata_values mv WHERE mv.candidate_id = <alias>.id …)` 片段与参数（走既有的
+`(candidate_id, field_name)` 索引，无新索引）。要点：
+
+- **块内**每条件 `[-]字段:值`，空格分隔、AND；**块外**是自由文本，按 `GLOBAL_FIELDS`（含 `ArtistRaw`/`GroupRaw`）
+  逐词搜；块内、块间、词间**一律 AND**；
+- **整体匹配 vs 模糊**：值里没有通配符时，多值字段走逗号围栏逐项比较（`_fence()`，与侧栏 facet 的
+  `_FACET_CONTAINS_SQL` 同一段 SQL）、单值字段整体相等；出现 `%`/`_` 即按 LIKE 模糊；`[%]`/`[_]` 是字面量。
+  `like_pattern()` 同时处理 `\`（ESCAPE 字符，必须翻倍）与裸 `[`，编译出的 SQL 文本里**没有**操作者的输入，
+  通配符只出现在绑定参数里；
+- `tag` 是伪字段，同时看 `Tags` 与 `TagsRaw`，并额外接受**去掉 `namespace:`** 的写法（`$tag:netorare$`
+  命中 `female:netorare`）；`jtitle` → `JapaneseTitle`；其余字段名从 `ALLOWED_FIELDS` 建表，**扣掉**
+  `Rating`/`Pages`/`FileSize`；
+- **页级伪字段**：候选 `status:`（状态码或中文名，走 `CANDIDATE_STATUS`）、已下载 `source:`
+  （provider 代码或中文名，走 `provider_codes_matching`）；跨页使用即降级（「status 只在候选页可用」）；
+- **解析器从不报错**：一个字读不出来就**整块**降级为自由文本（坏段当全局搜索、其余块保活），半个 `$`
+  同样降级，`Degraded(text, reason)` 交给页面显示；空串/纯空白不是错误。逐条退化（保留块里的合法条件）
+  没有采用：那样「已按全局搜索处理」的提示会说谎；
+- **chips**：`Filter.chip` 渲染 `标签 = NTR` / `标签 ≈ %ntr%` / `不含 标签 = cosplay`；
+  `Filter.raw` 是**条件在搜索框里的原样切片**（连引号），`ParsedQuery.without(raw)` 据此精确删除，
+  删掉块里最后一条时连 `$…$` 一起去掉（否则会留下 `$ $` 这个空块，下次提交变成新的退化提示）。
+
+**接线（一份实现，两页共用）**：`app/db/database.py` 的两条列表查询改调这套编译——旧的单子串 LIKE 与
+`search_providers` OR 分支删除，`list_downloaded_works` 去掉 `search_providers` 参数；自由文本仍按代码/中文名
+匹配 provider，所以「EH 归档」照旧能搜到。`app/web/deps.py` 新增 `search_href()`（替换搜索词、丢掉 `page`，
+`base=` 可把链接指向别的页）、`tag_search_term()` / `tag_hrefs()`（🔍 过滤追加 `$tag:值$`、🚫 排除追加
+`$-tag:值$`，带空格加双引号，已在搜索框里的条件不重复添加）与 `search_context()`（两页共用的
+chips/退化提示/标签链接上下文）。模板：`components/ui.html` 新增 `tag_list()`（标签 → 带两个动作的 chip）
+与 `search_chips()`；候选与已下载的**列表行 + 卡片**、以及**作品详情页的元数据标签**（链到
+`/candidates/all`，因为「给我所有带这个标签的作品」不是关于这本书状态的问题）共四处接入；`ui.css` 加
+`.ui-chip` / `.ui-chip-x` / `.ui-tag-action`。API 载荷：`/api/v1/candidates` 与 `/api/v1/downloaded` 新增
+`search_filters`（**与方案 §4 的偏差**：`filters` 在候选端点上已经是侧栏 facet 的选择，同名会被读成同一件事；
+方案里已补注）。侧栏 facet 本轮**不动**（chips 只反映搜索框，两套过滤互不覆盖）。
+
+**测试（+58，1792 → 1850）**
+- `tests/unit/test_search_query.py`（新增 44 条）：语法（自由文本多词 AND、单块单/多条件、多块、
+  `-` 排除、引号保留空格、字段名大小写、`tag`/`tags` 别名）、通配（`has_wildcard` 看穿字面量、
+  `like_pattern` 保留通配并转义 `%`/`_`/`\`/`[`、自由文本同语义）、退化（`$$`、嵌套 `$$…$$`、半个 `$`、
+  坏块不牵连邻居、坏块降级仍搜词、引号未闭合仍搜词、空串/空白不算错）、字段（数值字段不生成条件、
+  未知字段/未知状态降级、`status:` 候选专属、`source:` 已下载专属）、chips（文案、删除一条保留其余、
+  删最后一条连带删块、保留两侧自由文本、载荷形状）、编译（`status` / `source` 子句与 `NOT` 包裹、
+  参数顺序、围栏模式、`[%]` 在参数里转义、空查询编译成 `1=1`、`Filter` 不可变与标签）。
+- `tests/integration/test_database.py`（+7）：`$tag:ntr$` **不**命中 `Artist`/`Title` 含同样字母的行、
+  只命中标签真含该标签的行；`$tag:solo$` 不命中 `solomale` 而 `$tag:%solo%$` 命中；`$-tag:ntr$` 排除、
+  `$title:%quiet%$` 限定字段；自由文本两词 AND；已下载与候选同一套语法（含补上的 `ArtistRaw`）；
+  `source:` 双向且 `status:` 在已下载页被拒；坏查询不抛错（合法块 + 词都在，半个 `$` 只降级）。
+- `tests/unit/test_api_read_layer.py`（净 +1）：R61 起 `%` 是通配（单用即匹配全部），字面量改由 `[%]` 表达
+  （旧用例断言 `%` 是字面量，已按新契约重写）。
+- `tests/integration/test_candidates_web.py`（+4）：一个块两个条件渲染两个 chips 且 × 只删一个；
+  坏块渲染「已按全局搜索处理」且页面仍是 200；点标签的 🔍/🚫 href 分别是 `$tag:"big breasts"$` 与
+  `$-tag:"big breasts"$`（带空格自动双引号）；`/api/v1/candidates` 载荷带 `search_filters`。
+- `tests/integration/test_downloaded_web.py`（+1）：已下载页同样的 chips + 退化提示 + × 只删一条，
+  且 `/api/v1/downloaded` 载荷带 `search` 与 `search_filters`。
+- `tests/integration/test_work_detail_web.py`（+1）：详情页元数据标签渲染成 chip，🔍/🚫 指向
+  `/candidates/all?search=$tag:"big breasts"$` 与排除版。
+- 旧断言重写（不改数量）：`test_downloaded_api`（snapshot 不再有 `search_providers` 键）、
+  `test_candidates_web` 与 `test_downloaded_web`、`test_review_actions` 四处「标签是裸 span」的断言改为
+  `data-tag=`（标签现在带两个动作）。
+
+**验证（全量）**：`.venv/bin/python -m pytest -p no:randomly tests -q` → **1850 collected / 0 failed**。
+**文档同步**：本 R61 条目；`PHASES.md`（补上遗漏的 R60 行，新增 R61 行、基线链、当前状态两条）；
+`AGENTS.md` 基线 1792 → 1850 与基线链（顺带把 R60 的十七条并进链里）；`README.md`「主要能力」新增
+「搜索即过滤」；`docs/USAGE.md` 新增「搜索与过滤语法（候选与已下载共用）」并改写「搜索也能按来源命中」；
+`AgentHelp/EHBot.md` §4.9 的边界改写（搜索那半已由 R61 完成，其余仍延后）+ 新增 §4.11。
+环境变量与 `.env.example` 无变化，无数据库迁移。
+
+**镜像（R61 发布动作）**：`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest --push .`，
+index digest `sha256:4431e9bcbd6f778caad8ebeb2a9357ffd4540d859b937d5009a925519f05af28`，
+amd64 manifest `sha256:ed9e3014e170f4a6f287e54f6dbec2240ccd9da28bb381151c71c9a67c1095ce`，
+config `sha256:32e615c599e9c671203a8a571a903350ae32448b3ebf98720e63fb05e9252eff`（latest 上一次被更新是
+R59 的 index `sha256:b7b9bfc9…`，R60 没有发布动作）。**从 registry 复核而不是只信本地构建**：
+`docker buildx imagetools inspect` 与 `docker pull` 取回同一 index digest。取回镜像冒烟（`--user 0:0`、
+`DATA_PATH=/tmp/ehbotdata`、`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`、`THUMBNAILS_ENABLED=false`）：
+`/healthz` 200 `{"status":"ok"}`、`/readyz` 200 `{"status":"ready"}`、`/candidates` 303 → `/login`
+（字面路由没有被 `/candidates/{candidate_id}` 截走）；容器内 `schema_migrations` 仍 24 条（R60/R61 都无迁移）。
+**登录之后**在镜像里真的走一遍 R61：`GET /candidates?search=$tag:%ntr%$ $坏$` 渲染出 `ui-chip`、
+chip 文案「标签 ≈ %ntr%」与「已按全局搜索处理」的退化提示，`app/search/query.py` 在镜像内可导入；
+`ui-tag-action`、`macro tag_list`、两个列表端点的 `search_filters` 都已随镜像就位（冒烟库是空的，
+所以没有标签可点）。冒烟容器已停止并随 `--rm` 清理。

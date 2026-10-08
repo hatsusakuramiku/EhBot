@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from html import unescape
 import itertools
+from urllib.parse import unquote_plus
 from pathlib import Path
 import re
 
@@ -483,8 +484,11 @@ def test_the_card_shows_every_chinese_tag_and_the_work_facts(
         client.__exit__(None, None, None)
 
     for tag in CARD_TAGS:
-        assert f'<span class="ui-tag">{tag}</span>' in grid, tag
-        assert f'<span class="ui-tag">{tag}</span>' in listing, tag
+        # R61: the chip carries the 过滤/排除 links, so the marker is its data
+        # attribute; the point of the assertion -- every tag survives both
+        # renderings -- is unchanged.
+        assert f'data-tag="{tag}"' in grid, tag
+        assert f'data-tag="{tag}"' in listing, tag
     # 「这是哪来的、多大」 without opening the work.
     assert "ui-card-facts" in grid
     assert provider_label(PROVIDER_TELEGRAM) in grid
@@ -1339,3 +1343,45 @@ def test_the_dedup_plan_is_available_over_the_api_and_matches_the_page(
     assert executed["kept"] == [keeper]
     assert [entry["candidate_id"] for entry in executed["removed"]] == [loser]
     assert executed["skipped"] == []
+
+
+def href_with(text: str, marker: str) -> str:
+    """The `href` of the element carrying `marker`, as a browser reads it.
+
+    Same search-not-equality shape as the candidate page's helper: the query
+    string's parameter order is Starlette's business, not this test's.
+    """
+    match = re.search(r'href="([^"]*)"[^>]*' + marker, text) or re.search(
+        marker + r'[^>]*href="([^"]*)"', text
+    )
+    assert match, f"no element matching {marker}"
+    return unescape(match.group(1))
+
+
+def test_the_search_box_draws_its_own_reading(tmp_path: Path) -> None:
+    """R61: the same chips, degraded notice and tag actions as /candidates."""
+    settings, library, ids = seeded(tmp_path)
+    library.set_metadata(ids["packed"], "Tags", "巨乳, 中出")
+
+    client = logged_in(settings)
+    try:
+        page = client.get("/downloaded", params={"search": "$tag:巨乳$ $坏$"})
+        payload = client.get(
+            "/api/v1/downloaded", params={"search": "$tag:巨乳$"}
+        ).json()
+    finally:
+        client.__exit__(None, None, None)
+
+    assert page.status_code == 200
+    assert "标签 = 巨乳" in page.text
+    # The half-open block is named on the page rather than silently dropped.
+    assert 'data-field="search-degraded"' in page.text
+    assert "已按全局搜索处理" in page.text
+    remove = unquote_plus(
+        href_with(page.text, 'aria-label="移除条件 标签 = 巨乳"')
+    )
+    assert remove.endswith("search=$坏$")
+
+    # The JSON snapshot carries the same reading for a mobile client.
+    assert payload["search"] == "$tag:巨乳$"
+    assert payload["search_filters"]["filters"][0]["field"] == "TAG"

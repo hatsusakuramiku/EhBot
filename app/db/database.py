@@ -29,6 +29,13 @@ from app.candidates.models import (
     TelegramSourceConfig,
 )
 from app.candidates.rules import evaluate_metadata_rules
+from app.search.query import (
+    PAGE_CANDIDATES,
+    PAGE_DOWNLOADED,
+    candidate_search_sql,
+    downloaded_search_sql,
+    parse_query,
+)
 from app.credentials import ApiCredential
 from app.downloads.models import (
     CONVERSION_STATE_FAILED,
@@ -2028,21 +2035,17 @@ class Database:
             placeholders = ", ".join("?" for _ in statuses)
             where.append(f"c.status IN ({placeholders})")
             params.extend(statuses)
-        needle = search.strip()
-        if needle:
-            # Matching through EXISTS rather than the aliased subqueries keeps
-            # the predicate valid SQL and lets SQLite use the
-            # (candidate_id, field_name) index instead of scanning the
-            # projected columns.
-            where.append(
-                "EXISTS (SELECT 1 FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id "
-                "   AND mv.field_name IN "
-                "       ('Title', 'JapaneseTitle', 'Artist', 'Group', "
-                "        'Tags', 'TagsRaw', 'ArtistRaw', 'GroupRaw') "
-                "   AND mv.field_value LIKE ? ESCAPE '\\')"
+        if search.strip():
+            # The `$…$` grammar (R61) compiles to EXISTS fragments over the
+            # same (candidate_id, field_name) index the old substring search
+            # used. Parsing is total, so a malformed query degrades to free
+            # text instead of raising here.
+            compiled = candidate_search_sql(
+                parse_query(search, page=PAGE_CANDIDATES)
             )
-            params.append(f"%{_escape_like(needle)}%")
+            if compiled.clause != "1=1":
+                where.append(compiled.clause)
+                params.extend(compiled.params)
         for name, values in facets.items():
             facet = CANDIDATE_FACETS.get(name)
             if facet is None:
@@ -2126,7 +2129,6 @@ class Database:
         self,
         *,
         search: str | None = None,
-        search_providers: Sequence[str] = (),
         pack_filter: str = "all",
         sort: str = "newest",
         direction: str | None = None,
@@ -2151,7 +2153,6 @@ class Database:
         return await asyncio.to_thread(
             self._list_downloaded_works_sync,
             (search or "").strip(),
-            tuple(search_providers),
             pack_filter,
             sort,
             direction,
@@ -2162,7 +2163,6 @@ class Database:
     def _list_downloaded_works_sync(
         self,
         search: str,
-        search_providers: tuple[str, ...],
         pack_filter: str,
         sort: str,
         direction: str | None,
@@ -2178,25 +2178,16 @@ class Database:
             DOWNLOAD_STATE_COMPLETED,
             PROVIDER_CONVERSION,
         ]
-        if search:
-            # The search box matches the book or the source that produced it:
-            # 「EH 归档」 is how an operator refers to a provider, and it lives on
-            # the job rather than in `metadata_values`, so it is an OR with the
-            # metadata match rather than a second filter.
-            clauses = [
-                "EXISTS (SELECT 1 FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id "
-                "   AND mv.field_name IN "
-                "       ('Title', 'JapaneseTitle', 'Artist', 'Group', "
-                "        'Tags', 'TagsRaw') "
-                "   AND mv.field_value LIKE ? ESCAPE '\\')"
-            ]
-            params.append(f"%{_escape_like(search)}%")
-            if search_providers:
-                placeholders = ", ".join("?" for _ in search_providers)
-                clauses.append(f"dj.provider IN ({placeholders})")
-                params.extend(search_providers)
-            where.append("(" + " OR ".join(clauses) + ")")
+        if search.strip():
+            # Same `$…$` grammar as the candidate list, with `source:` bound to
+            # the job's provider. A free word still matches a provider by its
+            # code or Chinese label, so the old 「EH 归档」 search keeps working.
+            compiled = downloaded_search_sql(
+                parse_query(search, page=PAGE_DOWNLOADED)
+            )
+            if compiled.clause != "1=1":
+                where.append(compiled.clause)
+                params.extend(compiled.params)
         # Each filter is expressed against the CBZ artifact or the packing job's
         # state, never against the candidate's status: packaging leaves the
         # status alone, so the status cannot answer「打好包了吗」.
