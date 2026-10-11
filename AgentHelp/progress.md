@@ -6336,3 +6336,45 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 → **48 tests / 0 failed**（45 + 3）。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R71 行。
+---
+
+## R72 · 2026-10-11 · 动作面补口 ③：按来源拉取（五个来源）
+
+**需求。** 同 R70；作品详情页的四个来源按钮（EH 种子 / Archive Download / 预览页 /
+TG 用户）要在手机上能用。
+
+**设计。** `POST /api/v1/works/{candidate_id}/sources/{provider}`，provider ∈
+`SOURCE_ENQUEUE` 的五个键——**同一张表驱动** `DownloadService` 的五个方法，
+键集与 `app/api/works.py::work_actions` 给 `actions.sources[]` 的那五个 provider 一致
+（`PROVIDER_CONVERSION` 不在里面，理由与页面不提供它一样：打包不是一个「来源」）：
+
+| provider | 调用的服务方法 |
+|----------|----------------|
+| `TELEGRAM` | `enqueue_telegram_download(candidate_id, <第一个压缩附件>, redownload=True)` |
+| `TELEGRAM_USER` | `enqueue_telegram_user_download(…同上…)` |
+| `EXHENTAI` | `enqueue_exhentai_download(candidate_id, redownload=True)` |
+| `TELEGRAPH` | 先 `deps.telegraph_service` 存在性检查，再 `enqueue_telegraph_download(…)` |
+| `EH_TORRENT` | 先 `deps.torrent_service` 存在性检查，再 `enqueue_torrent_download(…)` |
+
+- **一律 `redownload=True`**，与页面一致：在一件已经从某来源来过的作品上按来源按钮
+  意思是「再拉一次」——这才让旧的失败可恢复；否则那次按下会是 no-op，
+  坏文件留在盘上给后面每一次打包读。
+- 两个 Telegram 来源先要有压缩附件，否则用**页面同一句话**拒绝
+  （`ARCHIVE_ATTACHMENT_MISSING` /「该候选没有可下载的压缩附件」）——
+  `_archive_attachment()` 就是这个 guard，抽出来是为了两个来源共用一个判据。
+- `EXHENTAI` 花 GP：**确认是客户端的事**（页面先问再发；这里不替按下的运营者做第二次判断）。
+- provider 大小写不敏感（`strip().upper()`）；未知 provider → 400 `PROVIDER_UNKNOWN`
+  且 `details.allowed` 给出那五个。
+- 缺行仍先查一次 → 404。
+
+**测试（本轮 R72 相关）**
+
+- `TestPullSource`（6 条）：三个不需要附件的来源各入一个任务且 job id 互不相同
+  （幂等键带来源名，换来源不是 no-op）、provider 大小写不敏感、
+  两个 Telegram 来源缺附件时按页面文案拒绝、未知来源列允许集（且不含 `CONVERSION`）、
+  缺行 404、CSRF 门。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_api_domains.py`
+→ **54 tests / 0 failed**（48 + 6）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R72 行。

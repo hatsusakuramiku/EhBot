@@ -24,7 +24,16 @@ from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.candidates import manual as manual_ingest
 from app.conversion.convert import ConversionError
 from app.db.database import DuplicateGalleryCandidate
-from app.downloads.models import MAX_JOB_PRIORITY, MIN_JOB_PRIORITY
+from app.downloads.models import (
+    MAX_JOB_PRIORITY,
+    MIN_JOB_PRIORITY,
+    PROVIDER_EH_TORRENT,
+    PROVIDER_EXHENTAI,
+    PROVIDER_TELEGRAM,
+    PROVIDER_TELEGRAM_USER,
+    PROVIDER_TELEGRAPH,
+)
+from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import METADATA_FIELDS, STATUS_NEEDS_REVISION
 from app.review.service import ReviewError, ReviewService
@@ -57,6 +66,20 @@ JOB_ACTION_PRIORITY = "priority"
 BATCH_JOB_ACTIONS: frozenset[str] = frozenset(JOB_ACTIONS) | {
     JOB_ACTION_SWITCH_SOURCE,
     JOB_ACTION_PRIORITY,
+}
+
+#: The sources a work's archive can be pulled from, mapped to the
+#: `DownloadService` method each one is queued through. The keys are the same
+#: providers `app/api/works.py::work_actions` offers in `actions.sources[]`, so
+#: the detail page's buttons and this endpoint cannot disagree about which
+#: sources exist; `PROVIDER_CONVERSION` is absent because packaging is not a
+#: source an operator picks.
+SOURCE_ENQUEUE: dict[str, str] = {
+    PROVIDER_TELEGRAM: "enqueue_telegram_download",
+    PROVIDER_TELEGRAM_USER: "enqueue_telegram_user_download",
+    PROVIDER_EXHENTAI: "enqueue_exhentai_download",
+    PROVIDER_TELEGRAPH: "enqueue_telegraph_download",
+    PROVIDER_EH_TORRENT: "enqueue_torrent_download",
 }
 
 
@@ -822,6 +845,90 @@ async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
         "candidate_id": candidate_id,
         "has_gallery": candidate.ex_gid is not None,
     }
+
+
+@router.post("/works/{candidate_id}/sources/{provider}")
+async def pull_work_source(
+    request: Request, candidate_id: int, provider: str
+) -> dict:
+    """Pull this work's archive from one named source, as the page's buttons do.
+
+    Every call is `redownload=True`, for the page's reason: pressing a source
+    button on a work that already came from it means 「再拉一次」 -- that is what
+    makes an old failure recoverable, where a no-op press would leave the bad
+    file on disk for every later pack to read.
+
+    The two Telegram routes need an archive attachment to name; a candidate
+    without one is refused with the page's sentence rather than with an
+    `AttributeError` from inside the download service.
+
+    `EXHENTAI` is ExHentai's Archive Download, which spends GP. The
+    confirmation is the client's business -- the page asks before it posts, and
+    this endpoint does not second-guess an operator who pressed it.
+    """
+    await _guard(request)
+    target = provider.strip().upper()
+    if target not in SOURCE_ENQUEUE:
+        raise ApiError(
+            "PROVIDER_UNKNOWN",
+            f"未知的来源：{provider}",
+            details={"allowed": sorted(SOURCE_ENQUEUE)},
+        )
+    database = deps.database(request)
+    candidate = await database.get_candidate(candidate_id)
+    if candidate is None:
+        raise ApiError(
+            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
+        )
+    service = deps.download_service(request)
+    try:
+        if target == PROVIDER_TELEGRAM:
+            result = await service.enqueue_telegram_download(
+                candidate_id, _archive_attachment(candidate), redownload=True
+            )
+        elif target == PROVIDER_TELEGRAM_USER:
+            result = await service.enqueue_telegram_user_download(
+                candidate_id, _archive_attachment(candidate), redownload=True
+            )
+        elif target == PROVIDER_TELEGRAPH:
+            # Presence check before the enqueue, exactly as the page does it: a
+            # deployment with no Telegraph client should be told that, not given
+            # a job that can only fail.
+            deps.telegraph_service(request)
+            result = await service.enqueue_telegraph_download(
+                candidate_id, redownload=True
+            )
+        elif target == PROVIDER_EH_TORRENT:
+            deps.torrent_service(request)
+            result = await service.enqueue_torrent_download(
+                candidate_id, redownload=True
+            )
+        else:  # PROVIDER_EXHENTAI
+            result = await service.enqueue_exhentai_download(
+                candidate_id, redownload=True
+            )
+    except DownloadError as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_DOWNLOAD, job_id=result.job_id)
+    return {
+        "candidate_id": candidate_id,
+        "provider": target,
+        "job_id": result.job_id,
+    }
+
+
+def _archive_attachment(candidate: Any) -> dict:
+    """The first archive attachment on a candidate, or the page's refusal.
+
+    Same guard and same sentence as `/candidates/{id}/download`: a Bot API pull
+    has to name the attachment it is fetching, and a candidate that carries none
+    is the operator on the wrong work rather than a broken server.
+    """
+    for message in candidate.messages:
+        for attachment in message.attachments:
+            if attachment.get("type") == "archive":
+                return dict(attachment)
+    raise ApiError("ARCHIVE_ATTACHMENT_MISSING", "该候选没有可下载的压缩附件")
 
 
 def _translate(exc: Exception) -> Exception:

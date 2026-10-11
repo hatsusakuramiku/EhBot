@@ -951,3 +951,139 @@ class TestFetchMetadata:
 
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+def set_candidate_fields(settings: Settings, candidate_id: int, **fields) -> None:
+    """Set columns on a seeded candidate (gallery ref, preview url, hash)."""
+    database = Database(settings.data_path / "ehbot.db")
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            f"UPDATE candidates SET {assignments} WHERE id = ?",
+            (*fields.values(), candidate_id),
+        )
+
+
+class TestPullSource:
+    """R72: 按来源拉取 over JSON, on the calls the page's buttons make."""
+
+    def test_each_source_queues_the_job_its_own_route_would(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            set_candidate_fields(settings, 1, ex_gid=12345)
+            log_in(client, settings)
+            jobs = {
+                provider: client.post(
+                    f"/api/v1/works/1/sources/{provider}",
+                    json={},
+                    headers={CSRF_HEADER: csrf_token(client)},
+                )
+                for provider in ("EXHENTAI", "TELEGRAPH", "EH_TORRENT")
+            }
+
+        for provider, response in jobs.items():
+            assert response.status_code == 200, provider
+            assert response.json()["provider"] == provider
+            assert response.json()["job_id"] > 0
+        # One job per provider: the idempotency key names the source, so asking
+        # for a different one is not a no-op.
+        assert len({r.json()["job_id"] for r in jobs.values()}) == 3
+
+    def test_the_provider_is_case_insensitive(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/sources/exhentai",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["provider"] == "EXHENTAI"
+
+    def test_a_bot_pull_without_an_archive_attachment_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """The page's sentence, from the page's guard."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            responses = [
+                client.post(
+                    f"/api/v1/works/1/sources/{provider}",
+                    json={},
+                    headers={CSRF_HEADER: csrf_token(client)},
+                )
+                for provider in ("TELEGRAM", "TELEGRAM_USER")
+            ]
+
+        for response in responses:
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "ARCHIVE_ATTACHMENT_MISSING"
+
+    def test_an_unknown_source_lists_the_allowed_ones(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/sources/CONVERSION",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "PROVIDER_UNKNOWN"
+        # `CONVERSION` is not a source an operator picks, exactly as the detail
+        # page never offers it.
+        assert error["details"]["allowed"] == [
+            "EH_TORRENT",
+            "EXHENTAI",
+            "TELEGRAM",
+            "TELEGRAM_USER",
+            "TELEGRAPH",
+        ]
+
+    def test_a_missing_work_is_a_404(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/404/sources/EXHENTAI",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 404
+
+    def test_it_needs_the_same_write_gates_as_any_other_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post("/api/v1/works/1/sources/EXHENTAI", json={})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_INVALID"
