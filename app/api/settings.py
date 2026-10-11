@@ -1688,6 +1688,81 @@ async def put_ai_chain(scope: str, request: Request) -> dict:
     return await settings_snapshot(request, _ai_section_of(code))
 
 
+@router.put("/settings/paths/ai")
+async def put_ai_path_settings(request: Request) -> dict:
+    """Store the 路径来源 choice and the AI sub-panel in one write.
+
+    One call because it is one form: the radio says whether the model or the
+    template decides a path, and the prompt, the two numbers and the three
+    switches only mean anything under the AI choice. The numbers are written
+    first, on the archive tab's reason -- they are the field that realistically
+    fails validation, so a rejected value aborts before the mode is changed.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    values = paths_form.ai_path_submission(payload)
+    service = deps.archive_settings_service(request)
+    try:
+        await service.save_ai_batch_size(values["ai_batch_size"])
+        await service.save_ai_concurrency(values["ai_concurrency"])
+        await service.save_path_source(str(values["path_source"]))
+        await service.save_ai_prompt(str(values["ai_prompt"]))
+        await service.save_ai_fallback_to_rules(
+            bool(values["ai_fallback_to_rules"])
+        )
+        await service.save_ai_stream(bool(values["ai_stream"]))
+        await service.save_ai_default_include_current(
+            bool(values["ai_default_include_current"])
+        )
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "paths")
+
+
+@router.put("/settings/paths/ai/prompt")
+async def put_ai_path_prompt(request: Request) -> dict:
+    """Store the archive-path prompt, or reset it to the shipped one.
+
+    `{"prompt": ""}` is how the page's 「恢复默认」 button submits, and it is why
+    this is a separate call from the panel: blank means 「use the default」 rather
+    than 「ask nothing」, and the default lives in `app/ai/prompt.py` -- writing a
+    copy of today's wording into the database would freeze it for a deployment
+    that upgrades to a better one tomorrow.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        await deps.archive_settings_service(request).save_ai_prompt(
+            str(payload.get("prompt") or "")
+        )
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "paths")
+
+
+@router.put("/settings/parse/model-source")
+async def put_candidate_model_source(request: Request) -> dict:
+    """Choose whether the AI candidate gate inherits the default model chain or
+    carries its own.
+
+    Its own call rather than part of the admission write because it is a
+    different question: the gate's switches say what to do with a verdict, this
+    says which list of models produces one.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        await deps.system_settings_service(
+            request
+        ).save_ai_candidate_model_source(str(payload.get("model_source") or ""))
+    except SystemSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "parse")
+
+
 @router.get("/settings/{section}")
 async def get_settings_section(request: Request, section: str) -> dict:
     """One section's stored settings, read-only."""

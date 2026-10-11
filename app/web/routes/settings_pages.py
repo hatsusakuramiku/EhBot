@@ -41,7 +41,11 @@ from app.settings.parse import (
     candidate_admission,
     parse_rules_submission,
 )
-from app.settings.paths import path_rule_payload, template_payload
+from app.settings.paths import (
+    ai_path_submission,
+    path_rule_payload,
+    template_payload,
+)
 from app.settings.sources import (
     SourceFieldError,
     parse_source,
@@ -669,17 +673,22 @@ async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
     service = deps.archive_settings_service(request)
+    # The reading half is `app/settings/paths.py`'s, shared with
+    # `PUT /api/v1/settings/paths/ai` (R80).
+    ai_path = ai_path_submission(form_values(form))
     try:
-        await service.save_ai_batch_size(form.get("ai_batch_size"))
-        await service.save_ai_concurrency(form.get("ai_concurrency"))
-        await service.save_path_source(str(form.get("path_source") or ""))
-        await service.save_ai_prompt(str(form.get("ai_prompt") or ""))
+        # Numbers first: they are the field that realistically fails validation,
+        # so a rejected value aborts before the mode is changed.
+        await service.save_ai_batch_size(ai_path["ai_batch_size"])
+        await service.save_ai_concurrency(ai_path["ai_concurrency"])
+        await service.save_path_source(str(ai_path["path_source"]))
+        await service.save_ai_prompt(str(ai_path["ai_prompt"]))
         await service.save_ai_fallback_to_rules(
-            form.get("ai_fallback_to_rules") == "on"
+            bool(ai_path["ai_fallback_to_rules"])
         )
-        await service.save_ai_stream(form.get("ai_stream") == "on")
+        await service.save_ai_stream(bool(ai_path["ai_stream"]))
         await service.save_ai_default_include_current(
-            form.get("ai_default_include_current") == "on"
+            bool(ai_path["ai_default_include_current"])
         )
     except ArchiveSettingsError as exc:
         return await render_settings(

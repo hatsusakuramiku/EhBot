@@ -1362,3 +1362,101 @@ def test_the_ai_writes_need_the_same_gates_as_any_other(
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+# ---------------------------------------------------------------- R80 AI 路径与模型来源
+
+def test_the_ai_path_panel_round_trips(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/ai",
+            json={
+                "path_source": "AI",
+                "ai_prompt": "按作者分目录",
+                "ai_batch_size": 20,
+                "ai_concurrency": 2,
+                "ai_fallback_to_rules": True,
+                "ai_stream": False,
+                "ai_default_include_current": True,
+            },
+            headers={CSRF_HEADER: csrf},
+        )
+        section = client.get(PATHS).json()
+
+    assert response.status_code == 200
+    # `path_source` sits at the top of the section (`ai` is the sub-panel), and
+    # the panel's own keys are the service's short names.
+    assert section["path_source"] == "ai"
+    panel = section["ai"]
+    assert panel["prompt"] == "按作者分目录"
+    assert panel["fallback_to_rules"] is True
+    assert panel["default_include_current"] is True
+
+
+def test_a_bad_number_aborts_before_the_mode_changes(tmp_path: Path) -> None:
+    """Numbers first, so the panel is not left half-applied."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/ai",
+            json={"path_source": "ai", "ai_batch_size": 0},
+            headers={CSRF_HEADER: csrf},
+        )
+        section = client.get(PATHS).json()
+
+    assert response.status_code == 400
+    # The mode is untouched, which is the whole reason for the ordering.
+    assert section["path_source"] != "ai"
+
+
+def test_an_empty_prompt_means_use_the_shipped_one(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        custom = client.put(
+            PATHS + "/ai/prompt",
+            json={"prompt": "按作者分目录"},
+            headers={CSRF_HEADER: csrf},
+        ).json()["ai"]["prompt"]
+        shipped = client.put(
+            PATHS + "/ai/prompt",
+            json={"prompt": ""},
+            headers={CSRF_HEADER: csrf},
+        ).json()["ai"]
+
+    assert custom == "按作者分目录"
+    # Blank is stored, and the payload reads the shipped text back: what makes
+    # 「恢复默认」one call rather than a copy of today's wording in the database.
+    assert shipped["prompt"] == shipped["default_prompt"]
+    assert shipped["default_prompt"]
+
+
+def test_the_candidate_model_source_round_trips(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PARSE + "/model-source",
+            json={"model_source": "custom"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_ai"]["model_source"] == "custom"
+
+
+def test_the_ai_panel_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/ai", json={"path_source": "ai", "ai_batch_size": 10}
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"

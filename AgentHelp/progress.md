@@ -6653,3 +6653,51 @@ AI 子面板，牵涉模型链，与 `ai` 区一起做）、`/paths/template/pre
 **验证**：`test_settings_write_api.py` → **69 tests / 0 failed**（60 + 9）。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R79 行。
+---
+
+## R80 · 2026-10-11 · 设置写入 ⑦：AI 路径面板与候选模型来源（收口）
+
+**需求。** 同 R74；把九区里「挂在别的标签上的 AI 子面板」补齐——它们各自是一块真开关，
+不是装饰。
+
+**设计。** 扩 `app/settings/paths.py`（`ai_path_submission`），网页 `/archive-settings/paths/ai`
+改成调它；三个 JSON 路由：
+
+    PUT /api/v1/settings/paths/ai            路径来源（模板 / AI）+ 提示词 + 两个数字 + 三个开关
+    PUT /api/v1/settings/paths/ai/prompt     写提示词；空串 = 用出厂那份（「恢复默认」）
+    PUT /api/v1/settings/parse/model-source  候选判定跟随全局默认 还是 本页单独指定
+
+- **数字先写**：`ai_batch_size` / `ai_concurrency` 是真会校验失败的字段，被拒的值要在
+  「路径来源」被改之前中止——与归档区限制先写是同一条理由。
+- 空提示词＝「用默认」而不是「什么都不问」：默认文本住在 `app/ai/prompt.py`，
+  把它抄进数据库会把今天的措辞冻给明天升级的部署。
+- 模型来源单独一个调用：面板的开关说「判定结果怎么处理」，这条说「用哪张模型列表」。
+
+**本区明确不做的四样**（记录在案，都不是遗漏）：
+
+| 网页路由 | 为什么不接 |
+|----------|-----------|
+| `/paths/template/preview` | 纯预览：把模板渲染一行给运营者看，手机端省一次往返不值得单开一个端点 |
+| `/paths/rearchive` | 一键重新归档：会把库里所有作品的路径重算并移动文件，是个重活，不该从手机误触 |
+| `/paths/ai/cache/clear` | 桌面便利：清路径建议缓存 |
+| `/archive-settings/toolchain/install`、`/archive-settings/profiles/{name}` | 命名服务器上的可执行文件与路径，手机上打的路径没法与运营者没在看的文件系统核对 |
+
+（模型链本身在 R79 的 `PUT /settings/ai/chain/{scope}` 里已经覆盖了三个作用域，
+所以「挂在路径页与解析页上的模型链编辑器」不需要再补。）
+
+**测试（本轮 R80 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 5 条：面板往返（路径来源 + 提示词 +
+  数字 + 开关）、**坏数字在改动路径来源之前中止**、空提示词读回出厂那份、模型来源往返、
+  CSRF 门。
+- 回归：`tests/integration/test_settings_web.py` 103 条 + `tests/unit/test_ai_paths.py` 62 条
+  （共 165）全绿——本轮改了网页侧 paths/ai 那个 handler。
+
+**验证**：`test_settings_write_api.py` → **74 tests / 0 failed**（69 + 5）。无迁移。
+
+**收口。** R64–R69 + R70–R80 合计 17 期：移动端够不着的动作面与九区设置写入全部有了
+`/api/v1` 出口。总设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` 与
+`MOBILE_API_COMPLETION_ROUND2_PROPOSAL.md`。剩下的只有本条目上表那四样，
+每一行都写了「为什么不做」，免得后面读成遗漏。
+
+**文档同步**：本条目；`PHASES.md` 加 R80 行。

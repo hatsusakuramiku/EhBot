@@ -20,6 +20,39 @@ from app.auto_approval.rules import RuleValidationError, validate_rule_ast
 from app.settings.forms import checkbox
 
 
+#: The AI sub-panel's switches. They only mean anything under the AI 路径来源, but
+#: they are stored independently -- an operator who switches back to the template
+#: and later back to the model finds their prompt and switches where they left
+#: them, which is what the page promises.
+AI_PATH_SWITCHES: tuple[str, ...] = (
+    "ai_fallback_to_rules",
+    "ai_stream",
+    "ai_default_include_current",
+)
+
+#: The two numbers, written first: they are the fields that realistically fail
+#: validation, so a rejected value aborts before the 路径来源 is changed.
+AI_PATH_NUMBERS: tuple[str, ...] = ("ai_batch_size", "ai_concurrency")
+
+
+def ai_path_submission(values: Mapping[str, Any]) -> dict[str, Any]:
+    """The 路径来源 radio, the prompt, the two numbers and the three switches.
+
+    One submission because it is one form: the radio says whether the model or
+    the template decides a path, and everything else only means anything under
+    the AI choice.
+    """
+    payload: dict[str, Any] = {
+        "path_source": str(values.get("path_source") or ""),
+        "ai_prompt": str(values.get("ai_prompt") or ""),
+    }
+    for key in AI_PATH_NUMBERS:
+        payload[key] = values.get(key)
+    for key in AI_PATH_SWITCHES:
+        payload[key] = checkbox(values.get(key))
+    return payload
+
+
 def path_rule_payload(
     values: Mapping[str, Any], *, condition: Any
 ) -> dict[str, Any]:
