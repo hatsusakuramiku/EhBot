@@ -98,6 +98,7 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R67 | 2026-10-11 | 移动端 API 补口 ④-1：`PUT /api/v1/settings/connections`（连接区写入；`system` / `passwords` 留 R68 / R69） | +5（同上，未跑全量） | `progress.md:6165` |
 | R68 | 2026-10-11 | 移动端 API 补口 ④-2：`PUT /api/v1/settings/system` + 抽共享运行时刷新器 `app/settings/runtime.py`（`passwords` 留 R69） | +5（同上，未跑全量） | `progress.md:6209` |
 | R69 | 2026-10-11 | 移动端 API 补口 ④-3：`PUT /api/v1/settings/passwords`（归档密码 + API Key；四期收官） | +6（同上，未跑全量） | `progress.md:6244` |
+| R70 | 2026-10-11 | 动作面补口 ①：`POST /api/v1/works/{id}/needs-revision` + `/convert`（复用 `ReviewService` / `ConversionService`） | +10（同上，未跑全量） | `progress.md:6285` |
 
 > 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → R58 1752 → R59 1775 → R60 1792 → R61 1850 → **R62/R63 1871**。以 `AGENTS.md` 的链为准。
 

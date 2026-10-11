@@ -14,3 +14,6 @@ __pycache__/
 .codegraph/
 /TG*
 /AgentHelp/reference_messages/
+
+# pytest junitxml / local build output
+build/

@@ -6273,3 +6273,39 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 手动添加（R66）、设置写入三区（R67 / R68 / R69）。总设计记录
 `MOBILE_API_COMPLETION_PROPOSAL.md`；本期未做的仍是它 §6 列的那批（重获元数据、四个来源拉取、
 转换、需修订、已下载改名），移动端若要另开一期。
+
+---
+
+## R70 · 2026-10-11 · 动作面补口 ①：要求修订 + 打包 / 重新打包
+
+**需求。** 运营者要求移动端复刻 WEBUI 的所有功能；上一批（R64–R69）留下 §6 那批动作仍在
+网页层。本批（R70–R73 + 设置六区）把它们补成 `/api/v1` 的 JSON 出口，设计记录
+`MOBILE_API_COMPLETION_ROUND2_PROPOSAL.md`。
+
+**设计。** 两个新路由落在 `app/api/actions.py`，都只做「一次 `require_session` + 一次
+`require_csrf` + 调网页 handler 调过的同一个服务方法」：
+
+- `POST /works/{candidate_id}/needs-revision` → `ReviewService.request_revision(id, operator, reason)`。
+  `reason` 必填这件事由服务判定（`REVISION_REASON_REQUIRED`），不在路由里再查一遍——
+  「要求修订」没有理由就是一句没人能执行的请求。返回 `{candidate_id, status}`。
+- `POST /works/{candidate_id}/convert` → `ConversionService.enqueue_for_candidate(id)`。
+  **一个端点同时是「打包」与「重新打包」**：那个方法本身就按作品幂等，网页的「打包为 CBZ /
+  重新打包」也是同一个按钮两个标签，再开一个端点就是让「已打包」有第二个定义。返回
+  `{candidate_id, job_id}`——客户端要拿这个 job id 去跟它刚起的任务，而网页只从作品上重读。
+- 两条都在调服务前先查一次 `get_candidate`：服务对「行不存在」报的是
+  `REVIEW_INVALID_TRANSITION`（这句话描述的是迁移不合法，不是请求不合法），
+  而 `/api/v1` 自己的约定——旁边那条 `works/{id}/metadata`——是缺行即 **404**。
+  界面需要这个区别来决定「报错」还是「刷新列表」。
+
+**测试（本轮 R70 相关）**
+
+- `tests/integration/test_api_domains.py` 新增 `TestNeedsRevision`（5 条）与 `TestConvert`（5 条）：
+  状态迁移与审计、空理由 400、不可修订状态 400、缺行 404、CSRF 门；
+  打包入队（先 `seed_downloaded` 造一个 COMPLETED 下载 + ARCHIVE 产物，证明入的是**新**任务）、
+  没有下载产物时按 `ARCHIVE_NOT_READY` 拒绝（这就是页面「按早了」看到的那句话）、
+  再按一次复用同一个任务、缺行 404、CSRF 门。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_api_domains.py`
+→ **45 tests / 0 failed**（35 + 10）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R70 行；方案 `MOBILE_API_COMPLETION_ROUND2_PROPOSAL.md`。

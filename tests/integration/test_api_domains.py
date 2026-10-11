@@ -35,6 +35,29 @@ def seed(settings: Settings, rows: list[tuple[int, str, str]]) -> None:
             )
 
 
+def seed_downloaded(settings: Settings, candidate_id: int) -> int:
+    """Give a candidate a completed download with an ARCHIVE artifact.
+
+    `打包` needs something to pack, and the readiness gate reads exactly what a
+    real download leaves behind: a COMPLETED `download_jobs` row with an ARCHIVE
+    artifact under it.
+    """
+    database = Database(settings.data_path / "ehbot.db")
+    with sqlite3.connect(database.path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO download_jobs (candidate_id, idempotency_key, provider, "
+            "state, details_json) VALUES (?,?,?,?,?)",
+            (candidate_id, f"seed-{candidate_id}", "TELEGRAM", "COMPLETED", "{}"),
+        )
+        job_id = cursor.lastrowid
+        connection.execute(
+            "INSERT INTO artifacts (job_id, artifact_type, path, size_bytes) "
+            "VALUES (?,?,?,?)",
+            (job_id, "ARCHIVE", "/tmp/book.zip", 10),
+        )
+    return int(job_id)
+
+
 def csrf_token(client: TestClient) -> str:
     """Read the token the page layer embeds, as the browser would."""
     return client.get("/").context["csrf_token"]
@@ -690,3 +713,187 @@ class TestMetadataLocks:
 
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "METADATA_VALUE_NOT_FOUND"
+
+
+class TestNeedsRevision:
+    """R70: 要求修订 over JSON, on the service the page posts to."""
+
+    def test_a_revision_moves_the_status_and_records_the_reason(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/needs-revision",
+                json={"reason": "封面不对"},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+            status = client.get("/api/v1/works/1").json()["status"]["code"]
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "NEEDS_REVISION"
+        assert status == "NEEDS_REVISION"
+
+    def test_a_reason_is_required_by_the_service(self, tmp_path: Path) -> None:
+        """「要求修订」without a reason is a request nobody can act on."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/needs-revision",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "REVISION_REASON_REQUIRED"
+
+    def test_a_status_that_cannot_be_revised_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Which statuses may be revised is the service's decision, once."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/needs-revision",
+                json={"reason": "还没想好"},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "REVIEW_INVALID_TRANSITION"
+
+    def test_a_missing_work_is_a_404(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/404/needs-revision",
+                json={"reason": "x"},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 404
+
+    def test_it_needs_the_same_write_gates_as_any_other_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/needs-revision", json={"reason": "x"}
+            )
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+class TestConvert:
+    """R70: 打包 / 重新打包 over JSON, one endpoint for both."""
+
+    def test_pressing_convert_queues_a_packaging_job(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            download_job = seed_downloaded(settings, 1)
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/convert",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["job_id"] > 0
+        # A *new* task, not the download it is packing.
+        assert response.json()["job_id"] != download_job
+
+    def test_convert_refuses_a_work_with_nothing_downloaded(
+        self, tmp_path: Path
+    ) -> None:
+        """The readiness gate is the archive artifact, not the status."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/convert",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "ARCHIVE_NOT_READY"
+
+    def test_a_second_press_reuses_the_same_job(self, tmp_path: Path) -> None:
+        """「打包」and「重新打包」are one button with two labels."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            seed_downloaded(settings, 1)
+            log_in(client, settings)
+            first = client.post(
+                "/api/v1/works/1/convert",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            ).json()["job_id"]
+            second = client.post(
+                "/api/v1/works/1/convert",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            ).json()["job_id"]
+
+        assert first == second
+
+    def test_a_missing_work_is_a_404(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/404/convert",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 404
+
+    def test_it_needs_the_same_write_gates_as_any_other_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "APPROVED", "Book 1")])
+            log_in(client, settings)
+            response = client.post("/api/v1/works/1/convert", json={})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_INVALID"

@@ -22,10 +22,11 @@ from app.api import deps
 from app.api.contracts import ApiError
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.candidates import manual as manual_ingest
+from app.conversion.convert import ConversionError
 from app.db.database import DuplicateGalleryCandidate
 from app.downloads.models import MAX_JOB_PRIORITY, MIN_JOB_PRIORITY
 from app.exhentai.service import ExHentaiDownloadError
-from app.review.models import METADATA_FIELDS
+from app.review.models import METADATA_FIELDS, STATUS_NEEDS_REVISION
 from app.review.service import ReviewError, ReviewService
 
 
@@ -727,6 +728,67 @@ async def requeue_work(request: Request, candidate_id: int) -> dict:
         raise ApiError(exc.code, exc.public_message) from exc
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
     return {"candidate_id": candidate_id, "status": "PENDING_REVIEW"}
+
+
+@router.post("/works/{candidate_id}/needs-revision")
+async def needs_revision_work(request: Request, candidate_id: int) -> dict:
+    """Ask for a revision on a work.
+
+    Runs through `ReviewService.request_revision`, the coroutine the work detail
+    page posts to, so the JSON layer cannot move a work the page would have
+    refused: which statuses may be revised is the service's decision, once.
+
+    `reason` is the sentence that lands in the audit row. The service requires
+    it -- 「要求修订」without a reason is a request nobody can act on -- so an
+    empty body is a 400 `REVISION_REASON_REQUIRED` from the same place the page
+    gets it, rather than a second check here.
+    """
+    operator = await _guard(request)
+    payload = await _body(request)
+    reason = str(payload.get("reason") or "").strip()
+    database = deps.database(request)
+    # Checked here rather than left to the service: a service that has no row to
+    # read reports it as an invalid transition (which is true of the transition,
+    # not of the request), and the API's own convention -- the metadata route
+    # beside this one -- is that a missing row is a 404. The interface needs the
+    # difference to choose between showing an error and refreshing the list.
+    if await database.get_candidate(candidate_id) is None:
+        raise ApiError(
+            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
+        )
+    service = ReviewService(database)
+    try:
+        await service.request_revision(candidate_id, operator, reason)
+    except ReviewError as exc:
+        raise ApiError(exc.code, exc.public_message) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return {"candidate_id": candidate_id, "status": STATUS_NEEDS_REVISION}
+
+
+@router.post("/works/{candidate_id}/convert")
+async def convert_work(request: Request, candidate_id: int) -> dict:
+    """Queue packaging for a work; pressing it again is a re-pack.
+
+    One endpoint for both, because `ConversionService.enqueue_for_candidate` is
+    idempotent per work: the page's 打包为 CBZ and 重新打包 are the same button
+    with two labels, and a second endpoint would be a second place that decides
+    what "already packed" means.
+
+    The response carries the queued job id: the client needs it to follow the
+    task it just started, and the page only ever re-read it off the work.
+    """
+    await _guard(request)
+    if await deps.database(request).get_candidate(candidate_id) is None:
+        raise ApiError(
+            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
+        )
+    service = deps.conversion_service(request)
+    try:
+        job_id = await service.enqueue_for_candidate(candidate_id)
+    except ConversionError as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_DOWNLOAD, job_id=job_id)
+    return {"candidate_id": candidate_id, "job_id": job_id}
 
 
 def _translate(exc: Exception) -> Exception:
