@@ -329,6 +329,92 @@ class TestWriteGates:
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "JOB_NOT_FOUND"
 
+    def test_batch_delete_removes_the_candidate(self, tmp_path: Path) -> None:
+        """The mobile client's 彻底删除 rides the batch endpoint (M9)."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/candidates/batch",
+                json={"action": "delete", "candidate_ids": [1]},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+            gone = client.get("/api/v1/works/1")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [entry["candidate_id"] for entry in payload["applied"]] == [1]
+        # The row is gone, not merely moved on: the detail endpoint is a 404.
+        assert gone.status_code == 404
+
+    def test_delete_reports_the_file_decision_without_deleting_any(
+        self, tmp_path: Path
+    ) -> None:
+        """`delete` keeps files; `delete-files` is a different word."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/candidates/batch",
+                json={"action": "delete", "candidate_ids": [1]},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        applied = response.json()["applied"][0]
+        # The safe word reports the decision explicitly: nothing was removed.
+        assert applied["deleted_files"] == []
+        assert applied["failed_files"] == []
+
+    def test_an_unknown_batch_action_lists_review_and_delete_words(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/candidates/batch",
+                json={"action": "explode", "candidate_ids": [1]},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["code"] == "ACTION_UNKNOWN"
+        assert set(error["details"]["allowed"]) == {
+            "approve",
+            "reject",
+            "delete",
+            "delete-files",
+        }
+
+    def test_deleting_a_missing_candidate_is_skipped_not_fatal(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/candidates/batch",
+                json={"action": "delete-files", "candidate_ids": [999]},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        # One missing row must not refuse the rest of the selection.
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["applied"] == []
+        assert [entry["candidate_id"] for entry in payload["skipped"]] == [999]
+
 
 class TestMetadataPatch:
     def test_an_override_is_applied_and_echoed_back(self, tmp_path: Path) -> None:

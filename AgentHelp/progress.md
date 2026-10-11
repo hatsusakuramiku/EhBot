@@ -6058,3 +6058,38 @@ config `sha256:7071a14a504bedf5ff063be3189a86a0930cdbe9b4b9cb348445c21ffd133503`
 `manual_add` 带 `_exhentai_configured` 门且已无 `_ingest_manual_magnet`、`settings/_parse.html` 里
 `title_required` 已消失；库内 `schema_migrations` 仍 24 条（R62/R63 都无迁移）。冒烟容器已停止并随
 `--rm` 清理。
+
+---
+
+## R64 · 2026-10-11 · 移动端 API 补口 ①：候选彻底删除
+
+**需求。** 运营者在移动端实测后反馈「没有删除相关功能」。核查确认：后端**已具备** `downloaded/batch`
+的 `repack` / `remove` / `redownload` 与 `jobs/{job_id}/switch-source`，但**候选彻底删除**只在网页层
+（`POST /candidates/{id}/delete`、`POST /candidates/batch-review`）。网页层的守卫是
+`app/web/deps.py::require_authenticated`，只读 `request.session`，**不接受 Bearer**；且那些 handler 是
+表单 POST（`csrf_token` 必填 Form 字段、成功 302），移动端的 Bearer 客户端够不着。设计记录
+`MOBILE_API_COMPLETION_PROPOSAL.md`（四期总方案，运营者已放行）。无数据库迁移、版本号不变。
+
+**设计。** 不新开 URL：`POST /api/v1/candidates/batch` 从「只做审核」扩成**按集合分派**——
+
+- `action ∈ CANDIDATE_DELETE_ACTIONS` → `apply_candidate_delete_batch(deps.archived_work_service, …)`
+- `action ∈ REVIEW_BATCH_ACTIONS` → `apply_review_batch(deps.review_orchestrator, …)`
+- 两者都不在 → 400 `ACTION_UNKNOWN`，`details.allowed` 给**并集**（`approve/reject/delete/delete-files`）
+
+两条都是网页 `batch-review` 用的**同一协程**，所以 API 与页面不可能对「批量做什么、跳过谁」产生分歧；
+分派本身在两侧各写一份是刻意的（两侧的集合名就是各自的契约），行为一致靠共享协程保证。
+`delete` 与 `delete-files` 坚持两个词，照 R50 的理由：误发的那个不能是连文件一起删的那个。
+
+**测试（本轮 R64 相关）**
+
+- `tests/integration/test_api_domains.py`（新增 4 条）：批量 `delete` 真的删掉候选（随后
+  `GET /api/v1/works/1` 是 404）；`delete` 报出文件取舍且 `deleted_files` / `failed_files` 为空；
+  未知动作在 `details.allowed` 里同时列出审核与删除四个词；删除不存在的候选落进 `skipped`
+  而不是让整批失败。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_api_domains.py` →
+**32 tests / 0 failed**（本文件；全量留给运营者要求或发布前）。
+
+**文档同步**：本条目；`PHASES.md` 加 R64 行；新增 `MOBILE_API_COMPLETION_PROPOSAL.md`。
+网页路径 / 模板 / 数据库均未改动；`README.md` 与 `docs/USAGE.md` 无需改（新增的是内部 JSON 出口，
+部署方式与操作者可见行为不变）。

@@ -341,18 +341,45 @@ async def apply_candidate_delete_batch(
 
 @router.post("/candidates/batch")
 async def api_batch_review(request: Request) -> dict:
-    """Approve or reject several candidates at once.
+    """Run one batch action against a selection of candidates.
+
+    Approve / reject go through `apply_review_batch`; the two 彻底删除 actions go
+    through `apply_candidate_delete_batch`. Both are the coroutines the
+    `/candidates` form posts through, so the API and the page cannot disagree
+    about what a batch does or about which rows it skips.
 
     Reports per-candidate outcomes instead of failing the selection on the first
-    refusal; the loop lives in `apply_review_batch`, which the `/candidates`
-    form posts through as well.
+    refusal. The dispatcher duplicates the page's, on purpose: the two sets are
+    named here and there, and the shared coroutines are what keep the behaviour
+    identical.
     """
     operator = await _guard(request)
     payload = await _body(request)
+    action = str(payload.get("action") or "")
     candidate_ids = _candidate_ids(payload.get("candidate_ids"))
+    if action in CANDIDATE_DELETE_ACTIONS:
+        return await apply_candidate_delete_batch(
+            deps.archived_work_service(request),
+            action,
+            candidate_ids,
+            operator,
+            announce_candidate=lambda candidate_id: _publish(
+                request, EVENT_CANDIDATE, candidate_id=candidate_id
+            ),
+        )
+    if action not in REVIEW_BATCH_ACTIONS:
+        raise ApiError(
+            "ACTION_UNKNOWN",
+            f"未知的审核动作：{action}",
+            details={
+                "allowed": sorted(
+                    REVIEW_BATCH_ACTIONS | CANDIDATE_DELETE_ACTIONS
+                )
+            },
+        )
     return await apply_review_batch(
         deps.review_orchestrator(request),
-        str(payload.get("action") or ""),
+        action,
         candidate_ids,
         operator,
         announce_candidate=lambda candidate_id: _publish(
