@@ -34,9 +34,13 @@ from app.api.status import (
 )
 from app.connections.models import ProviderConnectionError
 from app.credentials import KIND_API_KEY, hash_secret, new_token
+from app.settings.forms import checkbox, form_values
+from app.settings.parse import (
+    candidate_admission,
+    parse_rules_submission,
+)
 from app.settings.sources import (
     SourceFieldError,
-    form_values as source_values,
     parse_source,
     parse_source_rules,
     parse_tags,
@@ -49,7 +53,6 @@ from app.auto_approval.rules import (
 )
 from app.auto_approval.service import AutomaticApprovalService
 from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
-from app.candidates.parse_rules import ARCHIVE_FORMATS as PARSE_ARCHIVE_FORMATS
 from app.web.rule_forms import parse_rule_condition
 from app.archive.rearchive import rearchive_works
 from app.archive.service import (
@@ -96,7 +99,7 @@ async def configure_source(request: Request):
     # The reading half is `app/settings/sources.py`'s, shared with
     # `POST /api/v1/settings/sources` (R74), so the two cannot disagree about
     # which chat ids are a channel or about what an empty box means.
-    payload, error = parse_source(source_values(form))
+    payload, error = parse_source(form_values(form))
     if error is not None or payload is None:
         return await render_settings(
             request,
@@ -216,7 +219,7 @@ async def sources_batch_action(request: Request):
         return redirect
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    values = source_values(form)
+    values = form_values(form)
     source_ids = selected_source_ids(values)
     if not source_ids:
         return await render_settings(
@@ -921,18 +924,9 @@ async def save_parse_rules(request: Request):
         return redirect
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    submitted_formats = set(form.getlist("archive_formats"))
-    raw = {
-        "require_gallery_link": form.get("require_gallery_link") == "on",
-        "accept_photo": form.get("accept_photo") == "on",
-        "accept_archive": form.get("accept_archive") == "on",
-        "accept_preview": form.get("accept_preview") == "on",
-        "archive_formats": [
-            archive_format
-            for archive_format in PARSE_ARCHIVE_FORMATS
-            if archive_format in submitted_formats
-        ],
-    }
+    # The reading half is `app/settings/parse.py`'s, shared with
+    # `PUT /api/v1/settings/parse` (R75).
+    raw = parse_rules_submission(form_values(form))
     try:
         await deps.system_settings_service(request).save_parse_rules(raw)
     except SystemSettingsError as exc:
@@ -967,21 +961,11 @@ async def save_candidate_admission(request: Request):
         return redirect
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    prompt = str(form.get("ai_candidate_prompt") or "").strip()
-    if prompt == DEFAULT_CANDIDATE_PROMPT.strip():
-        prompt = ""
     try:
         await deps.system_settings_service(request).save_candidate_admission(
-            {
-                "ai_candidate_enabled": form.get("ai_candidate_enabled") == "on",
-                "ai_candidate_override_parse_rules": (
-                    form.get("ai_candidate_override_parse_rules") == "on"
-                ),
-                "ai_candidate_prompt": prompt,
-                "ai_candidate_fallback": str(
-                    form.get("ai_candidate_fallback") or ""
-                ),
-            }
+            candidate_admission(
+                form_values(form), default_prompt=DEFAULT_CANDIDATE_PROMPT
+            )
         )
     except SystemSettingsError as exc:
         return await render_settings(

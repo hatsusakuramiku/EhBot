@@ -532,3 +532,145 @@ def test_the_write_needs_the_same_gates_as_any_other(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+# ---------------------------------------------------------------- R75 解析规则
+
+PARSE = "/api/v1/settings/parse"
+
+
+def test_the_parse_scheme_is_stored_and_read_back(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PARSE,
+            json={
+                "require_gallery_link": True,
+                "accept_photo": True,
+                "accept_archive": True,
+                # `accept_preview` absent: an unchecked box sends nothing, so
+                # absence has to mean off rather than the shipped default.
+                "archive_formats": ["zip", "cbz"],
+            },
+            headers={CSRF_HEADER: csrf},
+        )
+        rules = client.get(PARSE).json()["parse_rules"]
+
+    assert response.status_code == 200
+    assert rules["require_gallery_link"] is True
+    assert rules["accept_photo"] is True
+    assert rules["accept_archive"] is True
+    assert rules["accept_preview"] is False
+    assert rules["archive_formats"] == ["zip", "cbz"]
+
+
+def test_an_unlisted_format_is_dropped_not_stored(tmp_path: Path) -> None:
+    """The vocabulary is the parser's; a typo must not become a rule."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.put(
+            PARSE,
+            json={"accept_archive": True, "archive_formats": ["zip", "tar"]},
+            headers={CSRF_HEADER: csrf},
+        )
+        rules = client.get(PARSE).json()["parse_rules"]
+
+    assert rules["archive_formats"] == ["zip"]
+
+
+def test_reset_puts_the_shipped_scheme_back(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        shipped = client.get(PARSE).json()["parse_defaults"]
+        client.put(
+            PARSE,
+            json={"accept_photo": True, "archive_formats": ["rar"]},
+            headers={CSRF_HEADER: csrf},
+        )
+        response = client.post(
+            PARSE + "/reset", json={}, headers={CSRF_HEADER: csrf}
+        )
+        rules = response.json()["parse_rules"]
+
+    assert response.status_code == 200
+    assert rules["accept_photo"] == shipped["accept_photo"]
+    assert rules["archive_formats"] == shipped["archive_formats"]
+
+
+def test_the_default_prompt_is_stored_as_use_the_default(
+    tmp_path: Path,
+) -> None:
+    """Otherwise every save would pin the shipped text as an override."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        default = client.get(PARSE).json()["candidate_prompt_default"]
+        shipped = client.put(
+            PARSE + "/ai",
+            json={"ai_candidate_prompt": default, "ai_candidate_fallback": "reject"},
+            headers={CSRF_HEADER: csrf},
+        ).json()["candidate_admission"]
+        custom = client.put(
+            PARSE + "/ai",
+            json={"ai_candidate_prompt": "只看有压缩包的", "ai_candidate_fallback": "reject"},
+            headers={CSRF_HEADER: csrf},
+        ).json()["candidate_admission"]
+
+    # The snapshot reads the prompt back resolved: an empty stored override says
+    # 「use the shipped text」, and the flag is what tells the two apart.
+    assert shipped["prompt"] == default
+    assert shipped["prompt_overridden"] is False
+    assert custom["prompt"] == "只看有压缩包的"
+    assert custom["prompt_overridden"] is True
+
+
+def test_the_gate_switches_travel_with_the_prompt(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        admission = client.put(
+            PARSE + "/ai",
+            json={
+                "ai_candidate_enabled": True,
+                "ai_candidate_override_parse_rules": False,
+                "ai_candidate_fallback": "accept",
+            },
+            headers={CSRF_HEADER: csrf},
+        ).json()["candidate_admission"]
+
+    assert admission["enabled"] is True
+    assert admission["override_parse_rules"] is False
+    assert admission["fallback"] == "accept"
+
+
+def test_an_unknown_fallback_is_refused_by_the_service(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PARSE + "/ai",
+            json={"ai_candidate_fallback": "explode"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert (
+        response.json()["error"]["code"] == "AI_CANDIDATE_FALLBACK_INVALID"
+    )
+
+
+def test_the_parse_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(PARSE, json={"accept_photo": True})
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"

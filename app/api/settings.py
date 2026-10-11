@@ -34,6 +34,7 @@ from app.connections.models import ProviderConnectionError
 from app.logging import apply_runtime_log_level
 from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
+from app.settings import parse as parse_form
 from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
 from app.settings.service import SystemSettingsError
@@ -1100,6 +1101,62 @@ async def put_sources_batch(request: Request) -> dict:
         await database.update_telegram_sources_bulk(source_ids, rules=rules)
     deps.connection_manager(request).note_sources_changed()
     return await settings_snapshot(request, "sources")
+
+
+@router.put("/settings/parse")
+async def put_parse_rules(request: Request) -> dict:
+    """Store the candidate-admission parse scheme (the 解析规则 tab, over JSON).
+
+    The reading half is `app/settings/parse.py`'s, shared with the page's
+    `/settings/parse` form: an unchecked switch is an absent field in both
+    worlds, and the archive-format list is filtered against the parser's own
+    vocabulary rather than the caller's.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    service = deps.system_settings_service(request)
+    try:
+        await service.save_parse_rules(
+            parse_form.parse_rules_submission(payload)
+        )
+    except SystemSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "parse")
+
+
+@router.post("/settings/parse/reset")
+async def reset_parse_rules(request: Request) -> dict:
+    """Put the shipped scheme back, so a bad experiment is one call from gone."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    await deps.system_settings_service(request).reset_parse_rules()
+    return await settings_snapshot(request, "parse")
+
+
+@router.put("/settings/parse/ai")
+async def put_candidate_admission(request: Request) -> dict:
+    """Store the AI candidate gate's switches and prompt.
+
+    The default-prompt rule lives in `app/settings/parse.py` beside the page's
+    copy of it: a prompt submitted byte-identical to the shipped default is
+    stored as 「use the default」, because otherwise every save would pin the
+    default text as an override and the page could never say whether the
+    operator had actually customised it.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    service = deps.system_settings_service(request)
+    try:
+        await service.save_candidate_admission(
+            parse_form.candidate_admission(
+                payload, default_prompt=DEFAULT_CANDIDATE_PROMPT
+            )
+        )
+    except SystemSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "parse")
 
 
 @router.get("/settings/{section}")

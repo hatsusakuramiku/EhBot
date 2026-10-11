@@ -15,8 +15,10 @@ layer can put both into the error envelope without inventing a second wording.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
+
+from app.settings.forms import checkbox, items_of
 
 #: The archive formats a source may admit, in the order the form lists them.
 ARCHIVE_FORMAT_CHOICES: tuple[str, ...] = ("zip", "rar", "7z", "cbz")
@@ -36,41 +38,10 @@ class SourceFieldError(ValueError):
         self.public_message = message
 
 
-def as_values(form: Mapping[str, Any]) -> dict[str, Any]:
-    """A mapping with every field present, multi-valued ones as lists.
-
-    A JSON body already has this shape. `request.form()` does not: it keeps one
-    value per key unless asked, so the caller hands the multi-valued fields in as
-    lists. Kept here rather than in the route so the list of multi-valued fields
-    sits beside the readers that expect them.
-    """
-    return dict(form)
-
-
-def form_values(form: Any) -> dict[str, Any]:
-    """`form_values` for a Starlette form: repeats become lists."""
-    values: dict[str, Any] = dict(form)
-    for key in ("allowed_archive_formats", "source_ids"):
-        values[key] = form.getlist(key)
-    return values
-
-
-def _items(raw: object) -> list[Any]:
-    """One value or many, as a list. A scalar is a list of one, never a string
-    iterated character by character."""
-    if raw is None:
-        return []
-    if isinstance(raw, (str, bytes)):
-        return [raw]
-    if isinstance(raw, Sequence):
-        return list(raw)
-    return [raw]
-
-
 def parse_tags(raw: object) -> tuple[str, ...]:
     """A comma- or newline-separated tag list, lowercased and de-blanked."""
     cleaned: list[str] = []
-    for value in _items(raw):
+    for value in items_of(raw):
         for item in str(value).replace("\n", ",").split(","):
             token = item.strip().lower()
             if token:
@@ -105,7 +76,9 @@ def parse_source_rules(
             return None, SourceFieldError("RATING_INVALID", "最低评分格式无效")
         if min_rating < 0:
             return None, SourceFieldError("RATING_INVALID", "最低评分格式无效")
-    submitted_formats = {str(item) for item in _items(values.get("allowed_archive_formats"))}
+    submitted_formats = {
+        str(item) for item in items_of(values.get("allowed_archive_formats"))
+    }
     return (
         {
             "allowed_archive_formats": [
@@ -162,30 +135,17 @@ def parse_source(
             "source_type": source_type,
             "chat_id": chat_id,
             "display_name": display_name,
-            "enabled": _truthy(values.get("enabled")),
+            "enabled": checkbox(values.get("enabled")),
             **rules,
         },
         None,
     )
 
 
-def _truthy(raw: object) -> bool:
-    """`enabled` from either caller.
-
-    The page sends `"on"` for a checked box and nothing at all for an unchecked
-    one, so absence is false; JSON sends `true`/`false`. Anything else in a
-    checkbox's place is read as false rather than refused -- an unchecked box is
-    the safe reading, and it is what the page means by a missing field.
-    """
-    if isinstance(raw, bool):
-        return raw
-    return str(raw) == "on"
-
-
 def selected_source_ids(values: Mapping[str, Any]) -> list[int]:
     """The `source_ids` of a batch submission, de-duplicated and in order."""
     ids: list[int] = []
-    for value in _items(values.get("source_ids")):
+    for value in items_of(values.get("source_ids")):
         try:
             number = int(str(value))
         except ValueError:
@@ -200,8 +160,6 @@ __all__ = [
     "SOURCE_TYPE_CHANNEL",
     "SOURCE_TYPE_PRIVATE_CHAT",
     "SourceFieldError",
-    "as_values",
-    "form_values",
     "parse_source",
     "parse_source_rules",
     "parse_tags",

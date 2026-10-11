@@ -6448,3 +6448,40 @@ JSON 层把它放进错误信封）。`settings_pages.py` 因此净减 135 行�
 → **28 tests / 0 failed**（16 + 12）；`test_settings_web.py` → 103 / 0 failed。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R74 行。
+---
+
+## R75 · 2026-10-11 · 设置写入 ②：解析规则（parse）
+
+**需求。** 同 R74；六区里排第二（解析规则决定「什么消息能进候选」，与来源规则是一对）。
+
+**设计。** 再抽一层通用的表单读取 `app/settings/forms.py`（`items_of` / `checkbox` /
+`form_values` / `MULTI_VALUE_FIELDS`），因为「缺字段=关」与「一个值还是多个」这两件事
+在网页与 JSON 两边必须一样，而它们小到写两遍就会悄悄分叉（未勾选的复选框**什么都不发**，
+把缺字段默认成 true 就会让「取消勾选」变成「静默保持开启」；单独一个字符串被当序列遍历
+会逐字符走一遍）。`app/settings/sources.py`（R74）改成用它们。
+
+再开 `app/settings/parse.py` 两个读取器 + 三个 JSON 路由：
+
+- `PUT /api/v1/settings/parse` → `SystemSettingsService.save_parse_rules`（网页 `/settings/parse` 同款）。
+- `POST /api/v1/settings/parse/reset` → `reset_parse_rules()`：「把出厂方案放回去」，
+  让一次坏实验一次调用就能撤销。
+- `PUT /api/v1/settings/parse/ai` → `save_candidate_admission(...)`：AI 候选判定的开关与提示词。
+  其中一条**真规则**在这里：提示词与出厂默认逐字相同时存成空串（＝「用默认」），
+  否则每次保存都会把默认文本钉成 override，页面再也说不清运营者到底改没改。
+
+`PARSE_ARCHIVE_FORMATS` 直接 re-export `app/candidates/parse_rules.py::ARCHIVE_FORMATS`——
+词表只有一份，解析器加一种格式，这里不用第二次编辑。网页那三个 handler 改调共享读取器，
+句子与校验一字未动。
+
+**测试（本轮 R75 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 7 条：方案保存并读回（**缺字段=关**这一条
+  被单独断言）、未列出的格式被丢掉、reset 恢复出厂方案、默认提示词存成「用默认」
+  （`prompt_overridden` 为 false）而自定义提示词保留、开关与回退值一起往返、
+  未知回退由服务拒绝（`AI_CANDIDATE_FALLBACK_INVALID`）、CSRF 门。
+- 回归：`tests/integration/test_settings_web.py` **103 条全绿**（这次又动了网页侧三个 handler）。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_settings_write_api.py`
+→ **35 tests / 0 failed**（28 + 7）；`test_settings_web.py` → 103 / 0 failed。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R75 行。
