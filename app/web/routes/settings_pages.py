@@ -40,6 +40,7 @@ from app.settings.parse import (
     candidate_admission,
     parse_rules_submission,
 )
+from app.settings.paths import path_rule_payload, template_payload
 from app.settings.sources import (
     SourceFieldError,
     parse_source,
@@ -630,13 +631,16 @@ async def save_library_template(request: Request, csrf_token: str = Form()):
         return redirect
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
+    # The reading half is `app/settings/paths.py`'s, shared with
+    # `PUT /api/v1/settings/paths/template` (R78).
+    template_form = template_payload(form_values(form))
     try:
-        if "title_source" in form:
+        if "title_source" in template_form:
             await deps.archive_settings_service(request).save_title_source(
-                str(form.get("title_source") or "")
+                str(template_form["title_source"])
             )
         await deps.archive_settings_service(request).save_library_template(
-            str(form.get("library_template") or "")
+            str(template_form["library_template"])
         )
     except ArchiveSettingsError as exc:
         return await render_settings(
@@ -757,27 +761,12 @@ async def save_archive_path_rule(request: Request):
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
     try:
-        name = str(form.get("name") or "").strip()
-        if not name:
-            raise RuleValidationError("规则名称不能为空")
-        priority = int(str(form.get("priority") or "100"))
-        # Absent means create. An unparsable one is a refusal rather than a
-        # fallback to create: silently inserting a second rule when an edit was
-        # meant is how an operator ends up with two rules routing everything.
-        raw_rule_id = str(form.get("path_rule_id") or "").strip()
-        rule_id = int(raw_rule_id) if raw_rule_id else None
-        condition = parse_rule_condition(form)
-        if condition is None:
-            raise RuleValidationError("请至少填写一个条件")
-        condition = validate_rule_ast(condition)
+        # The validation half is `app/settings/paths.py`'s, shared with
+        # `POST /api/v1/settings/paths/rules` (R78).
         await deps.archive_settings_service(request).save_path_rule(
-            rule_id=rule_id,
-            name=name,
-            enabled=form.get("enabled") == "on",
-            priority=priority,
-            condition=condition,
-            path_template=str(form.get("path_template") or ""),
-            case_sensitive=form.get("case_sensitive") == "on",
+            **path_rule_payload(
+                form_values(form), condition=parse_rule_condition(form)
+            )
         )
     except LookupError:
         # The rule was deleted between the page render and the save. Reported as

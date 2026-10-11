@@ -985,3 +985,179 @@ def test_the_archive_writes_need_the_same_gates_as_any_other(
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+# ---------------------------------------------------------------- R78 路径与命名
+
+PATHS = "/api/v1/settings/paths"
+
+
+def _path_rule(**overrides) -> dict:
+    body = {
+        "name": "同人志单独放",
+        "priority": 20,
+        "enabled": True,
+        "condition": {
+            "kind": "condition",
+            "field": "Category",
+            "operator": "LIKE",
+            "value": "doujinshi",
+        },
+        "path_template": "{category}/{artist}/{title}",
+        "case_sensitive": False,
+    }
+    body.update(overrides)
+    return body
+
+
+def _paths(client: TestClient) -> dict:
+    return client.get(PATHS).json()
+
+
+def test_the_layout_template_and_title_source_round_trip(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/template",
+            json={
+                "library_template": "{category}/{title}",
+                "title_source": "JAPANESE",
+            },
+            headers={CSRF_HEADER: csrf},
+        )
+        section = _paths(client)
+
+    assert response.status_code == 200
+    assert section["library_template"] == "{category}/{title}"
+    assert section["title_source"] == "japanese"
+
+
+def test_a_template_that_walks_out_of_the_library_is_refused(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/template",
+            json={"library_template": "../{title}"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"]
+
+
+def test_a_routing_rule_is_stored_and_overwritten_by_id(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        created = client.post(
+            PATHS + "/rules", json=_path_rule(), headers={CSRF_HEADER: csrf}
+        )
+        rule_id = created.json()["path_rules"][0]["rule_id"]
+        client.post(
+            PATHS + "/rules",
+            json=_path_rule(path_rule_id=rule_id, name="改过的名字"),
+            headers={CSRF_HEADER: csrf},
+        )
+        rules = _paths(client)["path_rules"]
+
+    assert created.status_code == 200
+    assert len(rules) == 1
+    assert rules[0]["name"] == "改过的名字"
+    assert rules[0]["path_template"] == "{category}/{artist}/{title}"
+
+
+def test_a_rule_whose_template_cannot_render_is_refused(tmp_path: Path) -> None:
+    """Refused now rather than at pack time, by the same validator."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            PATHS + "/rules",
+            json=_path_rule(path_template="../{title}"),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] != "RULE_INVALID"
+
+
+def test_a_rule_with_no_condition_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            PATHS + "/rules",
+            json=_path_rule(condition=None),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "RULE_INVALID"
+
+
+def test_editing_a_path_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            PATHS + "/rules",
+            json=_path_rule(path_rule_id=999),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
+
+
+def test_toggling_and_deleting_a_routing_rule(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(PATHS + "/rules", json=_path_rule(), headers={CSRF_HEADER: csrf})
+        rule_id = _paths(client)["path_rules"][0]["rule_id"]
+        parked = client.put(
+            f"{PATHS}/rules/{rule_id}/toggle",
+            json={"enabled": False},
+            headers={CSRF_HEADER: csrf},
+        ).json()["path_rules"][0]["enabled"]
+        removed = client.delete(
+            f"{PATHS}/rules/{rule_id}", headers={CSRF_HEADER: csrf}
+        )
+
+    assert parked is False
+    assert removed.status_code == 200
+    assert removed.json()["path_rules"] == []
+
+
+def test_deleting_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.delete(
+            f"{PATHS}/rules/999", headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
+
+
+def test_the_path_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/template", json={"library_template": "{title}"}
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"

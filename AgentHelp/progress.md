@@ -6562,3 +6562,45 @@ JSON 四个路由：
 `test_settings_web.py` → 103 / 0 failed。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R77 行。
+---
+
+## R78 · 2026-10-11 · 设置写入 ⑤：路径与命名（paths：模板 + 路由规则）
+
+**需求。** 同 R74；路径区决定「这本书落到哪个目录、叫什么名字」。
+
+**设计。** 抽 `app/settings/paths.py`（`path_rule_payload` / `template_payload`），
+网页 `/archive-settings/paths/template` 与 `/archive-settings/paths/rules` 两个 handler 改调它们。
+路由规则的读取器是自动审批那个的双胞胎——同一套规则引擎、同一套校验、同一批拒绝句子——
+只差一件正是它必须单独成函数而不是加个参数的事：路径规则还要带 `path_template`，
+由归档设置服务校验，所以「渲染不出来的规则」在运营者眼前被拒，而不是等到打包时。
+
+    PUT    /api/v1/settings/paths/template            布局模板 + 标题来源
+    POST   /api/v1/settings/paths/rules               新建 / 按 path_rule_id 覆盖
+    PUT    /api/v1/settings/paths/rules/{id}/toggle   {enabled}
+    DELETE /api/v1/settings/paths/rules/{id}
+
+- 模板与标题来源一个调用，理由是页面那条：模板说书放哪、偏好说 `{title}` 取哪种语言，
+  只看一个会预览出一条打包器不会产出的路径；偏好先写，模板被拒时不能顺手把它丢掉。
+  「没带 `title_source`」＝不动这个偏好，而不是清掉它。
+- 编辑已不存在的 `path_rule_id` → 404 `RULE_NOT_FOUND`，不用旧 id 复活一条被删的规则。
+
+**本区未做的三样**（记录在案，不算遗漏）：`/archive-settings/paths/ai`（路径来源与
+AI 子面板，牵涉模型链，与 `ai` 区一起做）、`/paths/template/preview`（页面的预览）、
+`/paths/rearchive`（一键重新归档，是个重活，手机端不适合触发）。
+
+**测试（本轮 R78 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 9 条：模板与标题来源往返、
+  `../{title}` 这类模板被拒、路由规则建档并按 `path_rule_id` 覆盖、模板渲染不出来的规则被拒
+  （错误码不是 `RULE_INVALID`，说明拒它的是归档服务而不是规则引擎）、缺条件 400、
+  编辑已删除的规则 404、启停与删除、删除不存在的规则 404、CSRF 门。
+- 一处自己踩的坑：新写的 `test_editing_a_rule_that_is_gone_is_a_404` 与 R76 里那条**重名**，
+  后写的在模块层把先前那条盖掉，pytest 只收 59 条而文件里有 60 个测试函数——已改名，两条都在跑。
+  这个坑只有数「文件里的 `def test_`」与 pytest 报的数对不上才会被发现。
+- 回归：`tests/integration/test_settings_web.py` 103 条 + `tests/unit/test_archive_path_rules.py`
+  32 条全绿（本轮又改了网页侧两个 handler）。
+
+**验证**：`test_settings_write_api.py` → **60 tests / 0 failed**（51 + 9）。
+无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R78 行。

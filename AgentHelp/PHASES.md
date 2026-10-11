@@ -106,6 +106,7 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R75 | 2026-10-11 | 设置写入 ②：解析规则 —— 抽共享 `app/settings/forms.py` + `app/settings/parse.py` + `PUT /settings/parse`、`POST /settings/parse/reset`、`PUT /settings/parse/ai` | +7（同上，未跑全量）；网页 103 条回归全绿 | `progress.md:6497` |
 | R76 | 2026-10-11 | 设置写入 ③：自动审批 —— 抽共享 `app/settings/auto_approval.py` + 规则 CRUD / 试跑 / 启停四个路由 | +10（同上，未跑全量）；自动审批既有 38 条回归全绿 | `progress.md:6548` |
 | R77 | 2026-10-11 | 设置写入 ④：归档与工具 —— 抽共享 `app/settings/archive.py` + torrent / torrent-test / limits / auto-pack 四个路由 | +6（同上，未跑全量）；网页 103 条回归全绿（并抓到一处 import 漏删） | `progress.md:6607` |
+| R78 | 2026-10-11 | 设置写入 ⑤：路径与命名 —— 抽共享 `app/settings/paths.py` + 模板 / 路由规则 CRUD 四个路由（AI 子面板与重新归档留下） | +9（同上，未跑全量）；网页 103 + 归档路径 32 条回归全绿 | `progress.md:6663` |
 
 > 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → R58 1752 → R59 1775 → R60 1792 → R61 1850 → **R62/R63 1871**。以 `AGENTS.md` 的链为准。
 

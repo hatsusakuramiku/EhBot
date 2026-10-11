@@ -39,6 +39,7 @@ from app.settings import auto_approval as approval_form
 from app.settings import archive as archive_form
 from app.settings.forms import checkbox
 from app.settings import parse as parse_form
+from app.settings import paths as paths_form
 from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
 from app.torrent.models import TorrentError
@@ -1328,6 +1329,86 @@ async def put_auto_pack(request: Request) -> dict:
     except ArchiveSettingsError as exc:
         raise ApiError(str(exc.code), exc.public_message) from exc
     return await settings_snapshot(request, "archive")
+
+
+@router.put("/settings/paths/template")
+async def put_library_template(request: Request) -> dict:
+    """Store the layout template and, when given, the title preference.
+
+    One call for both because they are one form: the template says where a book
+    goes and the preference says what `{title}` resolves to, and previewing one
+    without the other would show a path the packer would not produce. The
+    preference is written first, on the page's reason -- a template refusal must
+    not silently discard it, since the two are validated independently.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    values = paths_form.template_payload(payload)
+    service = deps.archive_settings_service(request)
+    try:
+        if "title_source" in values:
+            await service.save_title_source(str(values["title_source"]))
+        await service.save_library_template(str(values["library_template"]))
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "paths")
+
+
+@router.post("/settings/paths/rules")
+async def post_path_rule(request: Request) -> dict:
+    """Create a routing rule, or overwrite the one `path_rule_id` names.
+
+    The condition arrives as the AST the engine evaluates (`validate_rule_ast`
+    is the gate the page's row editor also goes through), and the template is
+    validated by the archive settings service -- the same check the global
+    template gets, so a rule that could not render is refused now rather than at
+    pack time.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        values = paths_form.path_rule_payload(
+            payload, condition=payload.get("condition")
+        )
+    except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise ApiError("RULE_INVALID", str(exc)) from exc
+    try:
+        await deps.archive_settings_service(request).save_path_rule(**values)
+    except LookupError as exc:
+        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "paths")
+
+
+@router.put("/settings/paths/rules/{rule_id}/toggle")
+async def toggle_path_rule(rule_id: int, request: Request) -> dict:
+    """Park a routing rule or put it back, without touching anything else."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    await deps.database(request).set_archive_path_rule_enabled(
+        rule_id, checkbox(payload.get("enabled"))
+    )
+    return await settings_snapshot(request, "paths")
+
+
+@router.delete("/settings/paths/rules/{rule_id}")
+async def delete_path_rule(rule_id: int, request: Request) -> dict:
+    """Delete a routing rule for good.
+
+    停用 is the reversible half and keeps its own call; this one cannot be undone
+    from the interface, which is why the page puts a confirmation in front of it.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        await deps.database(request).delete_archive_path_rule(rule_id)
+    except LookupError as exc:
+        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
+    return await settings_snapshot(request, "paths")
 
 
 @router.get("/settings/{section}")
