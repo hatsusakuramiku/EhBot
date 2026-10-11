@@ -6414,3 +6414,37 @@ directory=…, operator_name=…)`，即网页 `/downloaded/{id}/rename` 调的�
 → **7 tests / 0 failed**。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R73 行。
+---
+
+## R74 · 2026-10-11 · 设置写入 ①：来源规则（sources）
+
+**需求。** 运营者要求移动端复刻 WEBUI；设置九区里已有三区（连接 / 系统 / 密码库，
+R67–R69）可写，本批补剩下的六区，按手机端价值排：**sources** 起头。
+
+**设计。** 先把「读一份来源提交」抽成共享模块 `app/settings/sources.py`，再开两个 JSON 路由：
+
+- `POST /api/v1/settings/sources` → `configure_telegram_source(**values)`（网页 「保存来源」同款，
+  按 chat id upsert，所以新建与编辑是同一个调用）。
+- `PUT /api/v1/settings/sources/batch` → `{action ∈ enable|disable|delete|apply, source_ids, …规则字段}`，
+  分派到 `update_telegram_sources_bulk` / `dismiss_telegram_sources`，即网页批量条那四个动作。
+- 两个都调 `connection_manager.note_sources_changed()`（MTProto ingester 从同一批行读目标列表）。
+
+**共享模块**（`app/settings/sources.py`）：`parse_source` / `parse_source_rules` /
+`parse_tags` / `selected_source_ids` / `form_values` / `SourceFieldError`。
+网页 `/sources` 与 `/sources/batch` 两个 handler 改成调它们，**句子一字未动**
+（`SourceFieldError` 同时带稳定 code 与那句 public message，页面照 `public_message` 渲染，
+JSON 层把它放进错误信封）。`settings_pages.py` 因此净减 135 行。
+
+**测试（本轮 R74 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 12 条：新建并读回、同 chat id 的保存是 upsert、
+  chat id 符号必须与类型一致、非法规则给页面那句话、批量 apply 报规则自己的句子、
+  标签清洗（大小写与去空白）与未列出的压缩格式被丢掉、批量启停、批量套用规则、
+  批量删除是 tombstone（列表为空）、未知动作列允许集、空选择被拒、CSRF 门。
+- 回归：`tests/integration/test_settings_web.py` **103 条全绿**——这次抽模块动了网页侧两个 handler，
+  那句话与那套校验必须与抽之前逐字相同。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_settings_write_api.py`
+→ **28 tests / 0 failed**（16 + 12）；`test_settings_web.py` → 103 / 0 failed。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R74 行。

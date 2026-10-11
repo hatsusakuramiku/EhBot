@@ -290,3 +290,245 @@ def test_an_unknown_password_action_lists_the_allowed_ones(
         "api-key-generate",
         "api-key-revoke",
     }
+
+
+# ---------------------------------------------------------------- R74 来源
+
+SOURCES = "/api/v1/settings/sources"
+
+
+def _channel(csrf: str, **overrides) -> dict:
+    body = {
+        "source_type": "CHANNEL",
+        "chat_id": -1001234567890,
+        "display_name": "某个频道",
+        "enabled": False,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_a_source_is_created_and_read_back(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf}
+        )
+        snapshot = client.get(SOURCES).json()
+
+    assert response.status_code == 200
+    rows = snapshot["sources"]
+    assert len(rows) == 1
+    assert rows[0]["chat_id"] == -1001234567890
+    assert rows[0]["display_name"] == "某个频道"
+    # Rows are created with whatever the operator asked for, including the flag:
+    # a source added and left disabled is the normal first step.
+    assert rows[0]["enabled"] is False
+
+
+def test_a_save_upserts_on_the_chat_id(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
+        client.post(
+            SOURCES,
+            json=_channel(csrf, display_name="改过的名字", enabled=True),
+            headers={CSRF_HEADER: csrf},
+        )
+        rows = client.get(SOURCES).json()["sources"]
+
+    assert len(rows) == 1
+    assert rows[0]["display_name"] == "改过的名字"
+    assert rows[0]["enabled"] is True
+
+
+def test_the_chat_id_sign_has_to_match_the_type(tmp_path: Path) -> None:
+    """A channel's id is negative and a private chat's is positive.
+
+    The sign *is* the kind in Telegram, so a submission that disagrees is the
+    operator on the wrong row of the type select, and it is refused before the
+    insert rather than by a constraint.
+    """
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            SOURCES,
+            json=_channel(csrf, chat_id=12345),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "SOURCE_INVALID"
+
+
+def test_bad_rules_are_refused_with_the_pages_sentence(tmp_path: Path) -> None:
+    """A negative size fails the same guard the page applies first.
+
+    `parse_source` checks identity and the size together -- the page has done
+    that since before this endpoint existed -- so the sentence is the combined
+    one rather than a size-specific one.
+    """
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            SOURCES,
+            json=_channel(csrf, max_attachment_size_mb=-1),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "SOURCE_INVALID"
+    assert error["message"] == "来源类型、ID、名称或附件上限无效"
+
+
+def test_a_batch_apply_reports_its_own_rule_error(tmp_path: Path) -> None:
+    """The batch reader checks the rules alone, so its sentence is the rule's."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
+        source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
+        response = client.put(
+            f"{SOURCES}/batch",
+            json={
+                "action": "apply",
+                "source_ids": [source_id],
+                "min_rating": "很高",
+            },
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "RATING_INVALID"
+    assert error["message"] == "最低评分格式无效"
+
+
+def test_tags_are_cleaned_the_same_way_the_form_cleans_them(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(
+            SOURCES,
+            json=_channel(
+                csrf,
+                required_tags="NTR, 巨乳",
+                allowed_archive_formats=["zip", "rar", "nope"],
+            ),
+            headers={CSRF_HEADER: csrf},
+        )
+        row = client.get(SOURCES).json()["sources"][0]
+
+    assert row["required_tags"] == ["ntr", "巨乳"]
+    # An unlisted format is dropped rather than stored: the vocabulary is the
+    # deployment's, not the caller's.
+    assert row["allowed_archive_formats"] == ["zip", "rar"]
+
+
+def test_the_batch_flips_the_flag(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
+        source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
+        enabled = client.put(
+            f"{SOURCES}/batch",
+            json={"action": "enable", "source_ids": [source_id]},
+            headers={CSRF_HEADER: csrf},
+        ).json()["sources"][0]["enabled"]
+        disabled = client.put(
+            f"{SOURCES}/batch",
+            json={"action": "disable", "source_ids": [source_id]},
+            headers={CSRF_HEADER: csrf},
+        ).json()["sources"][0]["enabled"]
+
+    assert enabled is True
+    assert disabled is False
+
+
+def test_the_batch_applies_a_rule_set(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
+        source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
+        row = client.put(
+            f"{SOURCES}/batch",
+            json={
+                "action": "apply",
+                "source_ids": [source_id],
+                "required_tags": "ntr",
+                "min_rating": "4.5",
+            },
+            headers={CSRF_HEADER: csrf},
+        ).json()["sources"][0]
+
+    assert row["required_tags"] == ["ntr"]
+    assert row["min_rating"] == 4.5
+
+
+def test_the_batch_deletes_by_tombstone(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
+        source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
+        client.put(
+            f"{SOURCES}/batch",
+            json={"action": "delete", "source_ids": [source_id]},
+            headers={CSRF_HEADER: csrf},
+        )
+        rows = client.get(SOURCES).json()["sources"]
+
+    # A tombstone, not a DELETE: the ingester has to know the chat was dropped
+    # rather than never seen.
+    assert rows == []
+
+
+def test_an_unknown_batch_action_lists_the_allowed_ones(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            f"{SOURCES}/batch",
+            json={"action": "explode", "source_ids": [1]},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "ACTION_UNKNOWN"
+    assert error["details"]["allowed"] == ["apply", "delete", "disable", "enable"]
+
+
+def test_a_batch_without_a_selection_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            f"{SOURCES}/batch",
+            json={"action": "enable", "source_ids": []},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "SOURCE_IDS_REQUIRED"
+
+
+def test_the_write_needs_the_same_gates_as_any_other(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(SOURCES, json=_channel(csrf))
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"

@@ -34,6 +34,7 @@ from app.connections.models import ProviderConnectionError
 from app.logging import apply_runtime_log_level
 from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
+from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
 from app.settings.service import SystemSettingsError
 from app.api.serializers import (
@@ -1014,6 +1015,91 @@ async def put_passwords(request: Request) -> dict:
     if plaintext_api_key is not None:
         snapshot["api_key_plaintext"] = plaintext_api_key
     return snapshot
+
+
+#: The batch actions over a selection of stored sources -- the 来源规则 tab's
+#: bulk toolbar, one word each. `apply` is a word of its own rather than an
+#: implication of the body, because an operator pressing 「批量启用」must not have
+#: their filters overwritten by whatever rule fields the form happened to carry.
+SOURCE_BATCH_ACTIONS: frozenset[str] = frozenset(
+    {"enable", "disable", "delete", "apply"}
+)
+
+
+@router.post("/settings/sources")
+async def post_source(request: Request) -> dict:
+    """Create or update one listening source (the tab's 保存来源, over JSON).
+
+    The reading half is `app/settings/sources.py`'s, shared with the page's
+    `/sources` form: which chat ids are a channel, what an empty rule field
+    means, and how a comma-separated tag list is cleaned are decided in one
+    place, so the form and this endpoint cannot accept different sources.
+
+    `configure_telegram_source` upserts on the chat id, which is what makes
+    「保存」 work for a new row and an edit alike without the client having to say
+    which one it is.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    values, error = source_form.parse_source(payload)
+    if error is not None or values is None:
+        raise ApiError(
+            str(getattr(error, "code", "SOURCE_INVALID")),
+            str(getattr(error, "public_message", "来源无效")),
+            details={"field": "source"},
+        )
+    await deps.database(request).configure_telegram_source(**values)
+    # The MTProto ingester reads its target list from these rows, so a save is
+    # also 「再看一眼这个来源」: the row may be byte-identical while the account
+    # was just added to the channel, and nothing stored would show it.
+    deps.connection_manager(request).note_sources_changed()
+    return await settings_snapshot(request, "sources")
+
+
+@router.put("/settings/sources/batch")
+async def put_sources_batch(request: Request) -> dict:
+    """Run one action over a selection of stored sources.
+
+    `enable` / `disable` flip the whitelist flag, `delete` tombstones the rows,
+    and `apply` overwrites the selection's whole rule set with the body's rule
+    fields. All four can change what the MTProto ingester should be polling,
+    which is why the refresh call sits after the branch rather than inside it.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    action = str(payload.get("action") or "")
+    if action not in SOURCE_BATCH_ACTIONS:
+        raise ApiError(
+            "ACTION_UNKNOWN",
+            f"未知的来源动作：{action}",
+            details={"allowed": sorted(SOURCE_BATCH_ACTIONS)},
+        )
+    source_ids = source_form.selected_source_ids(payload)
+    if not source_ids:
+        raise ApiError(
+            "SOURCE_IDS_REQUIRED",
+            "请至少选择一个来源",
+            details={"field": "source_ids"},
+        )
+    database = deps.database(request)
+    if action == "enable":
+        await database.update_telegram_sources_bulk(source_ids, enabled=True)
+    elif action == "disable":
+        await database.update_telegram_sources_bulk(source_ids, enabled=False)
+    elif action == "delete":
+        await database.dismiss_telegram_sources(source_ids)
+    else:  # apply
+        rules, error = source_form.parse_source_rules(payload)
+        if error is not None or rules is None:
+            raise ApiError(
+                str(getattr(error, "code", "SOURCE_RULES_INVALID")),
+                str(getattr(error, "public_message", "来源规则无效")),
+            )
+        await database.update_telegram_sources_bulk(source_ids, rules=rules)
+    deps.connection_manager(request).note_sources_changed()
+    return await settings_snapshot(request, "sources")
 
 
 @router.get("/settings/{section}")

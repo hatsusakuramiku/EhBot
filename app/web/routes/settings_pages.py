@@ -34,6 +34,14 @@ from app.api.status import (
 )
 from app.connections.models import ProviderConnectionError
 from app.credentials import KIND_API_KEY, hash_secret, new_token
+from app.settings.sources import (
+    SourceFieldError,
+    form_values as source_values,
+    parse_source,
+    parse_source_rules,
+    parse_tags,
+    selected_source_ids,
+)
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
@@ -69,17 +77,6 @@ from app.web.settings_view import render_settings, settings_redirect
 router = APIRouter()
 
 
-def _parse_csv_tags(raw: object) -> tuple[str, ...]:
-    if raw is None:
-        return ()
-    cleaned: list[str] = []
-    for item in str(raw).replace("\n", ",").split(","):
-        token = item.strip().lower()
-        if token:
-            cleaned.append(token)
-    return tuple(cleaned)
-
-
 @router.get("/sources")
 async def sources_page(request: Request):
     """Retired: 来源规则 is a tab of `/settings`."""
@@ -96,73 +93,19 @@ async def configure_source(request: Request):
         return redirect
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    source_type = str(form.get("source_type") or "")
-    display_name = str(form.get("display_name") or "").strip()
-    try:
-        chat_id = int(str(form.get("chat_id") or ""))
-        max_attachment_size_mb = int(
-            str(form.get("max_attachment_size_mb") or "0")
-        )
-    except ValueError:
-        chat_id = 0
-        max_attachment_size_mb = -1
-    valid_identity = (
-        source_type == "CHANNEL" and chat_id < 0
-    ) or (
-        source_type == "PRIVATE_CHAT" and chat_id > 0
-    )
-    if not valid_identity or not display_name or max_attachment_size_mb < 0:
+    # The reading half is `app/settings/sources.py`'s, shared with
+    # `POST /api/v1/settings/sources` (R74), so the two cannot disagree about
+    # which chat ids are a channel or about what an empty box means.
+    payload, error = parse_source(source_values(form))
+    if error is not None or payload is None:
         return await render_settings(
             request,
             SETTINGS_SOURCES,
-            error="来源类型、ID、名称或附件上限无效",
+            error=(error or SourceFieldError("SOURCE_INVALID", "来源无效"))
+            .public_message,
             status_code=400,
         )
-    submitted_formats = set(form.getlist("allowed_archive_formats"))
-    allowed_archive_formats = tuple(
-        archive_format
-        for archive_format in ("zip", "rar", "7z", "cbz")
-        if archive_format in submitted_formats
-    )
-    required_tags = _parse_csv_tags(
-        form.get("required_tags")
-    )
-    forbidden_tags = _parse_csv_tags(
-        form.get("forbidden_tags")
-    )
-    allowed_languages = _parse_csv_tags(
-        form.get("allowed_languages")
-    )
-    allowed_categories = _parse_csv_tags(
-        form.get("allowed_categories")
-    )
-    min_rating_raw = str(form.get("min_rating") or "").strip()
-    min_rating: float | None = None
-    if min_rating_raw:
-        try:
-            min_rating = float(min_rating_raw)
-        except ValueError:
-            min_rating = -1.0
-    if min_rating is not None and min_rating < 0:
-        return await render_settings(
-            request,
-            SETTINGS_SOURCES,
-            error="最低评分格式无效",
-            status_code=400,
-        )
-    await deps.database(request).configure_telegram_source(
-        source_type=source_type,
-        chat_id=chat_id,
-        display_name=display_name,
-        enabled=form.get("enabled") == "on",
-        allowed_archive_formats=allowed_archive_formats,
-        max_attachment_size_mb=max_attachment_size_mb,
-        required_tags=required_tags,
-        forbidden_tags=forbidden_tags,
-        allowed_languages=allowed_languages,
-        allowed_categories=allowed_categories,
-        min_rating=min_rating,
-    )
+    await deps.database(request).configure_telegram_source(**payload)
     # A save is the operator asking the MTProto ingester to look at this source
     # again: the row may be byte-identical, but the account may have just been
     # added to the channel, and nothing about the stored set would show it.
@@ -259,65 +202,6 @@ async def select_telegram_dialog(
     )
 
 
-def _source_rules_from_form(form) -> tuple[dict | None, str | None]:
-    """Read one source's filter rules out of a submitted form.
-
-    Shared by the per-row 更新规则 form and the batch 套用规则 action, so the two
-    cannot disagree about what an empty field means -- it clears that rule, which
-    is the only reading an operator can predict from an empty box.
-    """
-    try:
-        max_attachment_size_mb = int(
-            str(form.get("max_attachment_size_mb") or "0")
-        )
-    except ValueError:
-        return None, "附件上限格式无效"
-    if max_attachment_size_mb < 0:
-        return None, "附件上限无效"
-    min_rating_raw = str(form.get("min_rating") or "").strip()
-    min_rating: float | None = None
-    if min_rating_raw:
-        try:
-            min_rating = float(min_rating_raw)
-        except ValueError:
-            return None, "最低评分格式无效"
-        if min_rating < 0:
-            return None, "最低评分格式无效"
-    submitted_formats = set(form.getlist("allowed_archive_formats"))
-    return (
-        {
-            "allowed_archive_formats": [
-                archive_format
-                for archive_format in ("zip", "rar", "7z", "cbz")
-                if archive_format in submitted_formats
-            ],
-            "max_attachment_size_mb": max_attachment_size_mb,
-            "required_tags": list(_parse_csv_tags(form.get("required_tags"))),
-            "forbidden_tags": list(_parse_csv_tags(form.get("forbidden_tags"))),
-            "allowed_languages": list(
-                _parse_csv_tags(form.get("allowed_languages"))
-            ),
-            "allowed_categories": list(
-                _parse_csv_tags(form.get("allowed_categories"))
-            ),
-            "min_rating": min_rating,
-        },
-        None,
-    )
-
-
-def _selected_source_ids(form) -> list[int]:
-    ids: list[int] = []
-    for value in form.getlist("source_ids"):
-        try:
-            number = int(str(value))
-        except ValueError:
-            continue
-        if number not in ids:
-            ids.append(number)
-    return ids
-
-
 @router.post("/sources/batch")
 async def sources_batch_action(request: Request):
     """One action over a selection of stored sources.
@@ -332,7 +216,8 @@ async def sources_batch_action(request: Request):
         return redirect
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    source_ids = _selected_source_ids(form)
+    values = source_values(form)
+    source_ids = selected_source_ids(values)
     if not source_ids:
         return await render_settings(
             request,
@@ -349,10 +234,13 @@ async def sources_batch_action(request: Request):
     elif action == "delete":
         await database.dismiss_telegram_sources(source_ids)
     elif action == "apply":
-        rules, error = _source_rules_from_form(form)
+        rules, error = parse_source_rules(values)
         if error is not None:
             return await render_settings(
-                request, SETTINGS_SOURCES, error=error, status_code=400
+                request,
+                SETTINGS_SOURCES,
+                error=error.public_message,
+                status_code=400,
             )
         await database.update_telegram_sources_bulk(
             source_ids, rules=rules
