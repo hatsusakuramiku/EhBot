@@ -437,6 +437,71 @@ async def downloaded_dedup(request: Request) -> dict[str, Any]:
     )
 
 
+@router.post("/downloaded/{candidate_id}/rename")
+async def rename_downloaded(request: Request, candidate_id: int) -> dict[str, Any]:
+    """Rename or relocate one work's published CBZ.
+
+    Runs `ArchivedWorkService.rename_work`, the coroutine `/downloaded/{id}/rename`
+    posts through, so the JSON layer cannot move a book the page would have
+    refused: whether the work has a CBZ, and whether a pack currently holds the
+    row, are decided by the service once for both.
+
+    Per-work rather than batch, on the page's reason: a filename is specific to
+    one book, and a batch rename would either need a template -- which is what
+    the archive layout setting already is -- or give fifty books one name. A
+    body without either field is a valid request only in the sense that the
+    service then re-derives nothing; in practice the client sends one of the two.
+
+    `repack` chains a packaging job afterwards, as the page's checkbox does, so
+    the file on disk is rebuilt at the name that was just chosen rather than
+    keeping the old one until the next pack.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        payload = await request.json()
+    except ValueError:
+        # Both parts are optional, so an absent body is an empty request rather
+        # than a malformed one.
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ApiError("BODY_INVALID", "请求体必须是 JSON 对象")
+    filename = str(payload.get("filename") or "").strip() or None
+    directory = str(payload.get("directory") or "").strip() or None
+    repack = bool(payload.get("repack"))
+    operator = str(request.session.get("username") or "admin")
+    service = deps.archived_work_service(request)
+    try:
+        result = await service.rename_work(
+            candidate_id,
+            filename=filename,
+            directory=directory,
+            operator_name=operator,
+        )
+        if repack:
+            await deps.conversion_service(request).enqueue_for_candidate(
+                candidate_id
+            )
+    except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
+        # Same rule as the rest of this file's actions: a refusal that knows how
+        # to describe itself is reported verbatim; anything else is a genuine
+        # fault and surfaces as a 500 instead of being disguised as a tidy 400.
+        message = getattr(exc, "public_message", None)
+        if message is None:
+            raise
+        raise ApiError(str(getattr(exc, "code", "RENAME_FAILED")), str(message)) from exc
+    request.app.state.event_bus.publish(EVENT_DOWNLOAD, candidate_id=candidate_id)
+    return {
+        "candidate_id": candidate_id,
+        # `moved` is false when the name was already the one asked for: the
+        # client tells that apart from a failure and says「文件名未变更」, as the
+        # page does.
+        "moved": bool(result["moved"]),
+        "relative_path": result["relative_path"],
+        "repacked": repack,
+    }
+
+
 __all__ = [
     "DOWNLOADED_BATCH_ACTIONS",
     "DOWNLOADED_SORT_OPTIONS",

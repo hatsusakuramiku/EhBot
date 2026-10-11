@@ -6378,3 +6378,39 @@ TG 用户）要在手机上能用。
 → **54 tests / 0 failed**（48 + 6）。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R72 行。
+---
+
+## R73 · 2026-10-11 · 动作面补口 ④：已下载改名 / 移动
+
+**需求。** 同 R70；已下载页的「改名 / 移动」在手机上要能用。
+
+**设计。** `POST /api/v1/downloaded/{candidate_id}/rename`（落在 `app/api/downloaded.py`，
+与批量动作同一个模块）→ 调 `ArchivedWorkService.rename_work(candidate_id, filename=…,
+directory=…, operator_name=…)`，即网页 `/downloaded/{id}/rename` 调的那一个；
+`repack` 为真时再 `enqueue_for_candidate`（网页的勾选框）。返回
+`{candidate_id, moved, relative_path, repacked}`。
+
+- body 可以完全为空（两栏都可选），所以空 body 按 `{}` 处理而不是 `BODY_INVALID`。
+- 域拒绝原样透传：没打包过 → `WORK_NOT_PACKAGED`；没有已下载档案 → `WORK_NOT_DOWNLOADED`；
+  正在打包 → `WORK_PACK_RUNNING`；`..` / 绝对路径由 `rename_work` 里的
+  `_resolve_inside` 逐段挡下（与打包器同一个校验）。
+- `moved=false` 是「名字没变」而不是失败：页面说「文件名未变更」，客户端照样照抄这句。
+
+**给客户端记一条。** 只给 `filename` 不给 `directory` 等于**把文件移到库根**——
+页面的抽屉两栏都发（从作品当前路径预填）。移动端的改名表单必须把
+`library_relative_path` 的目录部分预填并一起发，否则一次「只改名字」会顺手搬走文件。
+
+**测试（本轮 R73 相关）**
+
+- 新增 `tests/integration/test_downloaded_api_actions.py`（7 条），复用
+  `test_downloaded_web.py` 的 `Library`（那个 fixture 会把 CBZ 真的写到盘上，
+  只写数据库行的 fixture 永远只能走到拒绝分支）：改名后**文件真的移动**且
+  `downloaded_work.cbz_path` 指向新位置；同名的「未变更」；未打包 400
+  `WORK_NOT_PACKED`；`../outside` 被挡且库外什么都没生成；`repack` 把该作品**唯一那条**
+  打包行重新置为 `CONVERSION_PENDING`（重新打包落在它替换的那个文件上，不会造出
+  `book (2).cbz`）；从没下载过的作品 `WORK_NOT_DOWNLOADED`；CSRF 门。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_downloaded_api_actions.py`
+→ **7 tests / 0 failed**。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R73 行。
