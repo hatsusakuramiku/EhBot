@@ -6485,3 +6485,44 @@ JSON 层把它放进错误信封）。`settings_pages.py` 因此净减 135 行�
 → **35 tests / 0 failed**（28 + 7）；`test_settings_web.py` → 103 / 0 failed。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R75 行。
+---
+
+## R76 · 2026-10-11 · 设置写入 ③：自动审批（auto-approval）
+
+**需求。** 同 R74；自动审批规则是「什么消息能自动通过 / 驳回」的那套编辑器。
+
+**设计。** 共享的是**校验**而不是条件编辑器的解析，因为两者的输入形状本来就不同：
+网页用并行列表（`condition_field` / `condition_operator` / `condition_value` +
+`group_operator`，见 `app/web/rule_forms.py`）拼 AST，JSON 直接送 AST。
+两边都把结果交给 `app/settings/auto_approval.py` 的两个读取器：
+
+- `rule_payload(values, condition=…)`：名称非空、`priority`、`rule_id`（缺＝新建）、
+  `action ∈ RULE_ACTIONS`、`validate_rule_ast` 过一遍，并在这里 `render_rule_dsl`
+  生成 `dsl_snapshot`——每条规则都带着「它当时读起来是什么句子」一起存。
+- `dry_run_payload(values, condition=…)`：同一条校验线，试跑的规则必须是能跑的。
+  页面那条理由照抄：不可用的规则试跑会报「命中 0」，读起来像「这条规则没用」
+  而不是「这条规则写错了」。
+
+JSON 四个路由：
+
+    POST   /api/v1/settings/auto-approval/rules            新建 / 按 rule_id 覆盖
+    POST   /api/v1/settings/auto-approval/rules/dry-run    只读试跑（返回 {dry_run: …}）
+    PUT    /api/v1/settings/auto-approval/rules/{id}/toggle  {enabled}
+    DELETE /api/v1/settings/auto-approval/rules/{id}
+
+- 编辑一个**已经不存在的** `rule_id` → 404 `RULE_NOT_FOUND`，而不是拿旧 id 重新建一条
+  （那等于把运营者删掉的规则复活）。
+- `dry_run` 的响应形状复用 `serializers.auto_approval_dry_run`，与页面那份是同一个。
+
+**测试（本轮 R76 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 10 条：建规则并带 DSL、按 rule_id 覆盖
+  （并断言 `version` 递增，这是「过去的自动判定仍说得出当时是哪版规则」的依据）、
+  编辑已删除的规则 404、空名称 / 未知动作 / 缺条件 / 未知字段都 400 `RULE_INVALID`、
+  试跑不写库（列表仍为空）、启停与删除、启停不存在的规则 404、CSRF 门。
+- 回归：`tests/integration/test_auto_approval_workflow.py` + `tests/unit/test_auto_approval.py`
+  **38 条全绿**（本轮改了网页侧 save / dry-run 两个 handler）。
+
+**验证**：`test_settings_write_api.py` → **45 tests / 0 failed**（35 + 10）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R76 行。

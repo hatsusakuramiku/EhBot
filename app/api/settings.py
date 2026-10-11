@@ -23,6 +23,7 @@ operator who has not configured seeding still needs to reach the archive tab.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Callable, Coroutine
 
 from fastapi import APIRouter, Request
@@ -34,6 +35,8 @@ from app.connections.models import ProviderConnectionError
 from app.logging import apply_runtime_log_level
 from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
+from app.settings import auto_approval as approval_form
+from app.settings.forms import checkbox
 from app.settings import parse as parse_form
 from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
@@ -45,6 +48,7 @@ from app.api.serializers import (
     ai_provider_model,
     ai_selectable_model,
     api_key_view,
+    auto_approval_dry_run,
     log_entry_payload,
     archive_password,
     archive_path_rule,
@@ -93,9 +97,10 @@ from app.auto_approval.rules import (
     COLLECTION_OPERATORS,
     EXISTENCE_OPS,
     NUMERIC_OPERATORS,
+    RuleValidationError,
     TEXT_OPERATORS,
 )
-from app.auto_approval.service import DRY_RUN_SCAN_LIMIT
+from app.auto_approval.service import DRY_RUN_SCAN_LIMIT, AutomaticApprovalService
 from app.ai.models import (
     CHAIN_SCOPE_ARCHIVE_PATH,
     CHAIN_SCOPE_CANDIDATE,
@@ -1157,6 +1162,93 @@ async def put_candidate_admission(request: Request) -> dict:
     except SystemSettingsError as exc:
         raise ApiError(str(exc.code), exc.public_message) from exc
     return await settings_snapshot(request, "parse")
+
+
+@router.post("/settings/auto-approval/rules")
+async def post_auto_approval_rule(request: Request) -> dict:
+    """Create a rule, or overwrite the one `rule_id` names.
+
+    One endpoint for both because it is one editor: absent `rule_id` means
+    create, and a `rule_id` that no longer exists is a 404 rather than a
+    re-create under the old id -- resurrecting a rule the operator deleted is
+    the one outcome nobody asked for.
+
+    The body carries the condition **AST** (`app/auto_approval/rules.py`'s
+    shape, `{"kind": "condition", "field": …, "operator": …, "value": …}` or a
+    group of them). The page builds that AST from its row editor; a JSON client
+    sends it, which is why the validation is shared and the *parsing* is not.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        values = approval_form.rule_payload(
+            payload, condition=payload.get("condition")
+        )
+    except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise ApiError("RULE_INVALID", str(exc)) from exc
+    database = deps.database(request)
+    try:
+        await database.save_auto_approval_rule(**values)
+    except LookupError as exc:
+        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
+    return await settings_snapshot(request, "auto-approval")
+
+
+@router.post("/settings/auto-approval/rules/dry-run")
+async def post_auto_approval_dry_run(request: Request) -> dict:
+    """Report what the edited rule would match. Writes nothing.
+
+    Same fields as the save, sent here instead: what was tried is what gets
+    saved, and an operator gets to see 「命中 12 条」before the rule starts
+    deciding on its own.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        values = approval_form.dry_run_payload(
+            payload, condition=payload.get("condition")
+        )
+    except (RuleValidationError, ValueError) as exc:
+        raise ApiError("RULE_INVALID", str(exc)) from exc
+    result = await AutomaticApprovalService(deps.database(request)).dry_run(
+        values["condition"],
+        case_sensitive=values["case_sensitive"],
+        action=values["action"],
+    )
+    return {"dry_run": auto_approval_dry_run(result)}
+
+
+@router.put("/settings/auto-approval/rules/{rule_id}/toggle")
+async def toggle_auto_approval_rule(rule_id: int, request: Request) -> dict:
+    """Park a rule or put it back, without touching anything else about it."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        await deps.database(request).set_auto_approval_rule_enabled(
+            rule_id, checkbox(payload.get("enabled"))
+        )
+    except LookupError as exc:
+        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
+    return await settings_snapshot(request, "auto-approval")
+
+
+@router.delete("/settings/auto-approval/rules/{rule_id}")
+async def delete_auto_approval_rule(rule_id: int, request: Request) -> dict:
+    """Delete a rule for good.
+
+    停用 is the reversible half and keeps its own call; this one cannot be undone
+    from the interface, which is why the page puts a confirmation in front of it.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        await deps.database(request).delete_auto_approval_rule(rule_id)
+    except LookupError as exc:
+        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
+    return await settings_snapshot(request, "auto-approval")
 
 
 @router.get("/settings/{section}")

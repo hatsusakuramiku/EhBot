@@ -13,14 +13,13 @@ from fastapi.responses import RedirectResponse
 
 from app.api.serializers import auto_approval_dry_run
 from app.api.status import SETTINGS_AUTO_APPROVAL
-from app.auto_approval.models import RULE_ACTION_APPROVE, RULE_ACTIONS
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
-    render_rule_dsl,
-    validate_rule_ast,
 )
 from app.auto_approval.service import AutomaticApprovalService
+from app.settings.auto_approval import dry_run_payload, rule_payload
+from app.settings.forms import form_values
 from app.web import deps
 # The row -> AST parser is shared with the paths tab's rule editor, so both
 # rule forms mean the same things on the wire.
@@ -66,37 +65,15 @@ async def save_auto_approval_rule(request: Request):
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
     try:
-        name = str(form.get("name") or "").strip()
-        if not name:
-            raise RuleValidationError("规则名称不能为空")
-        priority = int(str(form.get("priority") or "100"))
-        # Absent means create. An unparsable one is a refusal rather than a
-        # fallback to create: silently inserting a second rule when an edit was
-        # meant is how an operator ends up with two rules approving everything.
-        raw_rule_id = str(form.get("rule_id") or "").strip()
-        rule_id = int(raw_rule_id) if raw_rule_id else None
-        # Validated here, not left to the column CHECK: an unknown action is a
-        # form the operator cannot produce, and a 400 with the reason beats a
-        # 500 from a constraint violation.
-        action = str(form.get("action") or RULE_ACTION_APPROVE)
-        if action not in RULE_ACTIONS:
-            raise RuleValidationError("未知的规则动作")
         # `validate_rule_ast` is the gate, not the editor: every operator and
         # value is checked here, so something the browser accepted and the
         # engine cannot is refused at the moment it would be stored.
-        ast = _parse_rule_condition(form)
-        if ast is None:
-            raise RuleValidationError("请至少填写一个条件")
-        ast = validate_rule_ast(ast)
+        # The validation half is `app/settings/auto_approval.py`'s, shared with
+        # `POST /api/v1/settings/auto-approval/rules` (R76).
         await deps.database(request).save_auto_approval_rule(
-            rule_id=rule_id,
-            name=name,
-            enabled=form.get("enabled") == "on",
-            priority=priority,
-            condition=ast,
-            dsl_snapshot=render_rule_dsl(ast),
-            case_sensitive=form.get("case_sensitive") == "on",
-            action=action,
+            **rule_payload(
+                form_values(form), condition=_parse_rule_condition(form)
+            )
         )
     except LookupError:
         # The rule was deleted between the page render and the save. Reported as
@@ -128,13 +105,9 @@ async def dry_run_auto_approval_rule(request: Request):
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
     try:
-        condition = _parse_rule_condition(form)
-        if condition is None:
-            raise RuleValidationError("请至少填写一个条件")
-        condition = validate_rule_ast(condition)
-        action = str(form.get("action") or RULE_ACTION_APPROVE)
-        if action not in RULE_ACTIONS:
-            raise RuleValidationError("未知的规则动作")
+        payload = dry_run_payload(
+            form_values(form), condition=_parse_rule_condition(form)
+        )
     except (RuleValidationError, ValueError) as exc:
         return await render_settings(
             request,
@@ -143,9 +116,9 @@ async def dry_run_auto_approval_rule(request: Request):
             status_code=400,
         )
     result = await AutomaticApprovalService(deps.database(request)).dry_run(
-        condition,
-        case_sensitive=form.get("case_sensitive") == "on",
-        action=action,
+        payload["condition"],
+        case_sensitive=payload["case_sensitive"],
+        action=payload["action"],
     )
     return await render_settings(
         request,

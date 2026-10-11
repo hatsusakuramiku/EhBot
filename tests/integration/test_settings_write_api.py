@@ -674,3 +674,201 @@ def test_the_parse_writes_need_the_same_gates_as_any_other(
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+# ---------------------------------------------------------------- R76 自动审批
+
+RULES = "/api/v1/settings/auto-approval/rules"
+
+
+def _condition() -> dict:
+    return {
+        "kind": "condition",
+        "field": "Language",
+        "operator": "LIKE",
+        "value": "chinese",
+    }
+
+
+def _rule(**overrides) -> dict:
+    body = {
+        "name": "中文的自动通过",
+        "priority": 50,
+        "enabled": True,
+        "condition": _condition(),
+        "case_sensitive": False,
+        "action": "APPROVE",
+    }
+    body.update(overrides)
+    return body
+
+
+def _rules(client: TestClient) -> list[dict]:
+    return client.get("/api/v1/settings/auto-approval").json()["rules"]
+
+
+def test_a_rule_is_stored_with_its_rendered_dsl(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            RULES, json=_rule(), headers={CSRF_HEADER: csrf}
+        )
+        rules = _rules(client)
+
+    assert response.status_code == 200
+    assert len(rules) == 1
+    assert rules[0]["name"] == "中文的自动通过"
+    assert rules[0]["priority"] == 50
+    # The DSL is rendered server-side and stored with it: the editor previews
+    # the same rendering, so a client never has to re-implement it.
+    assert rules[0]["dsl"]
+
+
+def test_an_edit_overwrites_by_rule_id(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(RULES, json=_rule(), headers={CSRF_HEADER: csrf})
+        rule_id = _rules(client)[0]["rule_id"]
+        client.post(
+            RULES,
+            json=_rule(rule_id=rule_id, name="改过的名字"),
+            headers={CSRF_HEADER: csrf},
+        )
+        rules = _rules(client)
+
+    assert len(rules) == 1
+    assert rules[0]["name"] == "改过的名字"
+    # An update bumps the version, which is what keeps a past approval's stored
+    # rule snapshot honest about what fired.
+    assert rules[0]["version"] > 1
+
+
+def test_editing_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+    """Not a silent create under the old id: that resurrects a deleted rule."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            RULES, json=_rule(rule_id=999), headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
+
+
+def test_an_empty_name_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            RULES, json=_rule(name="   "), headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "RULE_INVALID"
+
+
+def test_an_unknown_action_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            RULES, json=_rule(action="EXPLODE"), headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "RULE_INVALID"
+
+
+def test_a_condition_the_engine_cannot_evaluate_is_refused(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        missing = client.post(
+            RULES, json=_rule(condition=None), headers={CSRF_HEADER: csrf}
+        )
+        bad_field = client.post(
+            RULES,
+            json=_rule(
+                condition={
+                    "kind": "condition",
+                    "field": "NotAField",
+                    "operator": "LIKE",
+                    "value": "x",
+                }
+            ),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert missing.status_code == 400
+    assert missing.json()["error"]["code"] == "RULE_INVALID"
+    assert bad_field.status_code == 400
+    assert bad_field.json()["error"]["code"] == "RULE_INVALID"
+
+
+def test_a_dry_run_reports_without_writing(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            RULES + "/dry-run",
+            json={"condition": _condition(), "action": "APPROVE"},
+            headers={CSRF_HEADER: csrf},
+        )
+        rules = _rules(client)
+
+    assert response.status_code == 200
+    # The shape is the serializer's, shared with the page's own preview.
+    assert "matched" in response.json()["dry_run"]
+    assert rules == []
+
+
+def test_toggling_and_deleting_a_rule(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(RULES, json=_rule(), headers={CSRF_HEADER: csrf})
+        rule_id = _rules(client)[0]["rule_id"]
+        parked = client.put(
+            f"{RULES}/{rule_id}/toggle",
+            json={"enabled": False},
+            headers={CSRF_HEADER: csrf},
+        ).json()["rules"][0]["enabled"]
+        removed = client.delete(
+            f"{RULES}/{rule_id}", headers={CSRF_HEADER: csrf}
+        )
+        rules = removed.json()["rules"]
+
+    assert parked is False
+    assert removed.status_code == 200
+    assert rules == []
+
+
+def test_toggling_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            f"{RULES}/999/toggle",
+            json={"enabled": False},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
+
+
+def test_the_rule_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(RULES, json=_rule())
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"
