@@ -95,6 +95,7 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R64 | 2026-10-11 | 移动端 API 补口 ①：`/api/v1/candidates/batch` 接受 `delete` / `delete-files`（与网页 `batch-review` 同构） | 1871→1875（+4；受触文件 119 条已验，全量留发布前） | `progress.md:6064` |
 | R65 | 2026-10-11 | 移动端 API 补口 ②：`POST /api/v1/works/{id}/requeue`（复用 `ReviewService.requeue_candidate`） | +3（同上，未跑全量） | `progress.md:6099` |
 | R66 | 2026-10-11 | 移动端 API 补口 ③：手动添加抽成共享模块 `app/candidates/manual.py` + `POST /api/v1/candidates/manual` | +4（同上，未跑全量） | `progress.md:6128` |
+| R67 | 2026-10-11 | 移动端 API 补口 ④-1：`PUT /api/v1/settings/connections`（连接区写入；`system` / `passwords` 留 R68 / R69） | +5（同上，未跑全量） | `progress.md:6165` |
 
 > 基线链（当前）：… → R50 1650 → R51 1672 → R52 1690 → R53 1728 → R54 1741 → R57 1743 → R58 1752 → R59 1775 → R60 1792 → R61 1850 → **R62/R63 1871**。以 `AGENTS.md` 的链为准。
 

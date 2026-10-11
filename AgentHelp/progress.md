@@ -6159,3 +6159,47 @@ API 不可能接受。三个共享入口：`exhentai_configured(manager)`、`gal
 
 **文档同步**：本条目；`PHASES.md` 加 R66 行。无迁移；网页行为与部署方式不变，
 `README.md` / `docs/USAGE.md` 无需改。
+
+---
+
+## R67 · 2026-10-11 · 移动端 API 补口 ④-1：设置写入（连接区）
+
+**需求。** 移动端「设置」要可编辑。`/api/v1/settings/{section}` 一直是**只读**，
+写入只在网页层（`/connections/*` 等），而网页层要会话 cookie + `csrf_token` 表单字段、成功 302，
+Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3.5：**按区分期、每区一 commit**，
+本期做 `connections`，`system` / `passwords` 留 R68 / R69。
+
+**设计。** 新增 `PUT /api/v1/settings/connections`（落在 `app/api/settings.py`，紧挨
+`/settings/{section}` 之前声明，遵守「字面量路由在类型化路由之前」的规矩）。body 是一个
+`action` 判别式，与 `candidates/batch` / `jobs/batch` 同一形状：
+
+    {"action": "telegram", "bot_token": "..."}
+    {"action": "telegram-disconnect"}
+    {"action": "telegram-user-login", "api_id": "...", "api_hash": "...", "phone": "..."}
+    {"action": "telegram-user-verify", "code": "..." | "password": "..."}
+    {"action": "telegram-user-disconnect"}
+    {"action": "exhentai", "ipb_member_id": "...", "ipb_pass_hash": "...", "igneous": "..."}
+    {"action": "exhentai-disconnect"}
+
+- 动作集合是模块级常量 `CONNECTION_ACTIONS`，未知动作 400 `ACTION_UNKNOWN` 且
+  `details.allowed` 从它生成——页面与 API 用**同一批 `ConnectionManager` 调用**，页面拒绝的凭据
+  在这里也存不进去。
+- 缺字段逐字段点名（`BOT_TOKEN_REQUIRED` 且 `details.field`），客户端能指到输入框。
+- 「验证码或两步验证密码」在服务端二选一校验（与页面同因：`required` 会挡住另一步）。
+- `ProviderConnectionError` 的 `code` / `public_message` 原样成信封，`retry_after` 进 `details`。
+- **成功返回分区快照**（`settings_snapshot(request, "connections")`），不是回显请求体：
+  凭据只以状态出现，不存在能把 token 带回来的字段。
+
+**测试（本轮 R67 相关）**
+
+- `tests/integration/test_settings_connections_api.py`（新增，5 条）：未知动作列出允许集；
+  缺凭据点名字段；验证码/两步密码二选一；断开后返回快照且响应里**不含** `bot_token`；
+  缺 CSRF 头 403（写入门与其它动作一致）。
+- **一个过程中犯的错误**：最初把这批用例追加进 2800 行的 `test_settings_web.py`，
+  锚点文本在该文件里出现两次，`apply_patch` 命中了前一处、切断了原测试；改为新建独立文件，
+  回滚了那次追加。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_settings_connections_api.py`
+→ **5 tests / 0 failed**；`test_settings_web.py -k connect` → 2 tests / 0 failed（网页侧未受影响）。
+
+**文档同步**：本条目；`PHASES.md` 加 R67 行。无迁移；网页路径与部署方式不变。

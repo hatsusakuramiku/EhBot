@@ -29,6 +29,8 @@ from fastapi import APIRouter, Request
 
 from app.api import deps
 from app.api.contracts import ApiError
+from app.connections.exhentai import ExHentaiCredentials
+from app.connections.models import ProviderConnectionError
 from app.api.serializers import (
     ai_chain_entry,
     ai_provider,
@@ -759,6 +761,123 @@ async def list_settings_sections(request: Request) -> dict:
     """
     await deps.require_session(request)
     return {"tabs": section_tabs("")}
+
+
+#: The connection actions the JSON layer accepts, one word each. A table would
+#: not fit (the arguments differ per action), so the check is a set plus a chain
+#: -- the same「unknown word is one 400」shape `app/api/actions.py` uses, and the
+#: allowed list is built from this set so the two cannot drift.
+CONNECTION_ACTIONS: frozenset[str] = frozenset(
+    {
+        "telegram",
+        "telegram-disconnect",
+        "telegram-user-login",
+        "telegram-user-verify",
+        "telegram-user-disconnect",
+        "exhentai",
+        "exhentai-disconnect",
+    }
+)
+
+
+async def _json_body(request: Request) -> dict:
+    """The JSON object a write expects, or a 400 naming what arrived."""
+    try:
+        payload = await request.json()
+    except ValueError as exc:
+        raise ApiError("BODY_INVALID", "请求体不是合法 JSON") from exc
+    if not isinstance(payload, dict):
+        raise ApiError("BODY_INVALID", "请求体必须是对象")
+    return payload
+
+
+def _required_text(payload: dict, field: str, label: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise ApiError(
+            f"{field.upper()}_REQUIRED",
+            f"请填写{label}",
+            details={"field": field},
+        )
+    return value
+
+
+@router.put("/settings/connections")
+async def put_connections(request: Request) -> dict:
+    """Configure or drop an external connection (the 连接 tab, over JSON).
+
+    The mobile client cannot reach `/connections/*`: those routes want a session
+    cookie plus a `csrf_token` form field and answer with a 302. This runs the
+    same `ConnectionManager` calls, so a credential the page would refuse cannot
+    be stored from here.
+
+    A credential entered here goes straight into the credential store. The
+    response is the section snapshot, which reports *whether* a credential is
+    configured and never what it is -- the line the section builders already
+    hold, and the reason this returns the snapshot rather than echoing the body.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    action = str(payload.get("action") or "")
+    if action not in CONNECTION_ACTIONS:
+        raise ApiError(
+            "ACTION_UNKNOWN",
+            f"未知的连接动作：{action}",
+            details={"allowed": sorted(CONNECTION_ACTIONS)},
+        )
+    manager = deps.connection_manager(request)
+    try:
+        if action == "telegram":
+            await manager.configure_telegram(
+                _required_text(payload, "bot_token", "Bot Token")
+            )
+        elif action == "telegram-disconnect":
+            await manager.disconnect_telegram()
+        elif action == "telegram-user-login":
+            await manager.start_telegram_user_login(
+                _required_text(payload, "api_id", "API ID"),
+                _required_text(payload, "api_hash", "API Hash"),
+                _required_text(payload, "phone", "手机号"),
+            )
+        elif action == "telegram-user-verify":
+            code = str(payload.get("code") or "").strip()
+            password = str(payload.get("password") or "")
+            # Which one is required depends on how far the login got, so the
+            # pair is validated here rather than by two `required` fields.
+            if not code and not password:
+                raise ApiError(
+                    "CODE_OR_PASSWORD_REQUIRED", "请填写验证码，或两步验证密码"
+                )
+            await manager.complete_telegram_user_login(
+                code=code or None, password=password or None
+            )
+        elif action == "telegram-user-disconnect":
+            await manager.disconnect_telegram_user()
+        elif action == "exhentai":
+            await manager.configure_exhentai(
+                ExHentaiCredentials(
+                    _required_text(payload, "ipb_member_id", "ipb_member_id"),
+                    _required_text(payload, "ipb_pass_hash", "ipb_pass_hash"),
+                    _required_text(payload, "igneous", "igneous"),
+                )
+            )
+        else:  # exhentai-disconnect
+            await manager.disconnect_exhentai()
+    except ProviderConnectionError as exc:
+        # The refusal is named rather than left to the snapshot: the provider
+        # records its own error, but a credential rejected before it could be
+        # stored leaves nothing there.
+        raise ApiError(
+            str(exc.code),
+            exc.public_message,
+            details=(
+                {"retry_after": exc.retry_after}
+                if exc.retry_after is not None
+                else None
+            ),
+        ) from exc
+    return await settings_snapshot(request, "connections")
 
 
 @router.get("/settings/{section}")
