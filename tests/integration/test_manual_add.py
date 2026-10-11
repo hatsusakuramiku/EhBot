@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from app.api.deps import CSRF_HEADER
 from app.config import Settings
 from app.db.database import Database
 from app.main import create_app
@@ -356,3 +357,104 @@ def test_a_refused_duplicate_leaves_the_existing_candidate_untouched(
         assert after is not None and before is not None
         assert after.status == before.status
         assert after.filter_reason == before.filter_reason
+
+
+# ------------------------------------------------------------------ JSON API
+# The mobile client cannot reach `/manual-add`: that route wants a session
+# cookie plus a `csrf_token` form field and answers with a 302. `POST
+# /api/v1/candidates/manual` runs the same shared ingest (`app.candidates.manual`),
+# which is what these four cases pin: same acceptances, same refusals.
+
+
+def _api_headers(client: TestClient) -> dict[str, str]:
+    """The CSRF token the page layer embeds, as the browser would send it."""
+    return {CSRF_HEADER: client.get("/manual-add").context["csrf_token"]}
+
+
+def _manual_api(client: TestClient, url: str, headers: dict[str, str]):
+    return client.post(
+        "/api/v1/candidates/manual", json={"url": url}, headers=headers
+    )
+
+
+def test_api_manual_add_creates_the_candidate(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        fetched = _stub_gallery_fetch(client, monkeypatch, metadata={"Title": "B"})
+        response = _manual_api(
+            client,
+            "https://exhentai.org/g/987654/appletoken99/",
+            _api_headers(client),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["candidate_id"] >= 1
+    # The gallery that was validated is the one that was fetched -- same
+    # sequence as the page, not a shape check that skips the fetch.
+    assert fetched == [(987654, "appletoken99")]
+
+
+def test_api_manual_add_reports_the_existing_candidate_on_a_repeat(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    url = "https://exhentai.org/g/987654/appletoken99/"
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        _stub_gallery_fetch(client, monkeypatch)
+        headers = _api_headers(client)
+        first = _manual_api(client, url, headers)
+        second = _manual_api(client, url, headers)
+
+    assert first.status_code == 200
+    # 409 rather than an error to fix: the client's move is to open the work,
+    # and the id travels in `details` so it can do that without parsing text.
+    assert second.status_code == 409
+    error = second.json()["error"]
+    assert error["code"] == "CANDIDATE_DUPLICATE"
+    assert error["details"]["existing_candidate_id"] == (
+        first.json()["candidate_id"]
+    )
+
+
+def test_api_manual_add_refuses_without_a_connection_and_creates_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        fetched = _stub_gallery_fetch(client, monkeypatch)
+        response = _manual_api(
+            client,
+            "https://exhentai.org/g/987654/appletoken99/",
+            _api_headers(client),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "EXHENTAI_NOT_CONFIGURED"
+    # Refused before the link was looked at: no fetch, no row.
+    assert fetched == []
+    assert _no_candidate_count(settings) == 0
+
+
+def test_api_manual_add_refuses_anything_that_is_not_a_gallery_link(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        fetched = _stub_gallery_fetch(client, monkeypatch)
+        response = _manual_api(
+            client,
+            "magnet:?xt=urn:btih:0123456789abcdef",
+            _api_headers(client),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_LINK"
+    assert fetched == []
+    assert _no_candidate_count(settings) == 0

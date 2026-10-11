@@ -6122,3 +6122,40 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 **35 tests / 0 failed**（本文件）。
 
 **文档同步**：本条目；`PHASES.md` 加 R65 行。无迁移、无网页改动、`README.md` / `docs/USAGE.md` 无需改。
+
+---
+
+## R66 · 2026-10-11 · 移动端 API 补口 ③：手动添加
+
+**需求。** 「手动添加」只在网页层（`POST /manual-add`），Bearer 客户端够不着。
+设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3.4。
+
+**设计。** 新增 `app/candidates/manual.py`，把 R63 的摄取序列（**形状 → 判重 → 真拉一次画廊 →
+建候选 + 入队**）整块搬进去，**刻意不依赖 `Request`**——两层各自把服务传进来，所以网页拒绝的链接
+API 不可能接受。三个共享入口：`exhentai_configured(manager)`、`gallery_reference(raw)`、
+`ingest_manual_link(raw, *, database, exhentai_service, orchestrator, download_service)`，
+外加 `enqueue_manual_candidate(...)`。`NOT_CONFIGURED_MESSAGE` 也收在共享模块里，两处显示同一句话。
+
+`app/web/routes/manual_add.py` 退化成薄壳：`_exhentai_configured` 变同步（读共享模块），
+`_gallery_reference` / `_enqueue_manual_candidate` 删除，`_ingest_manual_link` 只做服务装配。
+网页的路径、模板、跳转、状态码一字未改。
+
+新增 `POST /api/v1/candidates/manual`（落在 `app/api/actions.py`），body `{url}`：
+
+- 门在链接之前：未配置 ExHentai → 400 `EXHENTAI_NOT_CONFIGURED`（与页面同一句文案）
+- 重复 → **409** `CANDIDATE_DUPLICATE`，`details.existing_candidate_id` 带上已有候选 id，
+  客户端不用解析文案就能「跳转到该候选」
+- 形状不合法 / 画廊读不到 → 400（`INVALID_LINK` 等，码由服务层给）
+- 成功 → 200 `{candidate_id: N}`（JSON 不跳转）；`_publish(EVENT_CANDIDATE)`
+
+**测试（本轮 R66 相关）**
+
+- `tests/integration/test_manual_add.py`（新增 4 条，走 JSON API）：成功建候选且**取回的就是校验过的那张画廊**；
+  重复粘贴 409 且 `details.existing_candidate_id` 等于首次的 id；未配置连接 400 且**没取画廊、没建行**；
+  磁力链接 400 `INVALID_LINK`。既有 11 条网页用例**全绿**，证明抽共享模块没改行为。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_manual_add.py` →
+**15 tests / 0 failed**。
+
+**文档同步**：本条目；`PHASES.md` 加 R66 行。无迁移；网页行为与部署方式不变，
+`README.md` / `docs/USAGE.md` 无需改。

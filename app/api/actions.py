@@ -21,7 +21,10 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
+from app.candidates import manual as manual_ingest
+from app.db.database import DuplicateGalleryCandidate
 from app.downloads.models import MAX_JOB_PRIORITY, MIN_JOB_PRIORITY
+from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import METADATA_FIELDS
 from app.review.service import ReviewError, ReviewService
 
@@ -389,6 +392,51 @@ async def api_batch_review(request: Request) -> dict:
             request, EVENT_DOWNLOAD, job_id=job_id
         ),
     )
+
+
+@router.post("/candidates/manual")
+async def manual_add(request: Request) -> dict:
+    """Turn a pasted ExHentai gallery link into an approved, queued candidate.
+
+    The sequence -- shape, then duplicate, then the gallery -- is
+    `app.candidates.manual`'s, the same one the `/manual-add` page runs. The
+    connection gate is checked before the link is even looked at, for the page's
+    reason: a deployment with no Cookie cannot fetch the gallery that validates
+    the link, so a deployment is told what to fix rather than that its link is
+    unreadable.
+    """
+    await _guard(request)
+    payload = await _body(request)
+    manager = deps.optional_service(request, "connection_manager")
+    if not manual_ingest.exhentai_configured(manager):
+        raise ApiError(
+            "EXHENTAI_NOT_CONFIGURED", manual_ingest.NOT_CONFIGURED_MESSAGE
+        )
+    try:
+        candidate_id = await manual_ingest.ingest_manual_link(
+            str(payload.get("url") or ""),
+            database=deps.database(request),
+            exhentai_service=deps.exhentai_service(request),
+            orchestrator=deps.review_orchestrator(request),
+            download_service=deps.download_service(request),
+        )
+    except DuplicateGalleryCandidate as exc:
+        # Not an error to fix: the work is already here, and the client's move is
+        # to open it. Carried as a code plus the id so it can do that without
+        # parsing the message.
+        raise ApiError(
+            "CANDIDATE_DUPLICATE",
+            f"作品已存在：候选 #{exc.existing_candidate_id}",
+            status_code=409,
+            details={"existing_candidate_id": exc.existing_candidate_id},
+        ) from exc
+    except (ReviewError, ExHentaiDownloadError) as exc:
+        raise ApiError(
+            str(getattr(exc, "code", "MANUAL_ADD_FAILED")),
+            str(getattr(exc, "public_message", exc)),
+        ) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return {"candidate_id": candidate_id}
 
 
 async def apply_job_batch(
