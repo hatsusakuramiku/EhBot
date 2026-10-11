@@ -6093,3 +6093,32 @@ config `sha256:7071a14a504bedf5ff063be3189a86a0930cdbe9b4b9cb348445c21ffd133503`
 **文档同步**：本条目；`PHASES.md` 加 R64 行；新增 `MOBILE_API_COMPLETION_PROPOSAL.md`。
 网页路径 / 模板 / 数据库均未改动；`README.md` 与 `docs/USAGE.md` 无需改（新增的是内部 JSON 出口，
 部署方式与操作者可见行为不变）。
+
+---
+
+## R65 · 2026-10-11 · 移动端 API 补口 ②：候选重新排队
+
+**需求。** 同 R64 的实测反馈：「重新排队」只在网页层（`POST /candidates/{id}/requeue`），
+Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3.3。
+
+**设计。** 新增 `POST /api/v1/works/{candidate_id}/requeue`，body 可选 `{note}`。落在
+`app/api/actions.py`（该模块的定义就是状态变更端点），紧挨同族的 `PATCH /works/{id}/metadata`：
+
+- 走 `ReviewService.requeue_candidate`——**网页用的同一个协程**。「哪些状态可以重排」由服务层
+  （`REQUEUEABLE_STATUSES = {REJECTED, NEEDS_REVISION, FAILED}`）判一次，两层不可能分歧。
+- `ReviewService` 与 metadata 路由同样**按请求内联构造**（`ReviewService(deps.database(request))`），
+  沿用文件里已有的先例，没有为此新增 `app/api/deps.py` 的访问器。
+- 拒绝原样走 `ReviewService` 的 `code` / `public_message`（`REVIEW_INVALID_TRANSITION`），
+  与相邻路由同一个信封；成功 `_publish(EVENT_CANDIDATE)`。
+- `note` 可选：省略是常态而不是错误。
+
+**测试（本轮 R65 相关）**
+
+- `tests/integration/test_api_domains.py`（新增 3 条）：`REJECTED` 可重排且状态落回
+  `PENDING_REVIEW`；已在队列里的 `PENDING_REVIEW` 被服务拒绝（400 `REVIEW_INVALID_TRANSITION`）；
+  缺 CSRF 头仍是 403（写入门与其它动作一致）。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_api_domains.py` →
+**35 tests / 0 failed**（本文件）。
+
+**文档同步**：本条目；`PHASES.md` 加 R65 行。无迁移、无网页改动、`README.md` / `docs/USAGE.md` 无需改。

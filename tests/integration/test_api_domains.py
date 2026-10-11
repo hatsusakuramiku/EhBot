@@ -417,6 +417,60 @@ class TestWriteGates:
 
 
 class TestMetadataPatch:
+    def test_requeue_returns_a_rejected_candidate_to_review(
+        self, tmp_path: Path
+    ) -> None:
+        """The mobile client's 重新排队 rides the work detail path (M9)."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "REJECTED", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/requeue",
+                json={"note": "误驳回"},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+            status = client.get("/api/v1/works/1").json()["status"]["code"]
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "PENDING_REVIEW"
+        assert status == "PENDING_REVIEW"
+
+    def test_requeue_refuses_a_status_that_is_already_in_the_queue(
+        self, tmp_path: Path
+    ) -> None:
+        """Which statuses may be requeued is the service's decision, once."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/requeue",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "REVIEW_INVALID_TRANSITION"
+
+    def test_requeue_needs_the_same_write_gates_as_any_other_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "REJECTED", "Book 1")])
+            log_in(client, settings)
+            response = client.post("/api/v1/works/1/requeue", json={})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_INVALID"
+
     def test_an_override_is_applied_and_echoed_back(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)
         settings.data_path.mkdir(parents=True, exist_ok=True)

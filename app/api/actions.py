@@ -654,6 +654,33 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     }
 
 
+@router.post("/works/{candidate_id}/requeue")
+async def requeue_work(request: Request, candidate_id: int) -> dict:
+    """Put a work the operator or a rule set aside back into the review queue.
+
+    Runs through `ReviewService.requeue_candidate`, the coroutine the work detail
+    page posts to, so the JSON layer cannot requeue a work the page would have
+    refused: whether a status may be requeued is decided by the service
+    (`REQUEUEABLE_STATUSES`), once, for both layers.
+
+    The body is optional. `note` is the operator's own sentence for the audit
+    row; omitting it is the common case, not an error.
+    """
+    operator = await _guard(request)
+    payload = await _body(request)
+    note = str(payload.get("note") or "").strip() or None
+    service = ReviewService(deps.database(request))
+    try:
+        await service.requeue_candidate(candidate_id, operator, note)
+    except ReviewError as exc:
+        # Same envelope as the metadata route beside it: the service owns the
+        # refusal and its wording, and a missing row is reported by it rather
+        # than re-derived here.
+        raise ApiError(exc.code, exc.public_message) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return {"candidate_id": candidate_id, "status": "PENDING_REVIEW"}
+
+
 def _translate(exc: Exception) -> Exception:
     """Map a domain error onto the JSON envelope.
 
