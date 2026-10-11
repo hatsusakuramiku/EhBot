@@ -37,6 +37,8 @@ from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
 from app.settings import auto_approval as approval_form
 from app.settings import archive as archive_form
+from app.settings import ai as ai_form
+from app.ai.errors import AiError
 from app.settings.forms import checkbox
 from app.settings import parse as parse_form
 from app.settings import paths as paths_form
@@ -1409,6 +1411,281 @@ async def delete_path_rule(rule_id: int, request: Request) -> dict:
     except LookupError as exc:
         raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
     return await settings_snapshot(request, "paths")
+
+
+def _ai_section_of(scope: str) -> str:
+    """Which settings section a chain scope's editor lives on.
+
+    The three chain editors are the same widget mounted on three tabs, so the
+    response after a chain edit is the tab the operator is looking at.
+    """
+    return {
+        CHAIN_SCOPE_ARCHIVE_PATH: "paths",
+        CHAIN_SCOPE_CANDIDATE: "parse",
+    }.get(scope, "ai")
+
+
+async def _ai_call(request: Request, operation: str, **kwargs: Any) -> dict:
+    """Run one `AiService` call and answer with the section's snapshot.
+
+    Every route below is this function plus a section name: the refusals are the
+    service's (`AiError` carries the code and the operator's sentence), and a
+    deployment with no AI service is a 503 from `deps`, not an AttributeError.
+    """
+    service = deps.ai_service(request)
+    try:
+        await getattr(service, operation)(**kwargs)
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, _ai_section_of(kwargs.get("scope", "")))
+
+
+@router.put("/settings/ai/master")
+async def put_ai_master(request: Request) -> dict:
+    """Toggle the global AI master switch.
+
+    State only: turning it off stops every feature from calling a model and
+    deletes nothing -- providers, keys, chains and per-feature switches all stay
+    where the operator left them, so turning it back on restores the exact
+    configuration that was there before.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    await deps.system_settings_service(request).save_ai_enabled(
+        checkbox(payload.get("enabled"))
+    )
+    return await settings_snapshot(request, "ai")
+
+
+@router.post("/settings/ai/providers")
+async def post_ai_provider(request: Request) -> dict:
+    """Create a provider, or overwrite the one `provider_id` names."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request, "save_provider", values=ai_form.provider_submission(payload)
+    )
+
+
+@router.delete("/settings/ai/providers/{provider_id}")
+async def delete_ai_provider(provider_id: int, request: Request) -> dict:
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    return await _ai_call(request, "delete_provider", provider_id=provider_id)
+
+
+@router.post("/settings/ai/providers/{provider_id}/keys")
+async def post_ai_provider_keys(provider_id: int, request: Request) -> dict:
+    """Store one or more API keys from a textarea, one per line.
+
+    The value is never echoed back -- not in the snapshot, not in an error
+    message: `keys` in the section payload are identifiers and states.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request,
+        "add_keys",
+        provider_id=provider_id,
+        raw=ai_form.key_text(payload),
+    )
+
+
+@router.put("/settings/ai/keys/{key_id}/toggle")
+async def toggle_ai_key(key_id: int, request: Request) -> dict:
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request,
+        "set_key_enabled",
+        key_id=key_id,
+        enabled=checkbox(payload.get("enabled")),
+    )
+
+
+@router.post("/settings/ai/keys/{key_id}/reset")
+async def reset_ai_key(key_id: int, request: Request) -> dict:
+    """Release a key from its cooldown, so it is tried again."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    return await _ai_call(request, "reset_key_cooldown", key_id=key_id)
+
+
+@router.delete("/settings/ai/keys/{key_id}")
+async def delete_ai_key(key_id: int, request: Request) -> dict:
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    return await _ai_call(request, "delete_key", key_id=key_id)
+
+
+@router.post("/settings/ai/providers/{provider_id}/models")
+async def post_ai_provider_models(provider_id: int, request: Request) -> dict:
+    """Add one or more model names to a provider."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request,
+        "add_models",
+        provider_id=provider_id,
+        names=ai_form.model_names(payload),
+    )
+
+
+@router.post("/settings/ai/providers/{provider_id}/models/fetch")
+async def fetch_ai_provider_models(provider_id: int, request: Request) -> dict:
+    """`GET /v1/models`, as a list for the operator to pick from.
+
+    Fetched names are not added and not tested: a listing says a model exists,
+    not that this deployment can talk to it. So this is a read, and it answers
+    with the names rather than a section snapshot.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    service = deps.ai_service(request)
+    try:
+        names = await service.list_remote_models(provider_id)
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return {"provider_id": provider_id, "names": list(names)}
+
+
+@router.put("/settings/ai/models/{model_id}/toggle")
+async def toggle_ai_model(model_id: int, request: Request) -> dict:
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request,
+        "set_model_enabled",
+        model_id=model_id,
+        enabled=checkbox(payload.get("enabled")),
+    )
+
+
+@router.put("/settings/ai/models/{model_id}/params")
+async def put_ai_model_params(model_id: int, request: Request) -> dict:
+    """Store a model's request parameters (a JSON string, as the page submits)."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    return await _ai_call(
+        request, "save_model_params", model_id=model_id, raw=payload.get("params")
+    )
+
+
+@router.delete("/settings/ai/models/{model_id}")
+async def delete_ai_model(model_id: int, request: Request) -> dict:
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    return await _ai_call(request, "delete_model", model_id=model_id)
+
+
+@router.post("/settings/ai/models/{model_id}/verify")
+async def verify_ai_model(model_id: int, request: Request) -> dict:
+    """Send the minimal chat request and report what came back.
+
+    A failure answers 400 with the provider's own words, the same shape the
+    qBittorrent 连通测试 uses: the operator asked a question, and the answer is
+    「不，原因是 …」 rather than a 200 that hides it.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    service = deps.ai_service(request)
+    try:
+        verification = await service.verify_model(model_id)
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    if not verification.ok:
+        raise ApiError("MODEL_VERIFY_FAILED", f"验证失败：{verification.message}")
+    return {"ok": True, "message": verification.message}
+
+
+@router.post("/settings/ai/providers/{provider_id}/verify")
+async def verify_ai_provider(provider_id: int, request: Request) -> dict:
+    """Test every enabled model of one provider, in order."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    service = deps.ai_service(request)
+    try:
+        results = await service.verify_all(provider_id)
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return {"results": _verify_payload(results)}
+
+
+@router.post("/settings/ai/verify")
+async def verify_all_ai_models(request: Request) -> dict:
+    """Test every enabled model of every provider, in order."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    service = deps.ai_service(request)
+    try:
+        results = await service.verify_all()
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return {"results": _verify_payload(results)}
+
+
+def _verify_payload(results: Any) -> dict[str, Any]:
+    """A verification run as `{ok, failed, message}`.
+
+    The summary is built here rather than in each caller because the page says
+    the same sentence: 「测试完成：N/M 个模型通过」, or the empty case's own line.
+    """
+    items = list(results)
+    passed = sum(1 for item in items if item.ok)
+    if not items:
+        return {"ok": 0, "total": 0, "message": "没有启用的模型可测试。"}
+    return {
+        "ok": passed,
+        "total": len(items),
+        "message": f"测试完成：{passed}/{len(items)} 个模型通过。",
+        "entries": [
+            {"ok": bool(item.ok), "message": str(item.message)} for item in items
+        ],
+    }
+
+
+@router.put("/settings/ai/chain/{scope}")
+async def put_ai_chain(scope: str, request: Request) -> dict:
+    """One ordered-list verb against one scope's model chain.
+
+    Four verbs, three scopes, one endpoint: the editors differ in *which* list
+    they edit and in nothing else, and two copies of 「上移/下移」 is how one of
+    them quietly stops supporting the last position.
+
+    `primary` makes the model the head, `append` puts it at the end, `shift`
+    moves an entry that is already in the list by `delta`, and `remove` takes it
+    out.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        code = ai_form.chain_scope(scope)
+        action = ai_form.chain_action(str(payload.get("action") or ""))
+        model_id = ai_form.chain_model_id(payload)
+    except AiError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    service = deps.ai_service(request)
+    try:
+        if action == "shift":
+            await service.shift_chain(model_id, int(payload.get("delta") or 0), code)
+        elif action == "remove":
+            await service.remove_from_chain(model_id, code)
+        elif action == "primary":
+            await service.set_chain_primary(model_id, code)
+        else:
+            await service.append_to_chain(model_id, code)
+    except (AiError, ValueError) as exc:
+        message = exc.public_message if isinstance(exc, AiError) else "移动方向无效"
+        raise ApiError(str(getattr(exc, "code", "CHAIN_SHIFT_INVALID")), message) from exc
+    return await settings_snapshot(request, _ai_section_of(code))
 
 
 @router.get("/settings/{section}")

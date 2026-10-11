@@ -15,7 +15,7 @@ from fastapi.responses import RedirectResponse
 
 from app.api.events import EVENT_DOWNLOAD
 from app.api.serializers import auto_approval_dry_run
-from app.ai.errors import AI_CHAIN_ENTRY_MISSING, AiError
+from app.ai.errors import AiError
 from app.ai.models import (
     CHAIN_SCOPE_ARCHIVE_PATH,
     CHAIN_SCOPE_CANDIDATE,
@@ -35,6 +35,7 @@ from app.api.status import (
 from app.connections.models import ProviderConnectionError
 from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings.archive import limits_submission, torrent_submission
+from app.settings import ai as ai_submission
 from app.settings.forms import checkbox, form_values
 from app.settings.parse import (
     candidate_admission,
@@ -1270,21 +1271,13 @@ async def delete_archive_password(
 def _ai_form_values(form) -> dict[str, object]:
     """The provider form as the service's validator wants it.
 
-    A thin translation and nothing else: the refusals live in the service so the
-    page, the JSON client and the chain editor all enforce one set of rules.
-    `enabled` is a checkbox, so absence is 「off」.
+    The translation is `app/settings/ai.py`'s, shared with
+    `POST /api/v1/settings/ai/providers` (R79): the refusals live in the service
+    so the page, the JSON client and the chain editor all enforce one set of
+    rules, and `enabled` being a checkbox (absence is 「off」) is one of the few
+    things that has to be read the same way twice.
     """
-    return {
-        "provider_id": form.get("provider_id"),
-        "name": form.get("name"),
-        "code": form.get("code"),
-        "base_url": form.get("base_url"),
-        "timeout_seconds": form.get("timeout_seconds"),
-        "max_retries": form.get("max_retries"),
-        "enabled": form.get("enabled") == "on",
-        "custom_headers": form.get("custom_headers"),
-        "default_params": form.get("default_params"),
-    }
+    return ai_submission.provider_submission(form_values(form))
 
 
 def _ai_location(provider_id: object = None) -> str:
@@ -1612,10 +1605,7 @@ async def save_ai_master_switch(request: Request, csrf_token: str = Form()):
 
 
 async def _chain_model_id(request: Request, form) -> int:
-    raw = str(form.get("model_id") or "").strip()
-    if not raw.isdigit():
-        raise AiError(AI_CHAIN_ENTRY_MISSING, "请选择一个模型")
-    return int(raw)
+    return ai_submission.chain_model_id(form_values(form))
 
 
 @router.post("/settings/ai/chain/primary")

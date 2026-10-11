@@ -6604,3 +6604,52 @@ AI 子面板，牵涉模型链，与 `ai` 区一起做）、`/paths/template/pre
 无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R78 行。
+
+---
+
+## R79 · 2026-10-11 · 设置写入 ⑥：AI 供应商与模型（ai）
+
+**需求。** 同 R74；九区里最后一块，也是最大的一块。
+
+**设计。** 抽 `app/settings/ai.py`。这里几乎没有「校验」可共享——仓库早就写过一句
+「refusals live in the service」，所以它是**一层薄翻译**：`provider_submission`（`enabled`
+是复选框，缺＝关）、`key_text`（整块 textarea，值永不回显）、`model_names`（可重复
+`model_name`：勾选五个模型是一次请求）、`chain_model_id`（链操作必须点到一个模型）、
+`chain_scope` / `chain_action`（作用域与四个动词）。网页侧 `_ai_form_values` 与
+`_chain_model_id` 改调它们。
+
+    PUT    /api/v1/settings/ai/master                        总开关（state only）
+    POST   /api/v1/settings/ai/providers                     新建 / 覆盖
+    DELETE /api/v1/settings/ai/providers/{id}
+    POST   /api/v1/settings/ai/providers/{id}/keys            一整块 Key（只上行）
+    POST   /api/v1/settings/ai/providers/{id}/models          {"model_name": [...]}
+    POST   /api/v1/settings/ai/providers/{id}/models/fetch    拉取远端模型名（只读）
+    PUT    /api/v1/settings/ai/keys/{id}/toggle               /  keys/{id}/reset  /  DELETE keys/{id}
+    PUT    /api/v1/settings/ai/models/{id}/toggle             /  params  /  DELETE models/{id}
+    POST   /api/v1/settings/ai/models/{id}/verify             连通测试（失败 400 + 供应商原话）
+    POST   /api/v1/settings/ai/providers/{id}/verify           测该供应商所有启用模型
+    POST   /api/v1/settings/ai/verify                          测全部
+    PUT    /api/v1/settings/ai/chain/{scope}                  {action ∈ primary|append|shift|remove, model_id, delta?}
+
+- **四个动词三个作用域一个路由**：三个编辑器只差「编辑哪张列表」，两份「上移/下移」
+  就是其中一份悄悄丢掉末位支持的方式。`scope ∈ {default, archive_path, candidate_admission}`，
+  这样挂载在路径页与解析页上的模型链编辑器也被这一个路由覆盖了。
+- 总开关只存状态：关掉它不删任何东西（供应商、Key、链、每功能开关都留着），
+  再打开就是原样。
+- 测试连通失败时回 400 + 供应商自己的话，与 qBittorrent 连通测试同一形状：
+  运营者问了一个问题，答案该是「不，因为…」而不是一个把原因藏起来的 200。
+
+**测试（本轮 R79 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 9 条：供应商入库且 **Key 明文不出现在
+  响应里**（`api_keys` 只报状态——注意字段名不叫 `keys`，因为 Jinja 会把 `.keys` 解析成
+  dict 自己的方法）、无名供应商被服务拒、模型批量添加与启停、模型删除与供应商删除、
+  删不存在的供应商 400 `AI_PROVIDER_NOT_FOUND`、总开关往返、链动词改主力和未知作用域
+  400 `CHAIN_SCOPE_UNKNOWN`、链动词缺模型 400 `AI_CHAIN_ENTRY_MISSING`、CSRF 门。
+- 回归：`tests/integration/test_settings_web.py` 103 条 + `tests/unit/test_ai_providers.py`
+  + `tests/unit/test_ai_paths.py` + `tests/unit/test_ai_candidates.py`，合计 **260 条 0 failed**
+  （`-p no:logging` 会让用 `caplog` 的用例报 fixture 缺失，那是调用参数的问题，不是回归）。
+
+**验证**：`test_settings_write_api.py` → **69 tests / 0 failed**（60 + 9）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R79 行。

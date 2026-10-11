@@ -1161,3 +1161,204 @@ def test_the_path_writes_need_the_same_gates_as_any_other(
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+# ---------------------------------------------------------------- R79 AI 供应商与模型
+
+AI = "/api/v1/settings/ai"
+
+
+def _provider(**overrides) -> dict:
+    body = {
+        "name": "本地 Ollama",
+        "code": "openai",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "timeout_seconds": 60,
+        "max_retries": 2,
+        "enabled": True,
+    }
+    body.update(overrides)
+    return body
+
+
+def _ai(client: TestClient) -> dict:
+    return client.get(AI).json()
+
+
+def test_a_provider_is_stored_and_read_back_without_its_key(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        created = client.post(
+            AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf}
+        )
+        section = _ai(client)
+        provider_id = section["providers"][0]["provider_id"]
+        with_key = client.post(
+            f"{AI}/providers/{provider_id}/keys",
+            json={"api_keys": "sk-secret-value"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert created.status_code == 200
+    assert section["providers"][0]["name"] == "本地 Ollama"
+    assert with_key.status_code == 200
+    # `api_keys`, not `keys`: Jinja resolves `.keys` on a dict to the dict's own
+    # method, so the field is named around that trap and the API keeps the name.
+    keys = with_key.json()["providers"][0]["api_keys"]
+    assert keys[0]["enabled"] is True
+    # The one line every settings payload holds, and the reason the textarea is
+    # never echoed back: a key is stored, reported by state, and never read.
+    assert "sk-secret-value" not in with_key.text
+
+
+def test_a_provider_without_a_name_is_refused_by_the_service(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            AI + "/providers",
+            json=_provider(name="  "),
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"]
+
+
+def test_a_model_is_added_and_toggled(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        provider_id = _ai(client)["providers"][0]["provider_id"]
+        added = client.post(
+            f"{AI}/providers/{provider_id}/models",
+            json={"model_name": ["llama3", "qwen2"]},
+            headers={CSRF_HEADER: csrf},
+        )
+        model_id = added.json()["providers"][0]["models"][0]["model_id"]
+        parked = client.put(
+            f"{AI}/models/{model_id}/toggle",
+            json={"enabled": False},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert added.status_code == 200
+    assert len(added.json()["providers"][0]["models"]) == 2
+    models = parked.json()["providers"][0]["models"]
+    assert [model["enabled"] for model in models] == [False, True]
+
+
+def test_a_model_can_be_removed_and_the_provider_deleted(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        provider_id = _ai(client)["providers"][0]["provider_id"]
+        client.post(
+            f"{AI}/providers/{provider_id}/models",
+            json={"model_name": ["llama3"]},
+            headers={CSRF_HEADER: csrf},
+        )
+        model_id = _ai(client)["providers"][0]["models"][0]["model_id"]
+        after_model = client.delete(
+            f"{AI}/models/{model_id}", headers={CSRF_HEADER: csrf}
+        ).json()
+        after_provider = client.delete(
+            f"{AI}/providers/{provider_id}", headers={CSRF_HEADER: csrf}
+        ).json()
+
+    assert after_model["providers"][0]["models"] == []
+    assert after_provider["providers"] == []
+
+
+def test_deleting_a_provider_that_is_gone_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.delete(
+            f"{AI}/providers/999", headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "AI_PROVIDER_NOT_FOUND"
+
+
+def test_the_master_switch_round_trips(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        on = client.put(
+            AI + "/master", json={"enabled": True}, headers={CSRF_HEADER: csrf}
+        ).json()["ai_enabled"]
+        off = client.put(
+            AI + "/master", json={"enabled": False}, headers={CSRF_HEADER: csrf}
+        ).json()["ai_enabled"]
+
+    assert on is True
+    assert off is False
+
+
+def test_a_chain_verb_moves_a_model_and_an_unknown_scope_is_refused(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        provider_id = _ai(client)["providers"][0]["provider_id"]
+        client.post(
+            f"{AI}/providers/{provider_id}/models",
+            json={"model_name": ["llama3"]},
+            headers={CSRF_HEADER: csrf},
+        )
+        model_id = _ai(client)["providers"][0]["models"][0]["model_id"]
+        primary = client.put(
+            f"{AI}/chain/default",
+            json={"action": "primary", "model_id": model_id},
+            headers={CSRF_HEADER: csrf},
+        )
+        unknown = client.put(
+            f"{AI}/chain/nope",
+            json={"action": "primary", "model_id": model_id},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert primary.status_code == 200
+    # The AI section calls it `default_chain`; the per-feature tabs call their own
+    # list `own_chain`.
+    assert primary.json()["default_chain"][0]["model_id"] == model_id
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["code"] == "CHAIN_SCOPE_UNKNOWN"
+
+
+def test_a_chain_verb_without_a_model_is_refused(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            f"{AI}/chain/default",
+            json={"action": "primary"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "AI_CHAIN_ENTRY_MISSING"
+
+
+def test_the_ai_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(AI + "/providers", json=_provider())
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"
