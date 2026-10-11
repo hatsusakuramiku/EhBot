@@ -32,7 +32,9 @@ from app.api.contracts import ApiError
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.models import ProviderConnectionError
 from app.logging import apply_runtime_log_level
+from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
+from app.archive.service import ArchiveSettingsError
 from app.settings.service import SystemSettingsError
 from app.api.serializers import (
     ai_chain_entry,
@@ -937,6 +939,81 @@ async def put_system(request: Request) -> dict:
     await runtime.refresh_download_source_priority(request, service)
     apply_runtime_log_level(await service.log_level())
     return await settings_snapshot(request, "system")
+
+
+#: The archive-password and API-key actions the JSON layer accepts.
+PASSWORD_ACTIONS: frozenset[str] = frozenset(
+    {"add", "delete", "api-key-generate", "api-key-revoke"}
+)
+
+
+@router.put("/settings/passwords")
+async def put_passwords(request: Request) -> dict:
+    """Add or drop an archive password, or mint / revoke the mobile API key.
+
+    Both live on the 密码库 tab because they are the same kind of thing -- a
+    credential stored once -- and the API key is minted here rather than through
+    the mobile API so a leaked client can never mint a replacement for itself.
+
+    Nothing in the response is a stored secret. The one exception is by design
+    and is the reason this returns a body rather than a snapshot alone:
+    `api-key-generate` answers with the new plaintext **once**, because that is
+    the only moment it exists outside the credential store -- the page shows it
+    the same way, through a one-shot reveal. Every other action answers with the
+    section snapshot, which reports *whether* a credential is configured and
+    never what it is.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    action = str(payload.get("action") or "")
+    if action not in PASSWORD_ACTIONS:
+        raise ApiError(
+            "ACTION_UNKNOWN",
+            f"未知的密码库动作：{action}",
+            details={"allowed": sorted(PASSWORD_ACTIONS)},
+        )
+    plaintext_api_key: str | None = None
+    if action == "add":
+        raw_priority = str(payload.get("priority", "100")).strip() or "100"
+        try:
+            priority = int(raw_priority)
+        except ValueError as exc:
+            raise ApiError("PRIORITY_INVALID", "优先级必须是整数") from exc
+        try:
+            await deps.archive_settings_service(request).add_password(
+                name=str(payload.get("name") or ""),
+                password=str(payload.get("password") or ""),
+                priority=priority,
+                enabled=bool(payload.get("enabled", True)),
+            )
+        except ArchiveSettingsError as exc:
+            raise ApiError(str(exc.code), exc.public_message) from exc
+    elif action == "delete":
+        password_id = payload.get("password_id")
+        if not isinstance(password_id, int):
+            raise ApiError(
+                "PASSWORD_ID_REQUIRED",
+                "请指定要删除的密码条目",
+                details={"field": "password_id"},
+            )
+        await deps.archive_settings_service(request).delete_password(password_id)
+    elif action == "api-key-generate":
+        token, public_id, secret = new_token(KIND_API_KEY)
+        # One transaction: revoke the old key and insert the new one together, so
+        # the partial unique index can never see two valid keys.
+        await deps.database(request).replace_api_key(
+            label="移动端",
+            public_id=public_id,
+            secret_hash=hash_secret(secret),
+        )
+        plaintext_api_key = token
+    else:  # api-key-revoke
+        await deps.database(request).revoke_active_api_key()
+    snapshot = await settings_snapshot(request, "passwords")
+    if plaintext_api_key is not None:
+        snapshot["api_key_plaintext"] = plaintext_api_key
+    return snapshot
 
 
 @router.get("/settings/{section}")

@@ -6238,3 +6238,38 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 → **10 tests / 0 failed**（连接 5 + 系统 5）。
 
 **文档同步**：本条目；`PHASES.md` 加 R68 行。无迁移。
+
+---
+
+## R69 · 2026-10-11 · 移动端 API 补口 ④-3：设置写入（密码库区，四期收官）
+
+**需求。** 同 R67：`passwords` 区要可编辑——归档密码新增 / 删除、移动端 API Key 生成 / 撤销。
+
+**设计。** 新增 `PUT /api/v1/settings/passwords`（`app/api/settings.py`），body 是 `action`
+判别式（`add` / `delete` / `api-key-generate` / `api-key-revoke`），动作集合是模块常量
+`PASSWORD_ACTIONS`：
+
+- `add` 复用 `ArchiveSettingsService.add_password`（页面同一份校验），`priority` 非整数 → 400。
+- `delete` 要求整数 `password_id`，否则 400 且 `details.field` 点名。
+- `api-key-generate` 复用 `new_token/hash_secret/replace_api_key`（页面同一条事务：旧的吊销与新的插入
+  在一个事务里，部分唯一索引不可能看到两条有效 Key）。
+- **唯一允许在响应里带密文的一次**：生成时把明文回给客户端一次。页面是「一次性 reveal」，
+  客户端没有下一次 GET 的机会，所以把这条规则照它的意图平移；除此之外响应永远是分区快照，
+  凭据只以状态出现（`api_key_view` 从不给 secret 或 hash）。
+- `api-key-revoke` 走 `revoke_active_api_key()`。
+
+**测试（本轮 R69 相关）**
+
+- `tests/integration/test_settings_write_api.py`（新增 6 条）：新增后条目在列且响应**不含**明文；
+  删除后列表为空；缺 `password_id` 400；生成 API Key 返回一次明文、后续 GET 只有元数据
+  （明文不出现在快照里）；撤销后 `configured` 为 false；未知动作列出允许集。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_settings_write_api.py`
+→ **16 tests / 0 failed**（连接 5 + 系统 5 + 密码库 6）。
+
+**文档同步**：本条目；`PHASES.md` 加 R69 行。无迁移。
+
+**四期收口。** R64–R69 把移动端够不着的动作面补齐：候选删除（R64）、重新排队（R65）、
+手动添加（R66）、设置写入三区（R67 / R68 / R69）。总设计记录
+`MOBILE_API_COMPLETION_PROPOSAL.md`；本期未做的仍是它 §6 列的那批（重获元数据、四个来源拉取、
+转换、需修订、已下载改名），移动端若要另开一期。

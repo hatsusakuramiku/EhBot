@@ -180,3 +180,113 @@ def test_saving_the_timezone_recaches_it_on_app_state(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert cached == "Asia/Tokyo"
+
+
+PASSWORDS = "/api/v1/settings/passwords"
+
+
+def _put_passwords(client: TestClient, csrf: str, body: dict):
+    return client.put(PASSWORDS, json=body, headers={CSRF_HEADER: csrf})
+
+
+def test_an_archive_password_is_added_and_never_read_back(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = _put_passwords(
+            client,
+            csrf,
+            {"action": "add", "name": "常用", "password": "s3cret", "priority": 5},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [entry["name"] for entry in payload["passwords"]] == ["常用"]
+    # The whole point of the store: the value is not in the response, only the
+    # fact that an entry exists.
+    assert "s3cret" not in json.dumps(payload)
+
+
+def test_a_deleted_password_is_gone_from_the_section(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        added = _put_passwords(
+            client, csrf, {"action": "add", "name": "常用", "password": "s3cret"}
+        )
+        password_id = added.json()["passwords"][0]["password_id"]
+        response = _put_passwords(
+            client, csrf, {"action": "delete", "password_id": password_id}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["passwords"] == []
+
+
+def test_a_password_id_is_required_to_delete(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = _put_passwords(client, csrf, {"action": "delete"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "PASSWORD_ID_REQUIRED"
+
+
+def test_generating_the_api_key_returns_the_plaintext_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """The one action whose response is allowed to carry a secret.
+
+    It exists nowhere else once this response is gone, so a client that misses it
+    has to mint a replacement -- which is why it is returned here rather than
+    stashed for a later read, the way the page's one-shot reveal does.
+    """
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        generated = _put_passwords(client, csrf, {"action": "api-key-generate"})
+        plaintext = generated.json()["api_key_plaintext"]
+        later = client.get("/api/v1/settings/passwords").json()
+
+    assert generated.status_code == 200
+    assert plaintext.startswith("ehk_")
+    assert generated.json()["api_key"]["configured"] is True
+    # A later read reports the key, never its plaintext.
+    assert later["api_key"]["configured"] is True
+    assert "api_key_plaintext" not in later
+    assert plaintext not in json.dumps(later)
+
+
+def test_revoking_the_api_key_leaves_the_section_unconfigured(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        _put_passwords(client, csrf, {"action": "api-key-generate"})
+        response = _put_passwords(client, csrf, {"action": "api-key-revoke"})
+
+    assert response.status_code == 200
+    assert response.json()["api_key"]["configured"] is False
+
+
+def test_an_unknown_password_action_lists_the_allowed_ones(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = _put_passwords(client, csrf, {"action": "explode"})
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "ACTION_UNKNOWN"
+    assert set(error["details"]["allowed"]) == {
+        "add",
+        "delete",
+        "api-key-generate",
+        "api-key-revoke",
+    }
