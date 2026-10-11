@@ -31,6 +31,9 @@ from app.api import deps
 from app.api.contracts import ApiError
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.models import ProviderConnectionError
+from app.logging import apply_runtime_log_level
+from app.settings import runtime
+from app.settings.service import SystemSettingsError
 from app.api.serializers import (
     ai_chain_entry,
     ai_provider,
@@ -878,6 +881,62 @@ async def put_connections(request: Request) -> dict:
             ),
         ) from exc
     return await settings_snapshot(request, "connections")
+
+
+#: The system preferences the JSON layer accepts. The same names the 系统 form
+#: posts, so the two write paths cannot drift over what a field is called; the
+#: values are validated by `SystemSettingsService`, once, for both.
+SYSTEM_SETTING_FIELDS: tuple[str, ...] = (
+    "source_concurrency",
+    "poll_interval_ms",
+    "timezone",
+    "auto_approval_interval_minutes",
+    "mobile_access_ttl_seconds",
+    "mobile_refresh_ttl_seconds",
+    "log_level",
+    # The ordered, comma-separated provider chain. The page builds it from one
+    # rank per source because that is what a form can express; the service stores
+    # this string, so a JSON caller sends the shape that is stored.
+    "download_source_priority",
+)
+
+
+@router.put("/settings/system")
+async def put_system(request: Request) -> dict:
+    """Store the 系统 preferences and make them current.
+
+    Only the fields present in the body are written, so a client can change one
+    cadence without restating the rest -- the page's behaviour, where an absent
+    form field is left alone.
+
+    The post-save refreshes are the page's, through the same
+    `app.settings.runtime` helpers: the display zone is cached on `app.state` and
+    the log level is process state, so a write that skipped them would look like
+    it did nothing until the next restart.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    values = {
+        key: str(payload[key])
+        for key in SYSTEM_SETTING_FIELDS
+        if key in payload and payload[key] is not None
+    }
+    if not values:
+        raise ApiError(
+            "SETTINGS_REQUIRED",
+            "请提供要修改的设置项",
+            details={"allowed": list(SYSTEM_SETTING_FIELDS)},
+        )
+    service = deps.system_settings_service(request)
+    try:
+        await service.save(values)
+    except SystemSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    await runtime.refresh_display_timezone(request, service)
+    await runtime.refresh_download_source_priority(request, service)
+    apply_runtime_log_level(await service.log_level())
+    return await settings_snapshot(request, "system")
 
 
 @router.get("/settings/{section}")

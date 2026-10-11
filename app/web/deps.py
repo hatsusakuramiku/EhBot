@@ -34,6 +34,7 @@ from fastapi.templating import Jinja2Templates
 from app.api.status import SETTINGS_PASSWORDS
 from app.review.service import ReviewService
 from app.search.query import parse_query
+from app.settings import runtime
 
 
 def templates(request: Request) -> Jinja2Templates:
@@ -215,10 +216,13 @@ async def refresh_display_timezone(request: Request) -> str:
     `shell_context` runs for every rendered page and is synchronous, so it cannot
     read this from the database itself. Refreshed on startup and after the 系统
     form saves — which together are every moment it can change.
+
+    The body is `app.settings.runtime`'s, because the JSON layer writes the same
+    setting and has to re-cache it the same way.
     """
-    zone = await system_settings_service(request).timezone()
-    request.app.state.display_timezone = zone
-    return zone
+    return await runtime.refresh_display_timezone(
+        request, system_settings_service(request)
+    )
 
 
 async def refresh_download_source_priority(request: Request) -> tuple[str, ...]:
@@ -228,9 +232,9 @@ async def refresh_download_source_priority(request: Request) -> tuple[str, ...]:
     it reads `app.state` rather than the database. Refreshed on startup and after
     the 系统 form saves, which together are every moment the value can change.
     """
-    priority = await system_settings_service(request).download_source_priority()
-    request.app.state.download_source_priority = priority
-    return priority
+    return await runtime.refresh_download_source_priority(
+        request, system_settings_service(request)
+    )
 
 
 def int_param(raw: str | None) -> int | None:

@@ -6203,3 +6203,38 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 → **5 tests / 0 failed**；`test_settings_web.py -k connect` → 2 tests / 0 failed（网页侧未受影响）。
 
 **文档同步**：本条目；`PHASES.md` 加 R67 行。无迁移；网页路径与部署方式不变。
+
+---
+
+## R68 · 2026-10-11 · 移动端 API 补口 ④-2：设置写入（系统区）
+
+**需求。** 同 R67，本期做 `system`：来源并发、轮询间隔、时区、自动审批间隔、
+移动端令牌有效期、日志等级、下载来源优先级。`passwords` 留 R69。
+
+**设计。**
+
+1. **抽出共享的运行时刷新器** `app/settings/runtime.py`：`refresh_display_timezone` 与
+   `refresh_download_source_priority` 原先只存在于 `app/web/deps.py`。`route_source` 与页面外壳都是
+   **同步**读取，所以这两项缓存在 `app.state` 上，**任何改得动它们的写路径都必须重新缓存**——
+   只有网页侧有这两个函数，就意味着 JSON 侧写完后要等到重启才生效。搬进共享模块，
+   服务由调用方传入（两层各自保留自己的「服务不可用」形状：页面 `HTTPException`、JSON `ApiError`），
+   `app/web/deps.py` 的两个函数改成薄委托。
+2. 新增 `PUT /api/v1/settings/system`（`app/api/settings.py`）：只写**请求体里出现过的字段**，
+   （与表单「未提交的字段不动它」一致，客户端可以只改一项）；字段名是模块常量
+   `SYSTEM_SETTING_FIELDS`，与页面表单同名，防止两边对「某字段叫什么」产生分歧；
+   校验交由 `SystemSettingsService`（**同一份**，两层共用）。
+3. 保存后**照网页走同三个收尾**：刷时区缓存、刷来源优先级缓存、`apply_runtime_log_level`。
+4. 空 body → 400 `SETTINGS_REQUIRED` 且 `details.allowed` 列出可写字段。
+
+**测试（本轮 R68 相关）**
+
+- `tests/integration/test_settings_write_api.py`（由 R67 的 `test_settings_connections_api.py` 更名，
+  因为现在覆盖两个区；新增 5 条）：某项写入后**再读回**一致；只写提交过的字段（第二次写不会重置第一次）；
+  越界值 400 且消息点明区间；空 body 400 且列出可写字段；**保存时区后 `app.state.display_timezone`
+  真的被重新缓存**（这条正是「漏了收尾就会静默失效」的回归）。
+- `test_settings_web.py -k system` → 5 tests / 0 failed，证明 deps 的抽取没改网页行为。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_settings_write_api.py`
+→ **10 tests / 0 failed**（连接 5 + 系统 5）。
+
+**文档同步**：本条目；`PHASES.md` 加 R68 行。无迁移。
