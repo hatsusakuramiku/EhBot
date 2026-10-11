@@ -897,3 +897,57 @@ class TestConvert:
 
         assert response.status_code == 403
         assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+
+class TestFetchMetadata:
+    """R71: 重获元数据 over JSON, on the call the page makes."""
+
+    def test_a_candidate_with_no_gallery_is_refused_by_the_service(
+        self, tmp_path: Path
+    ) -> None:
+        """The refusal an operator actually hits, and the proof the route
+        reached `fetch_metadata_for_candidate` rather than answering itself."""
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/1/fetch-metadata",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 400
+        assert (
+            response.json()["error"]["code"] == "CANDIDATE_HAS_NO_EX_REFERENCE"
+        )
+
+    def test_a_missing_work_is_a_404(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            log_in(client, settings)
+            response = client.post(
+                "/api/v1/works/404/fetch-metadata",
+                json={},
+                headers={CSRF_HEADER: csrf_token(client)},
+            )
+
+        assert response.status_code == 404
+
+    def test_it_needs_the_same_write_gates_as_any_other_action(
+        self, tmp_path: Path
+    ) -> None:
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
+            log_in(client, settings)
+            response = client.post("/api/v1/works/1/fetch-metadata", json={})
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "CSRF_INVALID"

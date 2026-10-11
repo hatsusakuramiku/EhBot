@@ -6309,3 +6309,30 @@ Bearer 客户端够不着。设计记录 `MOBILE_API_COMPLETION_PROPOSAL.md` §3
 → **45 tests / 0 failed**（35 + 10）。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R70 行；方案 `MOBILE_API_COMPLETION_ROUND2_PROPOSAL.md`。
+---
+
+## R71 · 2026-10-11 · 动作面补口 ②：重获元数据
+
+**需求。** 同 R70；作品详情页的「拉取元数据」按钮要在手机上能用。
+
+**设计。** `POST /api/v1/works/{candidate_id}/fetch-metadata` → 调
+`ExHentaiService.fetch_metadata_for_candidate(candidate_id)`，即网页
+`/candidates/{id}/exhentai-metadata` 调的那一个。它内部走
+`persist_gallery_metadata`（三个调用方共用的唯一写入口），所以 JSON 路径不可能存下
+与页面**不同子集**的同一份画廊。返回 `{candidate_id, has_gallery}`。
+
+拒绝都是服务给的，也正是运营者真会撞到的三种：没配 ExHentai 连接
+（`deps.exhentai_service` 给 503 `SERVICE_UNAVAILABLE`）、这件作品没有关联画廊
+（`CANDIDATE_HAS_NO_EX_REFERENCE`）、上游回答的不是画廊。缺行仍先查一次 → 404。
+
+**测试（本轮 R71 相关）**
+
+- `TestFetchMetadata`（3 条）：无画廊的候选被服务拒（这条同时证明路由确实调到了
+  `fetch_metadata_for_candidate`，而不是自己编了个答案）、缺行 404、CSRF 门。
+- 成功路径不在这一层断言：它要一份**真实的画廊响应**（上游 HTTP mock），
+  而路由本身只是三行转发；`persist_gallery_metadata` 的写入子集已由抓取侧用例覆盖。
+
+**验证**：`.\.venv\Scripts\python.exe -m pytest tests/integration/test_api_domains.py`
+→ **48 tests / 0 failed**（45 + 3）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R71 行。

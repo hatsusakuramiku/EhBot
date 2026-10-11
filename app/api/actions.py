@@ -791,6 +791,39 @@ async def convert_work(request: Request, candidate_id: int) -> dict:
     return {"candidate_id": candidate_id, "job_id": job_id}
 
 
+@router.post("/works/{candidate_id}/fetch-metadata")
+async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
+    """Re-read the gallery's metadata for one work.
+
+    Runs `ExHentaiService.fetch_metadata_for_candidate`, the call the work detail
+    page makes: read the gallery, then persist it through the one shared writer
+    (`persist_gallery_metadata`) so the JSON path cannot store a different subset
+    of the same gallery than the page does.
+
+    The refusals are the service's, and they are the ones an operator actually
+    hits: no ExHentai connection configured, no gallery on this candidate, or an
+    upstream that answered with something other than a gallery.
+    """
+    await _guard(request)
+    database = deps.database(request)
+    candidate = await database.get_candidate(candidate_id)
+    if candidate is None:
+        raise ApiError(
+            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
+        )
+    try:
+        await deps.exhentai_service(request).fetch_metadata_for_candidate(
+            candidate_id
+        )
+    except ExHentaiDownloadError as exc:
+        raise ApiError(exc.code, exc.public_message) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return {
+        "candidate_id": candidate_id,
+        "has_gallery": candidate.ex_gid is not None,
+    }
+
+
 def _translate(exc: Exception) -> Exception:
     """Map a domain error onto the JSON envelope.
 
