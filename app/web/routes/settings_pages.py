@@ -34,6 +34,7 @@ from app.api.status import (
 )
 from app.connections.models import ProviderConnectionError
 from app.credentials import KIND_API_KEY, hash_secret, new_token
+from app.settings.archive import limits_submission, torrent_submission
 from app.settings.forms import checkbox, form_values
 from app.settings.parse import (
     candidate_admission,
@@ -56,7 +57,6 @@ from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
 from app.web.rule_forms import parse_rule_condition
 from app.archive.rearchive import rearchive_works
 from app.archive.service import (
-    LIMIT_KEYS as ARCHIVE_LIMIT_KEYS,
     TITLE_SOURCE_JAPANESE,
     TITLE_SOURCES,
     ArchiveSettingsError,
@@ -1066,17 +1066,10 @@ async def save_torrent_client_settings(
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
     try:
+        # The reading half is `app/settings/archive.py`'s, shared with
+        # `PUT /api/v1/settings/archive/torrent` (R77).
         await deps.archive_settings_service(request).save_torrent_client(
-            {
-                "base_url": form.get("base_url"),
-                "username": form.get("username"),
-                "password": form.get("password"),
-                "category": form.get("category"),
-                "save_path": form.get("save_path"),
-                "local_save_path": form.get("local_save_path"),
-                "keep_seeding": bool(form.get("keep_seeding")),
-                "auto_pack": bool(form.get("auto_pack")),
-            }
+            torrent_submission(form_values(form))
         )
     except ArchiveSettingsError as exc:
         return await render_settings(
@@ -1123,7 +1116,7 @@ async def save_archive_limits(request: Request, csrf_token: str = Form()):
         # fails validation, so they are stored first: a rejected number
         # aborts before the quality level is touched.
         await deps.archive_settings_service(request).save_limits(
-            {key: str(form.get(key) or "") for key in ARCHIVE_LIMIT_KEYS}
+            limits_submission(form_values(form))
         )
         await deps.archive_settings_service(request).save_keep_original(
             form.get("keep_original") == "on"

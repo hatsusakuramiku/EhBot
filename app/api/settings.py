@@ -36,10 +36,12 @@ from app.logging import apply_runtime_log_level
 from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
 from app.settings import auto_approval as approval_form
+from app.settings import archive as archive_form
 from app.settings.forms import checkbox
 from app.settings import parse as parse_form
 from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
+from app.torrent.models import TorrentError
 from app.settings.service import SystemSettingsError
 from app.api.serializers import (
     ai_chain_entry,
@@ -1249,6 +1251,83 @@ async def delete_auto_approval_rule(rule_id: int, request: Request) -> dict:
     except LookupError as exc:
         raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
     return await settings_snapshot(request, "auto-approval")
+
+
+@router.put("/settings/archive/torrent")
+async def put_torrent_client(request: Request) -> dict:
+    """Store the qBittorrent client settings (the 归档与工具 tab, over JSON).
+
+    The reading half is `app/settings/archive.py`'s, shared with the page's
+    `/archive-settings/torrent` form, so the two switches cannot mean different
+    things in the two worlds. The password is written straight into the
+    credential store and never read back -- the snapshot reports whether a client
+    is configured, not what its password is.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        await deps.archive_settings_service(request).save_torrent_client(
+            archive_form.torrent_submission(payload)
+        )
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "archive")
+
+
+@router.post("/settings/archive/torrent/test")
+async def post_torrent_test(request: Request) -> dict:
+    """Prove the stored settings reach a real client before a book needs it.
+
+    A read of the client, not a write: the page's 「测试连接」 button, and the one
+    way to find out that a host is unreachable without queueing a download into
+    it. The version comes back so the operator can see *which* client answered.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        version = await deps.torrent_service(request).check_connection()
+    except TorrentError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return {"connected": True, "version": version}
+
+
+@router.put("/settings/archive/limits")
+async def put_archive_limits(request: Request) -> dict:
+    """Store the safety limits, the keep-original switch and the image quality.
+
+    Limits go first, on the page's reason: they are typed by hand and are the
+    field that realistically fails validation, so a rejected number aborts before
+    the quality level is touched.
+    """
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    service = deps.archive_settings_service(request)
+    try:
+        await service.save_limits(archive_form.limits_submission(payload))
+        if "keep_original" in payload:
+            await service.save_keep_original(checkbox(payload.get("keep_original")))
+        if "image_quality" in payload:
+            await service.save_image_quality(str(payload.get("image_quality") or ""))
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "archive")
+
+
+@router.put("/settings/archive/auto-pack")
+async def put_auto_pack(request: Request) -> dict:
+    """Store whether a finished download packs itself."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    try:
+        await deps.archive_settings_service(
+            request
+        ).save_auto_pack_after_download(checkbox(payload.get("enabled")))
+    except ArchiveSettingsError as exc:
+        raise ApiError(str(exc.code), exc.public_message) from exc
+    return await settings_snapshot(request, "archive")
 
 
 @router.get("/settings/{section}")

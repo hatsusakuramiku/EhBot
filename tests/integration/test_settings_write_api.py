@@ -872,3 +872,116 @@ def test_the_rule_writes_need_the_same_gates_as_any_other(
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
+
+# ---------------------------------------------------------------- R77 归档与工具
+
+ARCHIVE = "/api/v1/settings/archive"
+
+
+def _archive(client: TestClient) -> dict:
+    return client.get(ARCHIVE).json()
+
+
+def test_the_torrent_client_is_stored_without_echoing_the_password(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            ARCHIVE + "/torrent",
+            json={
+                "base_url": "http://127.0.0.1:8080",
+                "username": "admin",
+                "password": "hunter2",
+                "category": "manga",
+                "keep_seeding": True,
+            },
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 200
+    torrent = response.json()["torrent"]
+    assert torrent["configured"] is True
+    # The one line every settings payload holds: a credential reports *whether*
+    # it is configured, never what it is.
+    assert "hunter2" not in response.text
+
+
+def test_clearing_the_host_leaves_the_client_unconfigured(
+    tmp_path: Path,
+) -> None:
+    """A blank host is 「no client」, not a client pointing at nowhere."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            ARCHIVE + "/torrent",
+            json={"base_url": "   "},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["torrent"]["configured"] is False
+
+
+def test_testing_the_client_reports_the_absence_of_one(
+    tmp_path: Path,
+) -> None:
+    """Unconfigured, the test call is a 503 naming the missing service."""
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.post(
+            ARCHIVE + "/torrent/test", json={}, headers={CSRF_HEADER: csrf}
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_a_limit_out_of_range_is_refused_by_the_service(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            ARCHIVE + "/limits",
+            json={"max_total_bytes": "not a number"},
+            headers={CSRF_HEADER: csrf},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"]
+
+
+def test_the_auto_pack_switch_round_trips(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        on = client.put(
+            ARCHIVE + "/auto-pack",
+            json={"enabled": True},
+            headers={CSRF_HEADER: csrf},
+        ).json()["auto_pack_after_download"]
+        off = client.put(
+            ARCHIVE + "/auto-pack",
+            json={"enabled": False},
+            headers={CSRF_HEADER: csrf},
+        ).json()["auto_pack_after_download"]
+
+    assert on is True
+    assert off is False
+
+
+def test_the_archive_writes_need_the_same_gates_as_any_other(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(ARCHIVE + "/auto-pack", json={"enabled": True})
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_INVALID"

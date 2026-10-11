@@ -6526,3 +6526,39 @@ JSON 四个路由：
 **验证**：`test_settings_write_api.py` → **45 tests / 0 failed**（35 + 10）。无迁移。
 
 **文档同步**：本条目；`PHASES.md` 加 R76 行。
+---
+
+## R77 · 2026-10-11 · 设置写入 ④：归档与工具（archive）
+
+**需求。** 同 R74；归档区决定「打包怎么跑」——手机端值得改的是 qBittorrent 客户端、
+安全限制、以及「下完自动打包」这一个开关。
+
+**设计。** 抽 `app/settings/archive.py`（`torrent_submission` / `limits_submission`），
+网页 `/archive-settings/torrent` 与 `/archive-settings/limits` 两个 handler 改调它们。
+**只读回这一区能用手改的三样**，理由写在模块 docstring 里：工具 profile 与
+工具链安装命名的是**服务器上**的可执行文件与路径，在手机上手打的路径没法与运营者
+没在看的那个文件系统核对，所以留在网页。
+
+    PUT  /api/v1/settings/archive/torrent        qBittorrent 客户端（密码只上行）
+    POST /api/v1/settings/archive/torrent/test   测试连通（只读客户端，不入队）
+    PUT  /api/v1/settings/archive/limits         安全限制 + 保留原档 + 图片质量
+    PUT  /api/v1/settings/archive/auto-pack      下完自动打包
+
+限制先写、再写质量等级，理由是页面那条：限制是手打且真会校验失败的字段，
+被拒的数字要在质量等级被改之前中止。
+
+**测试（本轮 R77 相关）**
+
+- `tests/integration/test_settings_write_api.py` 新增 6 条：保存客户端后
+  **响应里没有密码**（`configured` 为真、明文不出现）、清空 host 等于「没有客户端」
+  （`configured` 为假，而不是一个指向空气的客户端）、未配置时测试连通回 503
+  `SERVICE_UNAVAILABLE`、限制非法由服务拒绝、自动打包开关往返、CSRF 门。
+- 回归：`tests/integration/test_settings_web.py` **103 条全绿**。
+  这一轮正是它抓到了我的一处真实错误：改 `settings_pages.py` 的 import 时把
+  `app.settings.forms` 那行也删掉了，`form_values` 变成未定义——API 侧的用例全绿，
+  因为那条路径不经过网页 handler。**动网页侧就一定要重跑网页侧**，这条规矩不是仪式。
+
+**验证**：`test_settings_write_api.py` → **51 tests / 0 failed**（45 + 6）；
+`test_settings_web.py` → 103 / 0 failed。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R77 行。
