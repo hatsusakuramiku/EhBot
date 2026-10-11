@@ -179,7 +179,9 @@ async def seed_torrent_candidate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    # New candidates wait in 待补充 (R62); the fixture sets the status it wants
+    # below, so it reads the row from where ingestion put it.
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     candidate_id = candidates[0].candidate_id
     with database._connect() as connection:  # noqa: SLF001
         connection.execute(

@@ -19,7 +19,6 @@ from app.candidates.parse_rules import (
     dump_parse_rules,
     message_qualifies,
     parse_rules_view,
-    title_forces_needs_info,
     validate_parse_rules,
 )
 
@@ -29,7 +28,6 @@ def _message(
     ex_gid: int | None = None,
     attachments: tuple[dict, ...] = (),
     preview_urls: tuple[str, ...] = (),
-    title: str | None = "作品",
 ) -> ParsedSourceMessage:
     return ParsedSourceMessage(
         is_edit=False,
@@ -43,9 +41,6 @@ def _message(
         attachments=attachments,
         file_unique_id=None,
         message_date="2026-01-01T00:00:00+00:00",
-        title=title,
-        title_source="TELEGRAM" if title else None,
-        title_confidence=0.9 if title else None,
         filter_result="ACCEPT",
         filter_reason="",
         ex_gid=ex_gid,
@@ -69,7 +64,6 @@ class TestDefaults:
             "accept_archive": False,
             "archive_formats": list(ARCHIVE_FORMATS),
             "accept_preview": False,
-            "title_required": False,
         }
 
     def test_a_default_copy_is_not_shared(self) -> None:
@@ -86,7 +80,6 @@ class TestValidation:
             "accept_archive": True,
             "archive_formats": ["zip", "cbz"],
             "accept_preview": True,
-            "title_required": True,
         }
         assert validate_parse_rules(rules) == rules
 
@@ -196,10 +189,3 @@ class TestGate:
         )
         ok, _ = message_qualifies(rules, _message(attachments=_archive()))
         assert ok is False
-
-    def test_title_required_overrides_the_source_decision(self) -> None:
-        rules = dict(DEFAULT_PARSE_RULES)
-        assert title_forces_needs_info(rules, _message(title=None)) is False
-        rules["title_required"] = True
-        assert title_forces_needs_info(rules, _message(title=None)) is True
-        assert title_forces_needs_info(rules, _message(title="有标题")) is False

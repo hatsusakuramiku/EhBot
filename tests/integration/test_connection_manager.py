@@ -100,7 +100,7 @@ async def test_configuring_telegram_starts_durable_update_polling(
         )
         await manager.configure_telegram("123:secret")
         for _ in range(100):
-            if await database.list_candidates():
+            if await database.list_candidates(status="NEEDS_INFO"):
                 break
             await asyncio.sleep(0.01)
 
@@ -111,7 +111,13 @@ async def test_configuring_telegram_starts_durable_update_polling(
     assert snapshot.telegram.state == "connected"
     assert snapshot.telegram.identity == "@ehbot_intake_bot"
     assert await database.latest_telegram_update_id() == 100
-    assert (await database.list_candidates())[0].title == "Polling Candidate"
+    # The caption is not a title any more (R62); the candidate waits in 待补充
+    # and the text it came from is on the message.
+    candidate = (await database.list_candidates(status="NEEDS_INFO"))[0]
+    assert candidate.title is None
+    detail = await database.get_candidate(candidate.candidate_id)
+    assert detail is not None
+    assert detail.messages[0].message_text == "Polling Candidate"
 
 
 @pytest.mark.asyncio
@@ -318,11 +324,12 @@ async def test_startup_processes_saved_updates_without_telegram_connection(
             candidate_ingestor=CandidateIngestor(database),
         )
         await manager.start()
-        candidates = await database.list_candidates()
+        candidates = await database.list_candidates(status="NEEDS_INFO")
         await manager.stop()
 
     assert len(candidates) == 1
-    assert candidates[0].title == "Offline Candidate"
+    assert candidates[0].title is None
+    assert candidates[0].status == "NEEDS_INFO"
 
 
 @pytest.mark.asyncio
@@ -590,7 +597,7 @@ async def test_the_user_account_ingests_new_channel_messages(
     created = await manager._ingest_with_user_account()
 
     assert created == 1
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert [candidate.candidate_id for candidate in candidates] != []
     detail = await database.get_candidate(candidates[0].candidate_id)
     attachment = detail.messages[0].attachments[0]
@@ -648,7 +655,7 @@ async def test_a_channel_the_session_has_not_seen_is_read_after_dialogs(
 
     assert await manager._ingest_with_user_account() == 1
     assert client.dialog_calls == 1
-    assert len(await database.list_candidates()) == 1
+    assert len(await database.list_candidates(status="NEEDS_INFO")) == 1
 
     # Read once per process, not once per poll.
     assert await manager._ingest_with_user_account() == 0
@@ -725,7 +732,7 @@ async def test_saving_a_source_again_re_runs_the_check(
     assert "telegram_user_source_unreadable" not in [
         item.getMessage() for item in caplog.records
     ]
-    assert len(await database.list_candidates()) == 1
+    assert len(await database.list_candidates(status="NEEDS_INFO")) == 1
     await manager.stop()
 
 
@@ -781,7 +788,7 @@ async def test_a_message_both_paths_saw_produces_one_candidate(
     again = parse_user_message(FakeUserMessage(id=21))
     assert again is not None
     assert await database.save_candidate_message(None, again) is False
-    assert len(await database.list_candidates()) == 1
+    assert len(await database.list_candidates(status="NEEDS_INFO")) == 1
     await manager.stop()
 
 

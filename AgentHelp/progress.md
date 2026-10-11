@@ -5941,3 +5941,120 @@ R59 的 index `sha256:b7b9bfc9…`，R60 没有发布动作）。**从 registry 
 chip 文案「标签 ≈ %ntr%」与「已按全局搜索处理」的退化提示，`app/search/query.py` 在镜像内可导入；
 `ui-tag-action`、`macro tag_list`、两个列表端点的 `search_filters` 都已随镜像就位（冒烟库是空的，
 所以没有标签可点）。冒烟容器已停止并随 `--rm` 清理。
+
+## R62 — 作品标题只来自画廊元数据：待补充、独立抓取 worker、启动维护（2026-10-11）
+
+运营者：「现在所有候选卡片的标题要么是候选编号，要么是部分分类，一点都不好进行分辨。应该改为使用
+显示作品名称」，并定下**日文名优先**、「人工维护过的行有标识、不维护」等。八点答复（v6）落定：作品名只
+从画廊元数据取，**不再从 Telegram 文案解析标题**；元数据在加入候选后立刻解析，抓不到就用占位显示、
+候选留在待补充；「相邻消息配对」不用管（单图/单附件本来就不会成为候选）。设计记录
+`CANDIDATE_TITLE_PROPOSAL.md`（v6）。本轮**不需要数据库迁移**，版本号不变（仍是 `v0.3.0rc3`）。
+
+**成因。** 卡片标题就是一条 SQL 直查 `metadata_values`，但六处各写一段子查询、各按 `is_manual DESC,
+confidence DESC` 取一行；消息解析器又把 caption 的第一条非 URL 行当标题写成 `TELEGRAM`、`confidence=0.9`，
+而抓回来的画廊标题只有 `0.6`——于是画廊名永远选不上，卡片显示的就是 Telegram 文案的首行。
+
+**设计 A：唯一取名字段 `title_subquery()`。** `app/db/database.py` 新增 `title_subquery(candidate_ref)`：
+`is_manual DESC`（人工永远第一）、语言层跟随「设置 → 路径」的**标题来源**（`library_title_source`，
+默认 `japanese`，SQL 里直接读那行设置，设置一改网页卡片与库文件名同时变）、来源层级
+`EXHENTAI > OPERATOR > MANUAL_ADD > EH_TORRENT / TELEGRAPH > FILENAME > TELEGRAM > INFERRED`
+（`METADATA_SOURCE_RANK_SQL`）、再比 `confidence`、`created_at`。六处读标题的位置全部换成它；
+`_effective_metadata_sync()`（喂归档路径规则与自动审批规则）改成画廊优先；
+`ConversionService._fetch_metadata_sync()` 此前**没有 ORDER BY**（打包用哪个名字取决于 SQLite 行走顺序），
+补上同一套排序。`app/api/serializers.py` 的候选载荷增 `display_title`。
+
+**设计 B：摄取不再解析标题。** 三处解析器（`ingestor` / `mtproto` / 编辑删除的重算）不再写 `Title` 行；
+`ParsedSourceMessage.title/title_source/title_confidence` 与解析规则里的「必须提供标题」
+（`title_required` / `title_forces_needs_info`）一并删除，`TELEGRAM`/`FILENAME`/`INFERRED` 三个来源从此不产生；
+「设置 → 解析规则」页的勾选框与提示同步移除。状态只有一条规则：有 `Title`/`JapaneseTitle` 行 → 待审核，
+没有 → 待补充；摄取侧（`evaluate_source_rules` 恒返回 `NEEDS_INFO`）与抓取后重算共用同一个
+`_candidate_title_missing()`，不再两份判断。`MISSING_TITLE_REASON = "尚未取得画廊标题"` 写进
+`_update_candidate_filter_state`，`re_evaluate_candidate_metadata_rules` 在 `ACCEPT` 之前插「标题门」。
+
+**设计 C：独立抓取 worker（`app/exhentai/scrape_worker.py`）。** `MetadataScrapeWorker` 有自己的
+`asyncio.Task`：`wake()` 事件由摄取回调（`ConnectionManager.on_candidates_ingested`，由 `_sweep_new_candidates`
+改名而来，先唤醒再扫）触发，空闲 30 s 轮询一次、每批 25 条，扫的是库（能捡起一次部署继承的积压）而非内存队列、
+最新优先，状态只取 `NEEDS_INFO`/`PENDING_REVIEW`/`NEEDS_REVISION`；失败按 30 s / 2 m / 10 m 内存退避后放弃
+（重启再试，proposal 要求不加迁移、也就没有重试列）。抓取**只写元数据、不改状态**；服务不存在或未配连接时
+安静跳过。`app/exhentai/service.py` 相应拆出 `fetch_metadata_for_gallery(gid, token) ->
+(metadata, GalleryData | None)` 与 `persist_gallery_metadata(candidate_id, metadata, gallery)`，
+`fetch_metadata_for_candidate` 复用它们。`app/wiring.py` 在 `application.state.exhentai_service` 之后
+建好并启动 worker，`finally` 里停掉。
+
+**设计 D：占位显示（不入库）。** `app/candidates/models.py` 新增模块级
+`display_title(title, ex_gid, candidate_id)`：有标题用标题，没有但有画廊 ID 用 `#<gid>`，
+都没有用 `候选 #<编号>`——库里保持「没有标题」这一事实，只在渲染时兜底。`CandidateListItem` /
+`CandidateDetail` 加 `display_title` 属性；卡片副行 `candidate_meta` 追加 `#<gid>`；候选列表、作品详情、
+一键去重页（`DedupEntry.display_title`）全部改用 `display_title`。待补充 tab 文案改成
+「等待画廊标题或抓取失败的候选，可人工补充标题」，空态同步改。
+
+**设计 E：启动一次性维护。** `Database.maintain_titles()` / `_maintain_titles_sync()`：删掉非人工的
+`TELEGRAM`/`FILENAME`/`INFERRED` `Title` 行（`is_manual = 1` 或 `is_locked = 1` 的行**不动**——那是运营者的
+标识），删完没有标题的候选落回待补充并写 `MISSING_TITLE_REASON`；幂等标记写既有 kv
+`system_settings.title_maintenance_v1`（值 = 完成时间 + 统计），有标记即跳过、连跑两次零改动。
+`build_lifespan` 里 `await database.initialize()` 之后**单独 try/except** 跑一次（异常只记
+`title_maintenance_failed` 与 `startup_errors`，不阻断启动），成功记
+`title_maintenance_completed scanned=… deleted=… needs_info=…`。另：编辑消息若改了 `ex_gid`，删掉该候选的
+`EXHENTAI` 行让抓取重跑；「相邻消息配对」只留配对类型判据（标题相等条件随字段一起消失）。
+
+**测试（本轮 R62 相关）**
+- `tests/integration/test_title_resolution.py`（新增 7）：`title_subquery()` 排序（人工第一、日文优先、
+  跟随「标题来源」、画廊压过 Telegram），以及列表/详情两个投影对同一份数据给同一个答案。
+- `tests/integration/test_title_maintenance.py`（新增 6）：只删三类非人工行、人工/锁定行不动、删完落回待补充、
+  标记存在时跳过、连跑两次零改动。
+- `tests/integration/test_metadata_scrape_worker.py`（新增 6）：`scrape_once` 只取三个状态、最新优先、
+  抓到标题后候选从待补充转待审核、抓不到仍待补充、失败退避后放弃、摄取唤醒。
+- 既有用例大面积跟着新契约改写（`test_candidate_ingestion`、`test_candidates_web`（新增「无标题显示画廊 ID」
+  一条）、`test_work_detail_web`、`test_exhentai_torrents`、`test_database`、`test_source_rules`、
+  `test_review_actions`、`test_metadata_rule_evaluation`、`test_telegraph_workflow`、`test_torrent_workflow`、
+  `test_auto_approval_workflow`、`test_downloads`、`test_connection_manager`；`test_parse_rules` /
+  `test_mtproto_translation` / `test_ai_candidates` / `ingest_admission` 删掉 `title_required` 相关断言）。
+
+## R63 — 手动添加改造：仅 Eh 链接、先验证后建行、未配置连接硬挡（2026-10-11）
+
+运营者：「点击添加 → 检查是否已存在 → 已存在进行提示是否跳转到页面；不存在就进入添加流程 → 填写标题等
+元数据或通过 Eh 拉取元数据。手动添加需要进行限制，仅支持 Eh 链接添加，添加时需要验证链接是否有效，
+如果未配置 Eh 连接则需要阻止并提示先配置 Eh 连接」。四点待定按建议落地（彻底移除磁力添加、保持
+「已审批 + 立即入队」、元数据在作品详情页补、页面置灰且服务端硬挡）。设计记录
+`MANUAL_ADD_FORM_PROPOSAL.md`。无迁移、版本号不变。
+
+**设计。** `app/web/routes/manual_add.py` 重写，提交顺序固定为**形状 → 判重 → 真拉一次画廊 → 建候选**：
+只认 Eh 画廊链接与 `telegra.ph/ehentai-<gid>-<token>` 预览 slug（`find_gallery_ref` /
+`find_preview_gallery_ref`），解析不出来返回 400「无法识别链接」；`candidate_id_for_gallery` 命中同画廊 ID
+（按 ID 单列、不看 token）抛 `DuplicateGalleryCandidate`，页面渲染「作品已存在：候选 #N」确认块 +
+「跳转到该候选」（目标现成的 `/works/<id>`）与「返回」，不再只写一句红字；查重在抓取之前，重复粘贴
+不白花一次请求；`fetch_metadata_for_gallery()` 真的读一次画廊来**证明链接有效**——画廊不存在 / 需要登录 /
+网络失败都抛错、400 停在表单、**候选不创建**；成功才 `create_manual_candidate` +
+`persist_gallery_metadata` + 入队 + 303 到 `/works/<id>`，操作者在那页改元数据或再点「拉取元数据」。
+连接状态从「只是提示」升级为**门**：提交时查 `connection_manager.snapshot().exhentai.configured`，
+未配置返回 400 + 「未配置 Exhentai 连接，请先在『连接』页配置后再手动添加」；页面打开同样置灰提交按钮
+并给 `/connections` 链接。磁力分支（`_ingest_manual_magnet`、`_MAGNET_PATTERN`、页面上的 `_torrent_configured`
+提示与 `磁力 <hash8>` 标题）**删除**（磁链判重 SQL 保留给别的入口）。`create_manual_candidate` 去掉
+`title=` 参数与 `MANUAL_ADD` 标题写入（docstring 同步：候选存在就有真名或显示兜底、绝不制造假标题）。
+
+**测试（本轮 R63 相关）**
+- `tests/integration/test_manual_add.py`（重写 11 条）：只认 Eh 链接（磁力 → 400）；未配置 Eh 连接 → 400
+  且**没有**建候选；链接无效 / 画廊不存在 → 400 且没有建候选；重复粘贴 → 409 / `existing_candidate_id`
+  且不重复建；正常链接 → 303 到 `/works/<id>` 且元数据已落库；预览链接可添加。
+
+**验证（全量）**：`.venv/bin/python -m pytest -p no:randomly tests -q` → **1871 collected / 0 failed**。
+**文档同步**：本 R62 / R63 两条；`PHASES.md` 两行与基线链；`AGENTS.md` 基线 1850 → 1871 与基线链；
+`README.md`「主要能力」删掉「要求标题」并新增「标题只来自画廊元数据」、改写「手动添加」（仅 Eh 链接 +
+先验证）；`docs/USAGE.md`「解析规则」删掉没有标题直接判待补充那条、新增「标题不再从消息里解析」与
+「手动添加只收 Eh 链接、先验证再建行」；`AgentHelp/EHBot.md` §4.7 解析规则/手动添加两行改写 + 新增
+§4.12「作品标题来自画廊元数据」。环境变量与 `.env.example` 无变化，无数据库迁移。
+
+**镜像（R62/R63 发布动作）**：`docker buildx build --platform linux/amd64 -t hsmk/ehbot:latest --push .`，
+index digest `sha256:823c8f2a1565d5a89694124426a2c2f58cee27dd541f1260dd101eafce6259ae`，
+amd64 manifest `sha256:736d04fb0f4d0d5d0f5f53e1c972021d89237d05835a86a7bcfd4da6dac36f7e`，
+config `sha256:7071a14a504bedf5ff063be3189a86a0930cdbe9b4b9cb348445c21ffd133503`（替换掉 R61 的 index
+`sha256:4431e9bc…`）。**从 registry 复核而不是只信本地构建**：`docker buildx imagetools inspect` 与
+`docker pull` 取回同一 index digest。取回镜像冒烟（`--user 0:0`、`DATA_PATH=/tmp/ehbotdata`、
+`ARCHIVE_TOOLCHAIN_AUTO_INSTALL=false`、`THUMBNAILS_ENABLED=false`，容器内 app 监听 8080）：`/healthz`
+200 `{"status":"ok"}`、`/readyz` 200 `{"status":"ready"}`；`/candidates`、`/manual-add`、`/downloaded/dedup`、
+`/works/1` 均 303 → `/login`；启动日志里 R62 的一次性维护真的跑了
+`title_maintenance_completed scanned=0 deleted=0 needs_info=0`，`system_settings.title_maintenance_v1`
+写入完成时间；镜像内 `app.exhentai.scrape_worker` 可导入、`display_title(None, 4137423, 9)` 给出 `#4137423`、
+`manual_add` 带 `_exhentai_configured` 门且已无 `_ingest_manual_magnet`、`settings/_parse.html` 里
+`title_required` 已消失；库内 `schema_migrations` 仍 24 条（R62/R63 都无迁移）。冒烟容器已停止并随
+`--rm` 清理。

@@ -70,11 +70,14 @@ async def test_enabled_source_accepts_allowed_archive(tmp_path: Path) -> None:
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 1
     assert len(candidates) == 1
-    assert candidates[0].status == "PENDING_REVIEW"
+    # Accepted, then parked in 待补充 until a gallery names it (R62); the
+    # caption and the file name are both only message content now.
+    assert candidates[0].status == "NEEDS_INFO"
+    assert candidates[0].filter_result == "NEEDS_INFO"
 
 
 @pytest.mark.asyncio
@@ -203,7 +206,7 @@ async def test_preview_without_title_requires_information(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_archive_title_resolves_grouped_preview_needs_info(
+async def test_a_grouped_photo_and_archive_merge_but_still_wait_for_a_title(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -256,11 +259,13 @@ async def test_archive_title_resolves_grouped_preview_needs_info(
     )
 
     await CandidateIngestor(database).process_pending_updates()
-    pending = await database.list_candidates()
+    pending = await database.list_candidates(status="NEEDS_INFO")
 
     assert len(pending) == 1
-    assert pending[0].title == "Resolved Title"
-    assert await database.list_candidates(status="NEEDS_INFO") == []
+    assert pending[0].message_count == 2
+    # A file name is not a title any more (R62), so the pair stays in 待补充.
+    assert pending[0].title is None
+    assert await database.list_candidates() == []
 
 
 @pytest.mark.asyncio

@@ -76,12 +76,17 @@ async def seed_candidate(
     update_id: int = 300,
     message_id: int = 60,
     title: str = "Queue Fixture Comic",
-) -> None:
+) -> int:
     """One candidate whose only attachment is a photo.
 
     A photo is not a downloadable archive, which is what makes this fixture the
     right one for the read-only assertions: the candidate stays in 待审核 no
     matter what the review rules do.
+
+    Since R62 the caption is not a title, so the fixture writes the name the way
+    a gallery scrape would -- an `EXHENTAI` row -- and lets the metadata
+    re-evaluation move the candidate out of 待补充. These tests are about the
+    queue, not about where a name comes from.
     """
     await configure_source(database)
     await database.save_telegram_updates(
@@ -106,6 +111,19 @@ async def seed_candidate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
+    return await _name_like_a_scrape(database, title)
+
+
+async def _name_like_a_scrape(database: Database, title: str) -> int:
+    """Give the newest 待补充 candidate a scraped title, and return its id."""
+    candidate_id = (
+        await database.list_candidates(status="NEEDS_INFO")
+    )[0].candidate_id
+    await database.set_candidate_metadata_value(
+        candidate_id, "Title", title, "EXHENTAI", 0.6
+    )
+    await database.re_evaluate_candidate_metadata_rules(candidate_id)
+    return candidate_id
 
 
 async def seed_candidate_with_gallery(database: Database) -> None:
@@ -117,8 +135,7 @@ async def seed_candidate_with_gallery(database: Database) -> None:
     path need the gallery-linked shape, which is also the only shape new
     gallery posts have.
     """
-    await seed_candidate(database)
-    candidate_id = (await database.list_candidates())[0].candidate_id
+    candidate_id = await seed_candidate(database)
     await database.set_candidate_eh_ref(candidate_id, 5150, "fixtureTok")
 
 
@@ -152,10 +169,7 @@ async def seed_archive_candidate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
-    match = [item for item in candidates if item.title == title]
-    assert match, f"expected a candidate titled {title}"
-    return match[0].candidate_id
+    return await _name_like_a_scrape(database, title)
 
 
 def set_status(database: Database, candidate_id: int, status: str) -> None:
@@ -1007,3 +1021,53 @@ def test_the_candidate_payload_carries_the_parsed_search_filters(
             "raw": "tag:ntr",
         }
     ]
+
+
+def test_an_untitled_candidate_shows_its_gallery_id(tmp_path: Path) -> None:
+    """A work waiting in 待补充 has no name yet (R62), but the row must still be
+    distinguishable: the gallery id when there is one, the candidate id when
+    there is not."""
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    gallery_id = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=402, message_id=162, title="Placeholder Holder"
+        )
+    )
+    # Strip the title the seed wrote: this is a raw ingestion row, before the
+    # scrape has answered.
+    with database.connection() as connection:
+        connection.execute(
+            "DELETE FROM metadata_values WHERE candidate_id = ? "
+            "AND field_name IN ('Title', 'JapaneseTitle')",
+            (gallery_id,),
+        )
+    named = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=403, message_id=163, title="Already Named"
+        )
+    )
+    untitled_and_galleryless = asyncio.run(
+        seed_archive_candidate(
+            database, update_id=404, message_id=164, title="No Handle"
+        )
+    )
+    with database.connection() as connection:
+        connection.execute(
+            "DELETE FROM metadata_values WHERE candidate_id = ? "
+            "AND field_name IN ('Title', 'JapaneseTitle')",
+            (untitled_and_galleryless,),
+        )
+    asyncio.run(database.set_candidate_eh_ref(gallery_id, 5150, "fixtureTok"))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        page = client.get("/candidates").text
+
+    assert "Already Named" in page
+    # The subline carries the gallery id for every row that has one.
+    assert "#5150" in page
+    # No gallery either: the candidate id is the only handle left.
+    assert f"候选 #{untitled_and_galleryless}" in page
+    assert f"候选 #{gallery_id}" not in page
+    assert named

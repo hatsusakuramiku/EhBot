@@ -51,6 +51,7 @@ from app.connections.manager import ConnectionManager
 from app.conversion.service import ConversionService
 from app.downloads.archived import ArchivedWorkService
 from app.downloads.service import DownloadService
+from app.exhentai.scrape_worker import MetadataScrapeWorker
 from app.exhentai.service import ExHentaiService
 from app.exhentai.tagdb import TagTranslator
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
@@ -202,6 +203,7 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.ai_service = None
     app.state.tag_translator = None
     app.state.auto_approval_sweeper = None
+    app.state.metadata_scrape_worker = None
     # Fan-out for state transitions. Created eagerly so a worker can publish
     # before any browser has connected (publishing with no subscriber is a no-op,
     # which is what makes it cheap to call from the download loop).
@@ -254,13 +256,20 @@ async def _enrich_candidate_metadata(app, candidate_ids) -> int:
     return await service.enrich_missing_metadata(candidate_ids)
 
 
-async def _sweep_new_candidates(app) -> None:
-    """Apply automatic-approval rules to a freshly ingested batch.
+async def _on_candidates_ingested(app) -> None:
+    """React to a freshly ingested batch: read the galleries, then judge them.
 
-    Separate from the sweeper so `ConnectionManager` takes a plain callable and
-    stays unaware of review policy, and so the 「not built yet」 case is expressed
-    once rather than inside a lambda.
+    Two workers, in this order. The scrape (R62) is what gives a candidate its
+    name -- ingestion no longer parses one -- and the sweep right after it is
+    what lets a rule that reads `{Title}` decide on the candidate that just
+    arrived rather than at the next timer tick. Both are woken through
+    `getattr` guards, because this callback is bound before either worker is
+    built (they need the download worker to exist first) and a batch that
+    arrives in that window is left to the interval loops.
     """
+    scrape_worker = getattr(app.state, "metadata_scrape_worker", None)
+    if scrape_worker is not None:
+        scrape_worker.wake()
     sweeper = getattr(app.state, "auto_approval_sweeper", None)
     if sweeper is None:
         return
@@ -313,6 +322,28 @@ def build_lifespan(
             ):
                 ensure_writable_directory(path)
             await database.initialize()
+            # One-time repair of the titles written before R62, when the
+            # message parser still guessed one from a caption's first line (see
+            # `Database.maintain_titles`). Guarded on its own: a repair that
+            # fails -- a database locked by another process -- must not stop the
+            # workers below from being built, so it reports and falls through
+            # rather than raising into the outer handler.
+            try:
+                maintenance = await database.maintain_titles()
+                if maintenance.get("status") != "already_done":
+                    logging.getLogger(__name__).info(
+                        "title_maintenance_completed scanned=%s deleted=%s "
+                        "needs_info=%s",
+                        maintenance.get("scanned"),
+                        maintenance.get("deleted"),
+                        maintenance.get("needs_info"),
+                    )
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                application.state.startup_errors.append(str(exc))
+                logging.getLogger(__name__).exception(
+                    "title_maintenance_failed",
+                    extra={"error_code": "TITLE_MAINTENANCE_FAILED"},
+                )
             apply_runtime_log_level(
                 await application.state.system_settings_service.log_level()
             )
@@ -375,7 +406,7 @@ def build_lifespan(
                 # None forever. The guard is what makes the ordering safe rather
                 # than merely lucky -- an update that arrives before the sweeper
                 # exists is left to the first timed sweep.
-                on_candidates_ingested=lambda: _sweep_new_candidates(application),
+                on_candidates_ingested=lambda: _on_candidates_ingested(application),
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -664,6 +695,22 @@ def build_lifespan(
                 work_path_provider=archive_settings_service.work_path,
             )
             application.state.exhentai_service = exhentai_service
+            # Started here rather than beside the sweeper below: reading a
+            # gallery has no dependency on the download worker, and a candidate
+            # that has just been created should not wait for the packaging half
+            # of startup to be read. The callable resolves the service through
+            # `application.state` per pass -- built above this line, but the
+            # guard in `_enrich_candidate_metadata` is what makes a deployment
+            # without credentials a no-op instead of an AttributeError.
+            application.state.metadata_scrape_worker = MetadataScrapeWorker(
+                database,
+                scrape=(
+                    lambda candidate_ids: _enrich_candidate_metadata(
+                        application, candidate_ids
+                    )
+                ),
+            )
+            await application.state.metadata_scrape_worker.start()
             if app_settings.thumbnails_enabled:
                 # Covers come from the same image hosts the preview fetcher
                 # talks to, so this client carries no cookie either: a cover is
@@ -731,6 +778,9 @@ def build_lifespan(
             sweeper = application.state.auto_approval_sweeper
             if sweeper is not None:
                 await sweeper.stop()
+            scrape_worker = application.state.metadata_scrape_worker
+            if scrape_worker is not None:
+                await scrape_worker.stop()
             torrent_service_instance = application.state.torrent_service
             if torrent_service_instance is not None:
                 await torrent_service_instance.stop()

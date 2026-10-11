@@ -117,7 +117,9 @@ async def seed_work(database: Database, *, status: str = "PENDING_REVIEW") -> in
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    # Ingestion lands the candidate in 待补充 now (R62): the caption is not a
+    # title, so the seed finds it there and moves it to the status under test.
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     candidate_id = candidates[0].candidate_id
     if status != candidates[0].status:
         set_status(database, candidate_id, status)
@@ -149,7 +151,7 @@ async def add_candidate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     return max(item.candidate_id for item in candidates)
 
 

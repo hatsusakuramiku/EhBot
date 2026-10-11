@@ -533,9 +533,6 @@ def _source_message(chat_id: int = -100900) -> "object":
         attachments=(),
         file_unique_id=None,
         message_date="2026-01-01T00:00:00+00:00",
-        title="X",
-        title_source="TELEGRAM",
-        title_confidence=0.9,
         filter_result="ACCEPT",
         filter_reason="",
     )
@@ -822,13 +819,13 @@ async def test_manual_add_rejects_a_duplicate_gallery_id(tmp_path: Path) -> None
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
     first = await database.create_manual_candidate(
-        filter_reason="x", ex_gid=4242, ex_gallery_token="aaaa", title=None
+        filter_reason="x", ex_gid=4242, ex_gallery_token="aaaa"
     )
     # A different token is a different spelling of the same URL, not a
     # different work: the judgement is on the id alone (R59/R60).
     with pytest.raises(DuplicateGalleryCandidate) as caught:
         await database.create_manual_candidate(
-            filter_reason="x", ex_gid=4242, ex_gallery_token="bbbb", title=None
+            filter_reason="x", ex_gid=4242, ex_gallery_token="bbbb"
         )
     assert caught.value.existing_candidate_id == first
     assert "该画廊已有候选" in str(caught.value)
@@ -849,14 +846,12 @@ async def test_manual_add_rejects_a_duplicate_infohash_case_insensitively(
         filter_reason="x",
         magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
         torrent_hash="aabbccddeeff00112233445566778899aabbccdd",
-        title=None,
     )
     with pytest.raises(DuplicateTorrentCandidate) as caught:
         await database.create_manual_candidate(
             filter_reason="x",
             magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
             torrent_hash="AABBCCDDEEFF00112233445566778899AABBCCDD",
-            title=None,
         )
     assert caught.value.existing_candidate_id == first
     assert "该磁力链接已有候选" in str(caught.value)
@@ -870,7 +865,6 @@ async def test_manual_add_rejects_a_duplicate_infohash_case_insensitively(
         filter_reason="x",
         magnet_url="magnet:?xt=urn:btih:AABBCCDDEEFF00112233445566778899AABBCCDD",
         torrent_hash="aabbccddeeff00112233445566778899aabbccdd",
-        title=None,
     )
     with sqlite3.connect(tmp_path / "ehbot.db") as connection:
         rows = connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]

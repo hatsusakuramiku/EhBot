@@ -57,6 +57,33 @@ class ExHentaiService:
     async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
         metadata, gallery = await self._fetch_metadata(gid, token)
+        await self.persist_gallery_metadata(candidate_id, metadata, gallery)
+        return metadata
+
+    async def fetch_metadata_for_gallery(
+        self, gid: int, token: str
+    ) -> tuple[dict, GalleryData | None]:
+        """Read a gallery and hand the answer back without writing anything.
+
+        Split out for manual add (R63), which has to prove a pasted link
+        resolves *before* it creates a row: a gallery that does not exist, needs
+        a login or is behind an outage must leave no candidate behind. The pair
+        comes back so the caller can hand exactly the gallery it validated to
+        `persist_gallery_metadata` -- re-fetching after the insert would be a
+        second request to a host that has already answered, and the rate limit
+        on that host is the reason this feature is deliberate about it.
+        """
+        return await self._fetch_metadata(gid, token)
+
+    async def persist_gallery_metadata(
+        self, candidate_id: int, metadata: dict, gallery: GalleryData | None
+    ) -> None:
+        """Write what `_fetch_metadata` returned for this candidate.
+
+        The write half of a scrape, shared by the by-candidate fetch, the
+        batch enrichment and the manual-add validation path so the three cannot
+        drift into persisting different subsets of the same gallery.
+        """
         await asyncio.to_thread(
             self._persist_metadata_sync, candidate_id, metadata
         )
@@ -70,7 +97,6 @@ class ExHentaiService:
         await self._database.re_evaluate_candidate_metadata_rules(
             candidate_id
         )
-        return metadata
 
     async def enrich_candidates_for_review(self, candidates: list) -> int:
         refs = await asyncio.to_thread(
@@ -135,19 +161,7 @@ class ExHentaiService:
                         extra={"error_code": exc.code},
                     )
                     continue
-            await asyncio.to_thread(
-                self._persist_metadata_sync, candidate_id, metadata
-            )
-            if gallery is not None:
-                await asyncio.to_thread(
-                    self._persist_torrents_sync, candidate_id, gallery
-                )
-                await asyncio.to_thread(
-                    self._persist_cover_sync, candidate_id, gallery
-                )
-            await self._database.re_evaluate_candidate_metadata_rules(
-                candidate_id
-            )
+            await self.persist_gallery_metadata(candidate_id, metadata, gallery)
             enriched += 1
         return enriched
 

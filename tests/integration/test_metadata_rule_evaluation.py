@@ -36,9 +36,25 @@ def _seed_candidate(database: Database, chat_id: int) -> int:
             ]
         )
         await CandidateIngestor(database).process_pending_updates()
-        candidates = await database.list_candidates()
+        candidates = await database.list_candidates(status="NEEDS_INFO")
         assert candidates, "candidate should have been created"
-        return candidates[0].candidate_id
+        candidate_id = candidates[0].candidate_id
+        # A name comes from the gallery now, not the caption (R62), and the
+        # fixture stands in for that scrape: these tests start from a work the
+        # rules can actually decide, which needs a title. The write goes in
+        # directly rather than through `set_manual_metadata`, whose
+        # re-evaluation would leave an extra METADATA_RULE action on the
+        # candidate that the rule-count assertions below would see.
+        await database.set_candidate_metadata_value(
+            candidate_id, "Title", "Fixture Title", "EXHENTAI", 0.6
+        )
+        with database.connection() as connection:
+            connection.execute(
+                "UPDATE candidates SET status = 'PENDING_REVIEW', "
+                "filter_result = 'ACCEPT', filter_reason = '' WHERE id = ?",
+                (candidate_id,),
+            )
+        return candidate_id
 
     return asyncio.run(run())
 

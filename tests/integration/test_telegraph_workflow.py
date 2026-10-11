@@ -123,7 +123,9 @@ async def seed_preview_candidate(
         [{"update_id": 500, "channel_post": post}]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    # A candidate with no gallery title waits in 待补充 (R62); these tests drive
+    # the download service by id, so the status is not part of the fixture.
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert candidates, "expected the preview message to become a candidate"
     candidate_id = candidates[0].candidate_id
     if pages is not None:

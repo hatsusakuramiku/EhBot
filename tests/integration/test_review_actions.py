@@ -87,9 +87,25 @@ async def seed_candidate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    # Ingestion parks the work in 待补充 now (R62): the caption is not a title.
+    # The fixture supplies the name the way an operator would -- at `OPERATOR`
+    # source rather than `EXHENTAI`, so the row does *not* count as an
+    # already-scraped gallery and `enrich_missing_metadata` still runs for the
+    # tests that stub a gdata response -- and then puts the work back where
+    # every review test expects to start, 待审核.
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert candidates, "expected candidate to be created"
-    return candidates[0].candidate_id
+    candidate_id = candidates[0].candidate_id
+    await database.set_candidate_metadata_value(
+        candidate_id, "Title", title, "OPERATOR", 1.0
+    )
+    with database.connection() as connection:
+        connection.execute(
+            "UPDATE candidates SET status = 'PENDING_REVIEW', "
+            "filter_result = 'ACCEPT', filter_reason = '' WHERE id = ?",
+            (candidate_id,),
+        )
+    return candidate_id
 
 
 def replace_candidate_with_photo(
@@ -477,7 +493,7 @@ def test_rating_field_requires_numeric_value(tmp_path: Path) -> None:
             ]
         )
         await CandidateIngestor(database).process_pending_updates()
-        candidates = await database.list_candidates()
+        candidates = await database.list_candidates(status="NEEDS_INFO")
         candidate_id = candidates[0].candidate_id
         try:
             await ReviewService(database).set_manual_metadata(

@@ -30,7 +30,6 @@ async def permit_all_message_types(database: Database) -> None:
                     "accept_archive": True,
                     "archive_formats": list(ARCHIVE_FORMATS),
                     "accept_preview": True,
-                    "title_required": False,
                 },
                 separators=(",", ":"),
             )

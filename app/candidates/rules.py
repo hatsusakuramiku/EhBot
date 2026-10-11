@@ -9,6 +9,11 @@ from app.candidates.models import (
 )
 
 
+#: Why a candidate waits in 待补充 before its gallery has been read (R62).
+#: Shared with the status recomputation in `Database` so the two cannot drift.
+MISSING_TITLE_REASON = "尚未取得画廊标题"
+
+
 def evaluate_source_rules(
     source: TelegramSourceConfig, message: ParsedSourceMessage
 ) -> RuleDecision:
@@ -33,9 +38,12 @@ def evaluate_source_rules(
 
     if size_unknown:
         return RuleDecision("NEEDS_INFO", "附件大小未知，无法应用大小上限")
-    if message.title is None:
-        return RuleDecision("NEEDS_INFO", "缺少可识别标题")
-    return RuleDecision("ACCEPT", message.filter_reason)
+    # Always, and deliberately: since R62 nothing is read out of the caption,
+    # so an accepted message has no title at all. The candidate starts in
+    # 待补充 and leaves it when the gallery scrape (or the operator) supplies a
+    # name. `Database._candidate_title_missing` is the other half of this rule.
+    return RuleDecision("NEEDS_INFO", MISSING_TITLE_REASON)
+
 
 def evaluate_metadata_rules(
     source: "TelegramSourceConfig",
@@ -108,4 +116,3 @@ def evaluate_metadata_rules(
         "ACCEPT",
         "元数据规则检查完成",
     )
-

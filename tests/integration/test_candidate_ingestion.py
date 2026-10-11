@@ -22,7 +22,7 @@ async def allow_sources(database: Database, *chat_ids: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_photo_preview_update_becomes_a_pending_review_candidate(
+async def test_photo_preview_update_waits_for_its_gallery_title(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -60,19 +60,23 @@ async def test_photo_preview_update_becomes_a_pending_review_candidate(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.processed_updates == 1
     assert result.created_candidates == 1
     assert len(candidates) == 1
-    assert candidates[0].status == "PENDING_REVIEW"
-    assert candidates[0].filter_result == "ACCEPT"
-    assert candidates[0].title == "Fixture Comic"
+    # Nothing is read off the caption any more (R62): the candidate waits in
+    # 待补充 until the gallery answers, and the caption text is only searchable
+    # as the message itself.
+    assert candidates[0].status == "NEEDS_INFO"
+    assert candidates[0].filter_result == "NEEDS_INFO"
+    assert candidates[0].title is None
+    assert candidates[0].filter_reason == "尚未取得画廊标题"
     assert candidates[0].message_count == 1
 
 
 @pytest.mark.asyncio
-async def test_exhentai_link_update_becomes_a_review_candidate(
+async def test_exhentai_link_update_waits_for_a_gallery_title(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -95,17 +99,29 @@ async def test_exhentai_link_update_becomes_a_review_candidate(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidate = (await database.list_candidates())[0]
+    candidate = (await database.list_candidates(status="NEEDS_INFO"))[0]
 
     assert result.created_candidates == 1
-    assert candidate.status == "PENDING_REVIEW"
-    assert candidate.title == "ExHentai #12345"
+    assert candidate.status == "NEEDS_INFO"
+    assert candidate.title is None
+    # No title yet, so the list shows the gallery id rather than the candidate
+    # id -- the same number the gallery is known by upstream (R62 §2.4).
+    assert candidate.display_title == "#12345"
     assert candidate.ex_gid == 12345
     assert candidate.ex_gallery_token == "abcDEF123"
+    # Nothing is written into the metadata table for a title any more (R62):
+    # the caption is message text, and the gallery has not answered yet.
+    with database.connection() as connection:
+        rows = connection.execute(
+            "SELECT COUNT(*) FROM metadata_values WHERE candidate_id = ? "
+            "AND field_name IN ('Title', 'JapaneseTitle')",
+            (candidate.candidate_id,),
+        ).fetchone()[0]
+    assert int(rows) == 0
 
 
 @pytest.mark.asyncio
-async def test_archive_only_update_uses_filename_as_candidate_title(
+async def test_archive_only_update_has_no_filename_title_any_more(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -133,11 +149,14 @@ async def test_archive_only_update_uses_filename_as_candidate_title(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidate = (await database.list_candidates())[0]
+    candidate = (await database.list_candidates(status="NEEDS_INFO"))[0]
 
     assert result.created_candidates == 1
-    assert candidate.status == "PENDING_REVIEW"
-    assert candidate.title == "Fixture Archive"
+    # A file name was never a title (R62); without a gallery there is not even
+    # an id to fall back to, so the placeholder is the candidate id.
+    assert candidate.status == "NEEDS_INFO"
+    assert candidate.title is None
+    assert candidate.display_title == "候选 #1"
 
 
 @pytest.mark.asyncio
@@ -187,13 +206,14 @@ async def test_messages_in_same_media_group_share_one_candidate(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.processed_updates == 2
     assert result.created_candidates == 1
     assert len(candidates) == 1
     assert candidates[0].message_count == 2
-    assert candidates[0].title == "Grouped Comic"
+    assert candidates[0].title is None
+    assert candidates[0].display_title == "#24680"
     assert candidates[0].ex_gid == 24680
     assert candidates[0].ex_gallery_token == "groupToken"
 
@@ -276,7 +296,7 @@ async def test_same_exhentai_gallery_reference_in_another_chat_is_ignored(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 1
     assert result.ignored_updates == 1
@@ -284,7 +304,8 @@ async def test_same_exhentai_gallery_reference_in_another_chat_is_ignored(
     # Only the first message: the re-post is ignored, not attached.
     assert candidates[0].message_count == 1
     assert candidates[0].ex_gid == 67890
-    assert candidates[0].title == "ExHentai #67890"
+    assert candidates[0].title is None
+    assert candidates[0].display_title == "#67890"
     # The update row says why it was dropped, which is what makes「这条消息去哪了」
     # answerable without reading the log.
     with database.connection() as connection:
@@ -396,7 +417,7 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
 
     assert summary.processed_updates == 1
     assert summary.failed_updates == 0
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert len(candidates) == 1
     survivor = candidates[0].candidate_id
     suggestion = await database.get_ai_path_suggestion(survivor)
@@ -448,7 +469,7 @@ async def test_reply_message_joins_the_referenced_candidate(tmp_path: Path) -> N
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 1
     assert len(candidates) == 1
@@ -499,7 +520,7 @@ async def test_adjacent_preview_and_archive_with_same_title_are_merged(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 1
     assert len(candidates) == 1
@@ -550,7 +571,9 @@ async def test_malformed_update_isolated_without_blocking_later_updates(
     assert first.processed_updates == 2
     assert first.failed_updates == 1
     assert second.processed_updates == 0
-    assert (await database.list_candidates())[0].ex_gid == 11223
+    assert (
+        await database.list_candidates(status="NEEDS_INFO")
+    )[0].ex_gid == 11223
 
 
 @pytest.mark.asyncio
@@ -593,13 +616,16 @@ async def test_edited_message_updates_existing_candidate_content(
 
     assert result.processed_updates == 1
     assert candidate is not None
-    assert candidate.title == "Edited Title"
+    # The edit changes the message text; it does not name the work (R62), so
+    # the candidate stays in 待补充 with no title.
+    assert candidate.title is None
+    assert candidate.status == "NEEDS_INFO"
     assert len(candidate.messages) == 1
     assert candidate.messages[0].message_text == "Edited Title"
 
 
 @pytest.mark.asyncio
-async def test_non_adjacent_same_title_messages_remain_separate(
+async def test_non_adjacent_photo_and_archive_remain_separate(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -642,7 +668,7 @@ async def test_non_adjacent_same_title_messages_remain_separate(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 2
     assert len(candidates) == 2
@@ -724,18 +750,19 @@ async def test_edit_keeps_original_candidate_when_media_group_changes(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert len(candidates) == 2
     assert sorted(candidate.message_count for candidate in candidates) == [1, 2]
-    assert {candidate.title for candidate in candidates} == {
-        "Edited First Candidate",
-        "Second Candidate",
+    assert {candidate.title for candidate in candidates} == {None}
+    assert {candidate.display_title for candidate in candidates} == {
+        "候选 #1",
+        "候选 #2",
     }
 
 
 @pytest.mark.asyncio
-async def test_edit_replaces_gallery_identity_and_stale_explicit_title(
+async def test_edit_replaces_gallery_identity(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -776,7 +803,10 @@ async def test_edit_replaces_gallery_identity_and_stale_explicit_title(
     candidate = await database.get_candidate(1)
 
     assert candidate is not None
-    assert candidate.title == "ExHentai #22222"
+    # The edit re-points the candidate at the new gallery and no title is
+    # derived from either caption (R62); the placeholder follows the id.
+    assert candidate.title is None
+    assert candidate.display_title == "#22222"
     assert candidate.ex_gid == 22222
     assert candidate.ex_gallery_token == "newToken"
 
@@ -887,7 +917,10 @@ async def test_edit_removal_rebuilds_metadata_from_remaining_message(
     candidate = await database.get_candidate(1)
 
     assert candidate is not None
-    assert candidate.title == "Remaining Archive"
+    # The surviving message's file name is not a title (R62); the gallery id
+    # it carries is the display handle.
+    assert candidate.title is None
+    assert candidate.display_title == "#33333"
     assert candidate.ex_gid == 33333
     assert candidate.ex_gallery_token == "survivorToken"
     assert len(candidate.messages) == 1
@@ -936,7 +969,9 @@ async def test_a_hyperlinked_preview_only_message_becomes_a_candidate(
 
     assert result.created_candidates == 1
     assert candidate is not None
-    assert candidate.title == "Preview Only Book"
+    # The caption named it, but the caption is not a title source any more.
+    assert candidate.title is None
+    assert candidate.display_title == "#4108964"
     assert candidate.preview_url == "https://telegra.ph/Preview-Only-Book-08-21"
     # The gallery link was hyperlinked too, and must still be picked up.
     assert candidate.ex_gid == 4108964
@@ -944,7 +979,7 @@ async def test_a_hyperlinked_preview_only_message_becomes_a_candidate(
 
 
 @pytest.mark.asyncio
-async def test_a_preview_link_with_no_other_content_is_still_accepted(
+async def test_a_preview_link_with_no_other_content_waits_for_a_title(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "ehbot.db")
@@ -975,20 +1010,22 @@ async def test_a_preview_link_with_no_other_content_is_still_accepted(
     )
 
     result = await CandidateIngestor(database).process_pending_updates()
-    titled = await database.get_candidate(1)
-    untitled = await database.get_candidate(2)
+    first = await database.get_candidate(1)
+    second = await database.get_candidate(2)
 
     assert result.created_candidates == 2
     assert result.ignored_updates == 0
-    assert titled is not None
-    assert titled.filter_reason == "包含预览页链接"
-    assert titled.preview_url == "https://graph.org/Bare-Preview-08-21"
-    # A link with no title still needs an operator, but the link is kept so
-    # the fallback stays available once the title is filled in.
-    assert untitled is not None
-    assert untitled.status == "NEEDS_INFO"
-    assert untitled.filter_reason == "缺少可识别标题"
-    assert untitled.preview_url == "https://graph.org/Untitled-08-21"
+    # Both are accepted preview links, and neither has a title -- the caption
+    # says nothing a title could be read from (R62), so both wait in 待补充 and
+    # the preview link is kept for the download that a title unlocks.
+    assert first is not None
+    assert first.status == "NEEDS_INFO"
+    assert first.filter_reason == "尚未取得画廊标题"
+    assert first.preview_url == "https://graph.org/Bare-Preview-08-21"
+    assert second is not None
+    assert second.status == "NEEDS_INFO"
+    assert second.filter_reason == "尚未取得画廊标题"
+    assert second.preview_url == "https://graph.org/Untitled-08-21"
 
 
 @pytest.mark.asyncio
@@ -1159,7 +1196,9 @@ async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidate_id = (await database.list_candidates())[0].candidate_id
+    candidate_id = (
+        await database.list_candidates(status="NEEDS_INFO")
+    )[0].candidate_id
 
     created = await database.save_candidate_message(
         None,
@@ -1175,9 +1214,6 @@ async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
             attachments=(),
             file_unique_id=None,
             message_date="2023-11-14T22:13:20+00:00",
-            title="Re-post",
-            title_source="TELEGRAM",
-            title_confidence=0.9,
             filter_result="ACCEPT",
             filter_reason="包含 ExHentai 画廊链接",
             ex_gid=5150,
@@ -1186,7 +1222,7 @@ async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
     )
 
     assert created is False
-    candidates = await database.list_candidates()
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert len(candidates) == 1
     assert candidates[0].candidate_id == candidate_id
     # The re-post is not attached to the existing candidate either: one gallery
@@ -1241,7 +1277,9 @@ async def test_a_preview_slug_gives_a_message_its_gallery_id(
     assert candidate is not None
     assert candidate.ex_gid == 4137423
     assert candidate.ex_gallery_token == "9ce70ddc26"
-    assert candidate.filter_reason == "由预览页链接识别 ExHentai 画廊"
+    # The gate's reason is now the missing title (R62): the gallery link is
+    # still recorded on the candidate, which is where a reader should look.
+    assert candidate.filter_reason == "尚未取得画廊标题"
     assert (
         candidate.preview_url
         == "https://telegra.ph/ehentai-4137423-9ce70ddc26-10-06"
@@ -1280,5 +1318,5 @@ async def test_an_eh_link_wins_over_the_preview_slug(tmp_path: Path) -> None:
     # The explicit EH link is authoritative; the preview slug is only a fallback.
     assert candidate.ex_gid == 222222
     assert candidate.ex_gallery_token == "bbbb222222"
-    assert candidate.filter_reason == "包含 ExHentai 画廊链接"
+    assert candidate.filter_reason == "尚未取得画廊标题"
     assert candidate.preview_url == "https://telegra.ph/ehentai-111111-aaaa111111-10-06"

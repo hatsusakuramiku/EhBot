@@ -62,28 +62,7 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
     if not attachments and gallery_ref is None and not page_urls:
         return None
 
-    explicit_title = next(
-        (
-            line.strip()
-            for line in text.splitlines()
-            if line.strip() and not line.strip().lower().startswith("http")
-        ),
-        None,
-    )
     ex_gid = gallery_ref[0] if gallery_ref is not None else None
-    title = explicit_title
-    title_source = "TELEGRAM" if explicit_title is not None else None
-    title_confidence = 0.9 if explicit_title is not None else None
-    if title is None and ex_gid is not None:
-        title = f"ExHentai #{ex_gid}"
-        title_source = "INFERRED"
-        title_confidence = 0.2
-    if title is None and attachments:
-        archive_name = str(attachments[0].get("file_name") or "")
-        if archive_name:
-            title = Path(archive_name).stem
-            title_source = "FILENAME"
-            title_confidence = 0.5
 
     chat_title = _chat_title(message, chat_id)
     file_unique_id = (
@@ -117,9 +96,6 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         attachments=attachments,
         file_unique_id=file_unique_id,
         message_date=_message_date(message),
-        title=title,
-        title_source=title_source,
-        title_confidence=title_confidence,
         filter_result="ACCEPT",
         filter_reason=filter_reason,
         ex_gid=ex_gid,

@@ -14,7 +14,6 @@ from app.candidates.parse_rules import (
     PARSE_RULES_KEY,
     message_qualifies,
     parse_rules_view,
-    title_forces_needs_info,
 )
 from app.candidates.rules import evaluate_source_rules
 from app.db.database import Database
@@ -78,9 +77,7 @@ class CandidateIngestor:
         decision = evaluate_source_rules(source, message)
         if decision.result != "ACCEPT":
             return decision
-        if title_forces_needs_info(rules, message):
-            return RuleDecision("NEEDS_INFO", "解析规则要求必须提供标题")
-        return RuleDecision("ACCEPT", gate.reason or decision.reason)
+        return decision
 
     async def _gate(
         self, message: ParsedSourceMessage, rules: dict
@@ -230,26 +227,7 @@ class CandidateIngestor:
                 archive = document
         if photo is None and gallery_ref is None and archive is None and not page_urls:
             return None
-        explicit_title = next(
-            (
-                line.strip()
-                for line in text.splitlines()
-                if line.strip() and not line.strip().lower().startswith("http")
-            ),
-            None,
-        )
         ex_gid = gallery_ref[0] if gallery_ref is not None else None
-        title = explicit_title
-        title_source = "TELEGRAM" if explicit_title is not None else None
-        title_confidence = 0.9 if explicit_title is not None else None
-        if title is None and ex_gid is not None:
-            title = f"ExHentai #{ex_gid}"
-            title_source = "INFERRED"
-            title_confidence = 0.2
-        if title is None and archive is not None:
-            title = Path(str(archive["file_name"])).stem
-            title_source = "FILENAME"
-            title_confidence = 0.5
         chat = message.get("chat") or {}
         attachments = ()
         file_unique_id = None
@@ -311,9 +289,6 @@ class CandidateIngestor:
             message_date=datetime.fromtimestamp(
                 int(message["date"]), tz=UTC
             ).isoformat(),
-            title=title,
-            title_source=title_source,
-            title_confidence=title_confidence,
             filter_result="ACCEPT",
             filter_reason=(
                 "包含图片预览"

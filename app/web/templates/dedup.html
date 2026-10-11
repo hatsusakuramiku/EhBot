@@ -53,7 +53,7 @@
       ], caption="画廊 #" ~ group.ex_gid ~ " 的重复项") %}
       {% set entry = group.keep %}
       <tr data-candidate-id="{{ entry.candidate_id }}">
-        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.title or "未命名作品" }}</a></td>
+        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.display_title }}</a></td>
         <td data-label="状态">{{ ui.badge_for(entry.status) }}</td>
         <td data-label="打包">{{ ui.badge_for("packed" if entry.packaged else "unpacked") }}</td>
         <td data-label="页数" data-numeric="true">{{ entry.page_count if entry.page_count is not none else "—" }}</td>
@@ -62,7 +62,7 @@
       </tr>
       {% for entry in group.remove %}
       <tr data-candidate-id="{{ entry.candidate_id }}">
-        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.title or "未命名作品" }}</a></td>
+        <td data-label="作品"><a href="/works/{{ entry.candidate_id }}">{{ entry.display_title }}</a></td>
         <td data-label="状态">{{ ui.badge_for(entry.status) }}</td>
         <td data-label="打包">{{ ui.badge_for("packed" if entry.packaged else "unpacked") }}</td>
         <td data-label="页数" data-numeric="true">{{ entry.page_count if entry.page_count is not none else "—" }}</td>

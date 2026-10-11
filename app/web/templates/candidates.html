@@ -31,8 +31,12 @@
 {%- macro candidate_meta(item) -%}
   {#- The one-line summary under a title. Built from whichever of the three
       fields the scrape actually produced, so a candidate with no artist does
-      not render a row of separators. -#}
-  {{- [item.artist, item.category, item.language] | select | join(" · ") -}}
+      not render a row of separators. The gallery id closes the line when there
+      is one (R62): it is what identifies an unread work before its title
+      arrives, and it is the number the gallery is known by upstream. -#}
+  {%- set parts = [item.artist, item.category, item.language] | select | list -%}
+  {%- if item.ex_gid is not none %}{% set parts = parts + ["#" ~ item.ex_gid] %}{% endif -%}
+  {{- parts | join(" · ") -}}
 {%- endmacro %}
 
 {%- macro candidate_flags(item) -%}
@@ -80,11 +84,11 @@
     {% if selectable %}
     <td data-label="选择">
       <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ item.candidate_id }}"
-             aria-label="选择「{{ item.title or '未命名候选' }}」">
+             aria-label="选择「{{ item.display_title }}」">
     </td>
     {% endif %}
     <td data-label="候选">
-      <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名候选" }}</a></span>
+      <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.display_title }}</a></span>
       {%- set meta = candidate_meta(item) -%}
       {% if meta %}<span class="ui-table-secondary">{{ meta }}</span>{% endif %}
     </td>
@@ -220,7 +224,7 @@
         {% for item in candidates %}
         <div data-candidate-id="{{ item.candidate_id }}">
           {% call ui.cover_card(
-                item.title or "未命名候选",
+                item.display_title,
                 href=item.href,
                 cover=item.cover,
                 meta=candidate_meta(item),

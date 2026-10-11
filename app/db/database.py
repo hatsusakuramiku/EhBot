@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.ai.models import (
@@ -28,7 +29,7 @@ from app.candidates.models import (
     ParsedSourceMessage,
     TelegramSourceConfig,
 )
-from app.candidates.rules import evaluate_metadata_rules
+from app.candidates.rules import MISSING_TITLE_REASON, evaluate_metadata_rules
 from app.search.query import (
     PAGE_CANDIDATES,
     PAGE_DOWNLOADED,
@@ -177,14 +178,88 @@ CANDIDATE_SORT_ORDERS: dict[str, SortSpec] = {
     ),
 }
 
+#: The operator's 「标题来源」 preference lives in `archive_settings` under this
+#: key, written by `ArchiveSettingsService.save_title_source`. The literal is
+#: spelled here rather than imported from `app.archive.service`, which imports
+#: `app.conversion`, which imports this module -- a real cycle. A test pins the
+#: two together so the copy cannot rot.
+TITLE_SOURCE_SETTING_KEY = "library_title_source"
+
+#: `system_settings` row that records the one-time R62 title repair.
+TITLE_MAINTENANCE_KEY = "title_maintenance_v1"
+
+#: `1` when the preference is Japanese (the default, and what an unset row
+#: means), `0` when it is English. Read inside the query rather than passed in,
+#: so every list -- candidates, downloaded, dedup, the detail page -- follows
+#: the setting without ten call sites having to remember to carry it.
+_TITLE_LANGUAGE_SQL = (
+    "CASE (SELECT value FROM archive_settings "
+    f"WHERE key = '{TITLE_SOURCE_SETTING_KEY}') "
+    "WHEN 'english' THEN 0 ELSE 1 END"
+)
+
+#: Trust order of `metadata_values.value_source`, as a SQL fragment (R62).
+#:
+#: The gallery page is the work's own record and outranks everything but the
+#: operator's own edit -- and `is_manual`, which is ordered separately and ahead
+#: of this wherever it is used. The codes are the same literals
+#: `app/api/status.py` labels and the writers insert; the rank has to live where
+#: the comparison happens, which is why this fragment is shared with
+#: `app/conversion` instead of being written out twice.
+METADATA_SOURCE_RANK_SQL = (
+    "CASE mv.value_source WHEN 'EXHENTAI' THEN 6 WHEN 'OPERATOR' THEN 5 "
+    "WHEN 'MANUAL_ADD' THEN 4 WHEN 'EH_TORRENT' THEN 3 "
+    "WHEN 'TELEGRAPH' THEN 3 WHEN 'FILENAME' THEN 2 "
+    "WHEN 'TELEGRAM' THEN 1 WHEN 'INFERRED' THEN 0 ELSE 0 END"
+)
+
+#: How a work's name is chosen out of everything its candidate collected (R62).
+#:
+#: Three keys, in this order:
+#:
+#: 1. `is_manual` -- a value the operator typed wins outright, whichever
+#:    language they put it in.
+#: 2. the language, following 「标题来源」. `JapaneseTitle` is only ever written
+#:    by a gallery scrape, so this layer is the operator's 「优先日文名」 rule
+#:    written down, not a guess.
+#: 3. the source rank above. Since R62 the gallery is the *only* automatic
+#:    source of a title -- the caption is no longer parsed for one -- and the
+#:    lower ranks are kept for rows written before that change until the
+#:    one-time maintenance (see `maintain_titles`) clears them.
+#:
+#: Built rather than pasted because the same resolution is read by six queries,
+#: and six copies is exactly how they came to disagree.
+_TITLE_SUBQUERY = (
+    "(SELECT mv.field_value FROM metadata_values mv "
+    " WHERE mv.candidate_id = {candidate} "
+    " AND mv.field_name IN ('Title', 'JapaneseTitle') "
+    " ORDER BY mv.is_manual DESC, "
+    " CASE mv.field_name WHEN 'JapaneseTitle' THEN {language} "
+    " ELSE 1 - {language} END DESC, "
+    " " + METADATA_SOURCE_RANK_SQL + " DESC, "
+    " mv.confidence DESC, mv.created_at DESC LIMIT 1)"
+)
+
+
+def title_subquery(candidate_ref: str) -> str:
+    """The shared title resolution, for one candidate reference.
+
+    `candidate_ref` is the SQL expression naming the candidate -- `c.id`,
+    `cm.candidate_id` or a bound `?` -- so a query without an alias for
+    `candidates` can still use the same resolution.
+    """
+    return _TITLE_SUBQUERY.format(
+        candidate=candidate_ref, language=_TITLE_LANGUAGE_SQL
+    )
+
+
 #: Projection shared by the paged and legacy candidate queries. Both read the
 #: same columns in the same order, which is what lets a single row mapper serve
 #: them and stops the two lists from drifting into different shapes.
 _CANDIDATE_LIST_SELECT = (
     "SELECT c.id, c.status, c.filter_result, "
-    "(SELECT mv.field_value FROM metadata_values mv "
-    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) AS title_value, "
+    + title_subquery("c.id")
+    + " AS title_value, "
     "(SELECT mv.field_value FROM metadata_values mv "
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Artist' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
@@ -256,9 +331,8 @@ DOWNLOADED_SORT_ORDERS: dict[str, SortSpec] = {
 #: show.
 _DOWNLOADED_SELECT = (
     "SELECT c.id, dj.id AS job_id, dj.provider, dj.state, "
-    "(SELECT mv.field_value FROM metadata_values mv "
-    " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-    " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1) AS title_value, "
+    + title_subquery("c.id")
+    + " AS title_value, "
     "arch.path, arch.size_bytes AS archive_size, "
     "pack.id AS pack_job_id, pack.state AS pack_state, "
     "pack.error_code, pack.error_message, "
@@ -762,16 +836,33 @@ class Database:
         )
 
     @staticmethod
+    def _candidate_title_missing(
+        connection: sqlite3.Connection, candidate_id: int
+    ) -> bool:
+        """Whether this candidate still has no name (R62).
+
+        Both title fields count: a gallery that only has a Japanese name is
+        named, and so is one an operator typed a title for by hand. The answer
+        is "no title" only when neither written source exists -- the caption is
+        not one any more -- which is the single condition that keeps a candidate
+        in 待补充.
+        """
+        row = connection.execute(
+            "SELECT 1 FROM metadata_values WHERE candidate_id = ? "
+            "AND field_name IN ('Title', 'JapaneseTitle') LIMIT 1",
+            (candidate_id,),
+        ).fetchone()
+        return row is None
+
+    @staticmethod
     def _update_candidate_filter_state(
         connection: sqlite3.Connection,
         candidate_id: int,
         fallback_reason: str,
     ) -> None:
-        has_title = connection.execute(
-            "SELECT 1 FROM metadata_values WHERE candidate_id = ? "
-            "AND field_name = 'Title' LIMIT 1",
-            (candidate_id,),
-        ).fetchone()
+        has_title = not Database._candidate_title_missing(
+            connection, candidate_id
+        )
         needs_rows = connection.execute(
             "SELECT sm.filter_reason FROM candidate_messages cm "
             "JOIN source_messages sm ON sm.id = cm.source_message_id "
@@ -783,7 +874,7 @@ class Database:
             (
                 str(row[0])
                 for row in needs_rows
-                if row[0] != "缺少可识别标题" or has_title is None
+                if row[0] != MISSING_TITLE_REASON or not has_title
             ),
             None,
         )
@@ -1482,9 +1573,6 @@ class Database:
                         "DELETE FROM candidates WHERE id = ?", (candidate_id,)
                     )
                     continue
-                best_title = None
-                best_title_source = None
-                best_title_confidence = -1.0
                 ex_gid = None
                 ex_gallery_token = None
                 preview_url = None
@@ -1520,15 +1608,6 @@ class Database:
                     if preview_url is None and previews:
                         preview_url = str(previews[0])
                     attachments = json.loads(attachment_json)
-                    explicit_title = next(
-                        (
-                            line.strip()
-                            for line in text.splitlines()
-                            if line.strip()
-                            and not line.strip().lower().startswith("http")
-                        ),
-                        None,
-                    )
                     archive = next(
                         (
                             attachment
@@ -1537,26 +1616,6 @@ class Database:
                         ),
                         None,
                     )
-                    if explicit_title is not None:
-                        title = explicit_title
-                        title_source = "TELEGRAM"
-                        title_confidence = 0.9
-                    elif archive is not None:
-                        title = Path(str(archive.get("file_name") or "")).stem
-                        title_source = "FILENAME"
-                        title_confidence = 0.5
-                    elif gid is not None:
-                        title = f"ExHentai #{gid}"
-                        title_source = "INFERRED"
-                        title_confidence = 0.2
-                    else:
-                        title = None
-                        title_source = None
-                        title_confidence = -1.0
-                    if title and title_confidence > best_title_confidence:
-                        best_title = title
-                        best_title_source = title_source
-                        best_title_confidence = title_confidence
                     if any(item.get("type") == "photo" for item in attachments):
                         filter_reason = "包含图片预览"
                     elif archive is not None and filter_reason != "包含图片预览":
@@ -1583,18 +1642,11 @@ class Database:
                     "WHERE id = ?",
                     (ex_gid, ex_gallery_token, candidate_id),
                 )
-                if best_title is not None:
-                    connection.execute(
-                        "INSERT OR IGNORE INTO metadata_values "
-                        "(candidate_id, field_name, field_value, value_source, "
-                        "confidence) VALUES (?, 'Title', ?, ?, ?)",
-                        (
-                            candidate_id,
-                            best_title,
-                            best_title_source,
-                            best_title_confidence,
-                        ),
-                    )
+                # No title is rebuilt from the remaining messages (R62): the
+                # caption is not a title source any more, and
+                # `_update_candidate_filter_state` below sends a candidate that
+                # has none back to 待补充, where the next scrape or the operator
+                # supplies one.
                 self._update_candidate_filter_state(
                     connection, candidate_id, filter_reason
                 )
@@ -1732,14 +1784,18 @@ class Database:
                         ),
                     ).fetchone()
                     candidate_id = int(row[0]) if row is not None else None
-                if candidate_id is None and message.title and message.attachments:
+                if candidate_id is None and message.attachments:
+                    # A photo posted next to the archive it belongs to is the
+                    # same upload. The caption's title used to be the evidence
+                    # that they belong together; since R62 there is no parsed
+                    # title, so what is left is the pair itself -- adjacent,
+                    # from one sender, complementary in kind -- and it is only
+                    # believed when exactly one candidate answers, so an
+                    # ambiguous neighbourhood is not merged on a guess.
                     current_type = str(message.attachments[0].get("type", ""))
                     rows = connection.execute(
-                        "SELECT cm.candidate_id, sm.attachment_json, "
-                        "(SELECT mv.field_value FROM metadata_values mv "
-                        " WHERE mv.candidate_id = cm.candidate_id "
-                        " AND mv.field_name = 'Title' ORDER BY mv.is_manual DESC, "
-                        " mv.confidence DESC LIMIT 1) FROM candidate_messages cm "
+                        "SELECT cm.candidate_id, sm.attachment_json "
+                        "FROM candidate_messages cm "
                         "JOIN source_messages sm ON sm.id = cm.source_message_id "
                         "WHERE sm.account_id = ? AND sm.chat_id = ? "
                         "AND sm.sender_id IS ? AND ABS(strftime('%s', sm.message_date) "
@@ -1762,14 +1818,7 @@ class Database:
                             if adjacent_attachments
                             else ""
                         )
-                        adjacent_title = str(adjacent_row[2] or "")
-                        if {
-                            current_type,
-                            adjacent_type,
-                        } == {"photo", "archive"} and (
-                            adjacent_title.strip().casefold()
-                            == message.title.strip().casefold()
-                        ):
+                        if {current_type, adjacent_type} == {"photo", "archive"}:
                             matching_candidate_ids.add(int(adjacent_row[0]))
                     if len(matching_candidate_ids) == 1:
                         candidate_id = matching_candidate_ids.pop()
@@ -1884,6 +1933,21 @@ class Database:
                     candidate_id = int(candidate_cursor.lastrowid)
                     created_candidate = True
                 elif message.is_edit and existing_candidate_id is not None:
+                    # An edit can point the candidate at a different gallery.
+                    # The scrape of the old one would then answer for a work it
+                    # never read, and because the enrichment only re-reads a
+                    # candidate with *no* EXHENTAI rows (R62), dropping them is
+                    # also what makes it re-read at all.
+                    previous = connection.execute(
+                        "SELECT ex_gid FROM candidates WHERE id = ?",
+                        (candidate_id,),
+                    ).fetchone()
+                    if previous is not None and previous[0] != message.ex_gid:
+                        connection.execute(
+                            "DELETE FROM metadata_values WHERE candidate_id = ? "
+                            "AND value_source = 'EXHENTAI'",
+                            (candidate_id,),
+                        )
                     connection.execute(
                         "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
                         "preview_url = ?, "
@@ -1929,40 +1993,11 @@ class Database:
                         "AND candidate_id != ?",
                         (source_message_id, candidate_id),
                     )
-                    connection.execute(
-                        "DELETE FROM metadata_values WHERE candidate_id = ? "
-                        "AND field_name = 'Title' AND is_manual = 0",
-                        (candidate_id,),
-                    )
-                if message.title:
-                    if message.is_edit:
-                        connection.execute(
-                            "INSERT INTO metadata_values "
-                            "(candidate_id, field_name, field_value, value_source, "
-                            "confidence) VALUES (?, 'Title', ?, ?, ?) "
-                            "ON CONFLICT(candidate_id, field_name, value_source) "
-                            "DO UPDATE SET field_value = excluded.field_value, "
-                            "confidence = excluded.confidence, "
-                            "created_at = CURRENT_TIMESTAMP",
-                            (
-                                candidate_id,
-                                message.title,
-                                message.title_source,
-                                message.title_confidence,
-                            ),
-                        )
-                    else:
-                        connection.execute(
-                            "INSERT OR IGNORE INTO metadata_values "
-                            "(candidate_id, field_name, field_value, value_source, "
-                            "confidence) VALUES (?, 'Title', ?, ?, ?)",
-                            (
-                                candidate_id,
-                                message.title,
-                                message.title_source,
-                                message.title_confidence,
-                            ),
-                        )
+                # Nothing is read off the message into `Title` any more (R62).
+                # The row that used to be dropped here so a re-derivation could
+                # replace it was the *caption's* guess; deleting it now would
+                # delete the gallery's own title, which is the only automatic
+                # source of a name there is.
                 self._update_candidate_filter_state(
                     connection, candidate_id, message.filter_reason
                 )
@@ -2103,6 +2138,95 @@ class Database:
                 (status, limit),
             ).fetchall()
         return [_candidate_list_item(row) for row in rows]
+
+    async def maintain_titles(self) -> dict[str, object]:
+        """One-time repair of the titles written before R62.
+
+        Run once at startup (`app/wiring.build_lifespan`). The display query
+        already ignores these rows -- the gallery outranks the caption -- so this
+        pass is not what makes a card correct; it is what stops the *stored*
+        rows from lying. A caption's first line is not a title, and leaving it
+        in the metadata table means the drawer offers it as one, and a candidate
+        whose gallery answered without a name would look named.
+
+        Only rows no operator wrote are touched (`is_manual` / `is_locked` are
+        skipped), and only the three sources the message parser used to write.
+        A candidate left without a name goes back to 待补充 -- from the statuses
+        where that is a real statement, never out of APPROVED or REJECTED.
+
+        Idempotent through a marker in `system_settings`.
+        """
+        return await asyncio.to_thread(self._maintain_titles_sync)
+
+    def _maintain_titles_sync(self) -> dict[str, object]:
+        with self.connection() as connection:
+            done = connection.execute(
+                "SELECT value FROM system_settings WHERE key = ?",
+                (TITLE_MAINTENANCE_KEY,),
+            ).fetchone()
+            if done is not None:
+                return {
+                    "status": "already_done",
+                    "scanned": 0,
+                    "deleted": 0,
+                    "needs_info": 0,
+                }
+            candidate_ids = [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT candidate_id FROM metadata_values "
+                    "WHERE field_name = 'Title' "
+                    "AND value_source IN ('TELEGRAM', 'INFERRED', 'FILENAME') "
+                    "AND is_manual = 0 AND is_locked = 0"
+                ).fetchall()
+            ]
+            deleted = connection.execute(
+                "DELETE FROM metadata_values WHERE field_name = 'Title' "
+                "AND value_source IN ('TELEGRAM', 'INFERRED', 'FILENAME') "
+                "AND is_manual = 0 AND is_locked = 0"
+            ).rowcount
+            needs_info = 0
+            for candidate_id in candidate_ids:
+                if not self._candidate_title_missing(connection, candidate_id):
+                    continue
+                # A candidate the operator approved, rejected or that is
+                # already downloading keeps its status: this pass repairs what
+                # a title was read off, and none of those states is a statement
+                # about the title.
+                changed = connection.execute(
+                    "UPDATE candidates SET status = 'NEEDS_INFO', "
+                    "filter_result = 'NEEDS_INFO', filter_reason = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND status IN ('PENDING_REVIEW', "
+                    "'NEEDS_INFO', 'NEEDS_REVISION')",
+                    (MISSING_TITLE_REASON, candidate_id),
+                ).rowcount
+                needs_info += int(changed)
+            connection.execute(
+                "INSERT INTO system_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = CURRENT_TIMESTAMP",
+                (
+                    TITLE_MAINTENANCE_KEY,
+                    json.dumps(
+                        {
+                            "completed_at": datetime.now(UTC).isoformat(
+                                timespec="seconds"
+                            ),
+                            "scanned": len(candidate_ids),
+                            "deleted": deleted,
+                            "needs_info": needs_info,
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        return {
+            "status": "completed",
+            "scanned": len(candidate_ids),
+            "deleted": deleted,
+            "needs_info": needs_info,
+        }
 
     async def candidate_counts(self) -> dict[str, int]:
         return await asyncio.to_thread(self._candidate_counts_sync)
@@ -2468,9 +2592,7 @@ class Database:
             if job_ids is None:
                 job_ids = [job_id for job_id, _ in jobs]
             title_row = connection.execute(
-                "SELECT field_value FROM metadata_values "
-                "WHERE candidate_id = ? AND field_name = 'Title' "
-                "ORDER BY is_manual DESC, confidence DESC LIMIT 1",
+                "SELECT " + title_subquery("?") + "",
                 (candidate_id,),
             ).fetchone()
             title = str(title_row[0]) if title_row is not None else None
@@ -2622,10 +2744,8 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT c.id, "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "pack.state, cbz.path, cbz.library_relative_path, "
+                + title_subquery("c.id")
+                + ", pack.state, cbz.path, cbz.library_relative_path, "
                 "pin.relative_path, pin.is_manual "
                 "FROM candidates c "
                 "LEFT JOIN download_jobs pack "
@@ -2835,10 +2955,9 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT c.id, c.status, c.filter_result, c.filter_reason, "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "c.ex_gid, c.ex_gallery_token, c.preview_url, c.torrent_count, "
+                + title_subquery("c.id")
+                + ", c.ex_gid, c.ex_gallery_token, c.preview_url, "
+                "c.torrent_count, "
                 "c.torrent_hash, c.magnet_url FROM candidates c WHERE c.id = ?",
 
                 (candidate_id,),
@@ -2928,15 +3047,16 @@ class Database:
         ex_gallery_token: str | None = None,
         magnet_url: str | None = None,
         torrent_hash: str | None = None,
-        title: str | None = None,
     ) -> int:
         """Create an already-approved candidate from an operator's manual link.
 
         Manual adds skip the Telegram review funnel: the row lands straight in
-        APPROVED so a download can be enqueued immediately. A `title` supplied
-        here is recorded as an inferred metadata value so the detail page has
-        something to show before a gallery fetch (or, for a magnet, instead of
-        one) completes.
+        APPROVED so a download can be enqueued immediately. It carries no
+        title: a manually added work used to get an `ExHentai #<gid>` row here
+        so the page had something to show, but R62 made the gallery the only
+        automatic source of a name and R63 has the caller fetch the gallery
+        *before* inserting -- so a candidate that exists has a real name or the
+        display fallback, never a fabricated one.
         """
         return await asyncio.to_thread(
             self._create_manual_candidate_sync,
@@ -2945,7 +3065,6 @@ class Database:
             ex_gallery_token,
             magnet_url,
             torrent_hash,
-            title,
         )
 
     @staticmethod
@@ -2999,7 +3118,6 @@ class Database:
         ex_gallery_token: str | None,
         magnet_url: str | None,
         torrent_hash: str | None,
-        title: str | None,
     ) -> int:
         with self.connection() as connection:
             # A manual add is the third way into `candidates`, and the only one
@@ -3040,15 +3158,6 @@ class Database:
                     raise DuplicateGalleryCandidate(existing) from None
                 raise
             candidate_id = int(cursor.lastrowid)
-            if title:
-                connection.execute(
-                    "INSERT INTO metadata_values "
-                    "(candidate_id, field_name, field_value, value_source, "
-                    "confidence) VALUES (?, 'Title', ?, 'MANUAL_ADD', 0.6) "
-                    "ON CONFLICT(candidate_id, field_name, value_source) "
-                    "DO UPDATE SET field_value = excluded.field_value",
-                    (candidate_id, title),
-                )
         return candidate_id
 
     async def set_candidate_metadata_value(
@@ -3270,11 +3379,14 @@ class Database:
     def _effective_metadata_sync(self, candidate_id: int) -> dict[str, str]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT field_name, field_value FROM metadata_values "
-                "WHERE candidate_id = ? ORDER BY is_manual DESC, "
-                "CASE value_source WHEN 'TELEGRAM' THEN 3 "
-                "WHEN 'EXHENTAI' THEN 2 WHEN 'FILENAME' THEN 1 ELSE 0 END DESC, "
-                "confidence DESC, created_at DESC",
+                # The same trust order the list queries use (R62): the
+                # gallery's own record first, a caption line last. This is what
+                # the archive path rules and the auto-approval rules read, so a
+                # rule matching `{Title}` sees the work's name too.
+                "SELECT mv.field_name, mv.field_value FROM metadata_values mv "
+                "WHERE mv.candidate_id = ? ORDER BY mv.is_manual DESC, "
+                + METADATA_SOURCE_RANK_SQL
+                + " DESC, mv.confidence DESC, mv.created_at DESC",
                 (candidate_id,),
             ).fetchall()
         metadata: dict[str, str] = {}
@@ -3311,10 +3423,8 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT c.id, c.ex_gid, c.status, "
-                "(SELECT mv.field_value FROM metadata_values mv "
-                " WHERE mv.candidate_id = c.id AND mv.field_name = 'Title' "
-                " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
-                "cbz.id IS NOT NULL, cbz.page_count "
+                + title_subquery("c.id")
+                + ", cbz.id IS NOT NULL, cbz.page_count "
                 "FROM candidates c "
                 "LEFT JOIN download_jobs pack "
                 "  ON pack.idempotency_key = 'convert:' || c.id "
@@ -3843,17 +3953,26 @@ class Database:
                     continue
                 metadata[field_key] = str(field_value)
             decision = evaluate_metadata_rules(source, metadata)
-            if decision.result == "ACCEPT":
+            if decision.result == "IGNORE":
+                new_status = "REJECTED"
+                new_filter_result = "IGNORE"
+                new_filter_reason = decision.reason
+            elif Database._candidate_title_missing(connection, candidate_id):
+                # The other half of 「拿不到标题就待补充」 (R62): a candidate
+                # whose gallery answered without a name -- or has not been read
+                # yet -- waits here even though every metadata rule passed.
+                # Reading the gallery is what moves it on, which is what makes
+                # a failed scrape visible instead of silently reviewable.
+                new_status = "NEEDS_INFO"
+                new_filter_result = "NEEDS_INFO"
+                new_filter_reason = MISSING_TITLE_REASON
+            elif decision.result == "ACCEPT":
                 if current_status in {"REJECTED", "NEEDS_INFO"}:
                     new_status = "PENDING_REVIEW"
                     new_filter_result = "ACCEPT"
                     new_filter_reason = decision.reason
                 else:
                     return
-            elif decision.result == "IGNORE":
-                new_status = "REJECTED"
-                new_filter_result = "IGNORE"
-                new_filter_reason = decision.reason
             else:
                 new_status = "NEEDS_INFO"
                 new_filter_result = "NEEDS_INFO"

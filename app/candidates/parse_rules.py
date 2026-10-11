@@ -43,7 +43,6 @@ DEFAULT_PARSE_RULES: dict[str, Any] = {
     "accept_archive": False,
     "archive_formats": list(ARCHIVE_FORMATS),
     "accept_preview": False,
-    "title_required": False,
 }
 
 _BOOLEAN_KEYS: tuple[str, ...] = (
@@ -51,7 +50,6 @@ _BOOLEAN_KEYS: tuple[str, ...] = (
     "accept_photo",
     "accept_archive",
     "accept_preview",
-    "title_required",
 )
 
 
@@ -220,21 +218,7 @@ def message_qualifies(
         return True, "包含图片预览"
     if message.preview_urls and rules.get("accept_preview"):
         return True, "包含预览页链接"
-    if rules.get("title_required") and not message.title:
-        return False, "解析规则要求标题，但消息没有可识别标题"
     return False, "按解析规则不接受此类消息"
-
-
-def title_forces_needs_info(
-    rules: Mapping[str, Any], message: ParsedSourceMessage
-) -> bool:
-    """Whether a missing title must be marked 待补充 even if the source accepts.
-
-    The default (`title_required` off) leaves the decision to the source rules,
-    which already answer 待补充 for a missing title; this is the explicit
-    override for an operator who wants it to be the same everywhere.
-    """
-    return bool(rules.get("title_required")) and not message.title
 
 
 __all__ = [
@@ -246,6 +230,5 @@ __all__ = [
     "dump_parse_rules",
     "message_qualifies",
     "parse_rules_view",
-    "title_forces_needs_info",
     "validate_parse_rules",
 ]

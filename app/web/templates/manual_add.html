@@ -1,15 +1,15 @@
 {#
-  Manual task entry (R9).
+  Manual task entry (R9; narrowed to ExHentai links in R63).
 
   One textarea and one button. The page exists because a link that arrives by
   any route other than a Telegram message still has to reach the queue, and a
   manually pasted link is an approval by the act of pasting it — there is nobody
   else to review it.
 
-  Rewritten off `app.css` in R9. The two source lines used to be an `<li>` whose
-  class was `ok` or `warn`, with the Chinese for both states inlined twice; they
-  are now badges resolved from the connection vocabulary, so 「已配置」 has one
-  spelling in the codebase.
+  R63 made the connection a gate rather than a note: the link is validated by
+  fetching the gallery, so with no configured ExHentai the submit is disabled
+  and the server refuses it. The magnet input is gone with it — a magnet has no
+  gallery and therefore no metadata, which is what this page is for.
 #}
 {% extends "base.html" %}
 {% import "components/ui.html" as ui %}
@@ -23,20 +23,30 @@
   <div>
     <span class="ui-eyebrow">下载</span>
     <h1 class="ui-title">手动添加任务</h1>
-    <p class="ui-subtitle">粘贴 ExHentai 画廊链接、预览链接或磁力链接，自动解析元数据并加入下载队列；手动添加视为已审批，重复链接会被指出。</p>
+    <p class="ui-subtitle">粘贴 ExHentai 画廊链接或预览链接，验证后拉取元数据并加入下载队列；手动添加视为已审批，已存在的作品会被指出。</p>
   </div>
 </div>
 
-{% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
-{#- A duplicate is not an error to fix, it is a work that already exists, so
-    the row offers the one useful move: open it. A plain link, not a
-    redirect, because the paste doing nothing is exactly what the operator
-    needs to see. -#}
+{#- Three outcomes, in order of what the operator has to do about them: a work
+    that already exists (go look at it), a setup problem (go configure it), and
+    a bad paste (try again). -#}
 {% if existing_candidate_id %}
-<p class="ui-hint">
-  <a class="ui-btn" data-size="sm" href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">查看已有候选 #{{ existing_candidate_id }}</a>
-</p>
+<section class="ui-section" aria-labelledby="manual-add-existing-heading">
+  <h2 class="ui-section-title" id="manual-add-existing-heading">作品已存在</h2>
+  <div class="ui-panel">
+    <p>
+      候选 <a href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">#{{ existing_candidate_id }}</a>
+      {%- if existing_candidate_title %} · {{ existing_candidate_title }}{% endif %}
+    </p>
+    <div class="ui-form-actions">
+      <a class="ui-btn" data-variant="primary" href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">跳转到该候选</a>
+      <a class="ui-btn" href="{{ url_for('manual_add_page') }}">返回</a>
+    </div>
+  </div>
+</section>
 {% endif %}
+
+{% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
 
 <section class="ui-section" aria-labelledby="manual-add-heading">
   <h2 class="ui-section-title" id="manual-add-heading">添加任务</h2>
@@ -45,47 +55,41 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <div class="ui-field">
         <label for="manual-input">链接</label>
-        {#- The two accepted shapes are spelled out under the field rather than in
-            a paragraph above it: the operator reads them at the moment they are
-            about to paste, and each one names the connection it needs. -#}
+        {#- The accepted shape is spelled out under the field rather than in a
+            paragraph above it: the operator reads it at the moment they are
+            about to paste, and it names the connection it needs. -#}
         <textarea class="ui-textarea" id="manual-input" name="input" rows="3" required
                   maxlength="1000" aria-describedby="manual-input-hint"
-                  placeholder="https://exhentai.org/g/... 或 magnet:?xt=urn:btih:..."></textarea>
+                  placeholder="https://exhentai.org/g/..."></textarea>
         <small id="manual-input-hint">
-          <strong>ExHentai 链接</strong>：<code class="ui-code-inline">https://exhentai.org/g/123456/abcdef12/</code>，需要已配置 ExHentai 来拉取元数据 ·
-          <strong>预览链接</strong>：<code class="ui-code-inline">https://telegra.ph/ehentai-123456-abcdef12-10-06</code>，slug 里带画廊 ID 时同样识别 ·
-          <strong>磁力链接</strong>：<code class="ui-code-inline">magnet:?xt=urn:btih:...</code>，需要已配置 qBittorrent
+          <strong>ExHentai 链接</strong>：<code class="ui-code-inline">https://exhentai.org/g/123456/abcdef12/</code> ·
+          <strong>预览链接</strong>：<code class="ui-code-inline">https://telegra.ph/ehentai-123456-abcdef12-10-06</code>，slug 里带画廊 ID 时同样识别
         </small>
       </div>
-      {#- Both prerequisites, stated before the submit rather than after the
-          failure. A magnet link pasted with no qBittorrent used to be accepted
-          and then fail somewhere the operator was not looking. The badge is the
-          dependency vocabulary —「已就绪 / 未就绪」— because that is what these
-          booleans are: a stored credential, not a verified live session. -#}
+      {#- The prerequisite, stated before the submit rather than after the
+          failure. With no connection the gallery cannot be read, so the link
+          could not be validated and no candidate could be created; the button
+          is disabled here and the server refuses the POST as well, because a
+          disabled button is a UI state and not an authorisation. -#}
       <div class="ui-record">
         <div class="ui-record-head">
           <span class="ui-record-title">ExHentai</span>
           <span class="ui-record-meta">
-            {% if not exhentai_configured %}仅 gdata 公开画廊可拉取元数据{% endif %}
+            {% if not exhentai_configured %}{{ not_configured_message }}{% endif %}
           </span>
           <span class="ui-record-badges">
             {{ ui.badge(exhentai_configured | dependency_view) }}
           </span>
         </div>
       </div>
-      <div class="ui-record">
-        <div class="ui-record-head">
-          <span class="ui-record-title">qBittorrent</span>
-          <span class="ui-record-meta">
-            {% if not torrent_configured %}磁力链接无法使用{% endif %}
-          </span>
-          <span class="ui-record-badges">
-            {{ ui.badge(torrent_configured | dependency_view) }}
-          </span>
-        </div>
-      </div>
+      {% if not exhentai_configured %}
+      <p class="ui-hint">
+        先到 <a href="/connections">连接</a> 页配置 ExHentai Cookie 后再回来添加。
+      </p>
+      {% endif %}
       <div class="ui-form-actions">
-        <button class="ui-btn" data-variant="primary" type="submit">解析并加入下载队列</button>
+        <button class="ui-btn" data-variant="primary" type="submit"
+                {% if not exhentai_configured %}disabled{% endif %}>解析并加入下载队列</button>
       </div>
     </form>
   </div>

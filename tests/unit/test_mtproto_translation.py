@@ -103,8 +103,6 @@ def test_an_archive_document_becomes_a_downloadable_attachment() -> None:
     assert parsed.message_id == 10
     assert parsed.sender_id == 55
     assert parsed.message_date == "2026-09-29T12:00:00+00:00"
-    assert parsed.title == "A Book"
-    assert parsed.title_source == "TELEGRAM"
     attachment = parsed.attachments[0]
     assert attachment["type"] == "archive"
     assert attachment["file_name"] == "book.zip"
@@ -165,7 +163,6 @@ def test_a_hyperlinked_gallery_is_read_off_the_entity() -> None:
     assert parsed is not None
     assert parsed.ex_gid == 3893499
     assert parsed.ex_gallery_token == "4f732d0bde"
-    assert parsed.title == "看这个"
     assert parsed.filter_reason == "包含 ExHentai 画廊链接"
 
 

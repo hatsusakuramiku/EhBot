@@ -92,6 +92,10 @@ def candidate_summary(item: Any) -> dict[str, Any]:
             item.status, item.filter_result, item.filter_reason
         ),
         "title": item.title,
+        # The name the page shows when `title` is still None: the gallery id,
+        # or the candidate id (R62). Sent rather than left for the client to
+        # reconstruct, because the rule is shared with the table and the card.
+        "display_title": item.display_title,
         "artist": item.artist,
         "category": item.category,
         "language": item.language,

@@ -43,7 +43,7 @@ from app.conversion.naming import (
     render_library_path,
     unique_library_target,
 )
-from app.db.database import Database
+from app.db.database import METADATA_SOURCE_RANK_SQL, Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_FAILED,
@@ -1381,10 +1381,20 @@ class ConversionService:
             return {"path": str(row[0])} if row else None
 
     def _fetch_metadata_sync(self, candidate_id: int) -> list:
+        """This work's metadata rows, best first.
+
+        ``_metadata_lookup`` below takes the first row carrying a field name, so
+        the order *is* the answer: without it, the title a pack names the book
+        with came down to whatever order SQLite happened to return the rows in,
+        which let a caption's first line beat the gallery's own title (R62).
+        """
         with self._database.connection() as connection:
             rows = connection.execute(
-                "SELECT field_name, field_value FROM metadata_values "
-                "WHERE candidate_id = ?",
+                "SELECT mv.field_name, mv.field_value FROM metadata_values mv "
+                "WHERE mv.candidate_id = ? "
+                "ORDER BY mv.is_manual DESC, "
+                + METADATA_SOURCE_RANK_SQL
+                + " DESC, mv.confidence DESC, mv.created_at DESC",
                 (candidate_id,),
             ).fetchall()
         return [

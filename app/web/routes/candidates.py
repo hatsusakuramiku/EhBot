@@ -71,9 +71,9 @@ CANDIDATE_PAGE_TABS: tuple[dict[str, str], ...] = (
     {
         "key": "needs_info",
         "href": "/candidates/needs-info",
-        "description": "缺标题、缺附件或需要修订的候选",
+        "description": "等待画廊标题或抓取失败的候选，可人工补充标题",
         "empty_title": "暂无待补充候选",
-        "empty_hint": "信息不足的候选会显示在这里",
+        "empty_hint": "尚未取得画廊标题的候选会显示在这里",
     },
     {
         "key": "approved",

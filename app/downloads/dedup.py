@@ -35,6 +35,7 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
+from app.candidates.models import display_title
 from app.downloads.models import (
     DOWNLOAD_STATE_CANCELLED,
     DOWNLOAD_STATE_COMPLETED,
@@ -55,6 +56,13 @@ class DedupEntry:
     title: str | None
     packaged: bool
     page_count: int | None
+
+    @property
+    def display_title(self) -> str:
+        """The name to show in the group table (R62). Every entry here has a
+        gallery id -- that is what makes it a duplicate -- so an untitled one
+        reads as `#<gid>` rather than as another 「未命名作品」."""
+        return display_title(self.title, self.ex_gid, self.candidate_id)
 
     @property
     def keep_key(self) -> tuple[int, int, int]:

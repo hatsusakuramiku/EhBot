@@ -277,6 +277,13 @@ async def test_a_lock_covers_every_row_for_the_field(tmp_path: Path) -> None:
         database, tmp_path, GDATA_RESPONSE
     ).fetch_metadata_for_candidate(1)
 
+    # A second source for the same field. The lock has to cover every row of
+    # `Title`, not just the one that wins today -- and since R62 the caption no
+    # longer supplies that second row, so the fixture writes one the way a
+    # metadata edit would.
+    await database.set_candidate_metadata_value(
+        1, "Title", "操作员标题", "OPERATOR", 1.0
+    )
     await database.set_metadata_lock(1, "operator", "Title", True)
 
     with database._connect() as connection:  # noqa: SLF001
@@ -399,7 +406,6 @@ async def test_enrichment_by_id_skips_a_candidate_with_no_gallery_link(
         filter_reason="手动添加：磁力链接",
         magnet_url="magnet:?xt=urn:btih:" + "a" * 40,
         torrent_hash="a" * 40,
-        title="Magnet Only",
     )
 
     async def refuse(request: httpx.Request) -> httpx.Response:
@@ -417,4 +423,3 @@ async def test_enrichment_by_id_skips_a_candidate_with_no_gallery_link(
     )
 
     assert await service.enrich_missing_metadata((candidate_id,)) == 0
-

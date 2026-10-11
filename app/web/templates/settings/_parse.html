@@ -70,15 +70,6 @@
           </div>
         </fieldset>
 
-        <label class="ui-checkline">
-          <input class="ui-checkbox" name="title_required" type="checkbox"
-                 {% if parse_rules.title_required %}checked{% endif %}>
-          <span>没有标题的消息直接判为「待补充」</span>
-        </label>
-        <small class="ui-hint">
-          关闭时沿用来源规则：解析不到标题的候选会进入「待补充」，仍然保留。
-        </small>
-
         <div class="ui-form-actions">
           <button class="ui-btn" data-variant="primary" type="submit">保存解析规则</button>
         </div>

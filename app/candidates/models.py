@@ -3,6 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def display_title(
+    title: str | None, ex_gid: int | None, candidate_id: int
+) -> str:
+    """What to show where a work is named, when it has no title yet (R62).
+
+    Since R62 a work's name comes from its gallery, so a candidate in 待补充 has
+    none -- and the list used to fall back to the candidate id, which is what
+    made every unread row look alike. A gallery id is at least the work's own
+    identity: the same number the gallery is known by upstream. When there is
+    not even that, the candidate id is the only handle left.
+
+    This is a display fallback only. `title` stays None so the API, the
+    metadata drawer and the search still see 「no title yet」.
+    """
+    if title:
+        return title
+    if ex_gid is not None:
+        return f"#{ex_gid}"
+    return f"候选 #{candidate_id}"
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedSourceMessage:
     is_edit: bool
@@ -16,9 +37,9 @@ class ParsedSourceMessage:
     attachments: tuple[dict, ...]
     file_unique_id: str | None
     message_date: str
-    title: str | None
-    title_source: str | None
-    title_confidence: float | None
+    #: No title is read out of the message any more (R62): the gallery's own
+    #: metadata is the only automatic source of a work's name, and a candidate
+    #: that has none waits in 待补充 for the operator or the next scrape.
     filter_result: str
     filter_reason: str
     ex_gid: int | None = None
@@ -53,6 +74,10 @@ class CandidateListItem:
     #: something (R60). Read for every row, rendered for few.
     filter_reason: str | None = None
 
+    @property
+    def display_title(self) -> str:
+        return display_title(self.title, self.ex_gid, self.candidate_id)
+
 
 @dataclass(frozen=True, slots=True)
 class CandidateMessage:
@@ -79,6 +104,10 @@ class CandidateDetail:
     torrent_count: int | None = None
     torrent_hash: str | None = None
     magnet_url: str | None = None
+
+    @property
+    def display_title(self) -> str:
+        return display_title(self.title, self.ex_gid, self.candidate_id)
 
 
 @dataclass(frozen=True, slots=True)

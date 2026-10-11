@@ -65,7 +65,9 @@ async def seed_archive(database: Database, *, file_name: str) -> int:
         ]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidates = await database.list_candidates()
+    # New candidates wait in 待补充 (R62); the tests that need APPROVED set it
+    # themselves, so the fixture only has to find the row.
+    candidates = await database.list_candidates(status="NEEDS_INFO")
     assert candidates, "expected candidate"
     return candidates[0].candidate_id
 

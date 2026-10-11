@@ -1,4 +1,14 @@
+"""Manual add: an ExHentai link, validated by fetching the gallery (R63).
+
+The page changed meaning in R63. It used to accept a magnet too and treated the
+connection state as a note; it now takes one shape (a gallery link), refuses to
+work without a connection, and proves the link resolves *before* it creates a
+candidate. A link that does not resolve leaves no row, which is the half of the
+behaviour a URL-shape check alone cannot give.
+"""
+
 import asyncio
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -44,6 +54,69 @@ def _post(client: TestClient, url: str, data: dict) -> TestClient:
     return client.post(url, data=data, follow_redirects=False)
 
 
+def _configure_exhentai(client: TestClient, monkeypatch) -> None:
+    """Make the ExHentai connection read as configured, without a Cookie.
+
+    The gate is a `snapshot()` read, so the fake is one attribute deep -- the
+    rest of the connection state is irrelevant to this page.
+    """
+    manager = client.app.state.connection_manager
+    monkeypatch.setattr(
+        manager,
+        "snapshot",
+        lambda: SimpleNamespace(
+            exhentai=SimpleNamespace(configured=True)
+        ),
+    )
+
+
+def _stub_gallery_fetch(
+    client: TestClient,
+    monkeypatch,
+    *,
+    metadata: dict | None = None,
+    error: Exception | None = None,
+) -> list[tuple[int, str]]:
+    """Stub the two halves of a scrape the route drives.
+
+    `fetch_metadata_for_gallery` validates, `persist_gallery_metadata` writes;
+    the route calls them in that order with nothing in between but the insert,
+    which is exactly what these fakes let a test observe: the fetched gallery is
+    the one persisted, and no second request is made.
+    """
+    service = client.app.state.exhentai_service
+    fetched: list[tuple[int, str]] = []
+    persisted: list[int] = []
+
+    async def fake_fetch(gid: int, token: str):
+        if error is not None:
+            raise error
+        fetched.append((gid, token))
+        return (metadata or {}, None)
+
+    async def fake_persist(candidate_id: int, meta, gallery) -> None:
+        persisted.append(candidate_id)
+        if metadata:
+            await Database(
+                client.app.state.settings.data_path / "ehbot.db"
+            ).set_candidate_metadata_value(
+                candidate_id, "Title", metadata["Title"], "EXHENTAI", 0.6
+            )
+
+    monkeypatch.setattr(service, "fetch_metadata_for_gallery", fake_fetch)
+    monkeypatch.setattr(service, "persist_gallery_metadata", fake_persist)
+    return fetched
+
+
+def _no_candidate_count(settings: Settings) -> int:
+    import sqlite3
+
+    with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
+        return int(
+            connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+        )
+
+
 def test_manual_add_page_renders(tmp_path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
@@ -51,21 +124,65 @@ def test_manual_add_page_renders(tmp_path) -> None:
         page = client.get("/manual-add")
         assert page.status_code == 200
         assert "手动添加任务" in page.text
+        # Unconfigured: the page says what to fix and the button cannot be
+        # pressed. The server refuses the POST too (below), because a disabled
+        # attribute is a UI state and not an authorisation.
+        assert "未配置 Exhentai 连接" in page.text
+        assert "disabled" in page.text
 
 
-def test_manual_add_rejects_unrecognised_input(tmp_path) -> None:
+def test_manual_add_page_enables_the_button_when_configured(
+    tmp_path, monkeypatch
+) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        page = client.get("/manual-add")
+        assert page.status_code == 200
+        assert "未配置 Exhentai 连接" not in page.text
+        assert "disabled" not in page.text
+
+
+def test_submitting_without_a_connection_is_refused_and_creates_nothing(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        fetched = _stub_gallery_fetch(client, monkeypatch)
+        response = _post(
+            client,
+            "/manual-add",
+            {"input": "https://exhentai.org/g/987654/appletoken99/"},
+        )
+        assert response.status_code == 400
+        assert "未配置 Exhentai 连接" in response.text
+        # Refused before the link was even looked at: no fetch, no row.
+        assert fetched == []
+        assert _no_candidate_count(settings) == 0
+
+
+def test_manual_add_rejects_unrecognised_input(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        fetched = _stub_gallery_fetch(client, monkeypatch)
         response = _post(client, "/manual-add", {"input": "https://example.com/thing"})
         assert response.status_code == 400
-        assert "无法识别链接" in response.text
+        assert "仅支持 ExHentai 画廊链接" in response.text
+        assert fetched == []
+        assert _no_candidate_count(settings) == 0
 
 
-def test_manual_magnet_without_qbittorrent_returns_clear_error(tmp_path) -> None:
+def test_a_magnet_is_no_longer_accepted(tmp_path, monkeypatch) -> None:
+    """R63 removed the magnet input: it has a gallery neither to read nor to
+    deduplicate by, which is what this page is for."""
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
         response = _post(
             client,
             "/manual-add",
@@ -77,25 +194,47 @@ def test_manual_magnet_without_qbittorrent_returns_clear_error(tmp_path) -> None
             },
         )
         assert response.status_code == 400
-        assert "qBittorrent" in response.text
+        assert "仅支持 ExHentai 画廊链接" in response.text
+        assert _no_candidate_count(settings) == 0
 
 
-def test_manual_eh_link_creates_approved_candidate(tmp_path, monkeypatch) -> None:
+def test_a_link_that_does_not_resolve_creates_no_candidate(
+    tmp_path, monkeypatch
+) -> None:
+    """The point of fetching before inserting: 「此画廊不存在」 must not leave a
+    half-made work behind for a human to clean up."""
+    from app.exhentai.service import ExHentaiDownloadError
+
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _authenticate(client, settings)
-
-        async def _noop_fetch(candidate_id: int) -> dict:
-            return {}
-
-        # The real app wiring creates an ExHentai service; stub its network
-        # metadata call so the test needs no gallery HTTP round-trip.
-        monkeypatch.setattr(
-            client.app.state.exhentai_service,
-            "fetch_metadata_for_candidate",
-            _noop_fetch,
+        _configure_exhentai(client, monkeypatch)
+        _stub_gallery_fetch(
+            client,
+            monkeypatch,
+            metadata=None,
+            error=ExHentaiDownloadError("GALLERY_NOT_FOUND", "画廊不存在"),
         )
+        response = _post(
+            client,
+            "/manual-add",
+            {"input": "https://exhentai.org/g/987654/appletoken99/"},
+        )
+        assert response.status_code == 400
+        assert "画廊不存在" in response.text
+        assert _no_candidate_count(settings) == 0
 
+
+def test_a_valid_eh_link_creates_an_approved_candidate_with_metadata(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        fetched = _stub_gallery_fetch(
+            client, monkeypatch, metadata={"Title": "画廊标题"}
+        )
         page = client.get("/manual-add")
         response = client.post(
             "/manual-add",
@@ -106,148 +245,29 @@ def test_manual_eh_link_creates_approved_candidate(tmp_path, monkeypatch) -> Non
             follow_redirects=False,
         )
         assert response.status_code == 303
-        candidate_id = int(response.headers["location"].rstrip("/").rsplit("/", 1)[-1])
+        assert response.headers["location"] == "/works/1"
+        # One fetch, for the gallery that was pasted.
+        assert fetched == [(987654, "appletoken99")]
 
         database = Database(settings.data_path / "ehbot.db")
-        candidate = asyncio.run(database.get_candidate(candidate_id))
+        candidate = asyncio.run(database.get_candidate(1))
         assert candidate is not None
         assert candidate.status == "APPROVED"
         assert candidate.ex_gid == 987654
         assert candidate.ex_gallery_token == "appletoken99"
-
-
-def _stub_torrents(client: TestClient, monkeypatch) -> list[int]:
-    """Make the app think qBittorrent is configured, without a server.
-
-    The magnet path checks that prerequisite before it touches the database, so
-    a dedup test has to get past it; the enqueue is stubbed for the same reason
-    the gallery test stubs metadata -- no network in a unit of logic.
-    """
-    from types import SimpleNamespace
-
-    service = client.app.state.archive_settings_service
-
-    async def fake_torrent_client():
-        return SimpleNamespace(is_configured=True)
-
-    async def fake_torrent_client_view():
-        return {"configured": True}
-
-    enqueued: list[int] = []
-
-    async def record_enqueue(candidate_id: int) -> None:
-        enqueued.append(candidate_id)
-
-    monkeypatch.setattr(service, "torrent_client", fake_torrent_client)
-    monkeypatch.setattr(service, "torrent_client_view", fake_torrent_client_view)
-    monkeypatch.setattr(
-        client.app.state.download_service,
-        "enqueue_torrent_download",
-        record_enqueue,
-    )
-    return enqueued
-
-
-def _noop_metadata(monkeypatch, client: TestClient) -> None:
-    async def _noop_fetch(candidate_id: int) -> dict:
-        return {}
-
-    monkeypatch.setattr(
-        client.app.state.exhentai_service,
-        "fetch_metadata_for_candidate",
-        _noop_fetch,
-    )
-
-
-def test_pasting_the_same_gallery_twice_is_refused_with_a_link(
-    tmp_path, monkeypatch
-) -> None:
-    settings = _settings(tmp_path)
-    with TestClient(create_app(settings)) as client:
-        _authenticate(client, settings)
-        _noop_metadata(monkeypatch, client)
-
-        url = "https://exhentai.org/g/987654/appletoken99/"
-        first = _post(client, "/manual-add", {"input": url})
-        assert first.status_code == 303
-        candidate_id = int(
-            first.headers["location"].rstrip("/").rsplit("/", 1)[-1]
-        )
-
-        second = _post(client, "/manual-add", {"input": url})
-        assert second.status_code == 409
-        assert "该画廊已有候选" in second.text
-        assert f"查看已有候选 #{candidate_id}" in second.text
-        assert f"/works/{candidate_id}" in second.text
-        # It stayed on the form rather than redirecting: the paste doing
-        # nothing is what the operator has to see.
-        assert second.headers.get("location") is None
-
-        import sqlite3
-
-        with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
-            rows = connection.execute(
-                "SELECT COUNT(*) FROM candidates"
-            ).fetchone()[0]
-        assert rows == 1
-
-
-def test_a_different_token_for_the_same_gallery_is_still_a_duplicate(
-    tmp_path, monkeypatch
-) -> None:
-    settings = _settings(tmp_path)
-    with TestClient(create_app(settings)) as client:
-        _authenticate(client, settings)
-        _noop_metadata(monkeypatch, client)
-
-        assert _post(
-            client,
-            "/manual-add",
-            {"input": "https://exhentai.org/g/987654/appletoken99/"},
-        ).status_code == 303
-        second = _post(
-            client,
-            "/manual-add",
-            {"input": "https://exhentai.org/g/987654/othertoken00/"},
-        )
-        assert second.status_code == 409
-        assert "该画廊已有候选" in second.text
-
-
-def test_pasting_the_same_magnet_twice_is_refused(tmp_path, monkeypatch) -> None:
-    settings = _settings(tmp_path)
-    with TestClient(create_app(settings)) as client:
-        _authenticate(client, settings)
-        enqueued = _stub_torrents(client, monkeypatch)
-
-        magnet = (
-            "magnet:?xt=urn:btih:"
-            "0123456789abcdef0123456789abcdef01234567&dn=test"
-        )
-        first = _post(client, "/manual-add", {"input": magnet})
-        assert first.status_code == 303
-
-        second = _post(client, "/manual-add", {"input": magnet})
-        assert second.status_code == 409
-        assert "该磁力链接已有候选" in second.text
-
-        import sqlite3
-
-        with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
-            rows = connection.execute(
-                "SELECT COUNT(*) FROM candidates"
-            ).fetchone()[0]
-        assert rows == 1
-        # Exactly one enqueue: the duplicate never reached the queue.
-        assert len(enqueued) == 1
+        # Manual add is deliberately an exception to 「无标题进待补充」: the
+        # operator asked for this one, and the gallery's own name is what the
+        # metadata step wrote.
+        assert candidate.title == "画廊标题"
+        assert candidate.filter_reason == "手动添加：ExHentai 画廊链接"
 
 
 def test_a_preview_link_is_accepted_by_manual_add(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _authenticate(client, settings)
-        _noop_metadata(monkeypatch, client)
-
+        _configure_exhentai(client, monkeypatch)
+        _stub_gallery_fetch(client, monkeypatch)
         response = _post(
             client,
             "/manual-add",
@@ -264,13 +284,65 @@ def test_a_preview_link_is_accepted_by_manual_add(tmp_path, monkeypatch) -> None
         assert candidate.ex_gallery_token == "9ce70ddc26"
 
 
+def test_pasting_the_same_gallery_twice_is_refused_with_a_link(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        fetched = _stub_gallery_fetch(client, monkeypatch)
+
+        url = "https://exhentai.org/g/987654/appletoken99/"
+        first = _post(client, "/manual-add", {"input": url})
+        assert first.status_code == 303
+        candidate_id = int(
+            first.headers["location"].rstrip("/").rsplit("/", 1)[-1]
+        )
+
+        second = _post(client, "/manual-add", {"input": url})
+        assert second.status_code == 409
+        # The card names the work and offers it, rather than only complaining.
+        assert f"/works/{candidate_id}" in second.text
+        assert f"#{candidate_id}" in second.text
+        assert second.headers.get("location") is None
+        # The duplicate was caught before the gallery read: one fetch, for the
+        # first paste only.
+        assert fetched == [(987654, "appletoken99")]
+        assert _no_candidate_count(settings) == 1
+
+
+def test_a_different_token_for_the_same_gallery_is_still_a_duplicate(
+    tmp_path, monkeypatch
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        _configure_exhentai(client, monkeypatch)
+        _stub_gallery_fetch(client, monkeypatch)
+
+        assert _post(
+            client,
+            "/manual-add",
+            {"input": "https://exhentai.org/g/987654/appletoken99/"},
+        ).status_code == 303
+        second = _post(
+            client,
+            "/manual-add",
+            {"input": "https://exhentai.org/g/987654/othertoken00/"},
+        )
+        assert second.status_code == 409
+        assert "作品已存在" in second.text
+
+
 def test_a_refused_duplicate_leaves_the_existing_candidate_untouched(
     tmp_path, monkeypatch
 ) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _authenticate(client, settings)
-        _noop_metadata(monkeypatch, client)
+        _configure_exhentai(client, monkeypatch)
+        _stub_gallery_fetch(client, monkeypatch)
 
         url = "https://exhentai.org/g/987654/appletoken99/"
         first = _post(client, "/manual-add", {"input": url})

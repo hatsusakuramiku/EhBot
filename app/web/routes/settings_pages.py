@@ -1039,7 +1039,6 @@ async def save_parse_rules(request: Request):
         "accept_photo": form.get("accept_photo") == "on",
         "accept_archive": form.get("accept_archive") == "on",
         "accept_preview": form.get("accept_preview") == "on",
-        "title_required": form.get("title_required") == "on",
         "archive_formats": [
             archive_format
             for archive_format in PARSE_ARCHIVE_FORMATS

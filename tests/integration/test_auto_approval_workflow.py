@@ -57,15 +57,31 @@ async def _seed_candidate(database: Database) -> int:
         }]
     )
     await CandidateIngestor(database).process_pending_updates()
-    candidate_id = (await database.list_candidates())[0].candidate_id
-    # One EXHENTAI-sourced value, so the sweeper's enrichment step finds nothing
-    # to fetch. A gallery-linked pending candidate is exactly what the enricher
-    # looks for, and these tests must not depend on the network.
+    candidate_id = (
+        await database.list_candidates(status="NEEDS_INFO")
+    )[0].candidate_id
+    # Two EXHENTAI-sourced values, so the sweeper's enrichment step finds
+    # nothing to fetch and the rule has something to match. A gallery-linked
+    # pending candidate is exactly what the enricher looks for, and these tests
+    # must not depend on the network. The title is one of them because R62 made
+    # the gallery -- not the caption -- the source of a name, and the rules
+    # under test match `{Title}`.
     with sqlite3.connect(database.path) as connection:
         connection.execute(
             "INSERT INTO metadata_values (candidate_id, field_name, field_value,"
             " value_source, confidence, is_manual) VALUES (?, 'Pages', '12',"
             " 'EXHENTAI', 0.9, 0)",
+            (candidate_id,),
+        )
+        connection.execute(
+            "INSERT INTO metadata_values (candidate_id, field_name, field_value,"
+            " value_source, confidence, is_manual) VALUES (?, 'Title',"
+            " 'Automatic Title', 'EXHENTAI', 0.9, 0)",
+            (candidate_id,),
+        )
+        connection.execute(
+            "UPDATE candidates SET status = 'PENDING_REVIEW', "
+            "filter_result = 'ACCEPT', filter_reason = '' WHERE id = ?",
             (candidate_id,),
         )
     return candidate_id
@@ -606,7 +622,25 @@ async def _seed_galleryless_candidate(database: Database) -> int:
         }]
     )
     await CandidateIngestor(database).process_pending_updates()
-    return (await database.list_candidates())[0].candidate_id
+    candidate_id = (
+        await database.list_candidates(status="NEEDS_INFO")
+    )[0].candidate_id
+    # The rule under test matches `{Title}`, which comes from the gallery now
+    # (R62), and `matching_rule` only looks at a 待审核 candidate -- so the
+    # fixture supplies both, the way a scrape would.
+    with database.connection() as connection:
+        connection.execute(
+            "INSERT INTO metadata_values (candidate_id, field_name, field_value,"
+            " value_source, confidence, is_manual) VALUES (?, 'Title',"
+            " 'Automatic Title', 'EXHENTAI', 0.9, 0)",
+            (candidate_id,),
+        )
+        connection.execute(
+            "UPDATE candidates SET status = 'PENDING_REVIEW', "
+            "filter_result = 'ACCEPT', filter_reason = '' WHERE id = ?",
+            (candidate_id,),
+        )
+    return candidate_id
 
 
 def test_a_candidate_without_a_gallery_id_is_never_decided(tmp_path: Path) -> None:

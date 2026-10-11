@@ -74,7 +74,7 @@
 <header class="ui-page-head">
   <div>
     <p class="ui-eyebrow">作品 #{{ work.candidate_id }}</p>
-    <h1 class="ui-title">{{ work.title or "未命名作品" }}</h1>
+    <h1 class="ui-title">{{ work.display_title }}</h1>
     <p class="ui-subtitle">
       <span data-field="stage">{{ ui.badge(work.stage) }}</span>
       <span data-field="status">{{ ui.badge(work.status) }}</span>
