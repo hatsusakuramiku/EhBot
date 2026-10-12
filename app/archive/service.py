@@ -113,6 +113,12 @@ SETTING_AI_CONCURRENCY = "ai_concurrency"
 SETTING_AI_STREAM = "ai_stream"
 SETTING_AI_DEFAULT_INCLUDE_CURRENT = "ai_default_include_current"
 
+#: Whether the ComicInfo `<Series>` field may be filled from the model (R83).
+#: Default off. Only meaningful while AI mode is usable at all -- the value is
+#: written back to the work's `Series` metadata so a later repack reads it
+#: instead of asking again.
+SETTING_AUTO_SERIES = "auto_series"
+
 #: Which models the *archive-path* feature uses: the global default chain, or a
 #: list of its own. The AI page owns the default (AstrBot's 「全局默认模型」);
 #: every other page inherits it unless it says otherwise, which is why the
@@ -639,6 +645,16 @@ class ArchiveSettingsService:
             {SETTING_AI_STREAM: "1" if enabled else "0"}
         )
 
+    async def auto_series(self) -> bool:
+        """Whether packing may fill ComicInfo's `<Series>` from the model (R83)."""
+        stored = await self._database.archive_settings()
+        return stored.get(SETTING_AUTO_SERIES, "0") not in {"0", "false", "no"}
+
+    async def save_auto_series(self, enabled: bool) -> None:
+        await self._database.save_archive_settings(
+            {SETTING_AUTO_SERIES: "1" if enabled else "0"}
+        )
+
     async def ai_default_include_current(self) -> bool:
         stored = await self._database.archive_settings()
         return stored.get(SETTING_AI_DEFAULT_INCLUDE_CURRENT, "0") not in {
@@ -1033,6 +1049,7 @@ __all__ = [
     "SETTING_AI_FALLBACK_TO_RULES",
     "SETTING_AI_PROMPT",
     "SETTING_AI_STREAM",
+    "SETTING_AUTO_SERIES",
     "SETTING_PATH_SOURCE",
     "SETTING_AUTO_PACK_AFTER_DOWNLOAD",
     "SETTING_IMAGE_QUALITY",

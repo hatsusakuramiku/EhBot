@@ -85,7 +85,6 @@ CANDIDATE_COUNT_KEYS: dict[str, str] = {
     "DISCOVERED": "discovered",
     "PENDING_REVIEW": "pending_review",
     "NEEDS_INFO": "needs_info",
-    "NEEDS_REVISION": "needs_revision",
     "APPROVED": "approved",
     "PROCESSING": "processing",
     "DOWNLOADED": "downloaded",
@@ -205,10 +204,13 @@ _TITLE_LANGUAGE_SQL = (
 #: of this wherever it is used. The codes are the same literals
 #: `app/api/status.py` labels and the writers insert; the rank has to live where
 #: the comparison happens, which is why this fragment is shared with
-#: `app/conversion` instead of being written out twice.
+#: `app/conversion` instead of being written out twice. `AI` (R83) sits just
+#: below the operator's own manual-add, above a torrent's contents: a model's
+#: guess is better than a filename but worse than anything the gallery said.
 METADATA_SOURCE_RANK_SQL = (
-    "CASE mv.value_source WHEN 'EXHENTAI' THEN 6 WHEN 'OPERATOR' THEN 5 "
-    "WHEN 'MANUAL_ADD' THEN 4 WHEN 'EH_TORRENT' THEN 3 "
+    "CASE mv.value_source WHEN 'EXHENTAI' THEN 7 WHEN 'OPERATOR' THEN 6 "
+    "WHEN 'MANUAL_ADD' THEN 5 WHEN 'AI' THEN 4 "
+    "WHEN 'EH_TORRENT' THEN 3 "
     "WHEN 'TELEGRAPH' THEN 3 WHEN 'FILENAME' THEN 2 "
     "WHEN 'TELEGRAM' THEN 1 WHEN 'INFERRED' THEN 0 ELSE 0 END"
 )
@@ -2198,7 +2200,7 @@ class Database:
                     "filter_result = 'NEEDS_INFO', filter_reason = ?, "
                     "updated_at = CURRENT_TIMESTAMP "
                     "WHERE id = ? AND status IN ('PENDING_REVIEW', "
-                    "'NEEDS_INFO', 'NEEDS_REVISION')",
+                    "'NEEDS_INFO')",
                     (MISSING_TITLE_REASON, candidate_id),
                 ).rowcount
                 needs_info += int(changed)

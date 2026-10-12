@@ -330,7 +330,7 @@ def test_the_timeline_reaches_back_to_the_rule_that_admitted_the_work(
     """回溯到自动规则命中与操作员动作 -- both, in one list, newest first."""
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
-    candidate_id = asyncio.run(seed_work(database, status="NEEDS_REVISION"))
+    candidate_id = asyncio.run(seed_work(database, status="REJECTED"))
 
     record(
         database,
@@ -342,7 +342,7 @@ def test_the_timeline_reaches_back_to_the_rule_that_admitted_the_work(
     record(
         database,
         candidate_id,
-        "NEEDS_REVISION",
+        "REJECT",
         "admin",
         {"note": "缺少第 3 卷"},
     )
@@ -362,7 +362,7 @@ def test_the_timeline_reaches_back_to_the_rule_that_admitted_the_work(
     # Newest first, so the operator reads the latest decision without scrolling.
     nodes = page.context["work"]["timeline"]
     assert [node["action"]["code"] for node in nodes] == [
-        "NEEDS_REVISION",
+        "REJECT",
         "AUTO_APPROVE",
     ]
 

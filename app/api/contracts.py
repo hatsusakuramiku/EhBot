@@ -27,6 +27,11 @@ MAX_PAGE_SIZE = 200
 
 DEFAULT_PAGE_SIZE = 50
 
+#: The page sizes the two server-rendered lists offer (R82). A contract rather
+#: than a template constant so the page and the JSON client agree on what a
+#: legal `?page_size=` looks like; every value is `<= MAX_PAGE_SIZE`.
+PAGE_SIZE_OPTIONS: tuple[int, ...] = (20, 50, 100, 200)
+
 
 class ApiError(Exception):
     """A failure that maps to the JSON error envelope.
@@ -168,6 +173,7 @@ __all__ = [
     "ApiError",
     "DEFAULT_PAGE_SIZE",
     "MAX_PAGE_SIZE",
+    "PAGE_SIZE_OPTIONS",
     "Page",
     "PageParams",
     "api_error_handler",

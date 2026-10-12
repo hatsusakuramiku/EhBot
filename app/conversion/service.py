@@ -20,9 +20,11 @@ from app.ai.errors import (
     AI_CHAIN_UNAVAILABLE,
     AI_PATH_MISSING,
     AI_PATH_UNAVAILABLE,
+    AI_SERIES_UNAVAILABLE,
     AiError,
 )
 from app.ai.paths import AiPathService
+from app.ai.series import AiSeriesService
 from app.archive.service import (
     PATH_SOURCE_AI,
     PATH_SOURCE_TEMPLATE,
@@ -58,7 +60,6 @@ from app.downloads.models import (
 )
 from app.review.models import (
     STATUS_NEEDS_INFO,
-    STATUS_NEEDS_REVISION,
     STATUS_PENDING_REVIEW,
     STATUS_REJECTED,
 )
@@ -83,7 +84,6 @@ _PACK_FORBIDDEN_STATUSES: frozenset[str] = frozenset(
         STATUS_REJECTED,
         STATUS_PENDING_REVIEW,
         STATUS_NEEDS_INFO,
-        STATUS_NEEDS_REVISION,
     }
 )
 
@@ -190,6 +190,11 @@ class ConversionService:
             AiPathService(database, ai_service, self._settings)
             if ai_service is not None
             else None
+        )
+        # The series decision (R83) rides the same provider/chain the path
+        # decision does; it is only reached when 「自动添加系列」 is on.
+        self._ai_series = (
+            AiSeriesService(ai_service) if ai_service is not None else None
         )
         # The global AI master switch. Optional so a test that builds this
         # service directly keeps the pre-R52 behaviour (AI allowed); `wiring`
@@ -653,6 +658,98 @@ class ConversionService:
             ).fetchall()
         return tuple(str(row[0]) for row in rows if row[0])
 
+    def _has_cbz_sync(self, candidate_id: int) -> bool:
+        """Whether this work already has a published CBZ (i.e. a repack)."""
+        return bool(self._existing_cbz_paths_sync(candidate_id))
+
+    async def _series_ai_usable(self) -> bool:
+        """Whether a series name could be asked for right now.
+
+        True only when the AI master switch is on and the archive-path chain has
+        at least one entry. It answers 「配没配」 without calling a model, which is
+        what lets a repack be refused before a task is created rather than after.
+        """
+        if self._ai_series is None:
+            return False
+        if self._system_settings is not None and not await self._system_settings.ai_enabled():
+            return False
+        return bool(await self._ai_series.chain())
+
+    async def _refuse_series_before_enqueue(self, candidate_id: int) -> None:
+        """Refuse a repack that could not get its series (R83).
+
+        Only the *determinable* case is refused: the switch is on, the archive
+        path is not AI-decided, no `Series` is stored, and no model chain can be
+        reached. A first pack would park in 需干预 with the same reason, so it is
+        let through; a repack would only abort, so refusing it here keeps the
+        operator on the page they pressed the button on and creates nothing.
+        """
+        if not await self._settings.auto_series():
+            return
+        if await self.path_source() == PATH_SOURCE_AI:
+            return
+        metadata = await asyncio.to_thread(
+            self._fetch_metadata_sync, candidate_id
+        )
+        if _metadata_lookup(metadata, "Series"):
+            return
+        if await self._series_ai_usable():
+            return
+        if not await asyncio.to_thread(self._has_cbz_sync, candidate_id):
+            return
+        raise ConversionError(
+            "SERIES_AI_UNAVAILABLE",
+            "「自动添加系列」已开启，但 AI 当前不可用，无法重新打包："
+            "请先到「设置 → AI 供应商」恢复总开关与模型链，或关闭该开关",
+        )
+
+    async def _resolve_series(self, candidate_id: int, metadata) -> str | None:
+        """The series name to write into ComicInfo, per the R83 priority.
+
+        1. a stored `Series` value (an operator's edit, a scrape, or a previous
+           AI answer) -- used as-is, switch or no switch;
+        2. AI path mode -- the folder the book is filed under is the series, so
+           no model call is made;
+        3. otherwise, with 「自动添加系列」 on, the model is asked and its answer
+           is written back to the metadata so a repack is free.
+
+        Raises `LibraryPathError(AI_SERIES_UNAVAILABLE)` when the switch is on
+        but the answer cannot be had; the caller parks or aborts based on
+        whether this is a first pack or a repack.
+        """
+        explicit = _metadata_lookup(metadata, "Series")
+        if explicit:
+            return explicit
+        if not await self._settings.auto_series():
+            return None
+        if await self.path_source() == PATH_SOURCE_AI:
+            # The *current* answer, not any cached row: a stale one came from a
+            # different prompt or chain and does not describe where this pack is
+            # filing the book. `_library_target` has already resolved it above,
+            # so this is a pure read.
+            cached = await self.current_ai_path(candidate_id, metadata)
+            if cached is None or len(cached.parts) < 2:
+                return None
+            return cached.parent.name
+        if not await self._series_ai_usable():
+            raise LibraryPathError(
+                AI_SERIES_UNAVAILABLE,
+                "「自动添加系列」已开启，但 AI 当前不可用：请到「设置 → AI 供应商」"
+                "恢复总开关与模型链，或关闭该开关",
+            )
+        try:
+            series = await self._ai_series.resolve(metadata)
+        except AiError as exc:
+            raise LibraryPathError(
+                AI_SERIES_UNAVAILABLE,
+                f"「自动添加系列」失败：{exc.public_message}",
+            ) from exc
+        if series:
+            await self._database.set_candidate_metadata_value(
+                candidate_id, "Series", series, "AI", 1.0
+            )
+        return series
+
     async def enqueue_for_candidate(
         self,
         candidate_id: int,
@@ -675,6 +772,11 @@ class ConversionService:
         free-form column: a new column for two booleans one branch reads would
         be a schema change for nothing.
         """
+        if not refile:
+            # A repack whose series cannot be resolved is refused here, before a
+            # task exists -- see the helper. A first pack is let through so the
+            # job can park in 需干预 with the same reason.
+            await self._refuse_series_before_enqueue(candidate_id)
         return await asyncio.to_thread(
             self._enqueue_sync, candidate_id, refile, refresh_ai_path
         )
@@ -1108,6 +1210,46 @@ class ConversionService:
                 {},
             )
             return
+        # The series (R83) is resolved before `process`, because ComicInfo is
+        # built inside the synchronous packing thread and a model cannot be
+        # awaited there. The AI path branch of `_library_target` above has
+        # already been resolved, so the folder it filed the book under is
+        # readable here without a second call.
+        try:
+            series = await self._resolve_series(
+                job["candidate_id"], metadata
+            )
+        except LibraryPathError as exc:
+            # 「开了自动添加系列但 AI 不可用」. A first pack parks in 需干预 and
+            # can be retried; a repack must not replace a good CBZ, so it aborts
+            # and says why without a 需干预 card (a repack is not a work item).
+            logging.getLogger(__name__).warning(
+                "conversion_series_unavailable",
+                extra={
+                    **job_context,
+                    "error_code": exc.code,
+                    "error_message": exc.public_message,
+                },
+            )
+            if await asyncio.to_thread(
+                self._has_cbz_sync, job["candidate_id"]
+            ):
+                await asyncio.to_thread(
+                    self._mark_failed_sync,
+                    job["job_id"],
+                    exc.code,
+                    exc.public_message,
+                )
+            else:
+                await asyncio.to_thread(
+                    self._mark_waiting_sync,
+                    job["job_id"],
+                    CONVERSION_STATE_WAITING_PATH,
+                    exc.code,
+                    exc.public_message,
+                    {},
+                )
+            return
         image_quality = await self._settings.image_quality()
         processor = await self._build_processor(image_quality)
         try:
@@ -1117,7 +1259,7 @@ class ConversionService:
                 destination=library_target,
                 work_directory=work_path / "conversion",
                 comicinfo_builder=lambda page_count: self._build_comicinfo(
-                    metadata, title, page_count, image_quality
+                    metadata, title, page_count, image_quality, series
                 ),
                 library_path=library_path,
             )
@@ -1331,7 +1473,11 @@ class ConversionService:
 
     @staticmethod
     def _build_comicinfo(
-        metadata, title: str, page_count: int, image_quality: str | None = None
+        metadata,
+        title: str,
+        page_count: int,
+        image_quality: str | None = None,
+        series: str | None = None,
     ) -> bytes:
         rating_value = _metadata_lookup(metadata, "Rating")
         try:
@@ -1350,6 +1496,7 @@ class ConversionService:
             japanese_title=_metadata_lookup(metadata, "JapaneseTitle"),
             group=_metadata_lookup(metadata, "Group"),
             parody=_metadata_lookup(metadata, "Parody"),
+            series=series,
             character=_metadata_lookup(metadata, "Character"),
             web=_metadata_lookup(metadata, "Web"),
             scan_information=_scan_information(metadata, image_quality),

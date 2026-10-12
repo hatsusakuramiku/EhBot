@@ -9,10 +9,17 @@ from app.archive.service import ArchiveSettingsService
 from app.archive.vault import decrypt_password
 from app.config import Settings
 from app.conversion.convert import ConversionError
+from app.ai.models import (
+    AiAnswer,
+    AiModelChainEntry,
+    AiProvider,
+    AiProviderModel,
+)
 from app.conversion.service import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_PENDING,
     CONVERSION_STATE_WAITING_PASSWORD,
+    CONVERSION_STATE_WAITING_PATH,
     CONVERSION_STATE_WAITING_VOLUMES,
     ConversionService,
 )
@@ -836,7 +843,7 @@ async def test_packing_is_still_refused_before_a_decision_and_after_a_rejection(
         data_path=tmp_path / "data",
     )
 
-    for status in ("PENDING_REVIEW", "REJECTED", "NEEDS_INFO", "NEEDS_REVISION"):
+    for status in ("PENDING_REVIEW", "REJECTED", "NEEDS_INFO"):
         await set_candidate_status(database, status)
         with pytest.raises(ConversionError) as error:
             await service.enqueue_for_candidate(candidate_id)
@@ -946,3 +953,130 @@ async def test_a_failed_metadata_fetch_does_not_strand_a_downloaded_book(
     # Packed under the title it already had, rather than not packed at all.
     assert (tmp_path / "library" / "Archive Title.cbz").exists()
 
+
+
+# ---------------------------------------------------------------------------
+#  The Series field (R83)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedAi:
+    """The archive-path chain, scripted: one answer, no HTTP."""
+
+    def __init__(self, text: str) -> None:
+        provider = AiProvider(
+            provider_id=1, name="本地", code="openai", base_url="http://x"
+        )
+        self._chain = (
+            AiModelChainEntry(
+                position=0,
+                provider=provider,
+                model=AiProviderModel(model_id=1, provider_id=1, name="m0"),
+            ),
+        )
+        self.text = text
+        self.calls = 0
+
+    async def effective_chain(self, scope: str = "default"):
+        return self._chain
+
+    async def complete(self, messages, *, validate=None, stream=None) -> AiAnswer:
+        self.calls += 1
+        if validate is not None:
+            validate(self.text)
+        return AiAnswer(
+            text=self.text,
+            provider_id=1,
+            provider_name="本地",
+            model_name="m0",
+            key_id=1,
+        )
+
+
+def _comicinfo_of(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        return archive.read("ComicInfo.xml").decode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_stored_series_is_written_into_the_packed_comicinfo(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg", "02.jpg"))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "INSERT INTO metadata_values "
+            "(candidate_id, field_name, field_value, value_source, is_manual) "
+            "VALUES (1, 'Series', '系列名', 'OPERATOR', 1)"
+        )
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    xml = _comicinfo_of(tmp_path / "library" / "Archive Title.cbz")
+    assert "<Series>系列名</Series>" in xml
+    assert "<LocalizedSeries>系列名</LocalizedSeries>" in xml
+
+
+@pytest.mark.asyncio
+async def test_auto_series_parks_the_first_pack_without_ai(tmp_path: Path) -> None:
+    """The switch is on but nothing can answer: 需干预, not a silent omission."""
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    settings = ArchiveSettingsService(database, tmp_path / "data")
+    await settings.save_auto_series(True)
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+    )
+
+    job_id = await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    state, code = job_state(database, job_id)
+    assert state == CONVERSION_STATE_WAITING_PATH
+    assert code == "AI_SERIES_UNAVAILABLE"
+    assert not (tmp_path / "library" / "Archive Title.cbz").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_series_asks_the_model_and_caches_the_answer(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "ehbot.db")
+    archive_path = tmp_path / "work" / "downloads" / "comic.zip"
+    write_zip(archive_path, ("01.jpg",))
+    candidate_id = await seed_downloaded_archive(database, archive_path)
+    settings = ArchiveSettingsService(database, tmp_path / "data")
+    await settings.save_auto_series(True)
+    ai = _ScriptedAi('{"series": "AI 系列"}')
+    service = ConversionService(
+        database,
+        tmp_path / "work",
+        tmp_path / "library",
+        data_path=tmp_path / "data",
+        ai_service=ai,
+    )
+
+    await service.enqueue_for_candidate(candidate_id)
+    assert await service._process_one() is True  # noqa: SLF001
+
+    assert ai.calls == 1
+    xml = _comicinfo_of(tmp_path / "library" / "Archive Title.cbz")
+    assert "<Series>AI 系列</Series>" in xml
+    entries = await database.list_metadata(candidate_id)
+    series = [entry for entry in entries if entry.field_name == "Series"]
+    assert series and series[0].value_source == "AI"

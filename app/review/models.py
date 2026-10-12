@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 REVIEW_APPROVE = "APPROVE"
 REVIEW_REJECT = "REJECT"
-REVIEW_NEEDS_REVISION = "NEEDS_REVISION"
 REVIEW_REQUEUE = "REQUEUE"
 REVIEW_EDIT_METADATA = "EDIT_METADATA"
 REVIEW_LOCK_METADATA = "LOCK_METADATA"
@@ -13,7 +12,6 @@ REVIEW_LOCK_METADATA = "LOCK_METADATA"
 REVIEW_ACTIONS: tuple[str, ...] = (
     REVIEW_APPROVE,
     REVIEW_REJECT,
-    REVIEW_NEEDS_REVISION,
     REVIEW_REQUEUE,
     REVIEW_EDIT_METADATA,
     REVIEW_LOCK_METADATA,
@@ -41,7 +39,6 @@ STATUS_PENDING_REVIEW = "PENDING_REVIEW"
 STATUS_NEEDS_INFO = "NEEDS_INFO"
 STATUS_APPROVED = "APPROVED"
 STATUS_REJECTED = "REJECTED"
-STATUS_NEEDS_REVISION = "NEEDS_REVISION"
 STATUS_PROCESSING = "PROCESSING"
 STATUS_FAILED = "FAILED"
 
@@ -49,7 +46,6 @@ REVIEWABLE_STATUSES: frozenset[str] = frozenset(
     {
         STATUS_PENDING_REVIEW,
         STATUS_NEEDS_INFO,
-        STATUS_NEEDS_REVISION,
         STATUS_REJECTED,
     }
 )
@@ -65,7 +61,6 @@ REVIEWABLE_STATUSES: frozenset[str] = frozenset(
 REQUEUEABLE_STATUSES: frozenset[str] = frozenset(
     {
         STATUS_REJECTED,
-        STATUS_NEEDS_REVISION,
         STATUS_FAILED,
     }
 )
@@ -90,6 +85,10 @@ METADATA_FIELDS: tuple[str, ...] = (
     "Artist",
     "Group",
     "Parody",
+    #: The series a library groups this book's volumes under (R83). Written by
+    #: an operator edit or the 「自动添加系列」 model answer; independent of
+    #: `Parody`, which is only the fallback when this is empty.
+    "Series",
     "Character",
     "Language",
     "Category",
@@ -119,6 +118,7 @@ FIELD_LABELS: dict[str, str] = {
     "Artist": "作者",
     "Group": "社团",
     "Parody": "原作",
+    "Series": "系列",
     "Character": "角色",
     "Language": "语言",
     "Category": "分类",

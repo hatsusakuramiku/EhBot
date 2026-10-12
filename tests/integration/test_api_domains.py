@@ -141,7 +141,7 @@ class TestCandidateListing:
         # Refusing would only push the caller into tighter paging loops.
         assert payload["page_size"] == 200
 
-    def test_the_needs_info_tab_covers_both_revision_states(
+    def test_the_needs_info_tab_selects_what_it_counts(
         self, tmp_path: Path
     ) -> None:
         settings = make_settings(tmp_path)
@@ -150,7 +150,7 @@ class TestCandidateListing:
         with TestClient(app) as client:
             seed(
                 settings,
-                [(1, "NEEDS_INFO", "A"), (2, "NEEDS_REVISION", "B")],
+                [(1, "NEEDS_INFO", "A"), (2, "NEEDS_INFO", "B")],
             )
             log_in(client, settings)
             payload = client.get("/api/v1/candidates?tab=needs_info").json()
@@ -715,10 +715,10 @@ class TestMetadataLocks:
         assert response.json()["error"]["code"] == "METADATA_VALUE_NOT_FOUND"
 
 
-class TestNeedsRevision:
-    """R70: 要求修订 over JSON, on the service the page posts to."""
+class TestNeedsRevisionRemoved:
+    """R84: 「要求修订」 is gone -- over JSON as well as on the page."""
 
-    def test_a_revision_moves_the_status_and_records_the_reason(
+    def test_the_needs_revision_endpoint_no_longer_exists(
         self, tmp_path: Path
     ) -> None:
         settings = make_settings(tmp_path)
@@ -729,80 +729,11 @@ class TestNeedsRevision:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/needs-revision",
-                json={"reason": "封面不对"},
-                headers={CSRF_HEADER: csrf_token(client)},
-            )
-            status = client.get("/api/v1/works/1").json()["status"]["code"]
-
-        assert response.status_code == 200
-        assert response.json()["status"] == "NEEDS_REVISION"
-        assert status == "NEEDS_REVISION"
-
-    def test_a_reason_is_required_by_the_service(self, tmp_path: Path) -> None:
-        """「要求修订」without a reason is a request nobody can act on."""
-        settings = make_settings(tmp_path)
-        settings.data_path.mkdir(parents=True, exist_ok=True)
-        app = create_app(settings)
-        with TestClient(app) as client:
-            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
-            log_in(client, settings)
-            response = client.post(
-                "/api/v1/works/1/needs-revision",
-                json={},
-                headers={CSRF_HEADER: csrf_token(client)},
-            )
-
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "REVISION_REASON_REQUIRED"
-
-    def test_a_status_that_cannot_be_revised_is_refused(
-        self, tmp_path: Path
-    ) -> None:
-        """Which statuses may be revised is the service's decision, once."""
-        settings = make_settings(tmp_path)
-        settings.data_path.mkdir(parents=True, exist_ok=True)
-        app = create_app(settings)
-        with TestClient(app) as client:
-            seed(settings, [(1, "APPROVED", "Book 1")])
-            log_in(client, settings)
-            response = client.post(
-                "/api/v1/works/1/needs-revision",
-                json={"reason": "还没想好"},
-                headers={CSRF_HEADER: csrf_token(client)},
-            )
-
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "REVIEW_INVALID_TRANSITION"
-
-    def test_a_missing_work_is_a_404(self, tmp_path: Path) -> None:
-        settings = make_settings(tmp_path)
-        settings.data_path.mkdir(parents=True, exist_ok=True)
-        app = create_app(settings)
-        with TestClient(app) as client:
-            log_in(client, settings)
-            response = client.post(
-                "/api/v1/works/404/needs-revision",
                 json={"reason": "x"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
         assert response.status_code == 404
-
-    def test_it_needs_the_same_write_gates_as_any_other_action(
-        self, tmp_path: Path
-    ) -> None:
-        settings = make_settings(tmp_path)
-        settings.data_path.mkdir(parents=True, exist_ok=True)
-        app = create_app(settings)
-        with TestClient(app) as client:
-            seed(settings, [(1, "PENDING_REVIEW", "Book 1")])
-            log_in(client, settings)
-            response = client.post(
-                "/api/v1/works/1/needs-revision", json={"reason": "x"}
-            )
-
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "CSRF_INVALID"
 
 
 class TestConvert:

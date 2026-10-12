@@ -28,6 +28,7 @@ AI_PATH_SWITCHES: tuple[str, ...] = (
     "ai_fallback_to_rules",
     "ai_stream",
     "ai_default_include_current",
+    "auto_series",
 )
 
 #: The two numbers, written first: they are the fields that realistically fail
@@ -36,7 +37,7 @@ AI_PATH_NUMBERS: tuple[str, ...] = ("ai_batch_size", "ai_concurrency")
 
 
 def ai_path_submission(values: Mapping[str, Any]) -> dict[str, Any]:
-    """The 路径来源 radio, the prompt, the two numbers and the three switches.
+    """The 路径来源 radio, the prompt, the two numbers and the four switches.
 
     One submission because it is one form: the radio says whether the model or
     the template decides a path, and everything else only means anything under

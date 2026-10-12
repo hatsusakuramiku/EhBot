@@ -143,7 +143,6 @@ def work_actions(candidate, jobs, sources: frozenset[str]) -> dict[str, Any]:
     return {
         "approve": reviewable,
         "reject": reviewable,
-        "needs_revision": reviewable,
         # Requeueing is what un-parks a work the operator or a rule set aside.
         # Offered only where it changes something -- a PENDING_REVIEW candidate
         # is already in the queue it would move to -- and read from

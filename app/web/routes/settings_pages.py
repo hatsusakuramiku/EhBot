@@ -676,6 +676,19 @@ async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
     # The reading half is `app/settings/paths.py`'s, shared with
     # `PUT /api/v1/settings/paths/ai` (R80).
     ai_path = ai_path_submission(form_values(form))
+    # 「仅 AI 可用时才有效」 (R83 §3.7): refusing before any write keeps the rest
+    # of the form from being applied when the one field the operator asked for
+    # cannot be. The page greys the box out too, so this is the server's copy of
+    # the same rule rather than the only guard.
+    if bool(ai_path["auto_series"]):
+        reason = await _ai_series_refusal(request)
+        if reason is not None:
+            return await render_settings(
+                request,
+                SETTINGS_PATHS,
+                error=reason,
+                status_code=400,
+            )
     try:
         # Numbers first: they are the field that realistically fails validation,
         # so a rejected value aborts before the mode is changed.
@@ -690,6 +703,7 @@ async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
         await service.save_ai_default_include_current(
             bool(ai_path["ai_default_include_current"])
         )
+        await service.save_auto_series(bool(ai_path["auto_series"]))
     except ArchiveSettingsError as exc:
         return await render_settings(
             request,
@@ -698,6 +712,23 @@ async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
             status_code=400,
         )
     return settings_redirect(request, SETTINGS_PATHS)
+
+
+async def _ai_series_refusal(request: Request) -> str | None:
+    """Why 「自动添加系列」 cannot be switched on now, or None when it can.
+
+    The switch asks a model at pack time, so it needs both the AI master switch
+    and a non-empty archive-path chain. Checked here rather than in the archive
+    settings service because only this layer can see the AI services.
+    """
+    if not await deps.system_settings_service(request).ai_enabled():
+        return "AI 总开关关闭，无法开启「自动添加系列」"
+    ai_service = deps.optional_service(request, "ai_service")
+    if ai_service is None:
+        return "还没有配置 AI 供应商，无法开启「自动添加系列」"
+    if not await ai_service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH):
+        return "还没有可用的模型链，无法开启「自动添加系列」"
+    return None
 
 
 @router.post("/archive-settings/paths/ai/prompt-default")

@@ -265,6 +265,30 @@ def query_href(request: Request, **params: object) -> str:
     return f"{url.path}?{url.query}" if url.query else url.path
 
 
+def page_size_hrefs(
+    request: Request, sizes: tuple[int, ...], *, default: int
+) -> dict[int, str]:
+    """One 每页条数 link per size, each back at page 1 (R82).
+
+    Changing how many rows a page holds makes the current page number
+    meaningless -- page 7 of 20-row pages is not page 7 of 100-row ones -- so
+    every link drops it. The default size is linked *without* the parameter, so
+    a URL that never mentioned `page_size` stays clean when the operator picks
+    the default back.
+    """
+    hrefs: dict[int, str] = {}
+    for size in sizes:
+        if size == default:
+            url = request.url.remove_query_params(["page", "page_size"])
+            hrefs[size] = f"{url.path}?{url.query}" if url.query else url.path
+        else:
+            url = request.url.remove_query_params("page").include_query_params(
+                page_size=size
+            )
+            hrefs[size] = f"{url.path}?{url.query}" if url.query else url.path
+    return hrefs
+
+
 def search_href(request: Request, search: str, *, base: str | None = None) -> str:
     """This URL with the search box replaced and the page cursor dropped.
 

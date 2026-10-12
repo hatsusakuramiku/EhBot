@@ -25,7 +25,12 @@ from app.api.candidates import (
     candidate_facet_selection,
     candidate_tab_counts,
 )
-from app.api.contracts import ApiError, PageParams
+from app.api.contracts import (
+    DEFAULT_PAGE_SIZE,
+    PAGE_SIZE_OPTIONS,
+    ApiError,
+    PageParams,
+)
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.api.serializers import candidate_summary
 from app.api.status import candidate_tab_view
@@ -244,6 +249,13 @@ async def _render_candidates(
             "total": total,
             "page": page.page,
             "page_size": page.page_size,
+            # R82: the 每页条数 control. Links rather than a scripted
+            # select, so it survives JavaScript being off and a shared URL
+            # reopens the same window.
+            "page_size_options": PAGE_SIZE_OPTIONS,
+            "page_size_hrefs": deps.page_size_hrefs(
+                request, PAGE_SIZE_OPTIONS, default=DEFAULT_PAGE_SIZE
+            ),
             # Paging and the view switch are links rather than scripted
             # buttons, so both survive JavaScript being off and a shared URL
             # reopens exactly what the sender was looking at.
@@ -598,32 +610,6 @@ async def reject_candidate(
     operator = request.session.get("username", "admin")
     try:
         await deps.review_service(request).reject_candidate(candidate_id, operator)
-    except ReviewError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
-
-
-@router.post("/candidates/{candidate_id}/needs-revision")
-async def needs_revision_candidate(
-    request: Request,
-    candidate_id: int,
-    csrf_token: str = Form(),
-    reason: str = Form(""),
-):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    operator = request.session.get("username", "admin")
-    try:
-        await deps.review_service(request).request_revision(
-            candidate_id, operator, reason
-        )
     except ReviewError as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message

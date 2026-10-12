@@ -35,7 +35,7 @@ from app.downloads.models import (
 )
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
-from app.review.models import METADATA_FIELDS, STATUS_NEEDS_REVISION
+from app.review.models import METADATA_FIELDS
 from app.review.service import ReviewError, ReviewService
 
 
@@ -751,41 +751,6 @@ async def requeue_work(request: Request, candidate_id: int) -> dict:
         raise ApiError(exc.code, exc.public_message) from exc
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
     return {"candidate_id": candidate_id, "status": "PENDING_REVIEW"}
-
-
-@router.post("/works/{candidate_id}/needs-revision")
-async def needs_revision_work(request: Request, candidate_id: int) -> dict:
-    """Ask for a revision on a work.
-
-    Runs through `ReviewService.request_revision`, the coroutine the work detail
-    page posts to, so the JSON layer cannot move a work the page would have
-    refused: which statuses may be revised is the service's decision, once.
-
-    `reason` is the sentence that lands in the audit row. The service requires
-    it -- 「要求修订」without a reason is a request nobody can act on -- so an
-    empty body is a 400 `REVISION_REASON_REQUIRED` from the same place the page
-    gets it, rather than a second check here.
-    """
-    operator = await _guard(request)
-    payload = await _body(request)
-    reason = str(payload.get("reason") or "").strip()
-    database = deps.database(request)
-    # Checked here rather than left to the service: a service that has no row to
-    # read reports it as an invalid transition (which is true of the transition,
-    # not of the request), and the API's own convention -- the metadata route
-    # beside this one -- is that a missing row is a 404. The interface needs the
-    # difference to choose between showing an error and refreshing the list.
-    if await database.get_candidate(candidate_id) is None:
-        raise ApiError(
-            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
-        )
-    service = ReviewService(database)
-    try:
-        await service.request_revision(candidate_id, operator, reason)
-    except ReviewError as exc:
-        raise ApiError(exc.code, exc.public_message) from exc
-    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    return {"candidate_id": candidate_id, "status": STATUS_NEEDS_REVISION}
 
 
 @router.post("/works/{candidate_id}/convert")

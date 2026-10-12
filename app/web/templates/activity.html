@@ -40,7 +40,12 @@
     </td>
     {% endif %}
     <td data-label="任务">
-      <span class="ui-table-primary">#{{ job.job_id }}</span>
+      {#- R81: the card is named by the work, not by the job id. The id is still
+          on the row, demoted to the secondary line -- it is what the operator
+          quotes when a job is the thing being discussed, and it never changes,
+          where the name can be corrected. -#}
+      <span class="ui-table-primary">{{ job.display_title }}</span>
+      <span class="ui-table-secondary">任务 #{{ job.job_id }}</span>
       <span data-field="state">{{ ui.badge(job.state) }}</span>
       {% if job.attention %}<span data-field="attention">{{ ui.badge(job.attention) }}</span>{% endif %}
       {% if job.note %}<span data-field="note">{{ ui.badge(job.note) }}</span>{% endif %}
@@ -59,6 +64,8 @@
       <span class="ui-table-secondary" data-field="error">{{ job.error_message }}</span>
       {% endif %}
     </td>
+    {#- The link to the work keeps the candidate id: the row is already named by
+        the work, and the id is the stable handle an operator quotes (R81). -#}
     <td data-label="候选"><a href="{{ job.href }}">候选 #{{ job.candidate_id }}</a></td>
     <td data-label="来源">{{ job.provider.label }}</td>
     <td data-label="优先级" data-numeric="true" data-field="priority">{{ job.priority }}</td>

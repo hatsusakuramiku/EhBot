@@ -419,6 +419,10 @@ async def _paths_section(request: Request) -> dict[str, Any]:
         # template can render the radio set, the prompt and the toggles from the
         # same values the validator will accept.
         "ai_enabled": ai_enabled,
+        # 「自动添加系列」 only means anything with the master switch on and a
+        # chain to ask (R83). The template greys the box out on this, and the
+        # routes refuse enabling it when it is False.
+        "ai_usable": ai_enabled and bool(chain),
         "path_source": await service.path_source(),
         "path_sources": [
             {
@@ -440,6 +444,7 @@ async def _paths_section(request: Request) -> dict[str, Any]:
             "concurrency": await service.ai_concurrency(),
             "stream": await service.ai_stream(),
             "default_include_current": await service.ai_default_include_current(),
+            "auto_series": await service.auto_series(),
             "cache_count": await database.ai_path_suggestion_count(),
             # Which models this feature asks: the global default, or a list of
             # its own. `chain` below is the *effective* list (what a pack will
@@ -1703,6 +1708,22 @@ async def put_ai_path_settings(request: Request) -> dict:
     payload = await _json_body(request)
     values = paths_form.ai_path_submission(payload)
     service = deps.archive_settings_service(request)
+    if bool(values["auto_series"]):
+        # Same rule as the page: 「自动添加系列」 needs the master switch on and
+        # a chain to ask. Refused before any write so a rejected call changes
+        # nothing at all.
+        if not await deps.system_settings_service(request).ai_enabled():
+            raise ApiError(
+                "SERIES_AI_UNAVAILABLE", "AI 总开关关闭，无法开启「自动添加系列」"
+            )
+        ai_service = deps.optional_service(request, "ai_service")
+        if ai_service is None or not await ai_service.effective_chain(
+            CHAIN_SCOPE_ARCHIVE_PATH
+        ):
+            raise ApiError(
+                "SERIES_AI_UNAVAILABLE",
+                "还没有可用的模型链，无法开启「自动添加系列」",
+            )
     try:
         await service.save_ai_batch_size(values["ai_batch_size"])
         await service.save_ai_concurrency(values["ai_concurrency"])
@@ -1715,6 +1736,7 @@ async def put_ai_path_settings(request: Request) -> dict:
         await service.save_ai_default_include_current(
             bool(values["ai_default_include_current"])
         )
+        await service.save_auto_series(bool(values["auto_series"]))
     except ArchiveSettingsError as exc:
         raise ApiError(str(exc.code), exc.public_message) from exc
     return await settings_snapshot(request, "paths")

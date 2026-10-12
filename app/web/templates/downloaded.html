@@ -264,7 +264,8 @@
       </div>
     </form>
 
-    {{ ui.pagination(page, page_size, total, prev_href=prev_href, next_href=next_href) }}
+    {{ ui.pagination(page, page_size, total, prev_href=prev_href, next_href=next_href,
+                     size_options=page_size_options, size_hrefs=page_size_hrefs) }}
     {% else %}
     {% if search %}
     {{ ui.empty_state("没有符合条件的作品", "换个关键词，或清除搜索条件后重试") }}

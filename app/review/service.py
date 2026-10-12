@@ -7,11 +7,9 @@ from app.db.database import Database
 from app.review.models import (
     METADATA_FIELDS,
     REVIEW_APPROVE,
-    REVIEW_NEEDS_REVISION,
     REVIEW_REJECT,
     REVIEW_REQUEUE,
     STATUS_APPROVED,
-    STATUS_NEEDS_REVISION,
     STATUS_PENDING_REVIEW,
     STATUS_REJECTED,
     CandidateReviewSummary,
@@ -61,23 +59,6 @@ class ReviewService:
             REVIEW_REJECT,
             STATUS_REJECTED,
             note,
-        )
-
-    async def request_revision(
-        self, candidate_id: int, operator_name: str, reason: str
-    ) -> None:
-        reason = reason.strip()
-        if not reason:
-            raise ReviewError(
-                "REVISION_REASON_REQUIRED",
-                "Revision reason is required",
-            )
-        await self._apply_status_transition(
-            candidate_id,
-            operator_name,
-            REVIEW_NEEDS_REVISION,
-            STATUS_NEEDS_REVISION,
-            reason,
         )
 
     async def requeue_candidate(

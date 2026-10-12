@@ -40,14 +40,21 @@ def build_comicinfo_xml(
     japanese_title: str | None = None,
     group: str | None = None,
     parody: str | None = None,
+    series: str | None = None,
     character: str | None = None,
     web: str | None = None,
     scan_information: str | None = None,
 ) -> bytes:
     root = Element("ComicInfo")
     SubElement(root, "Title").text = title
-    SubElement(root, "Series").text = parody or title
-    SubElement(root, "LocalizedSeries").text = japanese_title or title
+    # `<Series>` is the series a library groups volumes under. The stored `Series`
+    # metadata wins, then an AI-resolved name (R83); with neither, the historical
+    # `parody or title` fallback is kept so an upgrade changes no existing book.
+    resolved_series = series or parody or title
+    SubElement(root, "Series").text = resolved_series
+    # A resolved series goes to the localized copy too; without one the previous
+    # `japanese_title or title` fallback stands.
+    SubElement(root, "LocalizedSeries").text = series or japanese_title or title
     # Publisher carries the circle/group when known, per the plan's mapping.
     SubElement(root, "Publisher").text = group or "EhBot"
     if artist:

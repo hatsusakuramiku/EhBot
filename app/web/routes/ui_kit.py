@@ -25,7 +25,6 @@ CANDIDATE_STATES: tuple[str, ...] = (
     "DISCOVERED",
     "PENDING_REVIEW",
     "NEEDS_INFO",
-    "NEEDS_REVISION",
     "APPROVED",
     "PROCESSING",
     "DOWNLOADED",

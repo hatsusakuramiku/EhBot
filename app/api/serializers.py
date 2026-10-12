@@ -365,6 +365,11 @@ def job_summary(job: Any) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
         "candidate_id": job.candidate_id,
+        # The work's name, resolved the same way every other list resolves it
+        # (R81). `title` is `None` for a candidate still in 待补充; the row shows
+        # `display_title`, which falls back to `#<gid>` / `候选 #<id>`.
+        "title": job.title,
+        "display_title": job.display_title,
         "provider": {
             "code": job.provider,
             "label": provider_label(job.provider),

@@ -28,7 +28,12 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from app.api.contracts import ApiError, PageParams
+from app.api.contracts import (
+    DEFAULT_PAGE_SIZE,
+    PAGE_SIZE_OPTIONS,
+    ApiError,
+    PageParams,
+)
 from app.api.downloaded import (
     DOWNLOADED_BATCH_ACTIONS,
     DOWNLOADED_SORT_OPTIONS,
@@ -168,6 +173,13 @@ async def _render_downloaded(
             "total": snapshot["total"],
             "page": page.page,
             "page_size": page.page_size,
+            # R82: the 每页条数 control. Links rather than a scripted
+            # select, so it survives JavaScript being off and a shared URL
+            # reopens the same window.
+            "page_size_options": PAGE_SIZE_OPTIONS,
+            "page_size_hrefs": deps.page_size_hrefs(
+                request, PAGE_SIZE_OPTIONS, default=DEFAULT_PAGE_SIZE
+            ),
             "prev_href": deps.query_href(request, page=page.page - 1),
             "next_href": deps.query_href(request, page=page.page + 1),
             "grid_href": deps.query_href(request, view="grid"),

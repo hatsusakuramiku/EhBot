@@ -78,7 +78,6 @@ CANDIDATE_STATUS: dict[str, StatusView] = {
     "DISCOVERED": _view("DISCOVERED", "已发现", TONE_MUTED),
     "PENDING_REVIEW": _view("PENDING_REVIEW", "待审核", TONE_WAITING),
     "NEEDS_INFO": _view("NEEDS_INFO", "待补充", TONE_WAITING),
-    "NEEDS_REVISION": _view("NEEDS_REVISION", "需要修订", TONE_WAITING),
     "APPROVED": _view("APPROVED", "已通过", TONE_ACTIVE),
     "PROCESSING": _view("PROCESSING", "处理中", TONE_ACTIVE, live=True),
     "DOWNLOADED": _view("DOWNLOADED", "已下载", TONE_SUCCESS),
@@ -110,11 +109,13 @@ CANDIDATE_TAB_STATUS: dict[str, StatusView] = {
 #: the writers actually insert, not a parallel vocabulary: EXHENTAI from
 #: `app/exhentai`, TELEGRAPH / EH_TORRENT from the two `ScanInformation`
 #: writers, OPERATOR from `set_manual_metadata`, and FILENAME / INFERRED /
-#: TELEGRAM / MANUAL_ADD from the message parser and the manual-add form.
+#: TELEGRAM / MANUAL_ADD from the message parser and the manual-add form. AI is
+#: written by the 「自动添加系列」 answer (R83).
 METADATA_SOURCE_STATUS: dict[str, StatusView] = {
     "EXHENTAI": _view("EXHENTAI", "画廊数据", TONE_SUCCESS),
     "OPERATOR": _view("OPERATOR", "手动编辑", TONE_ACTIVE),
     "MANUAL_ADD": _view("MANUAL_ADD", "手动添加", TONE_ACTIVE),
+    "AI": _view("AI", "AI 解析", TONE_NEUTRAL),
     "TELEGRAM": _view("TELEGRAM", "消息标题", TONE_NEUTRAL),
     "TELEGRAPH": _view("TELEGRAPH", "预览页", TONE_NEUTRAL),
     "EH_TORRENT": _view("EH_TORRENT", "种子内容", TONE_NEUTRAL),
@@ -353,12 +354,11 @@ SYSTEM_HEALTH_STATUS: dict[str, StatusView] = {
 #: Audit-trail verbs (`review_actions.action`), for the timeline. The codes are
 #: exactly what the writers insert -- `REVIEW_ACTIONS` plus the two nobody types
 #: -- rather than a parallel list, so an entry can never render as a raw
-#: `NEEDS_REVISION` beside the same word spelled out. A rejection is `muted` for
-#: the same reason `REJECTED` is: it is a decision, not a fault.
+#: A rejection is `muted` for the same reason `REJECTED` is: it is a decision,
+#: not a fault.
 REVIEW_ACTION_STATUS: dict[str, StatusView] = {
     "APPROVE": _view("APPROVE", "通过", TONE_SUCCESS),
     "REJECT": _view("REJECT", "驳回", TONE_MUTED),
-    "NEEDS_REVISION": _view("NEEDS_REVISION", "要求修订", TONE_WAITING),
     "REQUEUE": _view("REQUEUE", "重新排队", TONE_WAITING),
     "EDIT_METADATA": _view("EDIT_METADATA", "编辑元数据", TONE_NEUTRAL),
     "LOCK_METADATA": _view("LOCK_METADATA", "锁定字段", TONE_NEUTRAL),

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import time
 
+from app.candidates.models import display_title
+
 
 class DownloadState(str, Enum):
     PENDING = "PENDING"
@@ -357,6 +359,24 @@ class DownloadJobSummary:
     #: Queue position. Both workers claim `ORDER BY priority, id`, so this is
     #: the only thing an operator can change to reorder pending work.
     priority: int = DEFAULT_JOB_PRIORITY
+    #: The work's name, resolved by the same `title_subquery()` every other list
+    #: uses (R81). `None` means the candidate has no title *yet* -- a real state
+    #: (待补充), not an empty string -- and `display_title` below carries the
+    #: fallback the queue row shows.
+    title: str | None = None
+    #: The gallery id, read alongside the title so `display_title` can fall back
+    #: to `#<gid>` without a second query.
+    ex_gid: int | None = None
+
+    @property
+    def display_title(self) -> str:
+        """The work's name for a queue row (R81).
+
+        Shares `app.candidates.models.display_title` rather than repeating the
+        `#<gid>` / `候选 #<id>` fallback: the queue is one more place a work is
+        named, and a second copy is how the two would come to disagree.
+        """
+        return display_title(self.title, self.ex_gid, self.candidate_id)
 
     @property
     def is_retryable(self) -> bool:

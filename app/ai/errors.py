@@ -62,6 +62,14 @@ AI_PATH_UNAVAILABLE = "AI_PATH_UNAVAILABLE"
 #: asked for. Like `AI_PATH_INVALID`, this walks the chain: a model that answers
 #: prose has not decided anything, and the next one gets the question.
 AI_CANDIDATE_INVALID = "AI_CANDIDATE_INVALID"
+#: A series answer that is not the `{"series": str}` object we asked for (R83).
+#: Distinct from `AI_PATH_INVALID` so the pack-time log and the parked job say
+#: which question the model failed, not just that one did.
+AI_SERIES_INVALID = "AI_SERIES_INVALID"
+#: 「自动添加系列」 is on but no model can answer: the AI master switch is off, no
+#: chain is configured, or every model in the chain failed. A packing job parks
+#: in 需干预 (first pack) or aborts (repack) -- it never silently drops the field.
+AI_SERIES_UNAVAILABLE = "AI_SERIES_UNAVAILABLE"
 
 
 class AiError(ValueError):
@@ -91,6 +99,8 @@ __all__ = [
     "AI_PATH_MISSING",
     "AI_PATH_UNAVAILABLE",
     "AI_PROVIDER_DISABLED",
+    "AI_SERIES_INVALID",
+    "AI_SERIES_UNAVAILABLE",
     "AI_PROVIDER_INVALID",
     "AI_PROVIDER_NAME_TAKEN",
     "AI_PROVIDER_NOT_FOUND",

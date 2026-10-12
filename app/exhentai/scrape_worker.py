@@ -62,7 +62,7 @@ RETRY_BACKOFF_SECONDS = (30.0, 120.0, 600.0)
 #: Statuses worth reading a gallery for. A candidate the operator approved,
 #: rejected or that is already being packed has moved past the question the
 #: scrape answers, and 待补充 is where an unread candidate waits.
-SCRAPE_STATUSES = ("NEEDS_INFO", "PENDING_REVIEW", "NEEDS_REVISION")
+SCRAPE_STATUSES = ("NEEDS_INFO", "PENDING_REVIEW")
 
 
 class MetadataScrapeWorker:

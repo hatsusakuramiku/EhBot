@@ -417,9 +417,6 @@
       {{ post_button(base ~ "/approve", "通过并下载", csrf_token, variant="primary") }}
       {% endif %}
     {% endif %}
-    {% if work.actions.needs_revision %}
-    {{ post_button(base ~ "/needs-revision", "要求修订", csrf_token) }}
-    {% endif %}
     {% if work.actions.reject %}
     {#- Reversible from the 已驳回 queue, but it is the action that takes a book
         out of the pipeline, and on this page it sits beside 通过并下载. -#}

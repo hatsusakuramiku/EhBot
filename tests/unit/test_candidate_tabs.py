@@ -41,7 +41,6 @@ class TestTabs:
             "total": 9,
             "pending_review": 2,
             "needs_info": 3,
-            "needs_revision": 1,
             "approved": 1,
             "processing": 1,
             "downloaded": 0,
@@ -49,9 +48,9 @@ class TestTabs:
             "failed": 0,
         }
         tallies = candidate_tab_counts(counts)
-        # 「待补充」 covers both revision states, 「已通过」 everything already let
-        # through: the badge has to match the list, which selects the same sets.
-        assert tallies["needs_info"] == 4
+        # 「已通过」 covers everything already let through: the badge has to match
+        # the list, which selects the same sets.
+        assert tallies["needs_info"] == 3
         assert tallies["approved"] == 2
         assert tallies["pending"] == 2
         assert tallies["failed"] == 0

@@ -2332,6 +2332,65 @@ class TestAIPathsSettings:
         assert stored["ai_fallback_to_rules"] == "1"
         assert stored["ai_default_include_current"] == "1"
 
+    def test_auto_series_is_refused_without_a_model_chain(
+        self, tmp_path: Path
+    ) -> None:
+        """「仅 AI 可用时才有效」 is enforced on the server, not just greyed out."""
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        with TestClient(create_app(settings)) as client:
+            _authenticate(client, settings)
+            response = client.post(
+                "/archive-settings/paths/ai",
+                data={
+                    "csrf_token": _csrf(client, "paths"),
+                    **_paths_ai_data(auto_series="on"),
+                },
+                follow_redirects=False,
+            )
+        assert response.status_code == 400
+        assert "自动添加系列" in response.text
+        stored = asyncio.run(database.archive_settings())
+        assert stored.get("auto_series", "0") == "0"
+
+    def test_auto_series_saves_once_a_chain_exists(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        database = Database(settings.data_path / "ehbot.db")
+        asyncio.run(database.initialize())
+        with TestClient(_ai_app(settings, _AiTransport())) as client:
+            _authenticate(client, settings)
+            ai_csrf = _csrf(client, "ai")
+            _add_provider(client, ai_csrf)
+            client.post(
+                "/settings/ai/providers/1/keys",
+                data={"csrf_token": ai_csrf, "api_keys": "k"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/providers/1/models",
+                data={"csrf_token": ai_csrf, "model_name": "big"},
+                follow_redirects=False,
+            )
+            client.post(
+                "/settings/ai/chain/primary",
+                data={"csrf_token": ai_csrf, "model_id": "1"},
+                follow_redirects=False,
+            )
+            response = client.post(
+                "/archive-settings/paths/ai",
+                data={
+                    "csrf_token": _csrf(client, "paths"),
+                    **_paths_ai_data(auto_series="on"),
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            page = client.get("/settings/paths")
+        assert page.context["ai"]["auto_series"] is True
+        stored = asyncio.run(database.archive_settings())
+        assert stored["auto_series"] == "1"
+
     def test_the_model_source_panel_and_its_editor_render(
         self, tmp_path: Path
     ) -> None:

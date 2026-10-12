@@ -209,7 +209,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
         }
 
-    assert migration_count == 24
+    assert migration_count == 25
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns
@@ -698,6 +698,67 @@ async def test_migration_024_backfills_a_missing_action_to_approve(
 
     rule = (await database.list_auto_approval_rules())[0]
     assert rule.action == "APPROVE"
+
+
+@pytest.mark.asyncio
+async def test_migration_025_moves_needs_revision_rows_and_clears_history(
+    tmp_path: Path,
+) -> None:
+    """R84: the retired state is repaired, and its timeline verb is erased.
+
+    The two halves are separate facts: a parked work must survive the upgrade
+    (as 待补充), while the audit rows for a verb the interface no longer has must
+    not be left behind to render as a raw code.
+    """
+    path = tmp_path / "ehbot.db"
+    database = Database(path)
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        parked = int(
+            connection.execute(
+                "INSERT INTO candidates (status) VALUES ('NEEDS_REVISION')"
+            ).lastrowid
+        )
+        info = int(
+            connection.execute(
+                "INSERT INTO candidates (status) VALUES ('NEEDS_INFO')"
+            ).lastrowid
+        )
+        connection.execute(
+            "INSERT INTO review_actions (candidate_id, action, operator_name) "
+            "VALUES (?, 'NEEDS_REVISION', 'admin')",
+            (parked,),
+        )
+        connection.execute(
+            "INSERT INTO review_actions (candidate_id, action, operator_name) "
+            "VALUES (?, 'APPROVE', 'admin')",
+            (info,),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 25")
+
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        status = connection.execute(
+            "SELECT status FROM candidates WHERE id = ?", (parked,)
+        ).fetchone()[0]
+        actions = {
+            row[0] for row in connection.execute("SELECT action FROM review_actions")
+        }
+        # Idempotent: replaying the file changes nothing a second time.
+        connection.execute("DELETE FROM schema_migrations WHERE version = 25")
+
+    await database.initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM candidates WHERE status = 'NEEDS_REVISION'"
+        ).fetchone()[0] == 0
+
+    assert status == "NEEDS_INFO"
+    assert "NEEDS_REVISION" not in actions
+    assert "APPROVE" in actions
 
 
 # ------------------------------------------------- 按画廊 ID 去重 (R59)

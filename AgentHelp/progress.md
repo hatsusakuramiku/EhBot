@@ -6701,3 +6701,118 @@ AI 子面板，牵涉模型链，与 `ai` 区一起做）、`/paths/template/pre
 每一行都写了「为什么不做」，免得后面读成遗漏。
 
 **文档同步**：本条目；`PHASES.md` 加 R80 行。
+
+---
+
+## R81 · 2026-10-11 · 活动页卡片标题改用作品名
+
+**需求。** 运营者：活动页面各卡片标题还是 ID，也要改成标题。
+
+**设计。** 复用 R62 的唯一真源，不另立一份：
+
+- `DownloadJobSummary` 增 `title`/`ex_gid` 与 `display_title` 属性（委托
+  `app.candidates.models.display_title`）；
+- `_fetch_jobs()` 的 SELECT 加 `title_subquery("download_jobs.candidate_id")` 与 `ex_gid` 子查询；
+- `job_summary()` 增 `title` / `display_title`；
+- `activity.html` 行与卡片主行改作品名，`任务 #<id>` 降副行，候选链接仍指 `/works/<id>`。
+
+无标题的候选照旧显示 `#<gid>` / `候选 #<编号>`（不写库、不空白）。
+
+**测试。** `tests/integration/test_activity_web.py` +2：卡片按作品名命名；无标题回落到候选编号。
+
+**验证**：`test_activity_web.py` 27 条 0 failed。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R81 行；`README.md` 提一句活动页标题。
+
+---
+
+## R82 · 2026-10-11 · 候选与已下载：每页条数可选
+
+**需求。** 候选与下载页的每页作品数不要固定 50，可自定义。
+
+**设计。** 链接式选择器（写进 URL、无需 JS、可分享/收藏，与排序控件同一套路）：
+
+- `app/api/contracts.py` 增 `PAGE_SIZE_OPTIONS = (20, 50, 100, 200)`；上限仍是
+  `MAX_PAGE_SIZE = 200`（有界扫描，不放开到无上限）；
+- `app/web/deps.py` 增 `page_size_hrefs()`：换条数时把 `page` 归零（旧页码失去意义）；
+- `ui.pagination` 宏增 `size_options` / `size_hrefs`，渲染「每页」一行；当前值禁用、其余为链接；
+- 候选页与已下载页把选项与链接传进宏。API 侧本来就支持 `?page_size=`，不动。
+
+**测试。** `tests/integration/test_candidates_web.py` +2、`tests/integration/test_downloaded_web.py` +2；
+两文件全量回归绿。
+
+**验证**：`test_candidates_web.py` + `test_downloaded_web.py` 全绿。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R82 行；`README.md` / `docs/USAGE.md` / `AgentHelp/EHBot.md` 各提一句。
+
+---
+
+## R83 · 2026-10-11 · 打包系列元数据（Series / 自动添加系列）
+
+**需求。** 打包时元数据里加系列（Series）：路径设置页加「自动添加系列」开关，仅 AI 可用时才有效。
+元数据有系列相关字段就用它；没有就交给 AI——用 AI 设定的归档路径时，打包路径所在的文件夹就是系列名；
+不是 AI 路径但归档配置里配了 AI 且已开启，就通过 AI 解析系列；未开启就不加。开启了但 AI 最终不可用
+则打包失败。重新打包同样处理。
+
+**设计。**
+
+- 新元数据字段 `Series`（`app/review/models.py` 的 `METADATA_FIELDS` / `FIELD_LABELS`）；表对字段名
+  无约束，故无迁移。详情页抽屉与字段编辑、锁定、自动规则、搜索自动获得该字段。
+- `build_comicinfo_xml(series=...)`：有系列时 `<Series>` 与 `<LocalizedSeries>` 都写它；没有时保留
+  今天的行为（`<Series> = parody or title`、`<LocalizedSeries> = japanese_title or title`），升级不改旧书。
+- 打包前（`process()` 之前，因为 ComicInfo 在同步线程里构建）按优先级解析：
+  1. 元数据 `Series`（人工/抓取/此前 AI）→ 直接用，与开关无关；
+  2. `path_source == ai` 且缓存建议有目录 → 取该文件夹名（不再多问一次模型）；
+  3. 「自动添加系列」开 且 有可用链 → 新 `app/ai/series.py` 问模型（复用路径决策那条链与 prompt
+     构造），答案写回 `metadata_values`（来源 `AI`），重新打包因此免费；
+  4. 开关关 / 无 AI → 不加，回落 `parody or title`。
+- 「开了但 AI 不可用」：**首次打包** → 任务停 `CONVERSION_WAITING_PATH` + `AI_SERIES_UNAVAILABLE`
+  （需干预，可重试）；**重新打包** → 入队前能判定（总开关关 / 没配链）、且无 `Series`、且已有 CBZ 时
+  直接拒绝不建任务；入队后才失败（供应商临时不可用）则中止本次任务标 `CONVERSION_FAILED`、保留旧 CBZ、
+  不写需干预。
+- 设置：`archive_settings.auto_series`（默认关）进 `app/settings/paths.py` 的 `AI_PATH_SWITCHES`，
+  网页 `POST /archive-settings/paths/ai` 与 `PUT /api/v1/settings/paths/ai` 均保存；未配置模型链或总开关
+  关闭时页面置灰、服务端拒绝开启。`METADATA_SOURCE_RANK_SQL` 加 `AI`（置于 MANUAL_ADD 与 EH_TORRENT 之间），
+  `app/api/status.py` 加「AI 解析」标签。
+
+**测试。** 新 `tests/unit/test_ai_series.py`（23 条）：解析、服务、优先级五分支、入队前拒绝、
+ComicInfo 回落。`test_archive_workflow.py` +3（元数据系列入库、无 AI 首次打包进需干预、模型答案写回并缓存）。
+`test_settings_web.py` +2（无链拒绝、有链保存）、`test_settings_write_api.py` +1（API 拒绝）、
+`test_review_models.py` 更新标签表。
+
+**验证**：新文件与归档 / 设置 / 网页相关文件全绿（见 R84 条目汇总的整库基线）。无迁移。
+
+**文档同步**：本条目；`PHASES.md` 加 R83 行；`README.md`（主要能力）、`docs/USAGE.md`（AI 路径一节）、
+`AgentHelp/EHBot.md` §4.6 表与语义清单。
+
+---
+
+## R84 · 2026-10-11 · 彻底移除「要求修订」（含历史审计）
+
+**需求。** 运营者：完全移除审核的「要求修订」功能，一点都不要留；历史的要求修订也不要保留。
+
+**设计。** 删掉每一处触点：
+
+- 领域模型 `app/review/models.py`：`REVIEW_NEEDS_REVISION` / `STATUS_NEEDS_REVISION` 常量、
+  `REVIEW_ACTIONS` 成员、`REVIEWABLE_STATUSES` / `REQUEUEABLE_STATUSES` 成员；
+- 服务 `app/review/service.py`：`request_revision()`（含 `REVISION_REASON_REQUIRED`）；
+- JSON API `app/api/actions.py` 的 `POST /works/{id}/needs-revision`（R70 刚加，**契约破坏**：
+  移动端须删除该调用）、`app/api/works.py` 的 `actions.needs_revision` 标志；
+- 状态词表 `app/api/status.py` 两条视图、`app/db/database.py` 的计数键与「待补充」查询；
+- 网页路由 `app/web/routes/candidates.py` 与 `work_detail.html` 的按钮、`ui_kit.py` 示例状态；
+- 消费方 `app/exhentai/scrape_worker.py` 抓取状态集、`app/conversion/service.py` 的禁止打包状态集、
+  `app/api/candidates.py` 的 tab 映射、`app/downloads/service.py` 注释。
+
+**迁移 `025_remove_needs_revision.sql`**（本项目第一条往回改数据的迁移，纯数据、幂等）：
+`UPDATE candidates SET status='NEEDS_INFO' WHERE status='NEEDS_REVISION'`；
+`DELETE FROM review_actions WHERE action='NEEDS_REVISION'`（连历史一起清）。`candidates.status` 无 CHECK
+约束，无需重建表。
+
+**测试。** `test_database.py` +1（改判 + 清审计 + 幂等重放）、`test_api_domains.py` 用「端点已消失(404)」
+替换原 `TestNeedsRevision`（-5 / +1）；`test_work_detail.py`、`test_candidate_tabs.py`、
+`test_work_detail_web.py`、`test_archive_workflow.py` 相应更新。
+
+**验证**：整库 `pytest tests`（见下方基线）全绿。
+
+**文档同步**：本条目；`PHASES.md` 加 R84 行；`README.md`、`docs/USAGE.md`（明写端点契约破坏）、
+`AgentHelp/EHBot.md` §4.4。

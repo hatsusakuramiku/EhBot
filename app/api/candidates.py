@@ -6,8 +6,8 @@ fixed 100 rows per status and had no way to reach row 101.
 
 Tabs are named here rather than in the template because the same grouping backs
 both the tab bar and the count badges. A tab that maps to several statuses (for
-example「待补充」covering NEEDS_INFO and NEEDS_REVISION) must select and count
-the same set, which is only guaranteed while one table drives both.
+example「已通过」covering APPROVED, PROCESSING and DOWNLOADED) must select and
+count the same set, which is only guaranteed while one table drives both.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ router = APIRouter(tags=["candidates"])
 CANDIDATE_TABS: dict[str, tuple[str, ...]] = {
     "all": (),
     "pending": ("PENDING_REVIEW",),
-    "needs_info": ("NEEDS_INFO", "NEEDS_REVISION"),
+    "needs_info": ("NEEDS_INFO",),
     "approved": ("APPROVED", "PROCESSING", "DOWNLOADED"),
     "rejected": ("REJECTED",),
     "failed": ("FAILED",),

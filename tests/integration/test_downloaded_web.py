@@ -1385,3 +1385,35 @@ def test_the_search_box_draws_its_own_reading(tmp_path: Path) -> None:
     # The JSON snapshot carries the same reading for a mobile client.
     assert payload["search"] == "$tag:巨乳$"
     assert payload["search_filters"]["filters"][0]["field"] == "TAG"
+
+
+# ------------------------------------------------- R82: 每页条数
+
+
+def test_the_page_size_control_offers_every_size_and_marks_the_current_one(
+    tmp_path: Path,
+) -> None:
+    settings, _library, _ids = seeded(tmp_path)
+    client = logged_in(settings)
+    try:
+        body = client.get("/downloaded").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert "每页" in body
+    assert ">50</button>" in body
+    for size in (20, 100, 200):
+        assert f'href="/downloaded?page_size={size}"' in body
+    assert "page_size=50" not in body
+
+
+def test_the_page_size_parameter_is_honoured(tmp_path: Path) -> None:
+    settings, _library, _ids = seeded(tmp_path)  # four works
+    client = logged_in(settings)
+    try:
+        one = client.get("/downloaded?page_size=1").text
+    finally:
+        client.__exit__(None, None, None)
+
+    assert len(work_ids(one)) == 1
+    assert "共 4 条" in one

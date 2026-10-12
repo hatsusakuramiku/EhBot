@@ -118,6 +118,20 @@
         </span>
       </label>
 
+      <label class="ui-checkline" data-layout="stack">
+        <input class="ui-checkbox" name="auto_series" type="checkbox"
+               {% if ai.auto_series %}checked{% endif %}
+               {% if not ai_usable %}disabled{% endif %}>
+        <span>自动添加系列（Series）
+          <small>
+            打包时把系列名写进 ComicInfo 的 <code>&lt;Series&gt;</code> 字段：先看元数据的「系列」值，
+            没有就交给 AI 判断（AI 归档路径下直接用作品所在文件夹名，不再多问一次模型）。
+            仅 AI 可用时有效；开启后 AI 不可用会让首次打包停在「待定归档路径」、重新打包直接中止。
+            默认关闭。{% if not ai_usable %}当前 AI 不可用，此项已置灰。{% endif %}
+          </small>
+        </span>
+      </label>
+
       <fieldset class="ui-fieldset">
         <legend>整库重排</legend>
         <div class="ui-field">

@@ -698,3 +698,51 @@ def test_a_gated_row_action_names_its_own_dialog(tmp_path: Path) -> None:
     assert labels, "no dialog rendered, so this test proves nothing"
     for label in labels:
         assert label in ids, label
+
+
+# ------------------------------------------------- R81: the row is named by the work
+
+
+def set_title(database: Database, candidate_id: int, value: str) -> None:
+    """Give the fixture's candidate a gallery title, as a scrape would."""
+    with database._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            "INSERT INTO metadata_values "
+            "(candidate_id, field_name, field_value, value_source, confidence) "
+            "VALUES (?, 'Title', ?, 'EXHENTAI', 1.0)",
+            (candidate_id, value),
+        )
+
+
+def row_html(body: str, job_id: int) -> str:
+    match = re.search(rf'<tr data-job-id="{job_id}">(.*?)</tr>', body, re.S)
+    assert match is not None, f"no row for job {job_id}"
+    return match.group(1)
+
+
+def test_a_queue_row_is_named_by_the_work_not_by_the_job_id(tmp_path: Path) -> None:
+    # R81: the card used to lead with `#<job_id>`, which names the task rather
+    # than the book. The work's name is now the primary line and the job id is
+    # demoted beside it -- both are still on the row.
+    fixture = Fixture(tmp_path)
+    try:
+        set_title(fixture.database, fixture.candidate_id, "静かな夏の記録")
+        html = row_html(fixture.client.get("/activity").text, fixture.paused)
+    finally:
+        fixture.close()
+
+    assert '<span class="ui-table-primary">静かな夏の記録</span>' in html
+    assert f"任务 #{fixture.paused}" in html
+    assert f'<span class="ui-table-primary">#{fixture.paused}</span>' not in html
+
+
+def test_an_untitled_work_falls_back_to_its_candidate_id(tmp_path: Path) -> None:
+    # The queue is a form of naming too, so it shares R62's fallback: a候选 in
+    # 待补充 shows a handle rather than an empty line.
+    fixture = Fixture(tmp_path)
+    try:
+        html = row_html(fixture.client.get("/activity").text, fixture.paused)
+    finally:
+        fixture.close()
+
+    assert f"候选 #{fixture.candidate_id}" in html

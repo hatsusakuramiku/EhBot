@@ -1395,6 +1395,24 @@ def test_the_ai_path_panel_round_trips(tmp_path: Path) -> None:
     assert panel["default_include_current"] is True
 
 
+def test_auto_series_is_refused_through_the_api_without_a_chain(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        csrf = _authenticate(client, settings)
+        response = client.put(
+            PATHS + "/ai",
+            json={"path_source": "template", "auto_series": True},
+            headers={CSRF_HEADER: csrf},
+        )
+        section = client.get(PATHS).json()
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "SERIES_AI_UNAVAILABLE"
+    assert section["ai"]["auto_series"] is False
+
+
 def test_a_bad_number_aborts_before_the_mode_changes(tmp_path: Path) -> None:
     """Numbers first, so the panel is not left half-applied."""
     settings = _settings(tmp_path)

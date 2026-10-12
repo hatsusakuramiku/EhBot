@@ -9,7 +9,7 @@ import time
 
 from app.connections.models import ProviderConnectionError, refusal_detail
 from app.connections.telegram import TelegramBotApi
-from app.db.database import Database
+from app.db.database import Database, title_subquery
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
     CONVERSION_STATE_FAILED,
@@ -263,7 +263,7 @@ class DownloadService:
             # fixed status list is what keeps a switched-source re-download, or
             # a re-add after a failure, from requiring a second pass through
             # review. Only a candidate that has never been approved (its status
-            # is PENDING_REVIEW / NEEDS_REVISION / REJECTED, or a fresh
+            # is PENDING_REVIEW / NEEDS_INFO / REJECTED, or a fresh
             # NEEDS_INFO that no job has followed) is refused.
             enqueueable_status = str(candidate_row[0])
             if enqueueable_status != "APPROVED":
@@ -846,7 +846,11 @@ class DownloadService:
                 " AND artifact_type = 'ARCHIVE' LIMIT 1), "
                 "(SELECT path FROM artifacts WHERE job_id = download_jobs.id "
                 " AND artifact_type = 'CBZ' LIMIT 1), "
-                "created_at, updated_at, details_json, priority "
+                "created_at, updated_at, details_json, priority, "
+                + title_subquery("download_jobs.candidate_id")
+                + ", "
+                "(SELECT ex_gid FROM candidates "
+                " WHERE id = download_jobs.candidate_id) "
                 "FROM download_jobs "
                 + where_sql,
                 params,
@@ -869,6 +873,8 @@ class DownloadService:
                 updated_at=str(row[11]),
                 details=self._safe_details(row[12]),
                 priority=int(row[13]),
+                title=str(row[14]) if row[14] is not None else None,
+                ex_gid=int(row[15]) if row[15] is not None else None,
             )
             for row in rows
         )

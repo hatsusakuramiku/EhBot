@@ -178,7 +178,7 @@ def test_a_reviewable_candidate_that_somehow_has_a_job_is_still_a_candidate() ->
     actions, because those are the ones that can still change anything.
     """
     jobs = (make_job(state="FAILED"),)
-    assert work_stage("NEEDS_REVISION", jobs) == STAGE_CANDIDATE
+    assert work_stage("NEEDS_INFO", jobs) == STAGE_CANDIDATE
 
 
 def test_an_unknown_status_with_no_jobs_falls_back_to_the_candidate_stage() -> None:
@@ -197,12 +197,10 @@ def test_review_actions_are_offered_only_while_the_work_is_reviewable() -> None:
     reviewable = work_actions(make_candidate(), (), ALL_SOURCES)
     assert reviewable["approve"] is True
     assert reviewable["reject"] is True
-    assert reviewable["needs_revision"] is True
 
     approved = work_actions(make_candidate(status="APPROVED"), (), ALL_SOURCES)
     assert approved["approve"] is False
     assert approved["reject"] is False
-    assert approved["needs_revision"] is False
 
 
 def test_requeue_is_offered_only_where_it_changes_something() -> None:
@@ -215,7 +213,6 @@ def test_requeue_is_offered_only_where_it_changes_something() -> None:
     """
     for status, expected in (
         ("REJECTED", True),
-        ("NEEDS_REVISION", True),
         ("FAILED", True),
         ("PENDING_REVIEW", False),
         ("NEEDS_INFO", False),
@@ -231,7 +228,6 @@ def test_a_failed_candidate_is_requeueable_but_not_reviewable() -> None:
     assert actions["requeue"] is True
     assert actions["approve"] is False
     assert actions["reject"] is False
-    assert actions["needs_revision"] is False
 
 
 def test_metadata_stays_editable_at_every_stage() -> None:

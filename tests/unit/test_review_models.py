@@ -12,6 +12,7 @@ EXPECTED_FIELD_LABELS = {
     "Artist": "作者",
     "Group": "社团",
     "Parody": "原作",
+    "Series": "系列",
     "Character": "角色",
     "Language": "语言",
     "Category": "分类",

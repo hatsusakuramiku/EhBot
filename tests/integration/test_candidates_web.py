@@ -1071,3 +1071,54 @@ def test_an_untitled_candidate_shows_its_gallery_id(tmp_path: Path) -> None:
     assert f"候选 #{untitled_and_galleryless}" in page
     assert f"候选 #{gallery_id}" not in page
     assert named
+
+
+# ------------------------------------------------- R82: 每页条数
+
+
+def test_the_page_size_control_offers_every_size_and_marks_the_current_one(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    asyncio.run(seed_candidate(database))
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        body = client.get("/candidates").text
+
+    assert "每页" in body
+    # The default (50) is the current size, so it is a disabled button rather
+    # than a link -- "you are here", not "click me".
+    assert ">50</button>" in body
+    # Every other size is a link that carries the size and deliberately drops
+    # the page cursor: page 7 of 20-row pages is not page 7 of 100-row ones.
+    for size in (20, 100, 200):
+        assert f'href="/candidates?page_size={size}"' in body
+    assert "page_size=50" not in body
+
+
+def test_the_page_size_parameter_is_honoured_and_clamped(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    database = Database(settings.data_path / "ehbot.db")
+    for index in range(3):
+        asyncio.run(
+            seed_candidate(
+                database,
+                update_id=400 + index,
+                message_id=70 + index,
+                title=f"Paged Comic {index}",
+            )
+        )
+
+    with TestClient(create_app(settings)) as client:
+        authenticate(client, settings)
+        one = client.get("/candidates?page_size=1").text
+        clamped = client.get("/candidates?page_size=9999").text
+
+    # One row on the page, three in the list -- the request was read, not the
+    # default 50.
+    assert one.count('data-candidate-id="') == 1
+    assert "共 3 条" in one
+    # 9999 is past `MAX_PAGE_SIZE`; the page uses 200 rather than refusing.
+    assert ">200</button>" in clamped
