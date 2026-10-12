@@ -1,8 +1,8 @@
 {#
   运行日志: the live tail.
 
-  Server-rendered first page, then `logs.js` subscribes to
-  `/api/v1/logs/stream` and prepends records as they are logged. With JavaScript
+  Server-rendered first page, then `logs.js` uses the shared WebSocket
+  and prepends records as they are logged. With JavaScript
   off this is still a working viewer with a level filter -- the same rule the
   other pages follow -- and what the script adds is the live part plus 暂停.
 
@@ -21,31 +21,31 @@
   in `logs.js`, the live prepend. `data-log-row` and `data-field` are that
   script's contract: it inserts rows and never rewrites this structure.
 #}
-{% extends "base.html" %}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}运行日志 · EhBot{% endblock %}
 
 {% block content_class %}ui-content{% endblock %}
 
-{% macro log_row(entry) -%}
+{% macro log_row(entry, prototype=False) -%}
   <li class="ui-log-row" data-log-row>
     <div class="ui-log-head">
       {{ ui.badge(entry.level) }}
-      {% if entry.timestamp %}
+      {% if prototype or entry.timestamp %}
         {#- `ui.js` scans `time[datetime]` and rewrites the TEXT into the
             configured zone, leaving the attribute as the machine-readable UTC.
             A live row therefore needs `EhBotUI.formatTimes()` after insertion,
             which is what `logs.js` calls. -#}
         <time datetime="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
       {% endif %}
-      {% if entry.logger %}<code class="ui-log-logger">{{ entry.logger }}</code>{% endif %}
+      {% if prototype or entry.logger %}<code class="ui-log-logger">{{ entry.logger }}</code>{% endif %}
     </div>
     <p class="ui-log-event">{{ entry.raw if entry.raw else entry.event }}</p>
-    {% if entry.error_message %}
+    {% if prototype or entry.error_message %}
       <p class="ui-log-message">{{ entry.error_message }}</p>
     {% endif %}
-    {% if entry.error_code or entry.job_id or entry.candidate_id or entry.request_id %}
+    {% if prototype or entry.error_code or entry.job_id or entry.candidate_id or entry.request_id %}
       <p class="ui-log-meta">
         {% if entry.error_code %}<code>{{ entry.error_code }}</code>{% endif %}
         {% if entry.job_id %}<span>任务 #{{ entry.job_id }}</span>{% endif %}
@@ -55,7 +55,7 @@
         {% if entry.request_id %}<code>{{ entry.request_id }}</code>{% endif %}
       </p>
     {% endif %}
-    {% if entry.exception %}
+    {% if prototype or entry.exception %}
       <details class="ui-log-trace">
         <summary>堆栈</summary>
         <pre>{{ entry.exception }}</pre>
@@ -125,6 +125,7 @@
       {{ log_row(entry) }}
     {% endfor %}
   </ol>
+  <template data-log-template>{{ log_row({'level': logs.levels[0]}, prototype=True) }}</template>
   {#- Both states exist in the DOM from the start and are toggled by the script:
       creating an empty state at the moment the list empties is how a live view
       ends up with two of them. -#}

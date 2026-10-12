@@ -1,9 +1,8 @@
-"""In-process event bus backing the SSE endpoint.
+"""In-process invalidations shared by WebSocket and the HTTP SSE endpoint.
 
-Why this exists: the download page refreshes the whole document on a timer, so
-a finished job is noticed up to N seconds late and the operator loses scroll
-position every tick. Publishing a state transition here lets the interface
-refresh exactly the affected row the moment it happens.
+Publishing transitions lets clients re-read authoritative snapshots when state
+changes. WebUI replaces content fragments and preserves the operator's input,
+selection and scroll position without periodic document refreshes.
 
 Design constraints that shaped it:
 
@@ -22,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 import logging
 import time
+from uuid import uuid4
 from typing import Any
 
 
@@ -45,6 +46,7 @@ EVENT_CANDIDATE = "candidate"
 EVENT_DOWNLOAD = "download"
 EVENT_CONVERSION = "conversion"
 EVENT_CONNECTION = "connection"
+EVENT_REFRESH = "refresh"
 
 KNOWN_EVENTS: frozenset[str] = frozenset(
     {
@@ -52,6 +54,7 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
         EVENT_DOWNLOAD,
         EVENT_CONVERSION,
         EVENT_CONNECTION,
+        EVENT_REFRESH,
     }
 )
 
@@ -88,6 +91,22 @@ class EventBus:
         self._queue_maxsize = queue_maxsize
         self._sequence = 0
         self._dropped = 0
+        self.epoch = uuid4().hex
+
+    @property
+    def sequence(self) -> int:
+        """Current invalidation watermark within this process epoch."""
+        return self._sequence
+
+    @contextmanager
+    def subscribe(self):
+        """Register before reading a snapshot; release on disconnect."""
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=self._queue_maxsize)
+        self._subscribers.add(queue)
+        try:
+            yield queue
+        finally:
+            self._subscribers.discard(queue)
 
     @property
     def subscriber_count(self) -> int:
@@ -101,17 +120,16 @@ class EventBus:
     def publish(self, name: str, **data: Any) -> Event | None:
         """Queue an event for every subscriber. Safe to call from any task.
 
-        Returns the event, or None when nobody is listening -- the common case
-        with no browser open, and the reason this costs almost nothing to call
-        from the worker loops.
+        Advances the process watermark even when no one listens. Returns the
+        event, or None when no subscriber needs a queued copy.
         """
         if name not in KNOWN_EVENTS:
             # A typo would otherwise produce an event no client subscribes to,
             # which is invisible in production. Fail loudly in development.
             raise ValueError(f"unknown event name: {name!r}")
+        self._sequence += 1
         if not self._subscribers:
             return None
-        self._sequence += 1
         event = Event(name=name, data=dict(data), sequence=self._sequence)
         for queue in tuple(self._subscribers):
             self._offer(queue, event)
@@ -180,6 +198,7 @@ __all__ = [
     "EVENT_CONNECTION",
     "EVENT_CONVERSION",
     "EVENT_DOWNLOAD",
+    "EVENT_REFRESH",
     "KEEPALIVE_INTERVAL_SECONDS",
     "KNOWN_EVENTS",
     "QUEUE_MAXSIZE",

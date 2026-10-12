@@ -251,12 +251,6 @@ async def render_work(
             # here through three metadata saves would be sent to the last of
             # them.
             "origin": resolve_origin(request, candidate_id),
-            # The metadata tags are editable fields rather than chips, but an
-            # operator reading one should still be able to jump to the list
-            # filtered or excluded by it (R61 §3.2). The links land on the 全部
-            # tab: 「show me everything with this tag」 is not a question about
-            # the work's own status.
-            "tag_hrefs": deps.tag_hrefs(request, base="/candidates/all"),
             "prev_work": prev_id,
             "next_work": next_id,
             "layout": deps.page_layout(request),

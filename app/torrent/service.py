@@ -60,6 +60,7 @@ class TorrentService:
         poll_seconds: float = 15.0,
         work_path_provider=None,
         auto_pack=None,
+        notify=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -73,6 +74,7 @@ class TorrentService:
         # Injected rather than imported so this module keeps knowing nothing
         # about the conversion queue; the torrent route only says "it is ready".
         self._auto_pack = auto_pack
+        self._notify = notify
         self._poller_task: asyncio.Task[None] | None = None
 
     async def _effective_work_path(self) -> Path:
@@ -339,6 +341,8 @@ class TorrentService:
                     str(getattr(exc, "code", "TORRENT_POLL_FAILED")),
                     str(getattr(exc, "public_message", exc)),
                 )
+            if self._notify is not None:
+                self._notify(job_id=job["job_id"], candidate_id=job["candidate_id"])
         return len(jobs)
 
     async def _advance_job(self, job: dict) -> None:

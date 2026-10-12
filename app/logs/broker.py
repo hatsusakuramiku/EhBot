@@ -34,6 +34,7 @@ Two things it deliberately does **not** do:
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
 import logging
 from collections import deque
@@ -221,6 +222,21 @@ class LogBroker:
         if limit is None:
             return records
         return records[:limit]
+
+    @contextmanager
+    def subscribe(self):
+        """Share the bounded, thread-safe subscription with WebSocket."""
+        subscriber = _Subscriber(
+            queue=asyncio.Queue(maxsize=self._queue_maxsize),
+            loop=asyncio.get_running_loop(),
+        )
+        with self._lock:
+            self._subscribers.add(subscriber)
+        try:
+            yield subscriber.queue
+        finally:
+            with self._lock:
+                self._subscribers.discard(subscriber)
 
     async def stream(
         self, *, replay: int = 0

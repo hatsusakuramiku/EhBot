@@ -1550,13 +1550,8 @@ def _href_with(text: str, marker: str) -> str:
     return match.group(1)
 
 
-def test_the_metadata_tags_carry_the_filter_actions(tmp_path: Path) -> None:
-    """R61: a tag on the detail page is also a way into the filtered list.
-
-    The metadata rows are editable fields, so the values are repeated below the
-    input as chips; clicking one goes to the 全部 tab, because 「show me
-    everything with this tag」 is not a question about this work's status.
-    """
+def test_the_metadata_tags_are_display_only(tmp_path: Path) -> None:
+    """R86: only candidate/downloaded lists offer tag filtering."""
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_work(database))
@@ -1566,10 +1561,6 @@ def test_the_metadata_tags_carry_the_filter_actions(tmp_path: Path) -> None:
         authenticate(client, settings)
         page = client.get(f"/works/{candidate_id}").text
 
-    assert 'data-tag="巨乳"' in page
-    assert unquote_plus(
-        _href_with(page, 'aria-label="过滤标签 big breasts"')
-    ) == '/candidates/all?search=$tag:"big breasts"$'
-    assert unquote_plus(
-        _href_with(page, 'aria-label="排除标签 big breasts"')
-    ) == '/candidates/all?search=$-tag:"big breasts"$'
+    assert '<span class="ui-tag">巨乳</span>' in page
+    assert '<span class="ui-tag">big breasts</span>' in page
+    assert 'data-tag-exclude=' not in page

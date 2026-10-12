@@ -6,7 +6,7 @@
  * that the operator sees the rule's DSL as they build it, and can grow the
  * condition list from an HTML button instead of saving each row.
  *
- * Two rules, the same ones `work.js` follows:
+ * Two rules:
  *
  * 1. It writes no vocabulary. There is no state label in this file and no
  *    Chinese: field and operator choices come from the `vocabulary` the
@@ -18,13 +18,14 @@
  *    so a disagreement between the browser and the server can only ever cost
  *    one refused save -- the same thing a missing this file costs anyway.
  */
-(function () {
+window.EhBotUI.onContentReady(function () {
   "use strict";
 
   /* ------------------------------------------------------------ rule editor */
 
   var editor = document.querySelector("[data-rule-editor]");
-  if (editor) {
+  if (editor && !editor.dataset.bound) {
+    editor.dataset.bound = "true";
     var preview = editor.querySelector("[data-dsl-preview]");
 
     /* Mirrors `render_rule_dsl`'s quoting closely enough to be recognisable.
@@ -209,7 +210,8 @@
    * server owns the mode because the server is what applies it. */
   var aiModes = document.querySelectorAll("[data-ai-mode]");
   var aiPanel = document.querySelector("[data-ai-panel]");
-  if (aiModes.length && aiPanel) {
+  if (aiModes.length && aiPanel && !aiPanel.dataset.bound) {
+    aiPanel.dataset.bound = "true";
     var syncAiPanel = function () {
       var selected = document.querySelector("[data-ai-mode]:checked");
       aiPanel.hidden = !selected || selected.value !== "ai";
@@ -223,7 +225,8 @@
   /* -------------------------------------------------------- path template */
 
   var templateInput = document.querySelector("[data-template-input]");
-  if (templateInput) {
+  if (templateInput && !templateInput.dataset.bound) {
+    templateInput.dataset.bound = "true";
     var tokens = document.querySelectorAll("[data-template-token]");
     for (var t = 0; t < tokens.length; t += 1) {
       tokens[t].addEventListener("click", function (event) {
@@ -246,4 +249,4 @@
       });
     }
   }
-})();
+});

@@ -920,8 +920,13 @@ canvas {
 /* The 过滤 / 排除 actions on a tag (R61). Small and quiet: they sit inside
    every tag, so anything louder than the tag's own text would make a card of
    tags unreadable. The focus ring is the keyboard's only way to see them. */
-.ui-tag-action { margin-left: 2px; text-decoration: none; opacity: .55; }
-.ui-tag-action:hover, .ui-tag-action:focus-visible { opacity: 1; }
+.ui-tag[href] { cursor: pointer; text-decoration: none; }
+.ui-tag[href]:hover, .ui-tag[href]:focus-visible { color: var(--t-ink); border-color: var(--t-ink-muted); }
+.ui-tag-menu { position: fixed; z-index: 100; display: grid; padding: var(--s-1);
+  background: var(--t-surface); border: 1px solid var(--t-line); border-radius: var(--r-sm); }
+.ui-realtime-status { position: fixed; bottom: 70px; right: var(--s-3); z-index: 90;
+  max-width: calc(100vw - 32px); padding: var(--s-2); background: var(--t-surface);
+  border: 1px solid var(--t-line); border-radius: var(--r-sm); }
 
 /* The search box's own reading (R61): one chip per parsed `$field:value$`. */
 .ui-search-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-2); }

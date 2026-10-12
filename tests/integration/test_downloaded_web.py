@@ -383,29 +383,21 @@ def test_the_page_carries_the_tab_key_and_not_the_resolved_view(
     assert api.json()["tab_view"]["label"] == "已打包"
 
 
-def test_the_poller_stops_when_the_contract_refuses_its_tab(
+def test_downloaded_page_uses_shared_realtime_without_polling(
     tmp_path: Path,
 ) -> None:
-    """A page rendered by an older build must not 400 twice a second.
-
-    `data-tab` used to carry the resolved view, so the poll asked about a dict
-    and the contract answered 400 every tick -- forever, because the attribute
-    cannot change without a reload. The script therefore has to read a 400 as
-    「this page is stale」, stop asking, and say the one thing that helps.
-    """
+    """Background pack changes use the document's shared WebSocket."""
     settings, _library, _ids = seeded(tmp_path)
     client = logged_in(settings)
     try:
         script = client.get("/static/downloaded.js").text.replace("\r\n", "\n")
+        page = client.get("/downloaded").text
     finally:
         client.__exit__(None, None, None)
 
-    # One definition, one call, and the call carries both halves: the stop and
-    # the message. Stopping silently would leave a frozen page with no reason
-    # given, which is the same bug wearing a quieter coat.
-    assert script.count("stopOnStale(") == 2
-    assert 'stopOnStale("列表有更新，刷新以查看", notice());' in script
-    assert "function stopOnStale(output, host) {\n    stopPolling();" in script
+    assert "realtime.js" in page
+    assert "setInterval" not in script
+    assert "EventSource" not in script
 
 
 def test_the_page_and_the_endpoint_cannot_disagree(tmp_path: Path) -> None:

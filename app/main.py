@@ -14,10 +14,12 @@ comment on each `include_router` says what its position is protecting.
 from fastapi import FastAPI
 import httpx
 from fastapi.staticfiles import StaticFiles
+from itsdangerous import TimestampSigner
 from pwdlib import PasswordHash
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.contracts import ApiError, api_error_handler
+from app.api.realtime import OperationEventsMiddleware, router as realtime_router
 from app.api.v1 import router as api_v1_router
 from app.config import Settings
 from app.db.database import Database
@@ -109,6 +111,9 @@ def create_app(
     # instance per application: the root logger it is fed from is process wide,
     # so a second broker would receive nothing.
     app.state.log_broker = log_broker()
+    app.state.realtime_session_generation = 0
+    app.state.realtime_cookie_signer = TimestampSigner(session_secret.key)
+    app.add_middleware(OperationEventsMiddleware)
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_middleware(
@@ -133,6 +138,7 @@ def create_app(
     # The JSON API first: every one of its paths is under `/api/v1`, so it can
     # shadow nothing below and nothing below can shadow it.
     app.include_router(api_v1_router)
+    app.include_router(realtime_router)
     app.include_router(auto_approval_router)
     app.include_router(dashboard_router)
     # Above `works` and `manual_add` only for readability -- no shared prefix.

@@ -26,7 +26,7 @@
     `app/api/settings.py`, and this file must not undo it by echoing a value
     back into a `value=` attribute.
 #}
-{% extends "base.html" %}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}{{ section.label }} · 设置 · EhBot{% endblock %}

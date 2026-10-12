@@ -1,30 +1,4 @@
-/* Live tail for /logs.
- *
- * The page is already a working log viewer without this file: the first page of
- * records is server-rendered and the level `<select>` submits a GET. What this
- * adds is the live part -- an `EventSource` on `/api/v1/logs/stream` that
- * prepends records as they are logged -- plus 暂停 and a level change that does
- * not tear the stream down.
- *
- * Rules it follows, the same three the other page scripts do:
- *
- * 1. **It writes no vocabulary.** A level's Chinese label and tone come from the
- *    `StatusView` the server resolved; this file reads them off the payload and
- *    never maps a code to a word. That is why a live row's badge cannot disagree
- *    with a server-rendered one.
- * 2. **It builds a row from the server's own markup.** The first rendered row is
- *    cloned as a template, so the structure lives in `logs.html` alone. When the
- *    page loaded empty there is nothing to clone, so it falls back to fetching
- *    the snapshot -- which is the same markup, rendered by the same macro, one
- *    request later -- rather than assembling a row from scratch here.
- * 3. **It reveals its own controls.** 暂停 and the status line ship `hidden`; a
- *    browser without `EventSource` never sees a pause button for a stream that
- *    was never opened.
- *
- * Why the level filter runs in the browser: the stream is one broadcast queue,
- * so a server-side filter would need the connection rebuilt on every change --
- * and the records it was opened to catch are exactly the ones lost in that gap.
- */
+/* Live log tail over the shared WebSocket; rows use server-authored markup. */
 (function () {
   "use strict";
 
@@ -39,7 +13,6 @@
   var select = panel.querySelector("[data-log-level]");
   var form = panel.querySelector(".ui-log-filter");
 
-  var streamPath = panel.getAttribute("data-stream") || "/api/v1/logs/stream";
   var level = panel.getAttribute("data-level") || "INFO";
   var limit = parseInt(panel.getAttribute("data-limit"), 10) || 100;
 
@@ -55,9 +28,10 @@
    * left on overnight must cost a fixed amount of memory, and the operator who
    * resumes wants the newest lines, not an hour of history. */
   var pending = [];
-  var stream = null;
   var rowTemplate = null;
   var seen = {};
+  var snapshotRevision = 0, snapshotPending = false, duringSnapshot = [];
+  var logEpoch = null, logWatermark = 0;
 
   function passes(code) {
     var floor = SEVERITY[level];
@@ -70,7 +44,8 @@
 
   function captureTemplate() {
     if (rowTemplate) return rowTemplate;
-    var first = list && list.querySelector("[data-log-row]");
+    var prototype = panel.querySelector("[data-log-template]");
+    var first = prototype ? prototype.content.firstElementChild : list && list.querySelector("[data-log-row]");
     if (!first) return null;
     rowTemplate = first.cloneNode(true);
     return rowTemplate;
@@ -92,6 +67,7 @@
     if (badge) {
       setText(badge, entry.level.label);
       badge.setAttribute("data-tone", entry.level.tone);
+      badge.setAttribute("data-code", entry.level.code);
     }
 
     var time = row.querySelector("time");
@@ -129,7 +105,8 @@
         if (entry.job_id) meta.appendChild(spanNode("任务 #" + entry.job_id));
         if (entry.candidate_id) {
           var link = document.createElement("a");
-          link.href = "/works/" + entry.candidate_id;
+          var realtimePath = document.querySelector('meta[name="realtime-path"]');
+          link.href = (realtimePath ? realtimePath.content.replace(/\/ws\/ui$/, "") : "") + "/works/" + entry.candidate_id;
           link.textContent = "作品 #" + entry.candidate_id;
           meta.appendChild(link);
         }
@@ -205,9 +182,11 @@
   /* ------------------------------------------------------------------ refresh */
 
   function refresh() {
+    var version = ++snapshotRevision;
+    snapshotPending = true; duringSnapshot = [];
     var url = "/api/v1/logs?level=" + encodeURIComponent(level) +
       "&limit=" + encodeURIComponent(limit);
-    return fetch(url, { headers: { Accept: "application/json" } })
+    return window.EhBotRealtime.fetch(url, { headers: { Accept: "application/json" } })
       .then(function (response) {
         return response.ok ? response.json() : null;
       })
@@ -215,17 +194,18 @@
         return null;
       })
       .then(function (payload) {
-        if (!payload || !payload.entries) return;
+        if (version !== snapshotRevision) return;
+        snapshotPending = false;
+        var queued = duringSnapshot; duringSnapshot = [];
+        if (!payload || !payload.entries) { queued.forEach(handle); return; }
+        captureTemplate();
         list.textContent = "";
-        rowTemplate = null;
-        /* Rendered from the payload, which needs a template -- and the template
-         * came from a server-rendered row that has just been removed. So the
-         * first entry is built from the markup captured before the clear, which
-         * is why `captureTemplate` runs before `list.textContent` is emptied. */
+        logEpoch = payload.log_epoch; logWatermark = payload.log_sequence || 0;
         payload.entries.forEach(function (entry) {
           var row = buildRow(entry);
           if (row) list.appendChild(row);
         });
+        queued.forEach(handle);
         syncEmpty();
         if (window.EhBotUI && window.EhBotUI.formatTimes) {
           window.EhBotUI.formatTimes();
@@ -236,6 +216,12 @@
   /* ------------------------------------------------------------------- stream */
 
   function handle(event) {
+    if (snapshotPending) {
+      duringSnapshot.push(event);
+      if (duringSnapshot.length > limit * 2) duringSnapshot.shift();
+      return;
+    }
+    if (event.epoch === logEpoch && event.sequence <= logWatermark) return;
     var payload;
     try {
       payload = JSON.parse(event.data);
@@ -249,6 +235,8 @@
     if (event.lastEventId) {
       if (seen[event.lastEventId]) return;
       seen[event.lastEventId] = true;
+      var ids = Object.keys(seen);
+      if (ids.length > limit * 2) delete seen[ids[0]];
     }
     var entry = normalise(payload);
     if (!passes(entry.level.code)) return;
@@ -291,7 +279,7 @@
   var levelViews = {};
 
   function loadLevelViews() {
-    return fetch("/api/v1/logs?limit=1", { headers: { Accept: "application/json" } })
+    return window.EhBotRealtime.fetch("/api/v1/logs?limit=1", { headers: { Accept: "application/json" } })
       .then(function (response) {
         return response.ok ? response.json() : null;
       })
@@ -307,19 +295,17 @@
   }
 
   function subscribe() {
-    if (!window.EventSource) return;
-    stream = new EventSource(streamPath);
-    stream.addEventListener("log", handle);
-    stream.onopen = function () {
-      status(paused ? "已暂停" : "实时");
-    };
-    stream.onerror = function () {
-      /* The browser reconnects on its own using the server's `retry`, and the
-       * replay covers what was missed, so there is nothing to do but say so. */
-      status("连接中断，正在重连");
-    };
+    window.EhBotRealtime.on("log", function (frame) {
+      handle({data: JSON.stringify(frame.data), lastEventId: frame.epoch + ":" + frame.sequence,
+        epoch: frame.epoch, sequence: frame.sequence});
+    });
+    window.EhBotRealtime.on("connection", function (frame) {
+      status(frame.connected ? (paused ? "已暂停" : "实时") : "连接中断，正在重连");
+    });
+    window.EhBotRealtime.on("ready", function () { refresh(); });
+    window.EhBotRealtime.on("log_gap", function () { refresh(); });
+    window.EhBotRealtime.on("refresh_request", function () { refresh(); });
     if (liveTools) liveTools.hidden = false;
-    status("实时");
   }
 
   /* -------------------------------------------------------------- controls */
@@ -342,17 +328,10 @@
   }
 
   if (select && form) {
-    /* Applied without a navigation, so the stream survives a level change. The
-     * URL is updated so a reload and a shared link show the same view. */
+    /* A level change updates this viewer without navigating or reconnecting. */
     select.addEventListener("change", function () {
       level = select.value;
       panel.setAttribute("data-level", level);
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(
-          {}, "", "/logs?level=" + encodeURIComponent(level) +
-          "&limit=" + encodeURIComponent(limit)
-        );
-      }
       pending = [];
       refresh();
     });
@@ -363,5 +342,6 @@
     });
   }
 
-  loadLevelViews().then(subscribe);
+  subscribe();
+  loadLevelViews();
 })();

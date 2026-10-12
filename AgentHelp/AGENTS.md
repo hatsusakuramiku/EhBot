@@ -136,7 +136,8 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 2037 collected（R85 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R85 新增 23 条，相关 14 个文件共 418 条最终通过；本轮未运行整库测试。 Ending below this is a regression.
+**Baseline: 2064 collected（R86 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R86 新增 27 条，相关 20 个文件共 545 条最终通过，另有真实 HTMX/Alpine 的 DOM 行为验证；本轮未运行整库测试。 Ending below this is a regression.
+**Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过；无迁移、无发布）。
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with

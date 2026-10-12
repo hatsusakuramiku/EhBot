@@ -13,7 +13,7 @@
     state, every timeline verb and every actor arrive as `StatusView` payloads
     resolved by `app/api/status.py` and render through `ui.badge`. 「自动规则」is
     exactly the kind of word this file would be tempted to type by hand.
-  * Every action is a real form. `work.js` adds live refresh and inline metadata
+  * Every action is a real form. `realtime.js` adds live refresh and metadata
     saving on top, but with JavaScript off the page still approves, rejects,
     requeues, runs a source, pauses a job and repackages.
   * What an action *is* comes from `work.actions`, never from the status: the
@@ -94,15 +94,7 @@
 
 {% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
 {% if message %}{{ ui.callout(message, tone="success") }}{% endif %}
-
-{#- Filled in by `work.js` when a poll finds a node the page has never rendered.
-    A line the operator can ignore, rather than a reload that would pull the page
-    out from under a half-typed metadata edit. -#}
-<div data-work-changed hidden></div>
-
-{#- `data-live` arms the polling in `work.js` and is the server's decision, not
-    the script's: the same flag the JSON payload carries. `data-timeline` is how
-    the script tells a value that changed from a node that did not exist. -#}
+{#- State is re-rendered from the shared realtime invalidation channel. -#}
 <div class="ui-detail-layout" data-work-root data-work-id="{{ work.candidate_id }}"
      data-csrf="{{ csrf_token }}" data-live="{{ 'true' if work.live else 'false' }}"
      data-timeline="{{ work.timeline | length }}">
@@ -186,7 +178,7 @@
       {#- One form per field rather than one form for all of them: the audit
           trail records EDIT_METADATA per field, and a single submit that wrote
           every field would fill the timeline with edits the operator did not
-          make. `work.js` replaces this with an inline save; without it each row
+          make. `realtime.js` submits it locally; without it each row
           is a working form. -#}
       <div class="ui-kv" data-metadata-rows>
         {% for entry in work.metadata %}
@@ -214,10 +206,9 @@
             {% if not entry.archive_field %}
             <span class="ui-kv-note">仅数据库，不写入归档</span>
             {% endif %}
-            {#- The editable field above, and below it the same values as chips
-                that carry the 过滤/排除 actions (R61 §3.2). -#}
+            {#- Detail-page tags are display-only; filtering belongs to lists. -#}
             {% if entry.field_name in ("Tags", "TagsRaw") and entry.field_value %}
-            {{ ui.tag_list(entry.field_value.split(","), tag_hrefs) }}
+            {{ ui.tag_list(entry.field_value.split(",")) }}
             {% endif %}
           </dd>
         </div>
@@ -544,8 +535,4 @@
     {% endif %}
   </div>
 </div>
-{% endblock %}
-
-{% block scripts %}
-<script defer src="{{ url_for('static', path='/work.js') }}"></script>
 {% endblock %}

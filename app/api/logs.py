@@ -156,12 +156,14 @@ async def log_snapshot(request: Request) -> dict[str, Any]:
     )
     limit = clamp_limit(request.query_params.get("limit"))
     broker = log_broker(request)
+    records = broker.snapshot()
+    log_sequence = records[0].sequence if records else 0
 
     entries = [
         entry
         for entry in (
-            buffered_entry(record.line)
-            for record in broker.snapshot()
+            dict(buffered_entry(record.line), sequence=record.sequence)
+            for record in records
         )
         if passes_min_level(str(entry["level"]["code"]), level)
     ][:limit]
@@ -182,6 +184,8 @@ async def log_snapshot(request: Request) -> dict[str, Any]:
 
     return {
         "entries": entries,
+        "log_epoch": request.app.state.event_bus.epoch,
+        "log_sequence": log_sequence,
         "level": level,
         "levels": level_choices(level),
         "limit": limit,

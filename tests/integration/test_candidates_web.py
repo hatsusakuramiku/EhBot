@@ -987,11 +987,15 @@ def test_clicking_a_tag_offers_filter_and_exclude(tmp_path: Path) -> None:
     # A value with a space goes in double quotes, which is the one spelling the
     # parser reads back as a single value.
     assert unquote_plus(
-        href_with(card, 'aria-label="过滤标签 big breasts"')
+        href_with(card, 'data-tag="big breasts"')
     ) == '/candidates?search=$tag:"big breasts"$'
-    assert unquote_plus(
-        href_with(card, 'aria-label="排除标签 big breasts"')
-    ) == '/candidates?search=$-tag:"big breasts"$'
+    exclude = re.search(r'data-tag="big breasts"[^>]*data-tag-exclude="([^"]+)"', card)
+    assert exclude is not None
+    assert unquote_plus(unescape(exclude.group(1))) == '/candidates?search=$-tag:"big breasts"$'
+    assert "ui-tag-action" not in card
+    assert 'aria-haspopup="menu"' in card
+    assert 'data-tag-filter-term="$tag:\"big breasts\"$"' in unescape(card)
+    assert 'data-tag-exclude-term="$-tag:\"big breasts\"$"' in unescape(card)
 
 
 def test_the_candidate_payload_carries_the_parsed_search_filters(

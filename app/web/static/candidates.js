@@ -3,7 +3,7 @@
  * Everything here is an addition to a page that already works. The list filters,
  * pages, opens a candidate and approves one or many through plain forms and
  * links; this file makes a hundred-candidate review fast, and takes nothing away
- * when it fails to load. Three rules, the same ones `activity.js` follows:
+ * when it fails to load. Three rules:
  *
  * 1. It writes no vocabulary. Metadata provenance is rendered from the `source`
  *    payload `app/api/status.py` resolved, and field labels come from the
@@ -78,21 +78,26 @@
     form.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
-  if (form) {
-    form.addEventListener("change", syncSelected);
-    syncSelected();
-  }
-
-  document.querySelectorAll("[data-select]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      var mode = button.getAttribute("data-select");
-      boxes().forEach(function (box) {
-        if (mode === "all") box.checked = true;
-        else if (mode === "none") box.checked = false;
-        else if (mode === "invert") box.checked = !box.checked;
-      });
-      announceSelection();
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-select]");
+    if (!button || !form) return;
+    var mode = button.getAttribute("data-select");
+    boxes().forEach(function (box) {
+      if (mode === "all") box.checked = true;
+      else if (mode === "none") box.checked = false;
+      else if (mode === "invert") box.checked = !box.checked;
     });
+    announceSelection();
+  });
+  window.EhBotUI.onContentReady(function () {
+    form = document.querySelector("[data-candidate-form]");
+    reveal("[data-select-tools]");
+    reveal("[data-metadata-open]");
+    if (form && !form.dataset.selectionBound) {
+      form.dataset.selectionBound = "true";
+      form.addEventListener("change", syncSelected);
+    }
+    syncSelected();
   });
 
   /* --------------------------------------------------------------- keyboard */
@@ -249,7 +254,7 @@
     if (detailLink) detailLink.setAttribute("href", "/candidates/" + candidateId);
     if (titleNode) titleNode.textContent = "元数据 · 候选 #" + candidateId;
     say("正在加载…");
-    fetch("/api/v1/works/" + candidateId, {
+    window.EhBotRealtime.fetch("/api/v1/works/" + candidateId, {
       headers: { Accept: "application/json" },
     })
       .then(function (response) {
@@ -279,10 +284,9 @@
     opener = null;
   }
 
-  document.querySelectorAll("[data-metadata-open]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      openDrawer(button.getAttribute("data-metadata-open"), button);
-    });
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-metadata-open]");
+    if (button) openDrawer(button.getAttribute("data-metadata-open"), button);
   });
 
   document.querySelectorAll("[data-metadata-close]").forEach(function (node) {
@@ -306,7 +310,7 @@
       }
       saveButton.disabled = true;
       say("正在保存…");
-      fetch("/api/v1/works/" + openId + "/metadata", {
+      window.EhBotRealtime.fetch("/api/v1/works/" + openId + "/metadata", {
         method: "PATCH",
         headers: {
           Accept: "application/json",
@@ -326,7 +330,7 @@
            * a field can move the candidate out of 待补充 and can change what
            * every other field's provenance is, and the server is the only thing
            * that knows. */
-          openDrawer(openId, opener, body.sync_message || "已保存，刷新列表后生效");
+          openDrawer(openId, opener, body.sync_message || "已保存");
         })
         .catch(function (body) {
           say((body && body.error && body.error.message) || "保存失败");

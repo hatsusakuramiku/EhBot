@@ -384,10 +384,12 @@ def shell_context(request: Request) -> dict:
     fallback rather than paying for a query per page.
     """
     current_path = request.url.path
+    from app.web.deps import page_layout
     domain = active_domain(current_path)
     return {
         "nav_items": NAV_ITEMS,
         "current_path": current_path,
+        "layout": page_layout(request),
         "active_domain": domain,
         "active_children": domain.children if domain is not None else (),
         "csrf_token": request.session.get("csrf_token", ""),

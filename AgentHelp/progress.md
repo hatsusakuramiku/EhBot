@@ -6865,3 +6865,64 @@ ComicInfo 回落。`test_archive_workflow.py` +3（元数据系列入库、无 A
   无新增迁移（仍 025 / 25 条），版本保持 0.3.0rc3；没有构建或推送镜像、没有部署。
 
 **文档同步。** README、docs/USAGE、EHBot 需求、方案状态、PHASES、AGENTS 基线及 task_plan。
+
+---
+
+## R86 · v0.3.0rc3 · 2026-10-12 · 服务端实时 API 与 WebUI 局部更新
+
+**需求与批准。** 运营者批准先完成服务端与 WebUI，移动端后续复用这些 API。
+方案为 `WEBUI_PARTIAL_REFRESH_WEBSOCKET_PROPOSAL.md` v4 与
+`TAG_FILTER_CONTEXT_MENU_PROPOSAL.md`。本轮不修改 EhBot-Mobile，不发布或部署。
+
+**服务端。**
+
+- 新增 `/ws/ui`（`ehbot-realtime.v1`）及认证后的 `GET /api/v1/realtime` 命令目录。
+  Cookie 要求同源 Origin 和 hello CSRF；原生客户端使用 Bearer access/API Key，拒绝 refresh。
+  每条命令与心跳重验凭据；Cookie 到期、网页退出/改密使活跃连接失效，移动端退出仅吊销自己的令牌族。
+- 固定 `api.*` / `web.*` 命令目录来自显式业务 routers；进程内 ASGI 调用复用原权限、
+  参数验证与服务。Web 表单受限跟随 GET 重定向取得原模板片段，并保留界面查询与重复参数。
+  不接受任意路径或方法；移动端仅可用 JSON 命令。HTTP API/SSE、文件与认证入口继续保留。
+- command.accepted/result/error 关联 request_id；连接最多积压 8 条，近期 4096 个 ID 去重。
+  不持久化幂等记录，断线/超时不自动重发写操作。256 KiB 入站上限；15 秒心跳、45 秒无消息
+  断开、10 秒发送超时；退出清理任务与订阅。
+- EventBus 加进程 epoch 和全局 sequence，无订阅者也计数；状态是失效通知，不是实体 revision。
+  先订阅再读取权威快照，返回读取前保守水位；新通知、序列缺口及重连要求校正。
+  HTTP/WS 成功写操作、新候选、抓取元数据、自动审批、下载/打包认领和结束、种子推进、Bot
+  连接恢复/失败补齐通知。LogBroker 共享线程安全订阅；日志快照新增独立 log_epoch/log_sequence
+  水位，内存条目附 sequence。
+
+**WebUI。**
+
+- 每个文档共用一条 WebSocket，表单、JSON 抽屉、状态与日志复用命令通道；删除页面状态轮询
+  及 EventSource，移除旧 activity.js/work.js，后台 Telegram/qBittorrent 采集不变。
+- 普通操作局部替换原 Jinja `#main` 片段，保留未保存表单原节点、勾选、焦点/文本选区、
+  滚动、展开状态及外部抽屉；可以确认未变化的行保留节点。恢复任务勾选时同步 Alpine 模型。
+  请求期间禁用提交按钮，捕获实际 submitter/formaction；HTTP 降级也保留多值、查询及编辑状态。
+  筛选 revision 丢弃旧响应，地址栏和历史不变；登录/退出/改密及普通导航仍走整页切换。
+- 只有候选与已下载列表的 Tag 可操作，左键过滤、右键选择过滤/排除。读取当前表单的未提交
+  输入，保留重复 facets、page_size/view/sort/dir，回第 1 页且不重复添加；详情等页只展示。
+  菜单支持 Shift+F10/ContextMenu、方向键/Esc、外部点击/滚动/片段替换关闭。
+- 日志共用连接，级别切换、暂停/继续、重连/缺口快照均局部更新；使用完整的服务端行模板，
+  即使初始列表为空也可插入。快照期间缓存新记录，按独立水位去重，旧筛选响应不能覆盖新结果。
+
+**测试与验证。**
+
+- 新增 `test_realtime.py` 27 条：认证/Origin/CSRF、协议/非法帧、有限目录、JSON/HTML
+  业务验证、重复命令、多值/重定向/root_path、两连接广播、到期/撤销/退出、日志清理与
+  入库/元数据 wiring；真实 ZIP→CBZ 用另一连接验证认领与完成通知。
+- 分批定向回归覆盖 20 个文件、**545 个不同用例最终通过**：realtime/candidates_web/
+  downloaded_web/work_detail_web/activity_web/settings_web/api_v1/api_auth/settings_write_api/
+  logs_web/auto_approval_workflow/connection_manager/metadata_scrape_worker；api_contracts/
+  conversion/conversion_logging/download_logging/log_broker/torrent/torrent_logging。
+  旧 Tag/轮询断言更新后复验，fake 服务安装时机和测试中的会话代数断言修正后复验。
+- `tests/web/realtime.cjs` 用真实 HTMX/Alpine、临时 jsdom 和模拟 WebSocket，根路径及
+  `/ehbot` 均通过：固定 URL、未提交过滤、多值/去重、菜单键盘/关闭、输入/勾选/抽屉保留、
+  旧查询隔离、序列缺口校正、按钮锁定、断线不重发及 HTTP 局部降级；日志空列表、快照期间
+  新日志、回放去重、旧级别响应、暂停与继续。无新增运行时 npm 依赖。
+- 整库 **2064 collected（+27）**，仅收集；最近整库全绿仍是 R81–R84 的 2014。
+  JS 语法、compileall app、git diff --check、CodeGraph sync 通过。浏览器工具不可用，
+  DOM 验证不等于真实浏览器/设备验收；未做移动端实现及双端真机联调。
+- 无新增迁移（仍 025 / 25 条），版本保持 0.3.0rc3；没有构建/推送镜像或部署。
+
+**文档同步。** README、docs/USAGE、docs/REALTIME_API、EHBot、两个方案、PHASES、
+AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。

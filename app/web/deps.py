@@ -342,6 +342,7 @@ def tag_hrefs(request: Request, search: str = "", *, base: str | None = None):
             term = tag_search_term(tag, exclude=exclude)
             combined = search if term in search else f"{search} {term}".strip()
             links[key] = search_href(request, combined, base=base)
+            links[f"{key}_term"] = term
         return links
 
     return build

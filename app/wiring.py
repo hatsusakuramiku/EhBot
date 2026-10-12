@@ -34,7 +34,7 @@ import sqlite3
 from fastapi import FastAPI, HTTPException
 import httpx
 
-from app.api.events import EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
+from app.api.events import EVENT_CANDIDATE, EVENT_CONNECTION, EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
 from app.ai.models import CHAIN_SCOPE_CANDIDATE
 from app.ai.service import AiProviderService
 from app.archive.service import ArchiveSettingsService
@@ -253,7 +253,10 @@ async def _enrich_candidate_metadata(app, candidate_ids) -> int:
     service = getattr(app.state, "exhentai_service", None)
     if service is None:
         return 0
-    return await service.enrich_missing_metadata(candidate_ids)
+    enriched = await service.enrich_missing_metadata(candidate_ids)
+    if enriched:
+        app.state.event_bus.publish(EVENT_CANDIDATE)
+    return enriched
 
 
 async def _on_candidates_ingested(app) -> None:
@@ -267,6 +270,7 @@ async def _on_candidates_ingested(app) -> None:
     built (they need the download worker to exist first) and a batch that
     arrives in that window is left to the interval loops.
     """
+    app.state.event_bus.publish(EVENT_CANDIDATE)
     scrape_worker = getattr(app.state, "metadata_scrape_worker", None)
     if scrape_worker is not None:
         scrape_worker.wake()
@@ -407,6 +411,7 @@ def build_lifespan(
                 # than merely lucky -- an update that arrives before the sweeper
                 # exists is left to the first timed sweep.
                 on_candidates_ingested=lambda: _on_candidates_ingested(application),
+                on_state_changed=lambda: application.state.event_bus.publish(EVENT_CONNECTION),
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -478,6 +483,9 @@ def build_lifespan(
                     client_http_client=torrent_client,
                     poll_seconds=float(app_settings.torrent_poll_seconds),
                     work_path_provider=archive_settings_service.work_path,
+                    notify=(lambda **data: application.state.event_bus.publish(
+                        EVENT_DOWNLOAD, **data
+                    )),
                     # Read off application.state per delivery: the conversion service
                     # is constructed further down in this same scope, so the
                     # name is not bound yet and the module-level accessor is
@@ -748,6 +756,7 @@ def build_lifespan(
                         application, candidate_ids
                     )
                 ),
+                notify=lambda **data: application.state.event_bus.publish(EVENT_CANDIDATE, **data),
             )
             await application.state.auto_approval_sweeper.start()
             if application.state.torrent_service is not None:

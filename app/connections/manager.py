@@ -74,6 +74,7 @@ class ConnectionManager:
         candidate_ingestor: CandidateIngestor | None = None,
         user_client_factory=None,
         on_candidates_ingested=None,
+        on_state_changed=None,
     ) -> None:
         self._secret_store = secret_store
         self._database = database
@@ -86,6 +87,7 @@ class ConnectionManager:
         # Telegram and knows nothing about review policy -- and because the
         # sweeper is built during the lifespan, after this is constructed.
         self._on_candidates_ingested = on_candidates_ingested
+        self._on_state_changed = on_state_changed
         self._telegram_task: asyncio.Task[None] | None = None
         # The MTProto ingester, when a user account is logged in. Separate from
         # `_telegram_task` because the two are independent: either can run with
@@ -760,6 +762,7 @@ class ConnectionManager:
         latest_update_id = await self._database.latest_telegram_update_id()
         offset = latest_update_id + 1 if latest_update_id is not None else None
         while True:
+            previous = self.snapshot()
             try:
                 updates = await api.get_updates(offset)
                 if updates:
@@ -774,6 +777,8 @@ class ConnectionManager:
                         configured=True,
                         identity=self._telegram_status.identity,
                     )
+                    if self._on_state_changed is not None:
+                        self._on_state_changed()
             except asyncio.CancelledError:
                 raise
             except sqlite3.Error:
@@ -787,6 +792,8 @@ class ConnectionManager:
                     "telegram_ingest_failed",
                     extra={"error_code": "TELEGRAM_INGEST_FAILED"},
                 )
+                if self.snapshot() != previous and self._on_state_changed is not None:
+                    self._on_state_changed()
                 await asyncio.sleep(5)
             except ProviderConnectionError as exc:
                 self._telegram_status = ProviderStatus(
@@ -798,6 +805,8 @@ class ConnectionManager:
                 logging.getLogger(__name__).warning(
                     "telegram_poll_failed", extra={"error_code": exc.code}
                 )
+                if self.snapshot() != previous and self._on_state_changed is not None:
+                    self._on_state_changed()
                 await asyncio.sleep(
                     exc.retry_after
                     if exc.retry_after is not None

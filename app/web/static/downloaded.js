@@ -1,20 +1,4 @@
-/* Bulk selection, the rename drawer and live pack progress for /downloaded.
- *
- * Everything here is an addition to a page that already works: the list filters,
- * pages, selects with plain checkboxes and packs, removes and re-downloads
- * through real forms. This file makes a fifty-book library fast to work through
- * and takes nothing away when it fails to load. The same three rules
- * `candidates.js` and `activity.js` follow:
- *
- * 1. It writes no vocabulary. The pack badge is replaced with markup the server
- *    resolved from `app/api/status.py`; there is no Chinese state name below.
- * 2. It patches fields, it never builds a row. A poll that finds a work the page
- *    has never rendered shows a change notice instead, because row markup built
- *    here would be a second copy of the `work_row` macro and the two would
- *    drift.
- * 3. It reveals its own controls. The select tools and the rename buttons ship
- *    `hidden` and are unhidden below, so a dead button never reaches the screen.
- */
+/* Bulk selection and the rename drawer. Realtime updates live in realtime.js. */
 (function () {
   "use strict";
 
@@ -24,8 +8,6 @@
    * when it is used or rebound by `setUp`, and nothing is captured once at load.
    */
   var form = null;
-  var tab = "all";
-  var live = false;
 
   function reveal(selector) {
     document.querySelectorAll(selector).forEach(function (node) {
@@ -73,11 +55,16 @@
    * the nodes they were attached to. */
   function bindSelection() {
     if (form) {
-      form.addEventListener("change", syncSelected);
+      if (!form.dataset.selectionBound) {
+        form.dataset.selectionBound = "true";
+        form.addEventListener("change", syncSelected);
+      }
       syncSelected();
     }
 
     document.querySelectorAll("[data-select]").forEach(function (button) {
+      if (button.dataset.bound) return;
+      button.dataset.bound = "true";
       button.addEventListener("click", function () {
         var mode = button.getAttribute("data-select");
         boxes().forEach(function (box) {
@@ -139,6 +126,8 @@
 
   function bindRenameTriggers() {
     document.querySelectorAll("[data-rename-open]").forEach(function (button) {
+      if (button.dataset.bound) return;
+      button.dataset.bound = "true";
       button.addEventListener("click", function () {
         openDrawer(button);
       });
@@ -154,172 +143,16 @@
     });
   }
 
-  /* ------------------------------------------------------------ live packing */
-
-  var timer = null;
-
-  /* Fallbacks only. The real values come from `/api/v1/meta`, so the cadence is
-   * an operator setting rather than a constant compiled into this file. */
-  var interval = 5000;
-  var idleInterval = 20000;
-
-  function notice() {
-    return document.querySelector("[data-queue-changed]");
-  }
-
-  function patch(item) {
-    var host = document.querySelector('[data-work-id="' + item.candidate_id + '"]');
-    if (!host) return false;
-    var badge = host.querySelector('[data-field="pack"]');
-    if (badge) {
-      /* The whole badge is replaced from the server-resolved payload rather than
-       * having its text rewritten, so the label and the tone can never come from
-       * two different states. */
-      badge.innerHTML =
-        '<span class="ui-badge" data-tone="' +
-        item.pack.tone +
-        '" data-code="' +
-        item.pack.code +
-        '">' +
-        item.pack.label +
-        "</span>";
-    }
-    var error = host.querySelector('[data-field="pack-error"]');
-    if (error) error.textContent = item.pack_error_message || "";
-    return true;
-  }
-
-  /* A page the server no longer understands, which R34 produced once for real:
-   * `data-tab` carried the resolved view instead of the key, so every tick
-   * asked `/api/v1/downloaded?tab={'code': ...}` and the contract answered 400.
-   * Retrying is wrong for a 400 -- the answer will never change -- and the two
-   * seconds between ticks is what turned one bad attribute into a permanent
-   * stream of `api_error TAB_UNKNOWN`. Stop, and say the one thing that helps:
-   * reload, which re-renders the attribute. */
-  function stopOnStale(output, host) {
-    stopPolling();
-    if (host) {
-      host.hidden = false;
-      host.textContent = output;
-    }
-  }
-
-  function poll() {
-    var url = "/api/v1/downloaded?tab=" + encodeURIComponent(tab);
-    fetch(url, { headers: { Accept: "application/json" } })
-      .then(function (response) {
-        /* 401 means the session went away. Reloading lands on the login page
-         * rather than leaving a stale grid updating itself. */
-        if (response.status === 401) {
-          window.location.reload();
-          return null;
-        }
-        /* 400 is the contract refusing the tab itself: this page is stale, not
-         * early. Asking again cannot help. */
-        if (response.status === 400) {
-          stopOnStale("列表有更新，刷新以查看", notice());
-          return null;
-        }
-        return response.ok ? response.json() : null;
-      })
-      .then(function (payload) {
-        if (!payload) return;
-        var unknown = false;
-        payload.works.forEach(function (item) {
-          if (!patch(item)) unknown = true;
-        });
-        var host = notice();
-        if (unknown && host) {
-          host.hidden = false;
-          host.textContent = "列表有更新，刷新以查看";
-        }
-        if (!payload.live) stopPolling();
-      })
-      .catch(function () {
-        /* Swallowed on purpose: a failed poll is a missing update, not an error
-         * worth putting on screen. The next tick tries again. */
-      });
-  }
-
-  function schedule() {
-    if (timer) window.clearInterval(timer);
-    /* A hidden tab polls at the idle cadence, which the server derives from the
-     * active one -- so no setting can make a background tab poll faster than a
-     * foreground one. */
-    var wait = document.visibilityState === "visible" ? interval : idleInterval;
-    timer = window.setInterval(poll, wait);
-  }
-
-  function stopPolling() {
-    if (timer) {
-      window.clearInterval(timer);
-      timer = null;
-    }
-  }
-
-  /* ---------------------------------------------------------------- start */
-
-  var started = false;
-
-  /* Runs on load and after every swap. Order matters: the DOM references are
-   * refreshed first, then the controls are rebound, then polling is re-armed
-   * against the new `live` flag -- a batch that queued fifty packs arrives with
-   * `data-live="true"` and starts the progress updates without a reload. */
   function setUp() {
-    var root = document.querySelector("[data-downloaded-root]");
-    if (!root) {
-      stopPolling();
-      return;
-    }
     form = document.querySelector("[data-downloaded-form]");
-    tab = root.getAttribute("data-tab") || "all";
-    live = root.getAttribute("data-live") === "true";
-
+    if (!form) return;
     reveal("[data-select-tools]");
     reveal("[data-rename-open]");
     bindSelection();
     bindRenameTriggers();
-
-    stopPolling();
-    /* Only polled when the server says something is moving, which is what keeps
-     * a library of finished books from waking the process every few seconds. */
-    if (live) schedule();
   }
-
-  var ready = window.EhBotUI && window.EhBotUI.onContentReady;
-  if (!ready) {
-    ready = function (callback) {
-      callback();
-    };
-  }
-
-  ready(function () {
-    if (!started) {
-      started = true;
-      /* Read once per document: the cadence is a settings value, and re-fetching
-       * it after every action would be a request per click. */
-      fetch("/api/v1/meta", { headers: { Accept: "application/json" } })
-        .then(function (response) {
-          return response.ok ? response.json() : null;
-        })
-        .then(function (meta) {
-          if (meta && meta.polling) {
-            interval = meta.polling.interval_ms || interval;
-            idleInterval = meta.polling.idle_interval_ms || idleInterval;
-          }
-        })
-        .catch(function () {
-          /* Keep the fallbacks: a page that cannot read the cadence still polls. */
-        })
-        .then(setUp);
-      return;
-    }
-    setUp();
+  document.addEventListener("ehbot:operation", function (event) {
+    if (event.detail.form === renameForm) closeDrawer();
   });
-
-  document.addEventListener("visibilitychange", function () {
-    if (!live) return;
-    if (document.visibilityState === "visible") poll();
-    schedule();
-  });
+  window.EhBotUI.onContentReady(setUp);
 })();

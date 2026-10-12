@@ -987,6 +987,7 @@ class DownloadService:
         job = await asyncio.to_thread(self._claim_pending_job_sync)
         if job is None:
             return False
+        self._announce(job["job_id"], job["candidate_id"])
         # One claimed / one finished record per job, logged here because this is
         # the single point every delivery passes through -- the same reason
         # `_announce` lives here. Without the pair, 「why is this book not

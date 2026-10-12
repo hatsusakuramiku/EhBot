@@ -29,6 +29,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}EhBot{% endblock %}</title>
   <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="realtime-path" content="{{ request.scope.get('root_path', '') }}/ws/ui">
   {#- The 时区 chosen on the 系统 tab. `ui.js` reads it from here to rewrite every
       `<time>` element's text; the raw UTC value stays in `datetime`, so a
       browser without JavaScript still shows a complete timestamp. -#}
@@ -65,9 +66,11 @@
   <script defer src="{{ url_for('static', path='/vendor/htmx-2.0.4.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/ui.js') }}"></script>
+  <script defer src="{{ url_for('static', path='/realtime.js') }}"></script>
   {% block head %}{% endblock %}
 </head>
 <body class="ui-page">
+  <div class="ui-realtime-status" data-realtime-status role="status" aria-live="polite" hidden></div>
   <a class="skip-link" href="#main">跳到主要内容</a>
   <div class="ui-shell" data-collapsed="false">
 

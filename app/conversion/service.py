@@ -971,6 +971,7 @@ class ConversionService:
         job = await asyncio.to_thread(self._claim_pending_job_sync)
         if job is None:
             return False
+        self._announce(job["job_id"], job["candidate_id"])
         # Paired claimed / finished records, at the same single point
         # `_announce` uses. `provider` is not logged: this queue only ever holds
         # `PROVIDER_CONVERSION`, and a constant field would be noise.
@@ -1041,9 +1042,8 @@ class ConversionService:
     def _announce(self, job_id: int, candidate_id: int) -> None:
         """Tell the interface a packaging job moved, if anything is listening.
 
-        Never allowed to disturb the worker: the activity page falls back to
-        polling, so a subscriber problem must not fail a CBZ that was written
-        successfully.
+        Never allowed to disturb the worker: a subscriber problem must not fail
+        a CBZ that was written successfully.
         """
         if self._notify is None:
             return

@@ -35,16 +35,20 @@
 {# --------------------------------------------------------------- tag chips #}
 
 {% macro tag_list(tags, tag_hrefs=None) -%}
-  {#- A read-only tag list, or -- when the page hands in `tag_hrefs` -- the same
-      list with the two actions asmr.one offers: 🔍 过滤 adds `$tag:值$`, 🚫 排除
-      adds `$-tag:值$`. Plain links, so both work with JavaScript off (R61 §3.2). -#}
+  {#- Only candidate/downloaded lists provide actions. Left click filters;
+      realtime.js offers exclusion in the context menu. The href is the
+      ordinary no-JavaScript fallback. -#}
   <div class="ui-card-tags">
     {% for raw_tag in tags %}
       {% set tag = raw_tag.strip() %}
       {% if tag %}
       {% set links = tag_hrefs(tag) if tag_hrefs else None %}
       {% if links %}
-      <span class="ui-tag" data-tag="{{ tag }}">{{ tag }}<a class="ui-tag-action" href="{{ links.filter }}" title="过滤「{{ tag }}」" aria-label="过滤标签 {{ tag }}">🔍</a><a class="ui-tag-action" href="{{ links.exclude }}" title="排除「{{ tag }}」" aria-label="排除标签 {{ tag }}">🚫</a></span>
+      <a class="ui-tag" data-tag="{{ tag }}" href="{{ links.filter }}"
+         data-tag-filter-term="{{ links.filter_term }}" data-tag-exclude-term="{{ links.exclude_term }}"
+         data-tag-exclude="{{ links.exclude }}" aria-haspopup="menu"
+         aria-expanded="false"
+         title="点击过滤；右键选择过滤或排除">{{ tag }}</a>
       {% else %}
       <span class="ui-tag">{{ tag }}</span>
       {% endif %}
@@ -477,7 +481,7 @@
 
       `key` and the `data-field` slots are the contract with a script that
       refreshes a node in place: it patches these values and never builds a node,
-      the same arrangement `activity.html` has with `activity.js`. The caller
+      the caller can also retain it across realtime fragments. The caller
       composes the key, because what identifies a node is the caller's business.
       -#}
   <li class="ui-timeline-node" {% if key %}data-timeline-key="{{ key }}"{% endif %}>

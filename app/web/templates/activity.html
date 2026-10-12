@@ -9,17 +9,17 @@
   It replaces `downloads.html`, whose `<meta http-equiv="refresh">` reloaded the
   whole document every few seconds and threw away scroll position, an open menu
   and any checkbox selection with it. Progress now arrives through
-  `activity.js`, which patches the numbers in place.
+  the shared WebSocket and server-rendered content fragments.
 
   Two rules this file follows and the old one broke:
 
   * No state label is written here. Every one comes from a `StatusView` the API
     resolved, rendered through `ui.badge`. The old page printed
     `{{ job.state }}` raw, which is how `WAITING_TORRENT` reached the screen.
-  * Every row action is a real form. `activity.js` upgrades them into batch
-    calls, but with JavaScript off the queue stays fully operable.
+  * Every row action is a real form. `realtime.js` submits it as a command,
+    but with JavaScript off the queue stays fully operable.
 #}
-{% extends "base.html" %}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}{{ tab_title }} · EhBot{% endblock %}
@@ -29,9 +29,8 @@
 {# ------------------------------------------------------------ one queue row #}
 
 {% macro job_row(job, selectable=true) -%}
-  {#- `data-job-id` and `data-field` are the contract with `activity.js`: it
-      finds a row by id and writes into the named fields, and never builds a
-      row itself. Row markup exists once, here. -#}
+  {#- `data-job-id` identifies rows across realtime fragment updates.
+      Row markup exists once, here. -#}
   <tr data-job-id="{{ job.job_id }}">
     {% if selectable %}
     <td data-label="选择">
@@ -173,7 +172,7 @@
 {#- Everything waiting on the operator, counted across both queues, on every
     tab: a packaging job stuck on a password is not something they should have
     to change tab to discover. The banner is server-rendered so it is right on
-    first paint, and `activity.js` keeps its numbers current. -#}
+    first paint, and realtime fragments keep its numbers current. -#}
 <div data-attention-banner>
   {% if snapshot.attention.total %}
   {% call ui.callout("有 " ~ snapshot.attention.total ~ " 项任务需要处理", tone="danger", role="alert") %}
@@ -186,11 +185,7 @@
   {% endif %}
 </div>
 
-{#- The membership notice. `activity.js` fills it in when a poll finds a job the
-    page has never rendered: it patches fields in place and deliberately does not
-    construct rows, because row markup built in JavaScript is a second copy of
-    the macro above and the two would drift. -#}
-<div data-queue-changed hidden></div>
+
 
 {% if tab == "history" %}
 
@@ -250,11 +245,5 @@
 {% endblock %}
 
 {% block scripts %}
-{#- `data-live` is the server's answer to「is anything still moving」, computed
-    from the job states in `queue_snapshot`. The script starts polling only when
-    it is true, which is what keeps an idle tab from waking the process. -#}
-<div data-activity-root
-     data-live="{{ 'true' if snapshot.live else 'false' }}"
-     data-tab="{{ tab }}" hidden></div>
-<script defer src="{{ url_for('static', path='/activity.js') }}"></script>
+<div data-activity-root data-live="{{ 'true' if snapshot.live else 'false' }}" data-tab="{{ tab }}" hidden></div>
 {% endblock %}

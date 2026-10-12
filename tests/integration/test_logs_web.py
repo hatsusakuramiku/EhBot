@@ -224,6 +224,8 @@ class TestTheLevelFloor:
         assert "floor_error" in events
         assert "floor_warning" in events
         assert "floor_info" not in events
+        assert payload["log_epoch"]
+        assert payload["log_sequence"] >= max(entry["sequence"] for entry in payload["entries"])
 
     def test_the_default_floor_is_info(self, tmp_path: Path) -> None:
         """INFO rather than 全部: DEBUG is a firehose nobody asked for."""

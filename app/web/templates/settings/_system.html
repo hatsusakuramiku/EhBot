@@ -31,7 +31,7 @@
   <div class="ui-settings-col">
     <section class="ui-panel">
       <h2 class="ui-section-title">运行参数</h2>
-      <p class="ui-hint">保存后下一个任务与下一次轮询即生效，无需重启。</p>
+      <p class="ui-hint">保存后无需重启；新任务采用新参数，旧客户端重新读取配置后采用新的轮询间隔。</p>
       <form class="ui-form" method="post" action="{{ url_for('save_system_settings') }}"
             style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -48,14 +48,13 @@
           </small>
         </div>
         <div class="ui-field">
-          <label for="sys-poll">轮询间隔（毫秒）</label>
+          <label for="sys-poll">旧客户端轮询间隔（毫秒）</label>
           <input class="ui-input" id="sys-poll" name="poll_interval_ms" type="number"
                  min="{{ bounds.poll_interval_ms.minimum }}"
                  max="{{ bounds.poll_interval_ms.maximum }}"
                  value="{{ system.poll_interval_ms }}">
           <small>
-            页面刷新进行中任务的频率，{{ bounds.poll_interval_ms.minimum }}–{{ bounds.poll_interval_ms.maximum }}。
-            后台标签页使用 {{ system.idle_poll_interval_ms }} 毫秒，不会比前台更频繁。
+            仅供尚未迁移的客户端读取；WebUI 使用 WebSocket，此值不控制页面更新。
             {%- if not system.poll_interval_overridden %} 当前为默认值。{% endif %}
           </small>
         </div>

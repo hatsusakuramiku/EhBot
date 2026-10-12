@@ -19,7 +19,7 @@
     list still filters, pages, opens a candidate and approves one or many.
   * Row and card markup exists once each, in the two macros below.
 #}
-{% extends "base.html" %}
+{% extends layout %}
 {% import "components/ui.html" as ui %}
 
 {% block title %}{{ tab_title }} · EhBot{% endblock %}
@@ -132,9 +132,8 @@
 {% endif %}
 
 <div class="ui-filter-layout">
-  {#- The sidebar is a plain GET form: submitting it rewrites the query string,
-      which is the page's whole state. `view` rides along hidden so applying a
-      filter does not throw away the operator's choice of grid or list. -#}
+  {#- The shared realtime controller reads this form for in-place queries;
+      plain GET remains the no-JavaScript fallback. -#}
   <form class="ui-filters" id="candidate-filters" method="get" action="{{ tab_href }}">
     <input type="hidden" name="view" value="{{ view }}">
     {#- The current direction rides along so switching sort keeps it; omitted

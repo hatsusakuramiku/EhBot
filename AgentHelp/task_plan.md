@@ -411,3 +411,13 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] Support custom metadata fields, preserve archive paths/images/generated facts
 - [x] Sync documentation and verify 418 distinct related tests; collect 2037 total
 - **Status:** complete; no migration, version 0.3.0rc3; full suite and release not run.
+
+### R86: Server Realtime API And WebUI Partial Updates
+- [x] Publish authenticated WebSocket commands, invalidations and JSON/HTML snapshots
+- [x] Support browser Cookie/Origin/CSRF and mobile Bearer access/API Key
+- [x] Replace WebUI polling/SSE with one connection and preserve editing/selection state
+- [x] Add list-only Tag left-click filtering and keyboard-accessible right-click menu
+- [x] Cover real repack notifications, auth revocation, log snapshot races and HTTP fallback
+- [x] Deliver docs/REALTIME_API.md for the later EhBot-Mobile implementation
+- [x] Verify 545 distinct tests across 20 files, DOM behavior and 2064 collected total
+- **Status:** complete; no migration, version 0.3.0rc3; mobile implementation, real-device testing, full suite and release remain later work.

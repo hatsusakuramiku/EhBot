@@ -80,6 +80,7 @@ class AutoApprovalSweeper:
         orchestrator,
         settings_service: SystemSettingsService,
         metadata_enricher=None,
+        notify=None,
     ) -> None:
         self._database = database
         self._orchestrator = orchestrator
@@ -87,6 +88,7 @@ class AutoApprovalSweeper:
         # Optional so a deployment without ExHentai, and the tests that drive
         # this class with fakes, keep working unchanged.
         self._metadata_enricher = metadata_enricher
+        self._notify = notify
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -191,6 +193,8 @@ class AutoApprovalSweeper:
                 approved += 1
             elif decision == REVIEW_REJECT:
                 rejected += 1
+            if decision in {REVIEW_APPROVE, REVIEW_REJECT} and self._notify is not None:
+                self._notify(candidate_id=candidate_id)
         if approved or rejected:
             # Logged only when something happened: a sweep that decides nothing
             # is the normal case and would otherwise write a line every 30
