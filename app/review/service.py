@@ -5,7 +5,7 @@ import sqlite3
 
 from app.db.database import Database
 from app.review.models import (
-    METADATA_FIELDS,
+    editable_metadata_field,
     REVIEW_APPROVE,
     REVIEW_REJECT,
     REVIEW_REQUEUE,
@@ -79,7 +79,7 @@ class ReviewService:
         field_name: str,
         field_value: str,
     ) -> None:
-        if field_name not in METADATA_FIELDS:
+        if not editable_metadata_field(field_name):
             raise ReviewError(
                 "METADATA_FIELD_INVALID",
                 f"Unsupported metadata field: {field_name}",
@@ -118,7 +118,7 @@ class ReviewService:
         is how an operator says「ExHentai 这个值是对的，别再改」without having
         to retype it as a manual override and lose the provenance.
         """
-        if field_name not in METADATA_FIELDS:
+        if not editable_metadata_field(field_name):
             raise ReviewError(
                 "METADATA_FIELD_INVALID",
                 f"Unsupported metadata field: {field_name}",

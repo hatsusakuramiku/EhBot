@@ -1098,7 +1098,7 @@ def test_the_page_size_control_offers_every_size_and_marks_the_current_one(
     assert "page_size=50" not in body
 
 
-def test_the_page_size_parameter_is_honoured_and_clamped(tmp_path: Path) -> None:
+def test_the_page_size_parameter_is_honoured_without_a_ceiling(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     for index in range(3):
@@ -1120,5 +1120,4 @@ def test_the_page_size_parameter_is_honoured_and_clamped(tmp_path: Path) -> None
     # default 50.
     assert one.count('data-candidate-id="') == 1
     assert "共 3 条" in one
-    # 9999 is past `MAX_PAGE_SIZE`; the page uses 200 rather than refusing.
-    assert ">200</button>" in clamped
+    assert 'name="page_size" min="1" step="1" value="9999"' in clamped

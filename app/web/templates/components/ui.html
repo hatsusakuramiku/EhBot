@@ -158,7 +158,7 @@
   </div>
 {%- endmacro %}
 
-{% macro pagination(page, page_size, total, prev_href=None, next_href=None, size_options=None, size_hrefs=None) -%}
+{% macro pagination(page, page_size, total, prev_href=None, next_href=None, size_options=None, size_hrefs=None, size_fields=None) -%}
   {#- Two shapes, one component. Given hrefs the arrows are anchors, which is
       what a server-rendered list wants: paging then survives JavaScript being
       off, and the URL stays the thing that describes the page. Without them
@@ -203,6 +203,16 @@
         {% endif %}
       {% endfor %}
     </span>
+    <form method="get" class="ui-row-actions" aria-label="自定义每页条数">
+      {% for name, value in size_fields or [] %}
+      <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {% endfor %}
+      <label for="page-size">每页</label>
+      <input id="page-size" class="ui-input" data-width="narrow" type="number"
+             name="page_size" min="1" step="1" value="{{ page_size }}">
+      <span>条</span>
+      <button class="ui-btn" data-size="sm" type="submit">确定</button>
+    </form>
     {% endif %}
   </nav>
 {%- endmacro %}

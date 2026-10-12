@@ -177,6 +177,7 @@ async def _render_downloaded(
             # select, so it survives JavaScript being off and a shared URL
             # reopens the same window.
             "page_size_options": PAGE_SIZE_OPTIONS,
+            "page_size_form_fields": deps.page_size_form_fields(request),
             "page_size_hrefs": deps.page_size_hrefs(
                 request, PAGE_SIZE_OPTIONS, default=DEFAULT_PAGE_SIZE
             ),

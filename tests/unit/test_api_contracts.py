@@ -9,7 +9,6 @@ import pytest
 
 from app.api.contracts import (
     DEFAULT_PAGE_SIZE,
-    MAX_PAGE_SIZE,
     ApiError,
     Page,
     PageParams,
@@ -114,10 +113,10 @@ class TestPageParams:
         assert PageParams.clamp(page, 10).page == 1
         assert PageParams.clamp(page, 10).offset == 0
 
-    def test_page_size_is_capped_rather_than_rejected(self) -> None:
+    def test_page_size_has_no_upper_limit(self) -> None:
         params = PageParams.clamp(1, 100_000)
 
-        assert params.page_size == MAX_PAGE_SIZE
+        assert params.page_size == 100_000
 
     @pytest.mark.parametrize("size", [0, -5])
     def test_non_positive_page_size_uses_the_default(self, size: int) -> None:

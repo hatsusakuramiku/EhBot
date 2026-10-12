@@ -432,6 +432,7 @@ async def work_snapshot(
     conversion=None,
     sources: frozenset[str] = frozenset(),
     library_path=None,
+    archived=None,
 ) -> dict[str, Any] | None:
     """Everything one work's detail page needs, in one read.
 
@@ -513,6 +514,7 @@ async def work_snapshot(
         ],
         "metadata": [metadata_entry(entry) for entry in primary],
         "raw_metadata": [metadata_entry(entry) for entry in raw],
+        "archive_metadata": await archived.archive_metadata(candidate_id) if archived else None,
         "timeline": work_timeline(actions, jobs),
         "jobs": [job_summary(job) for job in jobs],
         # The packaged output, promoted out of the job list: it is what the work
@@ -571,6 +573,7 @@ async def get_work(request: Request, candidate_id: int) -> dict:
         conversion=deps.optional_service(request, "conversion_service"),
         sources=configured_sources(request),
         library_path=await effective_library_path(request),
+        archived=deps.optional_service(request, "archived_work_service"),
     )
     if snapshot is None:
         raise ApiError(

@@ -227,6 +227,7 @@ async def render_work(
         conversion=deps.optional_service(request, "conversion_service"),
         sources=configured_sources(request),
         library_path=await effective_library_path(request),
+        archived=deps.optional_service(request, "archived_work_service"),
     )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Candidate not found")

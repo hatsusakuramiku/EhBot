@@ -8,12 +8,11 @@ from app.archive.errors import ArchiveError
 from app.archive.formats import detect_source_format
 from app.archive.models import SafetyLimits
 from app.archive.processor import ArchiveProcessor
-from app.conversion.comicinfo import build_comicinfo_xml
+from app.conversion.comicinfo import build_comicinfo_xml, metadata_tags as _metadata_tags
 from app.conversion.naming import (
     FALLBACK_NAME_MAX,
     safe_library_name,
 )
-from app.conversion.service import _metadata_tags
 
 from tests.unit.archive_fixtures import (
     ZIP_ONLY_PROFILES,

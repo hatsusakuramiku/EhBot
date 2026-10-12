@@ -326,7 +326,7 @@ def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
     assert any(h.action == "EDIT_METADATA" for h in history)
 
 
-def test_metadata_edit_rejects_unknown_field(tmp_path: Path) -> None:
+def test_metadata_edit_rejects_invalid_field(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
@@ -339,7 +339,7 @@ def test_metadata_edit_rejects_unknown_field(tmp_path: Path) -> None:
             f"/candidates/{candidate_id}/metadata",
             data={
                 "csrf_token": csrf,
-                "field_name": "UnsupportedField",
+                "field_name": "Unsupported-Field",
                 "field_value": "value",
             },
         )

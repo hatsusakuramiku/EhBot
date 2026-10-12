@@ -287,7 +287,7 @@
     </form>
 
     {{ ui.pagination(page, page_size, total, prev_href=prev_href, next_href=next_href,
-                     size_options=page_size_options, size_hrefs=page_size_hrefs) }}
+                     size_options=page_size_options, size_hrefs=page_size_hrefs, size_fields=page_size_form_fields) }}
     {% else %}
     {#- Two empty states, one element: a tab with nothing in it says so in the
         words `CANDIDATE_PAGE_TABS` gives it, but a filter that matched nothing

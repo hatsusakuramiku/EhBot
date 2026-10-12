@@ -14,7 +14,6 @@ from app.archive.errors import (
     ArchiveVolumesMissing,
 )
 from app.archive.processor import ArchiveProcessor
-from app.archive.quality import quality_note
 from app.ai.errors import (
     AI_CHAIN_EMPTY,
     AI_CHAIN_UNAVAILABLE,
@@ -31,7 +30,7 @@ from app.archive.service import (
     ArchiveSettingsService,
     TITLE_SOURCE_JAPANESE,
 )
-from app.conversion.comicinfo import build_comicinfo_xml
+from app.conversion.comicinfo import build_from_metadata
 from app.conversion.convert import ConversionError
 from app.conversion.naming import (
     CBZ_SUFFIX,
@@ -121,34 +120,6 @@ def _metadata_lookup(metadata, field_name: str) -> str | None:
         if entry.field_name == field_name:
             return entry.field_value
     return None
-
-
-def _scan_information(metadata, image_quality: str | None) -> str | None:
-    """Append the re-encode policy to the source grade already recorded.
-
-    The provider grade (for example `EH_TORRENT original 121.0MiB`) says where
-    the pages came from; the appended note says what EhBot did to them. Keeping
-    both in one field means a re-encoded book can be told apart from an
-    untouched one without opening a single page.
-    """
-    source = _metadata_lookup(metadata, "ScanInformation")
-    note = quality_note(image_quality)
-    if not note:
-        return source
-    return f"{source} {note}" if source else note
-
-
-def _metadata_tags(metadata) -> tuple[str, ...]:
-    tags: list[str] = []
-    for field_name in ("TagsRaw", "Tags"):
-        value = _metadata_lookup(metadata, field_name)
-        if not value:
-            continue
-        for item in value.replace("\n", ",").split(","):
-            tag = item.strip()
-            if tag and tag not in tags:
-                tags.append(tag)
-    return tuple(tags)
 
 
 class ConversionService:
@@ -1479,28 +1450,7 @@ class ConversionService:
         image_quality: str | None = None,
         series: str | None = None,
     ) -> bytes:
-        rating_value = _metadata_lookup(metadata, "Rating")
-        try:
-            rating = float(rating_value) if rating_value else None
-        except ValueError:
-            rating = None
-        return build_comicinfo_xml(
-            title=title,
-            artist=_metadata_lookup(metadata, "Artist"),
-            language=_metadata_lookup(metadata, "Language"),
-            category=_metadata_lookup(metadata, "Category"),
-            tags=_metadata_tags(metadata),
-            rating=rating,
-            description=_metadata_lookup(metadata, "Description"),
-            page_count=page_count,
-            japanese_title=_metadata_lookup(metadata, "JapaneseTitle"),
-            group=_metadata_lookup(metadata, "Group"),
-            parody=_metadata_lookup(metadata, "Parody"),
-            series=series,
-            character=_metadata_lookup(metadata, "Character"),
-            web=_metadata_lookup(metadata, "Web"),
-            scan_information=_scan_information(metadata, image_quality),
-        )
+        return build_from_metadata(metadata, title, page_count, image_quality, series)
 
     @staticmethod
     def _remove_original_sync(source_path: Path) -> None:
@@ -1537,7 +1487,7 @@ class ConversionService:
         """
         with self._database.connection() as connection:
             rows = connection.execute(
-                "SELECT mv.field_name, mv.field_value FROM metadata_values mv "
+                "SELECT mv.field_name, mv.field_value, mv.is_manual FROM metadata_values mv "
                 "WHERE mv.candidate_id = ? "
                 "ORDER BY mv.is_manual DESC, "
                 + METADATA_SOURCE_RANK_SQL
@@ -1545,7 +1495,7 @@ class ConversionService:
                 (candidate_id,),
             ).fetchall()
         return [
-            type("MetaRow", (), {"field_name": r[0], "field_value": r[1]})
+            type("MetaRow", (), {"field_name": r[0], "field_value": r[1], "is_manual": bool(r[2])})
             for r in rows
         ]
 

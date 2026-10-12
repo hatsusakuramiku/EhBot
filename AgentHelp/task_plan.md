@@ -404,3 +404,10 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] Prefer the managed version and remove PATH / registry / Program Files discovery
 - [x] Run all 12 real archive integration tests against the portable Windows pair
 - **Status:** complete; 1181 collected, all 12 real 7-Zip tests execute on Windows.
+
+### R85: Page Size Input And Archive Metadata Synchronization
+- [x] Accept any positive page size; preserve filters and reset to page one
+- [x] Read actual ComicInfo and share in-place edits between WebUI and API
+- [x] Support custom metadata fields, preserve archive paths/images/generated facts
+- [x] Sync documentation and verify 418 distinct related tests; collect 2037 total
+- **Status:** complete; no migration, version 0.3.0rc3; full suite and release not run.

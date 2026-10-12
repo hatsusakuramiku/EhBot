@@ -289,6 +289,14 @@ def page_size_hrefs(
     return hrefs
 
 
+def page_size_form_fields(request: Request) -> list[tuple[str, str]]:
+    """Keep repeated filters, dropping the old paging window for a GET form."""
+    return [
+        (name, value) for name, value in request.query_params.multi_items()
+        if name not in {"page", "page_size"}
+    ]
+
+
 def search_href(request: Request, search: str, *, base: str | None = None) -> str:
     """This URL with the search box replaced and the page cursor dropped.
 

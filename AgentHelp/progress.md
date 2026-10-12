@@ -6816,3 +6816,52 @@ ComicInfo 回落。`test_archive_workflow.py` +3（元数据系列入库、无 A
 
 **文档同步**：本条目；`PHASES.md` 加 R84 行；`README.md`、`docs/USAGE.md`（明写端点契约破坏）、
 `AgentHelp/EHBot.md` §4.4。
+
+---
+
+## R85 · v0.3.0rc3 · 2026-10-12 · 每页条数无上限与归档元数据就地同步
+
+**需求与批准。** `PAGE_SIZE_INPUT_AND_SERIES_DETAIL_PROPOSAL.md` v3，运营者确认
+「OK，快动手做 R85」。每页条数可手填任意正整数；归档元数据可读可写并保存到数据库；
+移动端同构；只改元数据，不移动或重命名已打包文件。
+
+**实现。**
+
+- `PageParams.clamp` 删除 200 的上限，空值、乱码、非正整数回落 50。网页保留快捷档并加入
+  GET 输入框；hidden 保留重复筛选项，丢掉 page/page_size，换条数回第 1 页。候选 API
+  接受字符串参数后按同一规则解析；活动 history 的 limit 也移除共享上限。
+- `build_from_metadata` 从转换服务抽出，首次打包、重新打包与归档同步共用映射。
+  ComicInfo 标量白名单支持 Translator/Editor/Year/Volume 等；自定义字段名使用
+  `[A-Za-z][A-Za-z0-9_]{0,63}`，原始字段、TAG/FileSize/Pages 和 PageCount/Manga/Added 禁止编辑。
+  非 ComicInfo 字段只入库并标注；仅支持添加、修改。显式 ComicInfo 元素值优先于映射值。
+- `ArchivedWorkService.archive_metadata` 实读 CBZ 中的 ComicInfo，返回文件值与数据库对应值。
+  详情页新增可编辑分区，缺少 Series 时也能填写；文件与输入不同时高亮「文件中的旧值」；
+  未打包时展示将来写入的字段；文件不可读时给出提示。
+- `sync_archive_metadata` 先取得 SQLite 写入预约，再检查产物、打包中和审核门禁，防止
+  工作线程在同步中认领打包任务。`rewrite_comicinfo` 在同目录临时 ZIP 写新 XML，流式复制
+  其余成员，成功后原子替换；保留文件权限、成员顺序/属性和归档注释。不依赖原压缩包，不解码
+  图片，不移动或重命名文件；保留实际页数、Manga、Added、原图源记录和已有额外/结构化元素。
+  更新 artifacts 的大小/SHA-256，不动 job_id/page_count/path；沿用 EDIT_METADATA 审计，
+  增 archive_synced/path。未打包、打包中、审核未允许或文件同步失败时保留数据库编辑并明确提示。
+- 网页保存与 API PATCH 共用服务。**契约变化**：PATCH 响应删除 repacked，改为
+  archive_synced / sync_skipped / sync_message；GET 作品新增 archive_metadata。
+  候选抽屉显示服务端同步结果，并将派生字段的编辑/锁定控件置为不可操作。
+
+**测试与验证。**
+
+- 新增 `tests/integration/test_archive_metadata.py` 21 条：真实文件值、网页/API 共用编辑、
+  Series/Translator 入库并写 XML、仅数据库字段、图片字节/路径/权限/生成值/额外元素保持，
+  产物摘要与审计更新；四种门禁、未打包、损坏文件、流式复制失败与根目录越界；
+  禁止编辑派生/原始/非法字段；实际返回 300 条，非法条数回落及重复筛选保留。
+- 新增 `tests/unit/test_comicinfo.py` 2 条：共享映射与自定义元素、显式元素覆盖且重打包沿用。
+  更新旧「未知字段必须拒绝」「上限 200」「元数据修改入队重打包」断言。
+  `test_downloaded_web` 的静态 JS 断言先规范 CRLF，修正 Windows 换行导致的假失败。
+- 定向验证覆盖 14 个文件、**418 个不同用例最终通过**（分批回归，失败修正后对应文件复验）：
+  archive_metadata / candidates_web / downloaded_web / work_detail_web / api_domains /
+  archive_workflow / review_actions；api_contracts / conversion / archived_works / ai_series /
+  work_detail / review_models / comicinfo。最后补验 155 条全绿，归档核心补验 54 条全绿。
+- 整库 **2037 collected（+23）**，仅收集，本轮未跑整库；最近整库全绿结果仍是 R81–R84 的 2014。
+  `compileall app`、`node --check candidates.js`、`git diff --check`、CodeGraph 同步通过。
+  无新增迁移（仍 025 / 25 条），版本保持 0.3.0rc3；没有构建或推送镜像、没有部署。
+
+**文档同步。** README、docs/USAGE、EHBot 需求、方案状态、PHASES、AGENTS 基线及 task_plan。

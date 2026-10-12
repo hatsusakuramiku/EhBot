@@ -4,6 +4,44 @@ from datetime import datetime, UTC
 from xml.etree import ElementTree as ET
 from xml.etree.ElementTree import Element, SubElement
 
+from app.archive.quality import quality_note
+
+
+# ComicInfo scalar elements. Generated facts are deliberately not editable.
+DERIVED_ELEMENTS = frozenset({"PageCount", "Manga", "Added"})
+EDITABLE_ELEMENTS = frozenset({
+    "Title", "JapaneseTitle", "Series", "LocalizedSeries", "Publisher",
+    "Writer", "Penciller", "Inker", "Colorist", "Letterer", "CoverArtist",
+    "Characters", "LanguageISO", "Genre", "Tags", "Rating", "Summary", "Web",
+    "ScanInformation", "Translator", "Editor", "Year", "Month", "Day",
+    "Volume", "Number", "Count", "AlternateSeries", "AlternateNumber",
+    "AlternateCount", "SeriesGroup", "StoryArc", "StoryArcNumber", "Notes",
+    "AgeRating", "Format", "Imprint", "Teams", "Locations", "MainCharacterOrTeam",
+    "CommunityRating", "BlackAndWhite", "Review", "GTIN",
+})
+
+
+def field_writes_archive(field_name: str) -> bool:
+    """Whether an operator field contributes to ComicInfo.xml."""
+    return field_name in EDITABLE_ELEMENTS or field_name in {
+        "Artist", "Language", "Category", "Description", "Group", "Parody",
+        "Character",
+    }
+
+
+def metadata_tags(metadata) -> tuple[str, ...]:
+    """Combine upstream and translated tags without duplicating a value."""
+    values = {}
+    for entry in metadata:
+        values.setdefault(entry.field_name, entry.field_value)
+    tags = []
+    for name in ("TagsRaw", "Tags"):
+        for item in (values.get(name) or "").replace("\n", ",").split(","):
+            tag = item.strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tuple(tags)
+
 
 # ISO 639-1 codes for the languages E-Hentai reports most often.
 LANGUAGE_ISO_CODES: dict[str, str] = {
@@ -87,4 +125,67 @@ def build_comicinfo_xml(
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-__all__ = ["LANGUAGE_ISO_CODES", "build_comicinfo_xml"]
+def build_from_metadata(
+    metadata,
+    title: str,
+    page_count: int,
+    image_quality: str | None = None,
+    series: str | None = None,
+    *,
+    existing: bytes | None = None,
+) -> bytes:
+    """Build packing and edit output from the same field mapping.
+
+    Rows arrive best first. Explicit ComicInfo overrides win over mapped values.
+    During an edit preserve the file's generated facts, quality record and
+    unmapped elements, so a metadata correction does not rewrite its history.
+    """
+    values = {}
+    for entry in metadata:
+        values.setdefault(entry.field_name, entry.field_value)
+    rating_value = values.get("Rating")
+    try:
+        rating = float(rating_value) if rating_value else None
+    except ValueError:
+        rating = None
+    source = values.get("ScanInformation")
+    note = quality_note(image_quality)
+    scan_information = f"{source} {note}" if source and note else source or note
+    root = ET.fromstring(build_comicinfo_xml(
+        title=values.get("Title") or title,
+        artist=values.get("Artist"), language=values.get("Language"),
+        category=values.get("Category"), tags=metadata_tags(metadata), rating=rating,
+        description=values.get("Description"), page_count=page_count,
+        japanese_title=values.get("JapaneseTitle"), group=values.get("Group"),
+        parody=values.get("Parody"), series=series or values.get("Series"),
+        character=values.get("Character"), web=values.get("Web"),
+        scan_information=scan_information,
+    ))
+    if existing is not None:
+        previous = ET.fromstring(existing)
+        for child in previous:
+            if child.tag in DERIVED_ELEMENTS or child.tag == "ScanInformation":
+                found = root.find(child.tag)
+                if found is not None:
+                    root.remove(found)
+                root.append(child)
+            elif root.find(child.tag) is None:
+                root.append(child)
+    for name in EDITABLE_ELEMENTS:
+        # Shared names (Title, Series, Tags, Rating, Web) already participate
+        # in the mapping. Only an operator override should replace formatting.
+        direct = next((entry for entry in metadata
+                       if entry.field_name == name), None)
+        if direct is None:
+            continue
+        mapped = name in {"Title", "Series", "Tags", "Rating", "Web", "ScanInformation"}
+        if mapped and not getattr(direct, "is_manual", False):
+            continue
+        found = root.find(name)
+        if found is None:
+            found = SubElement(root, name)
+        found.text = f"{rating:.2f}" if name == "Rating" and rating is not None else direct.field_value
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+__all__ = ["LANGUAGE_ISO_CODES", "build_comicinfo_xml", "build_from_metadata"]

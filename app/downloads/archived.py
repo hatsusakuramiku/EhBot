@@ -25,7 +25,12 @@ requirements document is explicit that the second is opt-in and off by default
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import zipfile
+from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 from app.conversion.naming import (
@@ -39,7 +44,12 @@ from app.conversion.naming import (
     strict_library_segment,
     unique_library_target,
 )
-from app.db.database import Database
+from app.archive.backends.zip_backend import rewrite_comicinfo
+from app.conversion.comicinfo import (
+    DERIVED_ELEMENTS, EDITABLE_ELEMENTS, build_from_metadata,
+)
+from app.conversion.service import _PACK_FORBIDDEN_STATUSES
+from app.db.database import Database, METADATA_SOURCE_RANK_SQL
 from app.downloads.models import (
     CONVERSION_STATE_RUNNING,
     CONVERSION_STATE_WAITING_PATH,
@@ -200,6 +210,145 @@ class ArchivedWorkService:
                 "该作品没有已下载的档案，无法执行此操作",
             )
         return work
+
+    # ----------------------------------------------------- archive metadata
+
+    @staticmethod
+    def _metadata_rows(connection, candidate_id: int) -> list:
+        """Read the same trust order used by packing and effective metadata."""
+        rows = connection.execute(
+            "SELECT mv.field_name, mv.field_value, mv.is_manual FROM metadata_values mv "
+            "WHERE mv.candidate_id = ? ORDER BY mv.is_manual DESC, "
+            + METADATA_SOURCE_RANK_SQL + " DESC, mv.confidence DESC, mv.created_at DESC",
+            (candidate_id,),
+        ).fetchall()
+        return [SimpleNamespace(field_name=r[0], field_value=r[1], is_manual=bool(r[2]))
+                for r in rows]
+
+    @staticmethod
+    def _cbz_row(connection, candidate_id: int):
+        return connection.execute(
+            "SELECT a.id, a.path, a.page_count FROM artifacts a "
+            "JOIN download_jobs dj ON dj.id = a.job_id "
+            "WHERE dj.candidate_id = ? AND a.artifact_type = 'CBZ' "
+            "ORDER BY dj.id DESC LIMIT 1", (candidate_id,),
+        ).fetchone()
+
+    async def archive_metadata(self, candidate_id: int) -> dict:
+        """Read actual ComicInfo values and their current database counterparts."""
+        library, _ = await self._roots()
+        return await asyncio.to_thread(self._archive_metadata_sync, candidate_id, library)
+
+    def _archive_metadata_sync(self, candidate_id: int, library: Path) -> dict:
+        with self._database.connection() as connection:
+            row = self._cbz_row(connection, candidate_id)
+            metadata = self._metadata_rows(connection, candidate_id)
+            audit = connection.execute(
+                "SELECT created_at FROM review_actions WHERE candidate_id = ? "
+                "AND action = 'EDIT_METADATA' "
+                "AND json_extract(details_json, '$.archive_synced') = 1 "
+                "ORDER BY id DESC LIMIT 1", (candidate_id,),
+            ).fetchone()
+        values = {entry.field_name: entry.field_value for entry in reversed(metadata)}
+        expected = ET.fromstring(build_from_metadata(
+            metadata, values.get("Title") or f"candidate-{candidate_id}",
+            int(row[2] or 0) if row else 0,
+        ))
+        field_values = {child.tag: child.text or "" for child in expected}
+        file_values = {}
+        error = None
+        if row:
+            try:
+                path = _resolve_inside(library, Path(row[1]))
+                with zipfile.ZipFile(path) as archive:
+                    root = ET.fromstring(archive.read("ComicInfo.xml"))
+                file_values = {child.tag: child.text or "" for child in root}
+            except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, ArchivedWorkError):
+                error = "无法读取归档元数据；数据库已保存的值仍可查看"
+        names = list(file_values)
+        names.extend(name for name in field_values if name not in names)
+        # Offer missing mapped elements without inventing every optional custom
+        # ComicInfo field; those are added through the custom-field form.
+        names.extend(name for name in (
+            "Title", "Series", "LocalizedSeries", "Publisher", "Writer", "Penciller",
+            "CoverArtist", "Characters", "LanguageISO", "Genre", "Tags", "Rating",
+            "Summary", "Web", "ScanInformation",
+        ) if name not in names)
+        return {
+            "packaged": row is not None, "path": str(row[1]) if row else None,
+            "synced_at": str(audit[0]) if audit else None, "error": error,
+            "elements": [
+                {"name": name, "field_value": (
+                    file_values[name] if name in DERIVED_ELEMENTS and name in file_values
+                    else values.get(name, field_values.get(name, file_values.get(name, "")))
+                 ),
+                 "file_value": file_values.get(name), "in_file": name in file_values,
+                 "editable": name in EDITABLE_ELEMENTS, "derived": name in DERIVED_ELEMENTS}
+                for name in names
+            ],
+        }
+
+    async def sync_archive_metadata(self, candidate_id: int) -> dict:
+        """Update ComicInfo in place; skipped writes retain the database edit.
+
+        Unpacked works, running packs and unapproved works are reported as
+        skipped. A write reservation covers the state check, file replacement
+        and artifact update, preventing a worker claim or concurrent sync from
+        overtaking this operation. No image decoding or source archive is used.
+        """
+        library, _ = await self._roots()
+        return await asyncio.to_thread(self._sync_archive_metadata_sync, candidate_id, library)
+
+    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path) -> dict:
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._cbz_row(connection, candidate_id)
+            reason = None
+            message = "元数据已保存，归档文件已同步"
+            if row is None:
+                reason, message = "WORK_NOT_PACKED", "元数据已保存，尚未打包，下次打包生效"
+            elif connection.execute(
+                "SELECT 1 FROM download_jobs WHERE candidate_id = ? AND state = ?",
+                (candidate_id, CONVERSION_STATE_RUNNING),
+            ).fetchone():
+                reason, message = "WORK_PACK_RUNNING", "元数据已保存，正在打包，本次未同步归档"
+            else:
+                status = connection.execute(
+                    "SELECT status FROM candidates WHERE id = ?", (candidate_id,),
+                ).fetchone()
+                if status is None or status[0] in _PACK_FORBIDDEN_STATUSES:
+                    reason, message = "WORK_PACK_FORBIDDEN", "元数据已保存，当前审核状态不允许同步归档"
+            if reason:
+                return {"synced": False, "reason": reason, "message": message}
+            try:
+                path = _resolve_inside(library, Path(row[1]))
+                with zipfile.ZipFile(path) as archive:
+                    previous = archive.read("ComicInfo.xml")
+                metadata = self._metadata_rows(connection, candidate_id)
+                comicinfo = build_from_metadata(
+                    metadata, f"candidate-{candidate_id}", int(row[2] or 0), existing=previous,
+                )
+                rewrite_comicinfo(path, comicinfo)
+                with path.open("rb") as handle:
+                    digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, ArchivedWorkError) as exc:
+                logger.warning("archive_metadata_sync_failed: %s", exc)
+                return {"synced": False, "reason": "ARCHIVE_METADATA_SYNC_FAILED",
+                        "message": "元数据已保存到数据库，但归档同步失败，请检查文件后重试"}
+            connection.execute(
+                "UPDATE artifacts SET sha256 = ?, size_bytes = ? WHERE id = ?",
+                (digest, path.stat().st_size, row[0]),
+            )
+            audit = connection.execute(
+                "SELECT id, details_json FROM review_actions WHERE candidate_id = ? "
+                "AND action = 'EDIT_METADATA' ORDER BY id DESC LIMIT 1", (candidate_id,),
+            ).fetchone()
+            if audit:
+                details = json.loads(audit[1])
+                details.update(archive_synced=True, path=str(path))
+                connection.execute("UPDATE review_actions SET details_json = ? WHERE id = ?",
+                                   (json.dumps(details, ensure_ascii=False), audit[0]))
+            return {"synced": True, "message": message, "path": str(path)}
 
     # ---------------------------------------------------------------- removal
 

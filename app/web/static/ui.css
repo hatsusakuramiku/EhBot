@@ -1276,6 +1276,7 @@ canvas {
 .ui-kv dd[data-tone="success"] { color: var(--tone-success-fg); }
 .ui-kv dd[data-tone="muted"] { color: var(--t-ink-muted); }
 .ui-kv-note { margin-left: var(--s-2); color: var(--t-ink-muted); font-size: var(--font-small); }
+.ui-kv-note[data-tone="waiting"] { color: var(--tone-waiting-fg); font-weight: 600; }
 
 @media (max-width: 640px) {
   .ui-kv-row { grid-template-columns: minmax(0, 1fr); gap: 0; }

@@ -197,7 +197,7 @@
             {% if entry.is_locked %}<span class="ui-kv-note">已锁定</span>{% endif %}
           </dt>
           <dd>
-            {% if work.actions.edit_metadata %}
+            {% if work.actions.edit_metadata and entry.editable %}
             <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
                   hx-post="/candidates/{{ work.candidate_id }}/metadata"
                   class="ui-row-actions">
@@ -211,6 +211,9 @@
             {% else %}
             {{ entry.field_value or "—" }}
             {% endif %}
+            {% if not entry.archive_field %}
+            <span class="ui-kv-note">仅数据库，不写入归档</span>
+            {% endif %}
             {#- The editable field above, and below it the same values as chips
                 that carry the 过滤/排除 actions (R61 §3.2). -#}
             {% if entry.field_name in ("Tags", "TagsRaw") and entry.field_value %}
@@ -222,6 +225,18 @@
       </div>
       {% else %}
       {{ ui.empty_state("还没有元数据", "从下方的来源拉取一次，或手动补充") }}
+      {% endif %}
+
+      {% if work.actions.edit_metadata %}
+      <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
+            hx-post="/candidates/{{ work.candidate_id }}/metadata" class="ui-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="ui-label" for="new-metadata-name">添加元数据字段</label>
+        <input id="new-metadata-name" class="ui-input" name="field_name" required
+               pattern="[A-Za-z][A-Za-z0-9_]{0,63}" placeholder="例如 Series、Translator">
+        <input class="ui-input" name="field_value" required aria-label="新字段的值">
+        <button class="ui-btn" data-size="sm" type="submit">添加</button>
+      </form>
       {% endif %}
 
       {% if work.raw_metadata %}
@@ -238,6 +253,46 @@
       </details>
       {% endif %}
     </section>
+
+    {% if work.archive_metadata %}
+    <section class="ui-panel">
+      <h2 class="ui-section-title">归档文件（ComicInfo.xml）</h2>
+      {% if not work.archive_metadata.packaged %}
+      <p class="ui-hint">尚未打包，以下是将来写入归档的元数据。</p>
+      {% endif %}
+      {% if work.archive_metadata.error %}
+      <p class="ui-hint">{{ work.archive_metadata.error }}</p>
+      {% endif %}
+      <div class="ui-kv">
+        {% for element in work.archive_metadata.elements %}
+        <div class="ui-kv-row" data-archive-element="{{ element.name }}">
+          <dt>{{ element.name }}</dt>
+          <dd>
+            {% if element.editable and work.actions.edit_metadata %}
+            <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
+                  hx-post="/candidates/{{ work.candidate_id }}/metadata" class="ui-row-actions">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="field_name" value="{{ element.name }}">
+              <input class="ui-input" name="field_value" value="{{ element.field_value }}"
+                     aria-label="归档 {{ element.name }}">
+              <button class="ui-btn" data-size="sm" type="submit">保存</button>
+            </form>
+            {% else %}
+            {{ element.file_value if element.in_file else element.field_value }}
+            <span class="ui-kv-note">不可编辑</span>
+            {% endif %}
+            {% if element.in_file %}
+            <span class="ui-kv-note" {% if element.field_value != element.file_value %}data-tone="waiting"{% endif %}>
+              {{ "文件中的旧值" if element.field_value != element.file_value else "文件中的当前值" }}：{{ element.file_value }}
+            </span>
+            {% endif %}
+          </dd>
+        </div>
+        {% endfor %}
+      </div>
+      <p class="ui-hint">保存会同步数据库与归档元数据，文件名和路径保持不变。</p>
+    </section>
+    {% endif %}
 
     {% if work.messages %}
     <section class="ui-panel">

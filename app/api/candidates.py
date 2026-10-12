@@ -117,7 +117,7 @@ async def list_candidates(
     language: list[str] | None = Query(None),
     category: list[str] | None = Query(None),
     page: int | None = Query(None),
-    page_size: int | None = Query(None),
+    page_size: str | None = Query(None),
 ) -> dict:
     """A page of candidates for the review grid."""
     await deps.require_session(request)

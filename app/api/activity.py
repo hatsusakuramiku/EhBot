@@ -19,7 +19,6 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from app.api import deps
-from app.api.contracts import MAX_PAGE_SIZE
 from app.api.serializers import job_summary, queue_group_payload
 from app.api.status import ATTENTION_STATUS, attention_view, is_live
 from app.downloads.models import QUEUE_GROUPS
@@ -118,7 +117,7 @@ async def get_queue(request: Request) -> dict:
 @router.get("/history")
 async def get_history(
     request: Request,
-    limit: int = Query(100, ge=1, le=MAX_PAGE_SIZE),
+    limit: int = Query(100, ge=1),
 ) -> dict:
     """Finished tasks, newest first.
 

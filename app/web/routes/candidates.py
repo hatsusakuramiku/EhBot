@@ -253,6 +253,7 @@ async def _render_candidates(
             # select, so it survives JavaScript being off and a shared URL
             # reopens the same window.
             "page_size_options": PAGE_SIZE_OPTIONS,
+            "page_size_form_fields": deps.page_size_form_fields(request),
             "page_size_hrefs": deps.page_size_hrefs(
                 request, PAGE_SIZE_OPTIONS, default=DEFAULT_PAGE_SIZE
             ),
@@ -666,18 +667,10 @@ async def edit_metadata(
         return await render_review_error(
             request, candidate_id, exc.public_message
         )
-    # A metadata correction matters most once the book is on disk: the CBZ was
-    # packed from the old title, so an edit after packing starts a repack that
-    # re-derives the name. Before packing there is nothing to rebuild; the next
-    # pack reads the edited value. `downloaded_work`'s `is_packaged` reads the
-    # artifact, not the state, so a FAILED task still counts as never-packed.
-    work = await deps.database(request).downloaded_work(candidate_id)
-    if work is not None and work.is_packaged:
-        await deps.conversion_service(request).enqueue_for_candidate(
-            candidate_id
-        )
+    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id)
+    notice = sync["message"]
     return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
+        str(request.url_for("work_detail", candidate_id=candidate_id).include_query_params(message=notice)),
         status_code=303,
     )
 

@@ -9,6 +9,9 @@ one screen and raw on another.
 
 from __future__ import annotations
 
+from app.review.models import editable_metadata_field
+from app.conversion.comicinfo import field_writes_archive
+
 import json
 from typing import Any
 
@@ -183,6 +186,8 @@ def metadata_entry(entry: Any) -> dict[str, Any]:
     return {
         "field_name": entry.field_name,
         "field_label": field_label(entry.field_name),
+        "editable": editable_metadata_field(entry.field_name),
+        "archive_field": field_writes_archive(entry.field_name),
         "field_value": entry.field_value,
         "value_source": entry.value_source,
         "source": metadata_source_view(entry.value_source).to_payload(),

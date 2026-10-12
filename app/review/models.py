@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -148,6 +149,14 @@ FIELD_LABELS: dict[str, str] = {
 def field_label(field_name: str) -> str:
     """Return the Chinese label for a metadata field, or the raw name."""
     return FIELD_LABELS.get(field_name, field_name)
+
+
+def editable_metadata_field(field_name: str) -> bool:
+    """Allow existing fields and scalar custom names, excluding derived facts."""
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", field_name)) and (
+        field_name not in {*RAW_METADATA_FIELDS, "TAG", "FileSize", "Pages",
+                           "PageCount", "Manga", "Added"}
+    )
 
 
 def split_metadata_entries(entries):

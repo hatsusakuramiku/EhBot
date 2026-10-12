@@ -396,7 +396,7 @@ def test_the_poller_stops_when_the_contract_refuses_its_tab(
     settings, _library, _ids = seeded(tmp_path)
     client = logged_in(settings)
     try:
-        script = client.get("/static/downloaded.js").text
+        script = client.get("/static/downloaded.js").text.replace("\r\n", "\n")
     finally:
         client.__exit__(None, None, None)
 

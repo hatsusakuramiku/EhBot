@@ -35,7 +35,7 @@ from app.downloads.models import (
 )
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
-from app.review.models import METADATA_FIELDS
+from app.review.models import METADATA_FIELDS, editable_metadata_field
 from app.review.service import ReviewError, ReviewService
 
 
@@ -673,7 +673,8 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
         raise ApiError(
             "FIELDS_REQUIRED", "\u8bf7\u63d0\u4f9b\u8981\u4fee\u6539\u7684\u5b57\u6bb5"
         )
-    unknown = sorted((set(fields) | set(locks)) - set(METADATA_FIELDS))
+    unknown = sorted(name for name in set(fields) | set(locks)
+                     if not editable_metadata_field(name))
     if unknown:
         raise ApiError(
             "METADATA_FIELD_INVALID",
@@ -702,18 +703,7 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     except ReviewError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
 
-    repacked = False
-    work = await database.downloaded_work(candidate_id)
-    if work is not None and work.is_packaged:
-        # A metadata correction on a work that is already packed starts a repack
-        # so the CBZ re-derives its name. `is_packaged` reads the artifact, not
-        # the state, so a FAILED pack counts as never-packed; before packing the
-        # next pack simply reads the edited value. A refused repack is reported
-        # as an error rather than silently dropping the edit's effect.
-        await deps.conversion_service(request).enqueue_for_candidate(
-            candidate_id
-        )
-        repacked = True
+    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id)
 
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
     return {
@@ -721,7 +711,9 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
         "updated": sorted(fields),
         "locked": sorted(name for name, on in locks.items() if on),
         "unlocked": sorted(name for name, on in locks.items() if not on),
-        "repacked": repacked,
+        "archive_synced": sync["synced"],
+        "sync_skipped": sync.get("reason"),
+        "sync_message": sync["message"],
         "metadata": await database.effective_metadata(candidate_id),
     }
 

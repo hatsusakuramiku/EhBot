@@ -128,7 +128,7 @@ class TestCandidateListing:
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "SORT_UNKNOWN"
 
-    def test_page_size_is_clamped_not_rejected(self, tmp_path: Path) -> None:
+    def test_page_size_has_no_upper_limit(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)
         settings.data_path.mkdir(parents=True, exist_ok=True)
         app = create_app(settings)
@@ -138,8 +138,7 @@ class TestCandidateListing:
                 "/api/v1/candidates?page_size=99999"
             ).json()
 
-        # Refusing would only push the caller into tighter paging loops.
-        assert payload["page_size"] == 200
+        assert payload["page_size"] == 99999
 
     def test_the_needs_info_tab_selects_what_it_counts(
         self, tmp_path: Path
@@ -510,7 +509,7 @@ class TestMetadataPatch:
         assert response.status_code == 200
         assert response.json()["metadata"]["Artist"] == "Sensei"
 
-    def test_an_unknown_field_is_refused(self, tmp_path: Path) -> None:
+    def test_an_invalid_field_is_refused(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)
         settings.data_path.mkdir(parents=True, exist_ok=True)
         app = create_app(settings)
@@ -519,14 +518,14 @@ class TestMetadataPatch:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"fields": {"NotAField": "x"}},
+                json={"fields": {"Not-A-Field": "x"}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "METADATA_FIELD_INVALID"
-        assert error["details"]["unknown"] == ["NotAField"]
+        assert error["details"]["unknown"] == ["Not-A-Field"]
 
     def test_patching_a_missing_work_is_404(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)
@@ -645,7 +644,7 @@ class TestMetadataLocks:
         assert payload["locked"] == ["Artist"]
         assert payload["metadata"]["Artist"] == "Sensei"
 
-    def test_an_unknown_field_in_locks_is_refused(self, tmp_path: Path) -> None:
+    def test_an_invalid_field_in_locks_is_refused(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)
         settings.data_path.mkdir(parents=True, exist_ok=True)
         app = create_app(settings)
@@ -654,14 +653,14 @@ class TestMetadataLocks:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"locks": {"NotAField": True}},
+                json={"locks": {"Not-A-Field": True}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
         assert response.status_code == 400
         error = response.json()["error"]
         assert error["code"] == "METADATA_FIELD_INVALID"
-        assert error["details"]["unknown"] == ["NotAField"]
+        assert error["details"]["unknown"] == ["Not-A-Field"]
 
     def test_locks_must_be_a_mapping(self, tmp_path: Path) -> None:
         settings = make_settings(tmp_path)

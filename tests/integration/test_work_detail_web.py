@@ -1023,10 +1023,12 @@ def test_manual_magnet_torrent_is_set_and_cleared(tmp_path: Path) -> None:
     assert after_clear.context["work"]["torrent_hash"] is None
 
 
-def test_editing_metadata_on_a_packed_work_requeues_a_repack(
+def test_editing_metadata_on_a_packed_work_synchronizes_in_place(
     tmp_path: Path,
 ) -> None:
-    """A metadata correction on an archived work starts a repack of the CBZ."""
+    """An edit works without the source archive and keeps the published path."""
+    import zipfile
+    from xml.etree import ElementTree as ET
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_work(database))
@@ -1042,9 +1044,12 @@ def test_editing_metadata_on_a_packed_work_requeues_a_repack(
         provider=PROVIDER_CONVERSION,
         idempotency_key=f"convert:{candidate_id}",
     )
-    insert_artifact(
-        database, pack_id, artifact_type="CBZ", path="/library/book.cbz"
-    )
+    path = settings.library_path / "book.cbz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("ComicInfo.xml", "<ComicInfo><Title>Old</Title><PageCount>1</PageCount></ComicInfo>")
+        archive.writestr("001.jpg", b"unchanged-image")
+    insert_artifact(database, pack_id, artifact_type="CBZ", path=str(path))
 
     with TestClient(create_app(settings), follow_redirects=False) as client:
         authenticate(client, settings)
@@ -1070,7 +1075,10 @@ def test_editing_metadata_on_a_packed_work_requeues_a_repack(
         if job.provider == PROVIDER_CONVERSION
         and job.state == CONVERSION_STATE_PENDING
     ]
-    assert repacked, [job.state for job in jobs]
+    assert not repacked, [job.state for job in jobs]
+    with zipfile.ZipFile(path) as archive:
+        assert ET.fromstring(archive.read("ComicInfo.xml")).findtext("Title") == "Renamed Book"
+        assert archive.read("001.jpg") == b"unchanged-image"
 
 
 # --- the 归档路径 form's prefill (R27) ----------------------------------------

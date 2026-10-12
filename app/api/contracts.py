@@ -20,16 +20,9 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 
-#: Upper bound for a single page. A caller asking for more gets this instead of
-#: an error: the request is still answerable, and refusing it would only push
-#: the caller into paging loops that hit the database harder.
-MAX_PAGE_SIZE = 200
-
 DEFAULT_PAGE_SIZE = 50
 
-#: The page sizes the two server-rendered lists offer (R82). A contract rather
-#: than a template constant so the page and the JSON client agree on what a
-#: legal `?page_size=` looks like; every value is `<= MAX_PAGE_SIZE`.
+#: Shortcuts only; any positive integer is accepted (R85).
 PAGE_SIZE_OPTIONS: tuple[int, ...] = (20, 50, 100, 200)
 
 
@@ -99,7 +92,7 @@ class PageParams:
     """Validated paging window.
 
     Built through :meth:`clamp` rather than the constructor so a hand-typed
-    query string can never produce a negative offset or an unbounded scan.
+    query string can never produce a negative offset.
     """
 
     page: int = 1
@@ -109,15 +102,15 @@ class PageParams:
     def clamp(
         cls,
         page: int | None,
-        page_size: int | None,
-        *,
-        max_page_size: int = MAX_PAGE_SIZE,
+        page_size: int | str | None,
     ) -> PageParams:
         resolved_page = 1 if page is None or page < 1 else int(page)
-        if page_size is None or page_size < 1:
+        try:
+            resolved_size = int(page_size) if page_size is not None else 0
+        except (TypeError, ValueError):
+            resolved_size = 0
+        if resolved_size < 1:
             resolved_size = DEFAULT_PAGE_SIZE
-        else:
-            resolved_size = min(int(page_size), max_page_size)
         return cls(page=resolved_page, page_size=resolved_size)
 
     @property
@@ -172,7 +165,6 @@ class Page:
 __all__ = [
     "ApiError",
     "DEFAULT_PAGE_SIZE",
-    "MAX_PAGE_SIZE",
     "PAGE_SIZE_OPTIONS",
     "Page",
     "PageParams",

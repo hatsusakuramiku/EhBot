@@ -209,9 +209,11 @@
       badgeInto(row.querySelector('[data-field="source"]'), entry.source);
       var value = row.querySelector('[data-field="value"]');
       value.value = entry.field_value === null ? "" : entry.field_value;
+      value.disabled = !entry.editable;
       value.setAttribute("data-original", value.value);
       var lock = row.querySelector('[data-field="lock"]');
       lock.checked = !!entry.is_locked;
+      lock.disabled = !entry.editable;
       lock.setAttribute("data-original", lock.checked ? "1" : "0");
       rowHost.appendChild(row);
     });
@@ -319,12 +321,12 @@
             return body;
           });
         })
-        .then(function () {
+        .then(function (body) {
           /* Re-read rather than patching the inputs from the response: editing
            * a field can move the candidate out of 待补充 and can change what
            * every other field's provenance is, and the server is the only thing
            * that knows. */
-          openDrawer(openId, opener, "已保存，刷新列表后生效");
+          openDrawer(openId, opener, body.sync_message || "已保存，刷新列表后生效");
         })
         .catch(function (body) {
           say((body && body.error && body.error.message) || "保存失败");

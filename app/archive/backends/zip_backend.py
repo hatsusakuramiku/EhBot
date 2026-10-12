@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import zipfile
+import os
+import shutil
+import tempfile
+import copy
 from pathlib import Path
 
 from app.archive.errors import (
@@ -32,6 +36,35 @@ _SYMLINK_MODE = 0xA000
 #: `zipfile` raise `NotImplementedError` inside a password attempt, where it
 #: used to be mistaken for a wrong password.
 _SUPPORTED_METHODS = frozenset({0, 8, 12, 14})
+
+
+def rewrite_comicinfo(path: Path, comicinfo: bytes) -> None:
+    """Atomically replace ComicInfo, streaming all other members unchanged.
+
+    The temporary file lives beside the CBZ for a same-filesystem replace.
+    Readers see either complete version; a copy failure leaves the old file.
+    """
+    descriptor, temporary = tempfile.mkstemp(suffix=".part", dir=path.parent)
+    os.close(descriptor)
+    try:
+        with zipfile.ZipFile(path) as source, zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_STORED, allowZip64=True
+        ) as target:
+            target.comment = source.comment
+            target.writestr("ComicInfo.xml", comicinfo)
+            for info in source.infolist():
+                if info.filename == "ComicInfo.xml":
+                    continue
+                copied = copy.copy(info)
+                copied.compress_type = zipfile.ZIP_STORED
+                with source.open(info) as reader, target.open(
+                    copied, "w", force_zip64=True
+                ) as writer:
+                    shutil.copyfileobj(reader, writer, CHUNK_SIZE)
+        shutil.copymode(path, temporary)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _unsupported_method(
