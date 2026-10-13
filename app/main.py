@@ -30,6 +30,7 @@ from app.session_secret import resolve_session_secret
 from app.web.rendering import STATIC_DIR, build_templates
 from app.web.request_id import RequestIdMiddleware
 from app.web.security_headers import SecurityHeadersMiddleware
+from app.web.session_auth import AdminSessionMiddleware
 from app.web.routes.activity import router as activity_router
 from app.web.routes.auth import router as auth_router
 from app.web.routes.auto_approval import router as auto_approval_router
@@ -112,9 +113,9 @@ def create_app(
     # instance per application: the root logger it is fed from is process wide,
     # so a second broker would receive nothing.
     app.state.log_broker = log_broker()
-    app.state.realtime_session_generation = 0
     app.state.realtime_cookie_signer = TimestampSigner(session_secret.key)
     app.add_middleware(OperationEventsMiddleware)
+    app.add_middleware(AdminSessionMiddleware, database=database)
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_middleware(

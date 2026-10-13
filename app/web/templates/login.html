@@ -48,7 +48,7 @@
       </div>
       <div>
         <h2 class="ui-section-title">管理员登录</h2>
-        <p class="ui-hint" style="margin: 0">使用服务启动时生成的密码登录</p>
+        <p class="ui-hint" style="margin: 0">输入账户名和密码。初始账户名为 admin。</p>
       </div>
       {#- The error is above the field, inside the form, and it is the same
           callout every other page uses. `role="alert"` because it appears on a
@@ -58,9 +58,14 @@
       <form class="ui-form" method="post" action="{{ url_for('login') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
+          <label for="username">管理员账户名</label>
+          <input class="ui-input" id="username" name="username" value="{{ username }}"
+                 autocomplete="username" maxlength="64" required autofocus>
+        </div>
+        <div class="ui-field">
           <label for="password">管理员密码</label>
           <input class="ui-input" id="password" name="password" type="password"
-                 autocomplete="current-password" required autofocus>
+                 autocomplete="current-password" required>
         </div>
         <button class="ui-btn" data-variant="primary" type="submit">登录</button>
       </form>

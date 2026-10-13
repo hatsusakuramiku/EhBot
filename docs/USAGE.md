@@ -434,7 +434,7 @@ OpenAI 兼容服务（Ollama、LM Studio 等）元数据不离开宿主机。
 
 手机端是独立的 Flutter 仓库，只通过 `/api/v1` 与本服务通信。服务端提供两种凭据，两族互不影响：
 
-**密码登录。** `POST /api/v1/auth/login`（body `{"password": "...", "label": "Pixel 9"}`）返回
+**密码登录。** `POST /api/v1/auth/login`（body `{"username": "admin", "password": "...", "label": "Pixel 9"}`）返回
 `access_token` 与 `refresh_token`：
 
 - access 默认 12 小时到期，用 `POST /api/v1/auth/refresh` 换新；refresh 每次刷新都会**轮换**，
@@ -442,6 +442,22 @@ OpenAI 兼容服务（Ollama、LM Studio 等）元数据不离开宿主机。
 - `POST /api/v1/auth/logout` 吊销这台设备的一整族令牌。
 - 初始密码未修改前不签发令牌，返回 `403 PASSWORD_CHANGE_REQUIRED`——先去网页改密码。
 - **改管理员密码会吊销所有密码登录的令牌**，其它设备需要重新登录。
+- 令牌对签发与 refresh 消费/后继写入同一事务；同时刷新同一令牌只有一份请求成功。
+
+**管理员配置与多端。** 项目始终只有一个管理员；「设置 → 密码库 → 管理员账户」可以改名。
+账户名区分大小写，去除首尾空白后为 1–64 字符，内部不能有空白或控制字符。改名后用新名字登录，已登录设备继续有效。
+浏览器和密码令牌的设备会话相互独立；注销只结束当前设备，旧 Cookie 重放也会拒绝。修改密码会结束所有旧密码会话及其 WS，发起修改的浏览器续接新会话；API Key 保留。
+
+共享 JSON 接口（浏览器写入需 `X-CSRF-Token`，Bearer 免 CSRF）：
+
+| 接口 | 请求与结果 |
+|---|---|
+| `GET /api/v1/auth/profile` | 返回 `username`、`revision`、`must_change_password`，允许初始密码会话读取 |
+| `PATCH /api/v1/auth/profile` | `username`、`current_password`、`expected_revision`；成功返回新配置 |
+| `POST /api/v1/auth/change-password` | `current_password`、`new_password`、`confirmation`、`expected_revision`；返回配置及 `reauthenticate`（Bearer 调用后为 true） |
+
+缺少/非法版本号返回 `400 REVISION_REQUIRED`，旧版本返回 `409 REVISION_CONFLICT`，核对新配置后再提交；不能自动重试覆盖。
+所有登录必须同时提供账户名和密码。schema 026 升级要求旧 Cookie 重新登录，旧客户端需补 `username`。
 
 **API Key 登录。** 在「设置 → 密码库 → API 密钥（移动端）」生成：
 
@@ -460,16 +476,16 @@ Bearer 与网页管理员**同权**，且不需要 CSRF 头（该头只保护浏
 
 ## 首次登录
 
-服务首次启动时会生成一个一次性的管理员密码，并直接打印到控制台：
+服务首次启动时会生成一个一次性的管理员密码，保存在私有文件中：
 
 ```
-docker compose logs
+docker compose exec ehbot cat /app/data/bootstrap_admin_password
 ```
 
-- 用户名固定为 `admin`，密码以横幅形式打印在启动日志顶部，不需要去翻数据目录。
-- 同时会写入 `data/bootstrap_admin_password` 作为备份（仅当前用户可读）。
-- 登录后必须先修改密码，才能访问其他页面；修改后该文件被删除，控制台也不再打印。
-- 若密码从未被修改，每次重启都会重新生成并重新打印。
+- 初始账户名为 `admin`，填写账户名＋密码登录；之后可以修改账户名。
+- 密码写入 `data/bootstrap_admin_password`（仅当前用户可读）；启动日志仅提示文件位置。宿主机也可直接读取该文件。
+- 登录后必须先修改密码，才能访问其他页面；修改后该文件被删除。
+- 若密码从未被修改，每次重启都会重新生成；已修改的账户名与同一个管理员身份保留。
 
 ## 验证
 

@@ -35,12 +35,13 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
     login = client.get("/login")
     client.post(
         "/login",
-        data={"password": password, "csrf_token": login.context["csrf_token"]},
+        data={"username": "admin", "password": password, "csrf_token": login.context["csrf_token"]},
     )
     change = client.get("/settings/passwords")
     client.post(
         "/change-password",
         data={
+            "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
             "current_password": password,
             "new_password": "new-password-with-12-characters",
             "confirmation": "new-password-with-12-characters",

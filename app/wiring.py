@@ -360,20 +360,21 @@ def build_lifespan(
             application.state.download_source_priority = (
                 await application.state.system_settings_service.download_source_priority()
             )
-            admin_auth = await database.get_admin_auth("admin")
-            if admin_auth is None or not admin_auth[1]:
+            admin_auth = await database.get_administrator()
+            if admin_auth is None or not admin_auth.password_changed:
                 bootstrap_password = secrets.token_urlsafe(18)
                 bootstrap_hash = await asyncio.to_thread(
                     password_hasher.hash, bootstrap_password
                 )
-                await database.set_bootstrap_admin("admin", bootstrap_hash)
+                username = admin_auth.username if admin_auth else "admin"
+                await database.set_bootstrap_admin(username, bootstrap_hash)
                 password_file = await asyncio.to_thread(
                     write_bootstrap_password,
                     app_settings.data_path,
                     bootstrap_password,
                 )
                 print(
-                    format_bootstrap_banner(bootstrap_password, password_file),
+                    format_bootstrap_banner(password_file, username),
                     flush=True,
                 )
                 logging.getLogger(__name__).warning(

@@ -612,6 +612,7 @@ def _selected_provider_id(request: Request, catalogue: list[dict[str, Any]]) -> 
 async def _passwords_section(request: Request) -> dict[str, Any]:
     service = deps.archive_settings_service(request)
     return {
+        "administrator": (await deps.database(request).get_administrator()).profile(),
         "passwords": [
             archive_password(entry) for entry in await service.passwords()
         ],

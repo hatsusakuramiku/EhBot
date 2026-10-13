@@ -48,6 +48,7 @@ def complete_first_run(client: TestClient, settings: Settings) -> str:
     client.post(
         "/login",
         data={
+            "username": "admin",
             "password": password,
             "csrf_token": login_page.context["csrf_token"],
         },
@@ -57,6 +58,7 @@ def complete_first_run(client: TestClient, settings: Settings) -> str:
     client.post(
         "/change-password",
         data={
+            "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
             "current_password": password,
             "new_password": NEW_PASSWORD,
             "confirmation": NEW_PASSWORD,
@@ -71,7 +73,7 @@ def api_login(client: TestClient, password: str, label: str | None = None):
     payload: dict[str, str] = {"password": password}
     if label is not None:
         payload["label"] = label
-    return client.post("/api/v1/auth/login", json=payload)
+    return client.post("/api/v1/auth/login", json={**payload, "username": "admin"})
 
 
 def bearer(token: str) -> dict[str, str]:
@@ -165,6 +167,7 @@ class TestThrottle:
             page = client.post(
                 "/login",
                 data={
+                    "username": "admin",
                     "password": password,
                     "csrf_token": login_page.context["csrf_token"],
                 },
@@ -331,6 +334,7 @@ class TestRefreshAndLogout:
         assert response.status_code == 200
         assert response.json() == {
             "username": "admin",
+            "revision": 1,
             "kind": "access",
             "label": "Pixel 9",
             "expires_at": response.json()["expires_at"],
@@ -351,6 +355,7 @@ class TestPasswordChange:
             rotated = client.post(
                 "/change-password",
                 data={
+                    "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                     "current_password": NEW_PASSWORD,
                     "new_password": ROTATED_PASSWORD,
                     "confirmation": ROTATED_PASSWORD,

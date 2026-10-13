@@ -92,9 +92,9 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
         encoding="utf-8"
     )
     login = client.get("/login")
-    client.post("/login", data={"password": password, "csrf_token": login.context["csrf_token"]})
+    client.post("/login", data={"username": "admin", "password": password, "csrf_token": login.context["csrf_token"]})
     change = client.get("/settings/passwords")
-    client.post("/change-password", data={"current_password": password, "new_password": "new-password-with-12-characters", "confirmation": "new-password-with-12-characters", "csrf_token": change.context["csrf_token"]})
+    client.post("/change-password", data={"expected_revision": client.get("/api/v1/auth/profile").json()["revision"], "current_password": password, "new_password": "new-password-with-12-characters", "confirmation": "new-password-with-12-characters", "csrf_token": change.context["csrf_token"]})
 
 
 def test_first_matching_auto_rule_approves_enqueues_and_audits(tmp_path: Path) -> None:

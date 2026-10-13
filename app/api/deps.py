@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import Request
 
 from app.api.contracts import ApiError
+from app.admin_auth import validate_session
 from app.credentials import (
     BEARER_KINDS,
     ApiCredential,
@@ -93,6 +94,10 @@ async def _bearer_credential(request: Request) -> ApiCredential | None:
         raise ApiError("AUTH_TOKEN_REVOKED", "凭据已被撤销", status_code=401)
     if record.is_expired(int(time.time())):
         raise ApiError("AUTH_TOKEN_EXPIRED", "凭据已过期", status_code=401)
+    if record.kind != "api_key":
+        admin = await database.get_administrator()
+        if admin is None or record.auth_epoch != admin.auth_epoch:
+            raise ApiError("AUTH_TOKEN_REVOKED", "凭据已被撤销", status_code=401)
     request.state.auth_source = "bearer"
     request.state.api_credential = record
     if _last_used_is_stale(record.last_used_at):
@@ -100,7 +105,7 @@ async def _bearer_credential(request: Request) -> ApiCredential | None:
     return record
 
 
-async def require_session(request: Request) -> None:
+async def require_session(request: Request, *, allow_password_change: bool = False) -> None:
     """Reject an unauthenticated or password-change-pending JSON caller.
 
     Accepts either a password-derived session cookie or a Bearer credential.
@@ -115,11 +120,11 @@ async def require_session(request: Request) -> None:
     """
     if await _bearer_credential(request) is not None:
         return
-    if not request.session.get("authenticated"):
+    if await validate_session(database(request), request.session) is None:
         raise ApiError(
             "NOT_AUTHENTICATED", "请先登录", status_code=401
         )
-    if request.session.get("must_change_password"):
+    if not allow_password_change and request.session.get("must_change_password"):
         raise ApiError(
             "PASSWORD_CHANGE_REQUIRED",
             "请先修改初始密码",

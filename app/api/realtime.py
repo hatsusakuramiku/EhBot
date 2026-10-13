@@ -107,8 +107,6 @@ class OperationEventsMiddleware:
         if 200 <= status < 400 and scope.get("app"):
             app = scope["app"]
             path = scope["path"]
-            if path.removeprefix(scope.get("root_path", "")) in {"/logout", "/change-password"}:
-                app.state.realtime_session_generation += 1
             app.state.event_bus.publish(EVENT_REFRESH, path=path)
 
 
@@ -192,7 +190,6 @@ async def realtime_socket(ws: WebSocket):
     if hello["client"] == "mobile":
         catalogue = {name: item for name, item in catalogue.items() if name.startswith("api.")}
     bus = ws.app.state.event_bus
-    generation = ws.app.state.realtime_session_generation
     # A browser cookie has the same absolute lifetime on an active socket as it
     # has on a new HTTP request; heartbeats never renew it invisibly.
     cookie_deadline = None
@@ -202,7 +199,7 @@ async def realtime_socket(ws: WebSocket):
 
     async def authorize():
         await deps.require_session(ws)
-        if not bearer and (generation != ws.app.state.realtime_session_generation or time.time() >= cookie_deadline):
+        if not bearer and time.time() >= cookie_deadline:
             raise ApiError("NOT_AUTHENTICATED", "会话已结束，请重新登录", status_code=401)
 
     headers = {name: ws.headers[name] for name in ("authorization",) if name in ws.headers}

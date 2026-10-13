@@ -430,3 +430,21 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] Verify 637 distinct cases across 21 files, real TCP/CBZ and DOM; collect 2101 total
 - [x] Synchronize operator docs, realtime contract, environment examples and phase ledger
 - **Status:** complete; no migration, version 0.3.0rc3; local commit only. Actual proxy/browser testing, mobile implementation and release remain later work.
+
+### 队列、多账号与统一 API 改造（2026-10-13，已授权）
+
+完整范围与接手状态见 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md)。旧 Phase 15 重试改旧行不再作为新模型契约。
+
+- [x] P0：批准、详细计划与快速接手入口
+- [x] P1 / R88：管理员认证完整切片（rc4/026，12 新合同、370 个不同用例最终通过、2113 collect；本地提交见计划，无发布）
+- [ ] P2：任务/尝试/回执/收尾与入口收口
+- [ ] P3：真实取消、切源、运行时移除
+- [ ] P4：账号与凭据版本管理
+- [ ] P5：统一 unique_key 附加表及摄取
+- [ ] P6：多 TG 监听与来源账号下载
+- [ ] P7：EH 轮询与有界接替
+- [ ] P8：产物依赖、发布、打包取消
+- [ ] P9：心跳、恢复、预算、清理
+- [ ] P10：全域共享 API、版本/幂等、WS/冲突 UI
+- [ ] P11：审批饥饿、ComicInfo 写锁、缩略图竞态
+- [ ] P12：合同与本地验收、升级/恢复、最终交接

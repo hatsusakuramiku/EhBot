@@ -226,3 +226,14 @@
 - A dataclass field with a default must come after all non-default fields; placing `artifact_cbz_path` before `created_at`/`updated_at`/`details` raised `TypeError` at import, which reads as a confusing ordering error rather than a value problem.
 - The magnet no-client guard cannot be `app.state.<service> is None`, because services are always constructed; the real gate is `torrent_client().is_configured`. The first instinct was a guard that never failed, which the test immediately exposed.
 - `TestClient` follows redirects by default, so an assertion on a 303 had to pass `follow_redirects=False`; otherwise the response was the rendered target and the intended status was invisible.
+
+## 2026-10-13 批准方案转实施
+
+- 方案已获批，当前 P1/R88，接手状态见 DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md。
+- 管理员有稳定 id，但启动/登录/改密码按 admin；用户名与身份需分离。refresh 和改密码撤销目前分步写，要数据库事务而非 endpoint 锁。
+- Cookie 是签名 session，Web 仅验 authenticated；新设计必须核对认证代次并覆盖 WS，独立设备会话不能用全局当前 session 替换。
+- P1 已新增 026 与固定身份/revision/认证代次；Web/API 共用认证和配置核心，原审阅复现及首次封面失败记录保留。
+- 单靠改密后另调用撤销函数会留下窗口；改密、旧浏览器/密码凭据撤销与当前浏览器续接必须同事务。提交前同时核对发起凭据仍有效，避免注销时已通过密码校验的旧请求继续提交。
+- 旧签名 Cookie 缺乏可撤销的设备身份，不能反复“升级”为新 session，否则注销后可重放旧 Cookie；026 强制旧 Cookie 重新登录。
+- P1 新合同 12 条通过；核心/设置首次旧契约 6 条失败已修复并定向复验；27 文件共 370 个不同用例最终通过，2113 collect。版本 rc4/026，仅源码/临时库验证，无镜像发布。
+- P2 接口调查：DownloadService 旧 retry 在状态裁决前执行 torrent verify/push/abandon；新控制核不能只包一层 API revision，应先事务受理意图再启动副作用，详见已批准方案。

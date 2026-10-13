@@ -91,11 +91,11 @@ services:
 
 ```powershell
 docker compose up -d
-docker compose logs
+docker compose exec ehbot cat /app/data/bootstrap_admin_password
 ```
 
-**3. 打开 `http://127.0.0.1:8080`**，用户名 `admin`，密码是日志顶部横幅里那串一次性密码
-（同时备份在 `data/bootstrap_admin_password`）。登录后必须先改密码才能用其他页面；改完该文件即被删除。
+**3. 打开 `http://127.0.0.1:8080`**，首次账户名 `admin`，输入账户名和上述私有文件中的一次性密码。
+也可在宿主机读取 `data/bootstrap_admin_password`；启动日志只提示文件位置，不打印密码。登录后必须先改密码才能用其他页面；改完该文件即被删除。
 只要没改过，每次重启都会重新生成一串新的。
 
 **4. 在「设置 → 外部连接」填入 Telegram Bot Token 与 ExHentai Cookie**（只想用账户收消息的话，
@@ -172,11 +172,15 @@ docker compose up -d
 手机端是一个独立的 Flutter 仓库（`ehbot-mobile`，与本仓库平级），只通过本服务的 `/api/v1`
 通信。客户端支持两种登录：
 
-- **密码登录**：用网页端的 `admin` 密码换取一对令牌——access（默认 12 小时，过期由客户端自动续期）
+- **密码登录**：用管理员账户名＋密码换取一对令牌——access（默认 12 小时，过期由客户端自动续期）
   与 refresh（默认 30 天，每次刷新都会轮换）。改管理员密码会吊销所有密码登录的令牌，其它设备需要重新登录。
 - **API Key 登录**：在网页「设置 → 密码库 → API 密钥（移动端）」手动生成，粘贴进客户端。
   全局**同时只有一条有效 Key**；它**不过期**，**刷新会让旧 Key 立即失效**，改管理员密码**不影响**它。
   明文只在生成那一次显示，之后页面只留标识与最近使用时间。
+
+「设置 → 密码库 → 管理员账户」可修改账户名，始终只有一个管理员。改名保留已登录设备；各设备独立登录、注销。
+改密码会使其他浏览器、密码令牌和相关 WS 失效，发起操作的浏览器保留登录。管理员配置提交携带版本号，旧版本返回冲突，避免多端覆盖。
+升级到 schema 026 后旧浏览器 Cookie 需重新登录；密码 API 登录也必须传 `username`，不再支持仅密码请求。
 
 令牌有效期可在「设置 → 系统」调整（60 秒 – 365 天）。REST 入口是
 `POST /api/v1/auth/login|refresh|logout` 与 `GET /api/v1/auth/whoami`；其余 `/api/v1` 端点同时接受

@@ -76,6 +76,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
+        path = request.url.path.removeprefix(request.scope.get("root_path", ""))
+        if path.startswith("/api/v1/auth/") or path in {
+            "/login", "/logout", "/administrator", "/change-password", "/settings/passwords",
+        }:
+            response.headers["Cache-Control"] = "no-store"
         for name, value in SECURITY_HEADERS.items():
             if name == "Content-Security-Policy":
                 try:

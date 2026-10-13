@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import secrets
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +40,7 @@ from app.search.query import (
     parse_query,
 )
 from app.credentials import ApiCredential
+from app.admin_auth import AdminAuth, AuthError
 from app.downloads.models import (
     CONVERSION_STATE_FAILED,
     CONVERSION_STATE_WAITING_PASSWORD,
@@ -75,6 +78,7 @@ def _api_credential_from_row(row) -> ApiCredential:
         expires_at=int(row[8]) if row[8] is not None else None,
         revoked_at=row[9],
         rotated_from=int(row[10]) if row[10] is not None else None,
+        auth_epoch=int(row[11]),
     )
 
 
@@ -1229,6 +1233,182 @@ class Database:
         except sqlite3.Error:
             return False
 
+    @staticmethod
+    def _administrator(connection) -> AdminAuth | None:
+        row = connection.execute(
+            "SELECT id, username, password_hash, password_changed, revision, "
+            "auth_epoch FROM admin_users"
+        ).fetchone()
+        return AdminAuth(row[0], row[1], row[2], bool(row[3]), row[4], row[5]) if row else None
+
+    async def get_administrator(self) -> AdminAuth | None:
+        return await asyncio.to_thread(self._get_administrator_sync)
+
+    def _get_administrator_sync(self):
+        with self.connection() as connection:
+            return self._administrator(connection)
+
+    async def update_administrator(
+        self, admin: AdminAuth, *, username: str | None = None,
+        password_hash: str | None = None,
+        actor_session_id: str | None = None, actor_credential_id: int | None = None,
+        renew_session_id: str | None = None,
+    ) -> AdminAuth:
+        return await asyncio.to_thread(
+            self._update_administrator_sync, admin, username, password_hash,
+            actor_session_id, actor_credential_id, renew_session_id,
+        )
+
+    def _update_administrator_sync(
+        self, admin, username, password_hash, actor_session_id, actor_credential_id, renew_session_id,
+    ):
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._administrator(connection)
+            if current is None or current.id != admin.id or current.revision != admin.revision:
+                raise AuthError("REVISION_CONFLICT", "管理员配置已更新，请核对后重新提交")
+            now = int(time.time())
+            if actor_session_id is not None:
+                active = connection.execute(
+                    "SELECT 1 FROM browser_sessions WHERE session_id = ? AND admin_id = ? "
+                    "AND auth_epoch = ? AND revoked_at IS NULL AND expires_at > ?",
+                    (actor_session_id, current.id, current.auth_epoch, now),
+                ).fetchone()
+                if active is None:
+                    raise AuthError("AUTH_TOKEN_REVOKED", "会话已结束，请重新登录")
+            if actor_credential_id is not None:
+                active = connection.execute(
+                    "SELECT 1 FROM api_credentials WHERE id = ? AND revoked_at IS NULL "
+                    "AND (expires_at IS NULL OR expires_at > ?) "
+                    "AND (kind = 'api_key' OR (kind = 'access' AND auth_epoch = ?))",
+                    (actor_credential_id, now, current.auth_epoch),
+                ).fetchone()
+                if active is None:
+                    raise AuthError("AUTH_TOKEN_REVOKED", "凭据已被撤销，请重新登录")
+            name = username if username is not None else current.username
+            if name == current.username and password_hash is None:
+                return current
+            connection.execute(
+                "UPDATE admin_users SET username = ?, password_hash = ?, "
+                "password_changed = ?, revision = revision + 1, "
+                "auth_epoch = auth_epoch + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (name, password_hash or current.password_hash,
+                 int(current.password_changed or password_hash is not None),
+                 int(password_hash is not None), current.id),
+            )
+            if password_hash is not None:
+                connection.execute(
+                    "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE kind IN ('access', 'refresh') AND revoked_at IS NULL"
+                )
+                connection.execute(
+                    "UPDATE browser_sessions SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE revoked_at IS NULL"
+                )
+                if renew_session_id is not None:
+                    connection.execute(
+                        "INSERT INTO browser_sessions (session_id, admin_id, auth_epoch, expires_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (renew_session_id, current.id, current.auth_epoch + 1, now + 14 * 86400),
+                    )
+            return self._administrator(connection)
+
+    async def create_browser_session(self, admin: AdminAuth) -> str:
+        return await asyncio.to_thread(self._create_browser_session_sync, admin)
+
+    def _create_browser_session_sync(self, admin):
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._administrator(connection)
+            if current is None or current.id != admin.id or current.revision != admin.revision:
+                raise AuthError("REVISION_CONFLICT", "认证已更新，请重新登录")
+            now = int(time.time())
+            connection.execute("DELETE FROM browser_sessions WHERE expires_at <= ?", (now,))
+            session_id = secrets.token_urlsafe(32)
+            connection.execute(
+                "INSERT INTO browser_sessions (session_id, admin_id, auth_epoch, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, admin.id, admin.auth_epoch, now + 14 * 86400),
+            )
+            return session_id
+
+    async def browser_session_admin(self, session_id: str) -> AdminAuth | None:
+        return await asyncio.to_thread(self._browser_session_admin_sync, session_id)
+
+    def _browser_session_admin_sync(self, session_id):
+        with self.connection() as connection:
+            admin = self._administrator(connection)
+            if admin is None:
+                return None
+            row = connection.execute(
+                "SELECT 1 FROM browser_sessions WHERE session_id = ? AND admin_id = ? "
+                "AND auth_epoch = ? AND expires_at > ? AND revoked_at IS NULL",
+                (session_id, admin.id, admin.auth_epoch, int(time.time())),
+            ).fetchone()
+            return admin if row else None
+
+    async def revoke_browser_session(self, session_id: str) -> None:
+        await asyncio.to_thread(self._revoke_browser_session_sync, session_id)
+
+    def _revoke_browser_session_sync(self, session_id):
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE browser_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                (session_id,),
+            )
+
+    async def issue_credential_pair(
+        self, admin: AdminAuth, *, refresh: tuple, access: tuple, label: str,
+        family_id: str, access_ttl: int, refresh_ttl: int,
+        previous: ApiCredential | None = None,
+    ) -> None:
+        """Commit both hashes and optional refresh consumption as one transaction.
+
+        Login checks the verified administrator revision. Rotation checks the
+        credential epoch and consumes one still-valid refresh exactly once.
+        """
+        await asyncio.to_thread(
+            self._issue_credential_pair_sync, admin, refresh, access, label,
+            family_id, access_ttl, refresh_ttl, previous,
+        )
+
+    def _issue_credential_pair_sync(
+        self, admin, refresh, access, label, family_id, access_ttl, refresh_ttl, previous,
+    ):
+        with self.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._administrator(connection)
+            if current is None or current.id != admin.id or current.auth_epoch != admin.auth_epoch:
+                raise AuthError("AUTH_TOKEN_REVOKED", "认证已更新，请重新登录")
+            if previous is None and current.revision != admin.revision:
+                raise AuthError("REVISION_CONFLICT", "认证已更新，请重新登录")
+            if not current.password_changed:
+                raise AuthError("PASSWORD_CHANGE_REQUIRED", "请先修改初始密码")
+            now = int(time.time())
+            if previous is not None:
+                cursor = connection.execute(
+                    "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND kind = 'refresh' AND secret_hash = ? "
+                    "AND family_id = ? AND auth_epoch = ? AND revoked_at IS NULL "
+                    "AND expires_at > ?",
+                    (previous.id, previous.secret_hash, family_id, current.auth_epoch, now),
+                )
+                if cursor.rowcount != 1:
+                    raise AuthError("AUTH_TOKEN_REVOKED", "刷新凭据已失效，请重新登录")
+            cursor = connection.execute(
+                "INSERT INTO api_credentials (kind, label, public_id, secret_hash, "
+                "family_id, expires_at, rotated_from, auth_epoch) "
+                "VALUES ('refresh', ?, ?, ?, ?, ?, ?, ?)",
+                (label, *refresh, family_id, now + refresh_ttl,
+                 previous.id if previous else None, current.auth_epoch),
+            )
+            connection.execute(
+                "INSERT INTO api_credentials (kind, label, public_id, secret_hash, "
+                "family_id, expires_at, rotated_from, auth_epoch) "
+                "VALUES ('access', ?, ?, ?, ?, ?, ?, ?)",
+                (label, *access, family_id, now + access_ttl, cursor.lastrowid, current.auth_epoch),
+            )
+
     async def get_admin_auth(self, username: str) -> tuple[str, bool] | None:
         return await asyncio.to_thread(self._get_admin_auth_sync, username)
 
@@ -1250,32 +1430,27 @@ class Database:
 
     def _set_bootstrap_admin_sync(self, username: str, password_hash: str) -> None:
         with self.connection() as connection:
-            connection.execute(
-                "INSERT INTO admin_users (username, password_hash, password_changed) "
-                "VALUES (?, ?, 0) "
-                "ON CONFLICT(username) DO UPDATE SET "
-                "password_hash = excluded.password_hash, "
-                "updated_at = CURRENT_TIMESTAMP "
-                "WHERE admin_users.password_changed = 0",
-                (username, password_hash),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            admin = self._administrator(connection)
+            if admin is None:
+                connection.execute(
+                    "INSERT INTO admin_users (username, password_hash) VALUES (?, ?)",
+                    (username, password_hash),
+                )
+            elif not admin.password_changed:
+                connection.execute(
+                    "UPDATE admin_users SET password_hash = ?, revision = revision + 1, "
+                    "auth_epoch = auth_epoch + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (password_hash, admin.id),
+                )
 
     async def change_admin_password(
         self, username: str, password_hash: str
     ) -> None:
-        await asyncio.to_thread(
-            self._change_admin_password_sync, username, password_hash
-        )
-
-    def _change_admin_password_sync(self, username: str, password_hash: str) -> None:
-        with self.connection() as connection:
-            cursor = connection.execute(
-                "UPDATE admin_users SET password_hash = ?, password_changed = 1, "
-                "updated_at = CURRENT_TIMESTAMP WHERE username = ?",
-                (password_hash, username),
-            )
-            if cursor.rowcount != 1:
-                raise LookupError(f"Administrator account {username!r} does not exist")
+        admin = await self.get_administrator()
+        if admin is None or admin.username != username:
+            raise LookupError("Administrator account does not exist")
+        await self.update_administrator(admin, password_hash=password_hash)
 
     # --- Mobile / API credentials (migration 023) -------------------------
     #
@@ -1317,10 +1492,11 @@ class Database:
         rotated_from: int | None,
     ) -> int:
         with self.connection() as connection:
+            admin = self._administrator(connection)
             cursor = connection.execute(
                 "INSERT INTO api_credentials "
                 "(kind, label, public_id, secret_hash, family_id, expires_at, "
-                "rotated_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "rotated_from, auth_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     kind,
                     label,
@@ -1329,6 +1505,7 @@ class Database:
                     family_id,
                     expires_at,
                     rotated_from,
+                    admin.auth_epoch if kind != "api_key" and admin is not None else 0,
                 ),
             )
             return int(cursor.lastrowid)
@@ -1340,7 +1517,7 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, kind, label, public_id, secret_hash, family_id, "
-                "created_at, last_used_at, expires_at, revoked_at, rotated_from "
+                "created_at, last_used_at, expires_at, revoked_at, rotated_from, auth_epoch "
                 "FROM api_credentials WHERE public_id = ?",
                 (public_id,),
             ).fetchone()
@@ -1354,7 +1531,7 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, kind, label, public_id, secret_hash, family_id, "
-                "created_at, last_used_at, expires_at, revoked_at, rotated_from "
+                "created_at, last_used_at, expires_at, revoked_at, rotated_from, auth_epoch "
                 "FROM api_credentials "
                 "WHERE kind = 'api_key' AND revoked_at IS NULL "
                 "ORDER BY id DESC LIMIT 1"

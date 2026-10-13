@@ -357,6 +357,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         client.post(
             "/login",
             data={
+                "username": "admin",
                 "password": bootstrap,
                 "csrf_token": page.context["csrf_token"],
             },
@@ -365,6 +366,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         client.post(
             "/change-password",
             data={
+                "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                 "current_password": bootstrap,
                 "new_password": "new-password-with-12-characters",
                 "confirmation": "new-password-with-12-characters",
@@ -422,6 +424,7 @@ def test_downloads_dashboard_renders(tmp_path: Path) -> None:
         client.post(
             "/login",
             data={
+                "username": "admin",
                 "password": bootstrap,
                 "csrf_token": page.context["csrf_token"],
             },
@@ -430,6 +433,7 @@ def test_downloads_dashboard_renders(tmp_path: Path) -> None:
         client.post(
             "/change-password",
             data={
+                "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                 "current_password": bootstrap,
                 "new_password": "new-password-with-12-characters",
                 "confirmation": "new-password-with-12-characters",

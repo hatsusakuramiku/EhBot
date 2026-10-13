@@ -6982,3 +6982,21 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 两份 Compose 与 .env.example 同步。Cloudflare beacon 由代理注入，部署说明要求关闭站点 Web Analytics 自动注入；
 没有修改 Cloudflare 控制台或放宽 script-src。实际代理与真实浏览器未联调，之前匿名公网的 502 不因代码修改而宣称消失。
 无移动端代码、迁移、镜像发布、push 或部署；一个 R87 本地提交。
+
+## R88 — 管理员联合登录、可改名与多端认证（v0.3.0rc4，2026-10-13）
+
+**授权。** 运营者批准 DOWNLOAD_QUEUE_AND_SHARED_API_PROPOSAL 并要求先计划后处理及 agent 留痕。详细执行/接手入口为 DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN，当前 P1；P0 已完成，P2–P12 未实施，无须重复开工批准。
+
+**交付。** P0–P1 完成。Web/API 账户名＋密码登录、管理员编辑/profile/改密共享 admin_auth 核心；稳定管理员 id 与单行约束，改名不造第二个 admin，也不影响已登录 Cookie/Bearer/WS。026 增 revision/auth_epoch、浏览器设备会话、密码令牌 epoch；expected_revision 防旧配置覆盖。改密/旧凭据与会话撤销/发起浏览器续接同事务，提交时核对发起凭据仍有效；refresh 消费与后继对同事务，一次竞争一个赢家。注销设备独立、旧 Cookie 重放拒绝；旧版无设备 Cookie 升级要求重登，密码 API 不再接受仅密码。API Key 独立保留。敏感认证响应 no-store，启动横幅只提示密码私有文件位置。
+
+**版本与迁移。** pyproject/uv.lock 为 0.3.0rc4；迁移 026（26 个）仅在临时库验证，含新库、025 升级、重复 initialize、异常多管理员整笔回滚，以及初始密码未改但改名后的重启身份保留。没有升级真实数据或发布镜像。退回旧代码须恢复升级前数据库快照，不能仅降代码/删迁移记录。
+
+**验证。** 新增 12 个身份/设备/竞争/回滚/迁移合同；相关 27 个文件、370 个不同用例最终通过（整份 authentication/api_auth/api_keys/realtime/database/credentials/administrator_identity/settings_web/settings_write_api/api_v1/api_read_layer，加 16 条其他页面登录夹具 smoke；不是 27 文件全跑）。整库 2113 collected（+12，仅收集），最近全量仍 R81–R84 的 2014。compileall、git diff --check、CodeGraph sync 通过。
+
+首次证据：核心 126 条有 3 个旧断言失败（引导密码打印、全局 WS 代次）；3 条复验通过。设置/API 223 条有 3 个 SSE 伪认证夹具失败；改成真实临时库设备记录后该类 6 条通过。更早 authentication/API/database/credentials 79 条有 whoami/revision 与迁移数量 2 个旧断言失败，均修正。新合同最初错误命令名与事件帧顺序 2 个失败已修正；smoke class 节点名收集错误已修正。按后续 XML 覆盖相同 node 去重得到最终 370/0，原结果保留于 .scratch/r88-*.xml；本轮临时修改/选测脚本已删，原审阅复现保留。pytest 旧临时目录 atexit 权限警告与测试结果独立，后续指定 workspace basetemp 避免。
+
+**文档与提交。** README/USAGE/REALTIME_API/EHBot/AGENTS/PHASES/计划/清单/findings 与 Compose 部署说明同步；不输出真实秘密、不连真实供应商。一个 R88 本地提交收尾（提交标题 `feat(auth): add editable administrator identity and independent sessions`；用 git log 查看最终 SHA），无 push/发布/部署。
+
+**下一动作。** P2：任务/尝试/回执与控制入口收口，方案 §6/§9.7、处理计划 P2；先核对 R88 提交及 git status。旧 DownloadService.retry 在状态裁决前就执行 torrent verify/push/abandon，新核心须先事务受理再做副作用，不能只加 API revision 包装。P2–P12 尚未实施；不重复认证、不启并行 agent、不动原审阅复现。
+
+**现场。** 无本地 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe 及本 checkout PYTHONPATH；不读真实私有凭据。git ignore 查询告警不阻塞；提交需工具审批，无推送/部署授权。首次计划补丁上下文错误未写入，核对末行后精确修正。

@@ -41,6 +41,7 @@ def log_in(client: TestClient, settings: Settings) -> None:
     client.post(
         "/login",
         data={
+            "username": "admin",
             "password": password,
             "csrf_token": login_page.context["csrf_token"],
         },
@@ -50,6 +51,7 @@ def log_in(client: TestClient, settings: Settings) -> None:
     client.post(
         "/change-password",
         data={
+            "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
             "current_password": password,
             "new_password": "a-much-longer-operator-password",
             "confirmation": "a-much-longer-operator-password",
@@ -89,6 +91,7 @@ class TestAuthGates:
             client.post(
                 "/login",
                 data={
+                    "username": "admin",
                     "password": password,
                     "csrf_token": login_page.context["csrf_token"],
                 },
@@ -178,8 +181,15 @@ class TestEventStream:
         assert response.status_code == 401
 
     @staticmethod
-    def _authenticated_request(app):
+    async def _authenticated_request(app):
         """Minimal stand-in for what the route and its auth gate read."""
+
+        db = app.state.database
+        await db.initialize()
+        await db.set_bootstrap_admin("admin", "fixture-hash")
+        await db.change_admin_password("admin", "fixture-updated-hash")
+        admin = await db.get_administrator()
+        session_id = await db.create_browser_session(admin)
 
         class FakeRequest:
             def __init__(self) -> None:
@@ -187,6 +197,8 @@ class TestEventStream:
                 self.session = {
                     "authenticated": True,
                     "csrf_token": "token-value",
+                    "admin_id": admin.id, "auth_epoch": admin.auth_epoch,
+                    "session_id": session_id,
                 }
                 # `require_session` looks for a bearer credential before the
                 # session, so the double needs the two slots that path reads.
@@ -200,7 +212,7 @@ class TestEventStream:
         app = create_app(settings)
 
         async def scenario():
-            response = await api_events(self._authenticated_request(app))
+            response = await api_events(await self._authenticated_request(app))
             await response.body_iterator.aclose()
             return response
 
@@ -219,7 +231,7 @@ class TestEventStream:
         app = create_app(settings)
 
         async def scenario() -> str:
-            response = await api_events(self._authenticated_request(app))
+            response = await api_events(await self._authenticated_request(app))
             frames = response.body_iterator
             # Preamble first: the retry directive and the connected comment
             # are what stop a proxy from stalling on an empty stream.
@@ -244,7 +256,7 @@ class TestEventStream:
         app = create_app(settings)
 
         async def scenario() -> tuple[int, int]:
-            response = await api_events(self._authenticated_request(app))
+            response = await api_events(await self._authenticated_request(app))
             frames = response.body_iterator
             await anext(frames)
             connected = app.state.event_bus.subscriber_count

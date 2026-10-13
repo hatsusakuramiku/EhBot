@@ -4,11 +4,11 @@
 # source tree nor a build toolchain.
 #
 #   docker compose -f compose.deploy.yaml up -d
-#   docker compose -f compose.deploy.yaml logs | tail -40
+#   docker compose -f compose.deploy.yaml exec ehbot cat /app/data/bootstrap_admin_password
 #
 # That is the whole procedure. The session signing key is generated and stored
-# under ./data/private on first start, and the initial admin password is printed
-# to the log as a banner (also saved to ./data/bootstrap_admin_password). Log in
+# under ./data/private on first start, and the initial admin password is saved
+# to ./data/bootstrap_admin_password; logs show only its location. Log in
 # with it and change it immediately; it stops working once you do.
 
 services:

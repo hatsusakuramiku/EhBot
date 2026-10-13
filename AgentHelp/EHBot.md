@@ -284,7 +284,8 @@ Stored / Deflate / Bzip2 / LZMA。
 与本服务通信；本仓库只提供契约与鉴权，不引入 Flutter 代码。设计记录见
 `MOBILE_CLIENT_PROPOSAL.md`。
 
-- **两种登录**：密码登录（`/api/v1/auth/login` 换 access + refresh，refresh 轮换）与 API Key。
+- **两种登录**：管理员账户名＋密码登录（`/api/v1/auth/login` 换 access + refresh，refresh 原子轮换）与 API Key。
+- **单管理员多端**：稳定身份、账户名可改；改名保留会话，注销仅当前设备；改密撤销旧密码派生 Cookie/access/refresh/WS，发起改密的浏览器原子续接。profile/改密共享 API 与 Web 核心，expected_revision 防覆盖，旧版返回 409。
 - **API Key**：网页「设置 › 密码库」手动生成，默认不生成；全局同时只有一条有效；不过期；
   刷新立即吊销旧 Key；改管理员密码不影响它；明文只在生成那一次显示。
 - **凭据族隔离**：改密吊销全部密码派生的 access/refresh；刷新/撤销 Key 只影响 Key 认证的客户端。

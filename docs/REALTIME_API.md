@@ -10,7 +10,8 @@
 - WebUI：已有 Session Cookie，同源 `Origin`，hello 携带当前页面 CSRF token。
 - 原生客户端：握手请求头 `Authorization: Bearer <access token 或 API Key>`，无需 Cookie/CSRF/Origin。不把凭据放在 URL、帧、日志或本地可分享的连接配置中。
 - refresh token 仅用于 HTTP 刷新接口，不能用于此连接。保留 `/api/v1/auth/login|refresh|logout|whoami`。
-- 认证失败在升级前关闭；协议/CSRF 错误在升级后返回 `error` 并关闭。活跃连接每条命令及心跳重新验证凭据；到期/撤销返回现有认证错误码并关闭。Cookie 会话受原有 14 天期限及退出/改密约束。
+- 认证失败在升级前关闭；协议/CSRF 错误在升级后返回 `error` 并关闭。活跃连接每条命令及心跳重新验证凭据；到期/撤销返回现有认证错误码并关闭。Cookie 会话有服务端设备记录及 14 天绝对期限；注销只结束该设备及其 WS，改密码结束所有旧密码会话及其 WS，改名保留会话。
+- HTTP `auth/login` 要求 `username`＋`password`；profile GET/PATCH 与 change-password POST 见 USAGE。认证设置由 HTTP 提交，不进入 WS 命令目录。schema 026 升级前的 Cookie 需重新登录。
 
 第一帧在 10 秒内发送 JSON 文本：
 

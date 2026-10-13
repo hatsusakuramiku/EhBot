@@ -36,6 +36,7 @@ def log_in(client: TestClient, password: str):
     return client.post(
         "/login",
         data={
+            "username": "admin",
             "password": password,
             "csrf_token": login_page.context["csrf_token"],
         },
@@ -98,7 +99,7 @@ def test_login_rejects_invalid_csrf_token(tmp_path: Path) -> None:
         client.get("/login")
         response = client.post(
             "/login",
-            data={"password": "correct-password", "csrf_token": "invalid"},
+            data={"username": "admin", "password": "correct-password", "csrf_token": "invalid"},
         )
 
     assert response.status_code == 403
@@ -134,6 +135,7 @@ def test_changing_password_removes_bootstrap_file_and_stops_rotation(
         response = client.post(
             "/change-password",
             data={
+                "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                 "current_password": bootstrap_password,
                 "new_password": new_password,
                 "confirmation": new_password,
@@ -195,7 +197,7 @@ def test_repeated_login_failures_are_temporarily_blocked(tmp_path: Path) -> None
             "password": "wrong-password",
             "csrf_token": login_page.context["csrf_token"],
         }
-        responses = [client.post("/login", data=form) for _ in range(6)]
+        responses = [client.post("/login", data={**form, "username": "admin"}) for _ in range(6)]
 
     assert [response.status_code for response in responses] == [
         401,
@@ -221,9 +223,9 @@ def test_a_lockout_is_recorded_in_the_log(tmp_path: Path, caplog) -> None:
             "password": "wrong-password",
             "csrf_token": login_page.context["csrf_token"],
         }
-        with caplog.at_level(logging.WARNING, logger="app.web.routes.auth"):
+        with caplog.at_level(logging.WARNING, logger="app.admin_auth"):
             for _ in range(MAX_FAILED_ATTEMPTS):
-                client.post("/login", data=form)
+                client.post("/login", data={**form, "username": "admin"})
 
     locked = [r for r in caplog.records if r.message.startswith("login_locked_out")]
     assert len(locked) == 1
@@ -290,21 +292,16 @@ def test_the_policy_confines_the_page_to_this_origin(tmp_path: Path) -> None:
     assert "object-src 'none'" in policy
 
 
-def test_bootstrap_password_is_printed_to_the_console(
+def test_bootstrap_password_is_private_and_console_shows_only_its_path(
     tmp_path: Path, capsys
 ) -> None:
-    """The first-run password must be readable from the console.
-
-    Operators run this in Docker, where the data directory is a bind mount or a
-    volume. Telling them to open a file inside the container is not a usable
-    handover, so `docker compose logs` has to show the value itself.
-    """
+    """The bootstrap secret is read from its private file, never from logs."""
     settings = make_settings(tmp_path)
     with TestClient(create_app(settings)):
         password = read_bootstrap_password(settings)
 
     printed = capsys.readouterr().out
-    assert password in printed
+    assert password not in printed
     assert "admin" in printed
     assert str(settings.data_path / "bootstrap_admin_password") in printed
 
@@ -322,6 +319,7 @@ def test_console_banner_is_absent_once_the_password_is_changed(
         client.post(
             "/change-password",
             data={
+                "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                 "current_password": password,
                 "new_password": new_password,
                 "confirmation": new_password,

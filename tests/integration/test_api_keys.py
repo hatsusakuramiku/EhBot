@@ -43,6 +43,7 @@ def complete_first_run(client: TestClient, settings: Settings) -> None:
     client.post(
         "/login",
         data={
+            "username": "admin",
             "password": password,
             "csrf_token": login_page.context["csrf_token"],
         },
@@ -52,6 +53,7 @@ def complete_first_run(client: TestClient, settings: Settings) -> None:
     client.post(
         "/change-password",
         data={
+            "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
             "current_password": password,
             "new_password": NEW_PASSWORD,
             "confirmation": NEW_PASSWORD,
@@ -220,6 +222,7 @@ class TestKeyUsage:
             client.post(
                 "/change-password",
                 data={
+                    "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
                     "current_password": NEW_PASSWORD,
                     "new_password": ROTATED_PASSWORD,
                     "confirmation": ROTATED_PASSWORD,
@@ -238,7 +241,7 @@ class TestKeyUsage:
             complete_first_run(client, settings)
             key = generate_key(client)
             access = client.post(
-                "/api/v1/auth/login", json={"password": NEW_PASSWORD}
+                "/api/v1/auth/login", json={"username": "admin", "password": NEW_PASSWORD}
             ).json()["access_token"]
 
             client.post("/api/v1/auth/logout", headers=bearer(access))
@@ -289,7 +292,7 @@ class TestTokenTtlSettings:
                 follow_redirects=False,
             )
             login = client.post(
-                "/api/v1/auth/login", json={"password": NEW_PASSWORD}
+                "/api/v1/auth/login", json={"username": "admin", "password": NEW_PASSWORD}
             )
 
         assert saved.status_code == 303

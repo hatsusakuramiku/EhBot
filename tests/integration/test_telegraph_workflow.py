@@ -166,6 +166,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
     client.post(
         "/login",
         data={
+            "username": "admin",
             "password": bootstrap_password,
             "csrf_token": login_page.context["csrf_token"],
         },
@@ -174,6 +175,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
     client.post(
         "/change-password",
         data={
+            "expected_revision": client.get("/api/v1/auth/profile").json()["revision"],
             "current_password": bootstrap_password,
             "new_password": "new-password-with-12-characters",
             "confirmation": "new-password-with-12-characters",

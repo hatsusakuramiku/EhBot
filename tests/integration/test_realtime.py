@@ -134,7 +134,7 @@ def test_json_write_command_and_error_reuse_http_validation(tmp_path):
 
 def test_bearer_access_and_revocation(tmp_path):
     with signed_client(tmp_path) as (client, app):
-        credentials = client.post("/api/v1/auth/login", json={"password": "a-much-longer-operator-password"}).json()
+        credentials = client.post("/api/v1/auth/login", json={"username": "admin", "password": "a-much-longer-operator-password"}).json()
         access = credentials["access_token"]
         client.cookies.clear()
         with client.websocket_connect("/ws/ui", headers={"Authorization": "Bearer " + access}) as ws:
@@ -144,10 +144,8 @@ def test_bearer_access_and_revocation(tmp_path):
             assert all(name.startswith("api.") for name in ready["commands"])
             result, _ = call(ws, "api.list_candidates")
             assert result["status"] == 200
-            generation = app.state.realtime_session_generation
             response = client.post("/api/v1/auth/logout", headers={"Authorization": "Bearer " + access})
             assert response.status_code == 200
-            assert app.state.realtime_session_generation == generation, "mobile logout must not invalidate browser sessions"
             ws.send_json({"type": "pong"})
             while True:
                 frame = ws.receive_json()
@@ -190,10 +188,8 @@ def test_browser_logout_invalidates_active_socket_with_proxy_prefix(tmp_path):
         with client.websocket_connect("/ehbot/ws/ui", headers={"Origin": "http://testserver"}) as ws:
             hello(client, ws)
             csrf = client.get("/candidates").context["csrf_token"]
-            generation = app.state.realtime_session_generation
             response = client.post("/ehbot/logout", data={"csrf_token": csrf}, follow_redirects=False)
             assert response.status_code == 303
-            assert app.state.realtime_session_generation == generation + 1
             ws.send_json({"type": "pong"})
             while True:
                 frame = ws.receive_json()
@@ -306,7 +302,7 @@ def test_heartbeat_notices_expired_token_without_a_new_command(tmp_path, monkeyp
     from app.api import realtime
     monkeypatch.setattr(realtime, "HEARTBEAT_SECONDS", 0.05)
     with signed_client(tmp_path) as (client, app):
-        credentials = client.post("/api/v1/auth/login", json={"password": "a-much-longer-operator-password"}).json()
+        credentials = client.post("/api/v1/auth/login", json={"username": "admin", "password": "a-much-longer-operator-password"}).json()
         client.cookies.clear()
         with client.websocket_connect("/ws/ui", headers={"Authorization": "Bearer " + credentials["access_token"]}) as ws:
             ws.send_json({"type": "hello", "protocol": PROTOCOL, "client": "mobile"})

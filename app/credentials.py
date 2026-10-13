@@ -82,6 +82,7 @@ class ApiCredential:
     expires_at: int | None = None
     revoked_at: str | None = None
     rotated_from: int | None = None
+    auth_epoch: int = 0
 
     @property
     def is_revoked(self) -> bool:
