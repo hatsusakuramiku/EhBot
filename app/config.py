@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.public_url import normalize_origin
+
 #: The four log levels an operator can set via `LOG_LEVEL`. Defined here
 #: (foundational layer) so the runtime config and the UI dropdown can both
 #: import it without the API layer depending on configuration.
@@ -70,6 +72,7 @@ class Settings:
     trust_proxy_headers: bool = False
     trusted_proxy_ips: tuple[str, ...] = ()
     app_root_path: str = ""
+    public_base_url: str = ""
     tag_translation_enabled: bool = True
     archive_toolchain_auto_install: bool = True
     telegraph_enabled: bool = True
@@ -92,6 +95,10 @@ class Settings:
     # Retained UTC day buckets, including the current day.
     log_file_backups: int = 5
 
+    def __post_init__(self) -> None:
+        if self.public_base_url:
+            object.__setattr__(self, "public_base_url", normalize_origin(self.public_base_url))
+
     @classmethod
     def from_env(cls) -> Settings:
         log_level = _read_log_level("LOG_LEVEL", "INFO", LOG_LEVEL_CHOICES)
@@ -108,6 +115,7 @@ class Settings:
                 if item.strip()
             ),
             app_root_path=os.getenv("APP_ROOT_PATH", ""),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             tag_translation_enabled=_read_bool(
                 "TAG_TRANSLATION_ENABLED", True
             ),

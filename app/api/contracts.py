@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 DEFAULT_PAGE_SIZE = 50
 
 #: Shortcuts only; any positive integer is accepted (R85).
-PAGE_SIZE_OPTIONS: tuple[int, ...] = (20, 50, 100, 200)
+PAGE_SIZE_OPTIONS: tuple[int, ...] = (50,)
 
 
 class ApiError(Exception):

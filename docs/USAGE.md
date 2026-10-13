@@ -18,7 +18,7 @@
 
 - **手机上底栏直连，不再有二级抽屉**：窄屏底栏与桌面侧栏是同一份导航数据，每个域就是一个链接，落地页自带分区条——到「已下载」是一次点击，而不是「底栏按钮 → 抽屉 → 选分区」。唯一不在分区条里的「手动添加」放在候选页页头。
 - **旧地址仍可用**：早期版本的独立页面（`/connections`、`/sources`、`/downloads`、`/archive-settings`、`/auto-approval-rules` 等）一律 `307` 重定向到对应的新页面，书签不会失效。
-- **候选与活动的每个筛选、排序、分页都在 URL 里**，因此任何一个视图都可以直接收藏或分享给另一台机器上的自己。候选与已下载列表的页脚可切换**每页条数**（快捷档 20 / 50 / 100 / 200，默认 50；可手填任意正整数，无上限；空值、乱码或非正整数回落 50）；换条数会回到第 1 页。
+- **候选、活动与已下载的筛选、排序、分页都在页面内局部更新，地址栏不变**；直接打开带查询参数的链接仍可恢复指定视图。候选与已下载列表的页脚可切换**每页条数**（仅保留每页 50 快捷项，默认 50；加宽输入框可手填任意正整数，无上限；空值、乱码或非正整数回落 50）；换条数会回到第 1 页。
 - **审核动作只有「通过」与「驳回」**：「要求修订」已完全移除——模型常量、接口、页面按钮与整条历史审计一并清掉（迁移 `025` 把停在旧状态的候选改判为「待补充」，并删除那类审计行）。移动端若曾调用 `POST /api/v1/works/{id}/needs-revision` 需同步删掉，该端点已不存在。
 - **主题与密度存在浏览器本地**（`localStorage`），不入库：它回答的是「这块屏幕看起来怎样」，而不是「这个部署怎么运行」——服务端存主题会让操作者换一块屏幕后看到错的配色。
 - **会花钱或不可撤销的操作会先问一次**：取消任务、驳回候选、彻底删除候选（连文件的那一档另算一次）、批量删除来源、切换停滞种子的来源、用 ExHentai Archive Download 取原档（消耗 GP）、断开外部连接、删除密码条目。重试、继续、暂停、通过、停止做种仍然一次点击——给每个按钮都加确认，只会让人不读就关掉。
@@ -532,23 +532,44 @@ python scripts/verify_docker_linux.py --offline --suite --build
 
 如果文件日志被启用但目录不可写（少见但会发生，比如数据目录被只读挂载），服务会以 `LOG_FILE_UNAVAILABLE` 警告为什么只走 stdout，不会拒绝启动。
 
-### R85：移动端归档元数据契约
+### R87：统一元数据编辑与移动端契约
 
 `GET /api/v1/works/{id}` 新增 `archive_metadata`，含 `packaged`、`path`、`synced_at`、`error`，
-以及 `elements` 数组。每项含 `name`、`field_value`（数据库对应值）、`file_value`（真实文件值）、
+以及 `elements` 数组。每项含 `name`、`field_value`（已打包为真实文件值，未打包为待写入值）、`file_value`（真实文件值）、
 `in_file`、`editable`、`derived`。未打包时 `file_value` 为 null；不能读取文件时 `error` 说明原因。
 
 `PATCH /api/v1/works/{id}/metadata` 可提交自定义字段，例如
 `{"fields":{"Series":"系列名","Translator":"译者"}}`，继续支持 `locks` 和既有鉴权/CSRF 门。
 保存后与网页共用归档同步服务；**响应契约变化**：原 `repacked` 删除，改为 `archive_synced`
 及 `sync_skipped`（成功为 null；跳过/失败为 `WORK_NOT_PACKED`、`WORK_PACK_RUNNING`、
-`WORK_PACK_FORBIDDEN` 或 `ARCHIVE_METADATA_SYNC_FAILED`）。数据库保存成功不代表文件同步成功，
+`WORK_PACK_FORBIDDEN`、`NO_ARCHIVE_CHANGES` 或 `ARCHIVE_METADATA_SYNC_FAILED`）。数据库保存成功不代表文件同步成功，
 客户端应读取这两个字段，`sync_message` 提供可直接显示的结果文案。显式重新打包仍调用 `POST /api/v1/works/{id}/convert`。
+
+作品详情与候选编辑抽屉共用 `metadata_editor.fields`，已打包以实际文件值为准；读取失败明确显示错误。
+来源字段与原始抓取信息继续保留供检索和审核，但不再提供第二套归档编辑控件。
+拉取 `POST /api/v1/works/{id}/fetch-metadata` 返回 `metadata_editor.fetched_fields`：可覆盖的非手动、非锁定 ComicInfo 值。
+未打包直接供下次打包使用；已打包在当前编辑器保留草稿，拉取不改文件，重新进入页面仍读取文件。
+点击保存时，手动输入发送 `fields`，拉取草稿发送 `fetched_fields`，允许仅提交后者；保存拉取结果不改标为手动。
+只应用本次改动，保留未改文件字段、图片成员及 PageCount/Manga/Added；后台更新、文件写回失败或正在打包时保留编辑输入。
 
 ## WebSocket 连接与局部操作（R86）
 
+代理部署相关环境变量（两份 Compose 与 `.env.example` 一致）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `PUBLIC_BASE_URL` | 空 | 单个公开 HTTP(S) origin，例如 `https://ehbot.mikufans.date`；固定 URL 生成、WS Origin 与命令桥，不依赖代理 IP |
+| `APP_ROOT_PATH` | 空 | 部署子路径，例如 `/ehbot`；不放进公开 URL |
+| `TRUST_PROXY_HEADERS` | false | 仅显式需要读取可信转发信息时开启，非公开 URL 模式的前置条件 |
+| `TRUSTED_PROXY_IPS` | 空 | 开启代理头信任时必须填写的可信代理来源；不自动由域名解析生成 |
+
+可直接在自用的 `docker-compose.yml` 中填写 `PUBLIC_BASE_URL: "https://ehbot.mikufans.date"`，
+也可给仓库两份 Compose 的 `.env` 填同名变量。只允许协议、主机、可选端口和末尾 `/`；凭据、查询、片段、路径及无效端口会在启动时报错。
+该设置不改变客户端来源 IP；留空保留原直连或可信代理模式。Caddy 自动支持 Upgrade；Cloudflare 使用 Full (strict)，
+关闭该站点 Web Analytics 自动脚本注入，无需放宽应用 script-src。502 仍需检查上游服务和发布端口。
+
 候选、活动、已下载、作品详情、手动添加及设置各分区共用 `/ws/ui`。表单操作收到确认后显示业务结果；「已接收」不表示打包已完成，后台执行结果另行推送。输入、勾选、滚动和抽屉在后台更新中保留。
 
-断线会显示连接状态并自动重连，页面保留当前内容，可点「更新当前内容」取得快照；已经发出的写操作在回复丢失时不自动重发，先核对当前状态。连接建立前可用 HTTP/HTMX 局部提交；关闭 JavaScript 时保留普通表单。登录、退出、改密及普通页面导航仍可切换整个文档。
+顶栏左侧文字显示「实时连接中 / 实时已连接 / 实时重连中 / 需要重新登录」。断线自动退避重连，重连后自动校正快照；页面保留当前内容，状态不再用固定卡片遮挡。已经发出的写操作在回复丢失时不自动重发，先核对当前状态。连接建立前可用 HTTP 局部提交；422/405 显示字段或方法拒绝原因。关闭 JavaScript 时保留普通表单。登录、退出、改密及普通页面导航仍可切换整个文档。
 
 移动端本轮不改代码，后续直接使用同一套 JSON 命令、状态通知和快照。认证、接入例子、命令目录、断线规则及 nginx 升级配置见 [REALTIME_API.md](REALTIME_API.md)。反向代理必须允许 WebSocket Upgrade，部署前缀与 `APP_ROOT_PATH` 一致。

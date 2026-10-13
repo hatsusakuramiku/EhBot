@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
+from jinja2 import pass_context
+from starlette.datastructures import URL
 
 from app.api.status import (
     candidate_tab_view,
@@ -52,6 +54,11 @@ def build_templates() -> Jinja2Templates:
     templates = Jinja2Templates(
         directory=TEMPLATE_DIR, context_processors=[shell_context]
     )
+    @pass_context
+    def local_url_for(context, route_name, /, **params):
+        return URL(context["request"].url_for(route_name, **params).path)
+
+    templates.env.globals["url_for"] = local_url_for
     # Labels, tones and provider names come from `app.api.status`, so a state
     # reads the same in a template as it does in a JSON response.
     templates.env.filters["status_label"] = status_label

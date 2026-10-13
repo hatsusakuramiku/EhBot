@@ -25,6 +25,7 @@ from app.config import Settings
 from app.db.database import Database
 from app.errors import AppError, app_error_handler
 from app.logging import configure_logging, log_broker
+from app.public_url import PublicURLMiddleware
 from app.session_secret import resolve_session_secret
 from app.web.rendering import STATIC_DIR, build_templates
 from app.web.request_id import RequestIdMiddleware
@@ -126,6 +127,7 @@ def create_app(
     # reach a response the session layer produced on its own, and every one of
     # them is a constant, so nothing here needs the correlation id.
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(PublicURLMiddleware, origin=app_settings.public_base_url)
     # Added last so it wraps outermost: Starlette applies middleware in reverse
     # order of registration, and the id has to be set before anything else can
     # log. That includes the session middleware, whose failures are worth

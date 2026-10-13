@@ -421,3 +421,12 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] Deliver docs/REALTIME_API.md for the later EhBot-Mobile implementation
 - [x] Verify 545 distinct tests across 20 files, DOM behavior and 2064 collected total
 - **Status:** complete; no migration, version 0.3.0rc3; mobile implementation, real-device testing, full suite and release remain later work.
+
+### R87: Public URL And WebUI Operations / Metadata Fixes
+- [x] Implement approved v2 PUBLIC_BASE_URL in both Compose files and validate exact public origins
+- [x] Repair rule route collisions, same-origin URLs, submitter handling and specific error feedback
+- [x] Move connection state to topbar; reconnect and reconcile automatically; keep 50 plus wide custom input
+- [x] Share file-based metadata editor, protect manual/locked fields and explicitly save fetched drafts
+- [x] Verify 637 distinct cases across 21 files, real TCP/CBZ and DOM; collect 2101 total
+- [x] Synchronize operator docs, realtime contract, environment examples and phase ledger
+- **Status:** complete; no migration, version 0.3.0rc3; local commit only. Actual proxy/browser testing, mobile implementation and release remain later work.

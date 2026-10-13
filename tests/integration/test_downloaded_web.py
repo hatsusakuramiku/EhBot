@@ -1395,7 +1395,8 @@ def test_the_page_size_control_offers_every_size_and_marks_the_current_one(
     assert "每页" in body
     assert ">50</button>" in body
     for size in (20, 100, 200):
-        assert f'href="/downloaded?page_size={size}"' in body
+        assert f'href="/downloaded?page_size={size}"' not in body
+    assert 'class="ui-input ui-page-size-input"' in body
     assert "page_size=50" not in body
 
 

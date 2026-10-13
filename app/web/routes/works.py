@@ -14,6 +14,8 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from app.api.events import EVENT_DOWNLOAD
+from app.api.actions import apply_metadata_patch
+from app.api.contracts import ApiError
 from app.api.works import (
     configured_sources,
     effective_library_path,
@@ -28,6 +30,31 @@ from app.review.models import METADATA_FIELDS, field_label
 from app.web import deps
 
 router = APIRouter()
+
+
+@router.post("/works/{candidate_id}/metadata")
+async def edit_work_metadata(request: Request, candidate_id: int):
+    """Save only changed inputs; JavaScript uses the same JSON edit service."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get("csrf_token", "")))
+    fields = {name.removeprefix("field__"): str(value) for name, value in form.items()
+              if name.startswith("field__") and value != form.get("original__" + name.removeprefix("field__"), "")}
+    custom = str(form.get("new_field", "")).strip()
+    if custom:
+        fields[custom] = str(form.get("new_value", ""))
+    locks = {name.removeprefix("lock_original__"): ("lock__" + name.removeprefix("lock_original__") in form)
+             for name, value in form.items() if name.startswith("lock_original__")
+             and ("lock__" + name.removeprefix("lock_original__") in form) != (value == "1")}
+    try:
+        result = await apply_metadata_patch(request, candidate_id, {"fields": fields, "locks": locks},
+                                            request.session.get("username", "admin"))
+    except ApiError as exc:
+        return await render_review_error(request, candidate_id, exc.message)
+    return RedirectResponse(request.url_for("work_detail", candidate_id=candidate_id).path
+                            + "?message=" + quote_plus(result["sync_message"]), status_code=303)
 
 #: Where 返回 can send an operator, longest prefix first.
 #:

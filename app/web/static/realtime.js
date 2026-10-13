@@ -70,10 +70,11 @@
         var result = local(response.url);
         if (/\/(login|change-password)$/.test(result.pathname)) throw new Error("认证已失效，请重新登录");
         var error = result.searchParams.get("error");
-        return response.text().then(function (html) {
+        var json = (response.headers.get("Content-Type") || "").indexOf("application/json") === 0;
+        return (json ? response.json() : response.text()).then(function (data) {
           return { type: response.ok && !error ? "command.result" : "command.error",
-            format: "html", data: html, status: response.status, location: result.pathname + result.search,
-            error: { message: error || "操作失败，请查看页面提示" } };
+            format: json ? "json" : "html", data: data, status: response.status, location: result.pathname + result.search,
+            error: { message: error || errorMessage(data, response.status) } };
         });
       });
     }
@@ -83,6 +84,18 @@
       body: body === undefined ? (item.entry.encoding === "form" ? [] : null) : body,
       context: current,
     });
+  }
+  function errorMessage(data, status) {
+    if (data && data.error) return data.error.message;
+    if (data && typeof data.detail === "string") return data.detail;
+    if (data && Array.isArray(data.detail)) return data.detail.map(function (item) {
+      return item.loc.join(".") + ": " + item.msg;
+    }).join("; ");
+    if (typeof data === "string") {
+      var notice = new DOMParser().parseFromString(data, "text/html").querySelector('.ui-callout[data-tone="danger"]');
+      if (notice) return notice.textContent.trim();
+    }
+    return "操作失败（HTTP " + status + "）";
   }
   /* Existing JSON drawers use the same command channel; HTTP is a fallback
    * only before submission. A sent write is never replayed after disconnect. */
@@ -99,16 +112,8 @@
   function connectionStatus(text) {
     var host = document.querySelector("[data-realtime-status]");
     if (!host) return;
-    host.hidden = !text;
     host.textContent = text || "";
-    if (text) {
-      var button = document.createElement("button");
-      button.className = "ui-btn";
-      button.type = "button";
-      button.textContent = "更新当前内容";
-      button.addEventListener("click", refresh);
-      host.appendChild(button);
-    }
+    host.hidden = false;
     emit("connection", { connected: connected });
   }
   function connect() {
@@ -126,7 +131,7 @@
         catalogue = frame.commands;
         epoch = frame.epoch; sequence = frame.sequence;
         connected = true; retry = 0;
-        connectionStatus("");
+        connectionStatus("实时已连接");
         emit("ready", frame);
         if (!document.querySelector("[data-log-panel]")) scheduleRefresh();
       } else if (frame.type === "ping") {
@@ -160,10 +165,20 @@
         job.reject(new Error("连接中断，操作结果可能尚未确认；请先核对状态"));
         delete pending[id];
       });
-      connectionStatus(event.code === 4401 || event.code === 4403 ? "认证已失效，请重新登录" : "实时连接中断，正在重连");
+      connectionStatus(event.code === 4401 || event.code === 4403 ? "需要重新登录" : "实时重连中");
       if (event.code !== 4401 && event.code !== 4403) {
-        var delay = Math.min(30000, 1000 * Math.pow(2, retry++)) * (0.8 + Math.random() * 0.4);
-        reconnectTimer = window.setTimeout(connect, delay);
+        function retryConnection() {
+          var delay = Math.min(30000, 1000 * Math.pow(2, retry++)) * (0.8 + Math.random() * 0.4);
+          reconnectTimer = window.setTimeout(connect, delay);
+        }
+        // Rejected HTTP upgrades appear as 1006 in browsers. Distinguish an
+        // expired session from a temporary proxy failure before retrying.
+        if (event.code === 1006) {
+          window.fetch(prefix + "/api/v1/realtime").then(function (response) {
+            if (response.status === 401 || response.status === 403) connectionStatus("需要重新登录");
+            else retryConnection();
+          }).catch(retryConnection);
+        } else retryConnection();
       }
     };
   }
@@ -225,7 +240,14 @@
     var x = window.scrollX, y = window.scrollY;
     var selection = focus && typeof focus.selectionStart === "number" ? [focus.selectionStart, focus.selectionEnd] : null;
     var forms = Array.from(main.querySelectorAll("form")), freshForms = Array.from(fragment.querySelectorAll("form"));
+    var drawer = main.querySelector("[data-metadata-drawer]");
+    var freshDrawer = fragment.querySelector("[data-metadata-drawer]");
+    if (drawer && freshDrawer && !drawer.hidden) {
+      drawer.id = freshDrawer.id = "metadata-drawer";
+      freshDrawer.setAttribute("hx-preserve", "true");
+    }
     function formKey(form) {
+      if (form.matches("[data-metadata-editor]") && form.id) return form.id;
       return [form.getAttribute("action"), form.getAttribute("method"), Array.from(form.querySelectorAll('input[type="hidden"]'))
         .filter(function (node) { return node.name !== "csrf_token" && node.name !== "return_to"; })
         .map(function (node) { return node.name + "=" + node.value; }).join("&")].join("|");
@@ -322,10 +344,12 @@
   });
   document.addEventListener("submit", function (event) {
     var form = event.target, submitter = event.submitter;
-    var method = (form.getAttribute("method") || "GET").toUpperCase();
+    if (form.matches("[data-metadata-editor]") || form.action.endsWith("/exhentai-metadata")) return;
+    var method = (submitter && submitter.getAttribute("formmethod") || form.getAttribute("method") || "GET").toUpperCase();
     var url = submitter && submitter.getAttribute("formaction") || form.getAttribute("action") || current;
     if (/\/(login|logout|change-password)$/.test(local(url).pathname) || form.classList.contains("ui-log-filter")) return;
-    var data = Array.from(new FormData(form, submitter || undefined).entries());
+    var data = Array.from(new FormData(form).entries());
+    if (submitter && submitter.name && !submitter.disabled) data.push([submitter.name, submitter.value]);
     if (data.some(function (pair) { return typeof pair[1] !== "string"; })) return;
     event.preventDefault(); event.stopImmediatePropagation();
     if (method === "GET") {
@@ -336,7 +360,7 @@
     }
     writing += 1;
     var version = revision;
-    var buttons = Array.from(form.querySelectorAll('button[type="submit"],input[type="submit"]')).filter(function (node) { return !node.disabled; });
+    var buttons = Array.from(form.elements).filter(function (node) { return node.type === "submit" && !node.disabled; });
     buttons.forEach(function (node) { node.disabled = true; });
     form.setAttribute("aria-busy", "true");
     request(method, url, data).then(function (frame) {
@@ -349,7 +373,11 @@
         refreshAgain = frame.sequence < sequence;
         if (frame.type === "command.result") delete form.dataset.dirty;
         swap(frame.data, frame.type === "command.result" ? form : null);
-      } else if (frame.type === "command.error") window.EhBotUI.toast(frame.error.message, {tone: "danger"});
+      }
+      if (frame.type === "command.error") {
+        form.dataset.dirty = "true";
+        window.EhBotUI.toast(frame.format ? errorMessage(frame.data, frame.status) : frame.error.message, {tone: "danger"});
+      }
       if (frame.type === "command.result") {
         document.dispatchEvent(new CustomEvent("ehbot:operation", { detail: { form: form, frame: frame } }));
       }

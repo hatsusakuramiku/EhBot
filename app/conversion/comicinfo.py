@@ -29,6 +29,34 @@ def field_writes_archive(field_name: str) -> bool:
     }
 
 
+def element_sources(name: str, values: dict) -> tuple[str, ...]:
+    """Source fields contributing to an element, including mapping fallbacks."""
+    aliases = {"Writer": "Artist", "Penciller": "Artist", "CoverArtist": "Artist",
+               "Characters": "Character", "LanguageISO": "Language", "Genre": "Category",
+               "Summary": "Description", "Publisher": "Group"}
+    if name == "Tags":
+        return ("Tags", "TagsRaw")
+    if name == "Series":
+        return (next((key for key in ("Series", "Parody", "Title") if values.get(key)), "Series"),)
+    if name == "LocalizedSeries" and name not in values:
+        return (next((key for key in ("Series", "JapaneseTitle", "Title") if values.get(key)), "Series"),)
+    if name not in values and name in aliases:
+        return (aliases[name],)
+    return (name,)
+
+
+def changed_elements(fields) -> set[str]:
+    """Map explicit edits to their output elements without rewriting defaults."""
+    aliases = {"Artist": {"Writer", "Penciller", "CoverArtist"}, "Character": {"Characters"},
+               "Language": {"LanguageISO"}, "Category": {"Genre"}, "Description": {"Summary"},
+               "Group": {"Publisher"}, "Series": {"Series", "LocalizedSeries"},
+               "Parody": {"Series"}, "TagsRaw": {"Tags"}}
+    targets = set()
+    for name in fields:
+        targets.update(aliases.get(name, {name} if name in EDITABLE_ELEMENTS else set()))
+    return targets
+
+
 def metadata_tags(metadata) -> tuple[str, ...]:
     """Combine upstream and translated tags without duplicating a value."""
     values = {}

@@ -1095,10 +1095,10 @@ def test_the_page_size_control_offers_every_size_and_marks_the_current_one(
     # The default (50) is the current size, so it is a disabled button rather
     # than a link -- "you are here", not "click me".
     assert ">50</button>" in body
-    # Every other size is a link that carries the size and deliberately drops
-    # the page cursor: page 7 of 20-row pages is not page 7 of 100-row ones.
+    # R87 keeps only 50 as a shortcut, leaving room for a wide custom input.
     for size in (20, 100, 200):
-        assert f'href="/candidates?page_size={size}"' in body
+        assert f'href="/candidates?page_size={size}"' not in body
+    assert 'class="ui-input ui-page-size-input"' in body
     assert "page_size=50" not in body
 
 

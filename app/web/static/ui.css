@@ -924,9 +924,8 @@ canvas {
 .ui-tag[href]:hover, .ui-tag[href]:focus-visible { color: var(--t-ink); border-color: var(--t-ink-muted); }
 .ui-tag-menu { position: fixed; z-index: 100; display: grid; padding: var(--s-1);
   background: var(--t-surface); border: 1px solid var(--t-line); border-radius: var(--r-sm); }
-.ui-realtime-status { position: fixed; bottom: 70px; right: var(--s-3); z-index: 90;
-  max-width: calc(100vw - 32px); padding: var(--s-2); background: var(--t-surface);
-  border: 1px solid var(--t-line); border-radius: var(--r-sm); }
+.ui-realtime-status { font-size: var(--font-small); color: var(--t-ink-muted); }
+.ui-page-size-input { width: 9rem; min-width: 7rem; }
 
 /* The search box's own reading (R61): one chip per parsed `$field:value$`. */
 .ui-search-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-2); }

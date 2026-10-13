@@ -515,6 +515,7 @@ async def work_snapshot(
         "metadata": [metadata_entry(entry) for entry in primary],
         "raw_metadata": [metadata_entry(entry) for entry in raw],
         "archive_metadata": await archived.archive_metadata(candidate_id) if archived else None,
+        "metadata_editor": await archived.metadata_editor(candidate_id) if archived else None,
         "timeline": work_timeline(actions, jobs),
         "jobs": [job_summary(job) for job in jobs],
         # The packaged output, promoted out of the job list: it is what the work

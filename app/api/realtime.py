@@ -24,6 +24,7 @@ from app.api import deps
 from app.api.contracts import ApiError
 from app.api.events import EVENT_REFRESH
 from app.api.logs import buffered_entry
+from app.public_url import normalize_origin
 
 
 router = APIRouter()
@@ -132,7 +133,11 @@ async def realtime_socket(ws: WebSocket):
         bearer = getattr(ws.state, "auth_source", None) == "bearer"
         origin = ws.headers.get("origin")
         expected_origin = ("https://" if ws.url.scheme == "wss" else "http://") + ws.url.netloc
-        if (origin and origin.rstrip("/") != expected_origin) or (not bearer and not origin):
+        try:
+            matches_origin = bool(origin and normalize_origin(origin) == normalize_origin(expected_origin))
+        except ValueError:
+            matches_origin = False
+        if (origin and not matches_origin) or (not bearer and not origin):
             raise ApiError("ORIGIN_INVALID", "连接来源不正确", status_code=403)
     except ApiError:
         await ws.close(code=4401)
@@ -284,6 +289,10 @@ async def realtime_socket(ws: WebSocket):
                 redirect_error = dict(parse_qsl(response.url.query.decode("ascii"))).get("error") if fmt == "html" else None
                 if response.status_code >= 400 or redirect_error:
                     error = data.get("error") if isinstance(data, dict) else None
+                    if not error and isinstance(data, dict) and "detail" in data:
+                        detail = data["detail"]
+                        message = "; ".join(".".join(map(str, item["loc"])) + ": " + item["msg"] for item in detail) if isinstance(detail, list) else str(detail)
+                        error = {"code": "REQUEST_REJECTED", "message": message}
                     result.update(type="command.error", error=error or {"code": "OPERATION_FAILED", "message": redirect_error or "操作失败，请查看页面提示"})
                 else:
                     result["type"] = "command.result"

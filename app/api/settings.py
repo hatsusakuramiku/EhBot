@@ -1231,7 +1231,7 @@ async def post_auto_approval_dry_run(request: Request) -> dict:
 
 
 @router.put("/settings/auto-approval/rules/{rule_id}/toggle")
-async def toggle_auto_approval_rule(rule_id: int, request: Request) -> dict:
+async def api_toggle_auto_approval_rule(rule_id: int, request: Request) -> dict:
     """Park a rule or put it back, without touching anything else about it."""
     await deps.require_session(request)
     deps.require_csrf(request)
@@ -1246,7 +1246,7 @@ async def toggle_auto_approval_rule(rule_id: int, request: Request) -> dict:
 
 
 @router.delete("/settings/auto-approval/rules/{rule_id}")
-async def delete_auto_approval_rule(rule_id: int, request: Request) -> dict:
+async def api_delete_auto_approval_rule(rule_id: int, request: Request) -> dict:
     """Delete a rule for good.
 
     停用 is the reversible half and keeps its own call; this one cannot be undone

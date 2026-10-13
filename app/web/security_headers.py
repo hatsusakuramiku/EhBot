@@ -37,6 +37,7 @@ from __future__ import annotations
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from app.public_url import normalize_origin
 
 
 #: `style-src` allows inline because the templates carry a handful of
@@ -76,6 +77,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
         for name, value in SECURITY_HEADERS.items():
+            if name == "Content-Security-Policy":
+                try:
+                    origin = normalize_origin(request.url.scheme + "://" + request.url.netloc)
+                except ValueError:
+                    origin = None
+                if origin:
+                    ws_origin = origin.replace("https://", "wss://").replace("http://", "ws://")
+                    value = value.replace("connect-src 'self'", f"connect-src 'self' {ws_origin}")
             response.headers.setdefault(name, value)
         return response
 

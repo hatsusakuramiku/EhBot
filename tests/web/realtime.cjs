@@ -26,6 +26,11 @@ function content(state = "queued", search = "") {
     <form id="batch" method="post" action="/downloaded/batch"><input name="candidate_ids" value="1" type="checkbox" checked>
       <input name="candidate_ids" value="2" type="checkbox" checked>
       <button id="pack" type="submit" formaction="/downloaded/1/repack" name="action" value="repack">重新打包</button></form>
+    <button id="external-pack" type="submit" form="batch" formmethod="post"
+      formaction="/downloaded/1/repack" name="action" value="repack">确认重新打包</button>
+    <form id="work-metadata-editor" data-metadata-editor>
+      <input type="hidden" name="original__Title" value="${state}">
+      <div data-field-name="Title"><input data-field="value" value="file title"></div></form>
     <form id="queue-batch" x-data="{ selected: [] }"><input name="job_ids" value="9" type="checkbox" x-model="selected">
       <span data-queue-selected x-text="selected.length"></span></form>`;
 }
@@ -94,6 +99,10 @@ async function scenario(prefix) {
   assert.equal(intervals.length, 0, "page state must not be polled");
   const originalUrl = win.location.href;
   const title = win.document.getElementById("title");
+  const metadataEditor = win.document.getElementById("work-metadata-editor");
+  metadataEditor.dataset.dirty = "true";
+  metadataEditor.querySelector("[data-field-name]").dataset.fetchedValue = "fetched draft";
+  metadataEditor.querySelector('[data-field="value"]').value = "fetched draft";
   title.value = "unsaved title"; title.focus(); title.setSelectionRange(2, 7);
   title.dispatchEvent(new win.Event("input", {bubbles: true}));
   const checkbox = win.document.querySelector('[data-candidate-id] input'); checkbox.checked = true;
@@ -106,6 +115,9 @@ async function scenario(prefix) {
   await new Promise(resolve => setTimeout(resolve, 40));
   assert.equal(win.document.getElementById("title"), title, "dirty form is preserved as the same DOM node");
   assert.equal(title.value, "unsaved title");
+  assert.equal(win.document.getElementById("work-metadata-editor"), metadataEditor, "editor survives changes to hidden snapshot fields");
+  assert.equal(metadataEditor.querySelector('[data-field="value"]').value, "fetched draft");
+  assert.equal(metadataEditor.querySelector("[data-field-name]").dataset.fetchedValue, "fetched draft");
   assert.equal(win.document.activeElement, title);
   assert.deepEqual([title.selectionStart, title.selectionEnd], [2, 7]);
   assert.equal(win.document.querySelector('[data-candidate-id] input').checked, true);
@@ -189,6 +201,7 @@ async function scenario(prefix) {
   const write = frames.findLast(frame => frame.name === "web.repack");
   assert.deepEqual(write.payload.params, {candidate_id: "1"});
   assert.equal(write.payload.body.filter(pair => pair[0] === "candidate_ids").length, 2, "multi-value forms keep all selected IDs");
+  assert.ok(write.payload.body.some(pair => pair[0] === "action" && pair[1] === "repack"));
   assert.equal(pack.disabled, true, "submit is disabled while request is outstanding");
   sockets[0].onclose({code: 4401});
   await new Promise(resolve => setTimeout(resolve, 30));
@@ -198,7 +211,7 @@ async function scenario(prefix) {
   let fallback;
   win.fetch = (url, options) => {
     fallback = {url, options};
-    return Promise.resolve({ok: true, status: 200, url: originalUrl,
+    return Promise.resolve({ok: true, status: 200, url: originalUrl, headers: {get: () => "text/html"},
       text: () => Promise.resolve(content("fallback saved", search))});
   };
   pack.form.dispatchEvent(new win.SubmitEvent("submit", {bubbles: true, cancelable: true, submitter: pack}));
@@ -209,6 +222,41 @@ async function scenario(prefix) {
   await waitFor(() => win.document.querySelector("[data-state]").textContent === "fallback saved");
   assert.equal(win.document.getElementById("title"), title, "HTTP fallback preserves unsaved inputs too");
   assert.equal(win.location.href, originalUrl);
+  const stableState = win.document.querySelector("[data-state]");
+  let errorStatus = 422;
+  win.fetch = (url, options) => {
+    assert.equal(options.method, "POST", "external submitter formmethod overrides the form");
+    assert.equal(options.body.get("action"), "repack");
+    return Promise.resolve({ok: false, status: errorStatus, url: originalUrl,
+    headers: {get: () => "application/json"}, json: () => Promise.resolve(errorStatus === 422
+      ? {detail: [{loc: ["body", "action"], msg: "Field required"}]} : {detail: "Method Not Allowed"})});
+  };
+  const external = win.document.getElementById("external-pack");
+  external.form.setAttribute("method", "get");
+  external.click();
+  await waitFor(() => win.document.querySelector(".ui-toasts").textContent.includes("Field required"));
+  assert.equal(external.disabled, false);
+  assert.equal(win.document.querySelector("[data-state]"), stableState, "JSON failures never replace content with an error envelope");
+  errorStatus = 405;
+  external.click();
+  await waitFor(() => win.document.querySelector(".ui-toasts").textContent.includes("Method Not Allowed"));
+  assert.equal(win.document.getElementById("title"), title, "JSON failures keep dirty form nodes");
+  holdWrite = false;
+  state = "reconnected state";
+  sockets[0].onclose({code: 1001});
+  assert.equal(win.document.querySelector("[data-realtime-status]").textContent, "实时重连中");
+  assert.equal(win.document.querySelector("[data-realtime-status] button"), null);
+  await waitFor(() => sockets.length === 2);
+  await waitFor(() => win.document.querySelector("[data-state]").textContent === state);
+  assert.equal(win.document.querySelector("[data-realtime-status]").textContent, "实时已连接");
+  assert.equal(win.document.getElementById("title"), title);
+  const reads = results.length;
+  win.fetch = () => Promise.resolve({status: 401});
+  sockets[1].onclose({code: 1006});
+  await waitFor(() => win.document.querySelector("[data-realtime-status]").textContent.includes("重新登录"));
+  await new Promise(resolve => setTimeout(resolve, 1300));
+  assert.equal(sockets.length, 2, "rejected upgrades with expired auth do not reconnect forever");
+  assert.equal(results.length, reads);
   win.close();
 }
 

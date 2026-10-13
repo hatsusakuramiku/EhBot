@@ -90,7 +90,7 @@ def test_root_path_is_included_in_generated_web_urls(tmp_path: Path) -> None:
         login_page = client.get("/login")
 
     assert redirect.headers["location"] == "/ehbot/login"
-    assert 'href="http://testserver/ehbot/static/ui.css"' in login_page.text
+    assert 'href="/ehbot/static/ui.css"' in login_page.text
 
 
 def test_login_rejects_invalid_csrf_token(tmp_path: Path) -> None:
@@ -267,6 +267,8 @@ def test_every_response_carries_the_security_headers(tmp_path: Path) -> None:
 
     for response in (page, api, redirect):
         for name, value in SECURITY_HEADERS.items():
+            if name == "Content-Security-Policy":
+                value = value.replace("connect-src 'self'", "connect-src 'self' ws://testserver")
             assert response.headers[name] == value
 
 

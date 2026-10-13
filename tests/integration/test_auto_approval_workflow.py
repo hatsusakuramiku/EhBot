@@ -549,6 +549,9 @@ def test_an_approve_rule_outranks_a_reject_rule_when_it_is_first(
     )
 
     with TestClient(create_app(settings)) as client:
+        # Assert the rule decision before an unconfigured download worker can
+        # claim the queued fixture and mark it failed.
+        client.portal.call(client.app.state.download_service.stop)
         assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 1
 
     detail = asyncio.run(database.get_candidate(candidate_id))

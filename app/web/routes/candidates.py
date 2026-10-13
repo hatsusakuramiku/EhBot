@@ -667,10 +667,10 @@ async def edit_metadata(
         return await render_review_error(
             request, candidate_id, exc.public_message
         )
-    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id)
+    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id, fields=[field_name])
     notice = sync["message"]
     return RedirectResponse(
-        str(request.url_for("work_detail", candidate_id=candidate_id).include_query_params(message=notice)),
+        request.url_for("work_detail", candidate_id=candidate_id).path + "?message=" + quote_plus(notice),
         status_code=303,
     )
 

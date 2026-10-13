@@ -46,7 +46,7 @@ from app.conversion.naming import (
 )
 from app.archive.backends.zip_backend import rewrite_comicinfo
 from app.conversion.comicinfo import (
-    DERIVED_ELEMENTS, EDITABLE_ELEMENTS, build_from_metadata,
+    DERIVED_ELEMENTS, EDITABLE_ELEMENTS, build_from_metadata, field_writes_archive,
 )
 from app.conversion.service import _PACK_FORBIDDEN_STATUSES
 from app.db.database import Database, METADATA_SOURCE_RANK_SQL
@@ -217,12 +217,13 @@ class ArchivedWorkService:
     def _metadata_rows(connection, candidate_id: int) -> list:
         """Read the same trust order used by packing and effective metadata."""
         rows = connection.execute(
-            "SELECT mv.field_name, mv.field_value, mv.is_manual FROM metadata_values mv "
+            "SELECT mv.field_name, mv.field_value, mv.is_manual, mv.is_locked, mv.value_source FROM metadata_values mv "
             "WHERE mv.candidate_id = ? ORDER BY mv.is_manual DESC, "
             + METADATA_SOURCE_RANK_SQL + " DESC, mv.confidence DESC, mv.created_at DESC",
             (candidate_id,),
         ).fetchall()
-        return [SimpleNamespace(field_name=r[0], field_value=r[1], is_manual=bool(r[2]))
+        return [SimpleNamespace(field_name=r[0], field_value=r[1], is_manual=bool(r[2]),
+                                is_locked=bool(r[3]), value_source=r[4])
                 for r in rows]
 
     @staticmethod
@@ -234,12 +235,15 @@ class ArchivedWorkService:
             "ORDER BY dj.id DESC LIMIT 1", (candidate_id,),
         ).fetchone()
 
-    async def archive_metadata(self, candidate_id: int) -> dict:
-        """Read actual ComicInfo values and their current database counterparts."""
+    async def archive_metadata(self, candidate_id: int, *, fetched_names=()) -> dict:
+        """One editor snapshot: actual file values when packed, projected otherwise."""
         library, _ = await self._roots()
-        return await asyncio.to_thread(self._archive_metadata_sync, candidate_id, library)
+        return await asyncio.to_thread(self._archive_metadata_sync, candidate_id, library, fetched_names)
 
-    def _archive_metadata_sync(self, candidate_id: int, library: Path) -> dict:
+    def _archive_metadata_sync(self, candidate_id: int, library: Path, fetched_names=()) -> dict:
+        from app.conversion.comicinfo import element_sources
+        from app.review.models import field_label
+        from app.api.status import metadata_source_view
         with self._database.connection() as connection:
             row = self._cbz_row(connection, candidate_id)
             metadata = self._metadata_rows(connection, candidate_id)
@@ -262,33 +266,63 @@ class ArchivedWorkService:
                 path = _resolve_inside(library, Path(row[1]))
                 with zipfile.ZipFile(path) as archive:
                     root = ET.fromstring(archive.read("ComicInfo.xml"))
+                    if root.tag != "ComicInfo":
+                        raise ET.ParseError("Expected ComicInfo root")
                 file_values = {child.tag: child.text or "" for child in root}
             except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, ArchivedWorkError):
-                error = "无法读取归档元数据；数据库已保存的值仍可查看"
+                error = "无法读取归档 ComicInfo.xml，请检查文件后重试"
         names = list(file_values)
         names.extend(name for name in field_values if name not in names)
         # Offer missing mapped elements without inventing every optional custom
         # ComicInfo field; those are added through the custom-field form.
         names.extend(name for name in (
-            "Title", "Series", "LocalizedSeries", "Publisher", "Writer", "Penciller",
+            "Title", "JapaneseTitle", "Series", "LocalizedSeries", "Publisher", "Writer", "Penciller",
             "CoverArtist", "Characters", "LanguageISO", "Genre", "Tags", "Rating",
             "Summary", "Web", "ScanInformation",
         ) if name not in names)
+        best = {entry.field_name: entry for entry in reversed(metadata)}
+        elements = []
+        fetched = {}
+        for name in names:
+            dependencies = element_sources(name, values)
+            sources = [best[key] for key in dependencies if key in best]
+            protected = any(entry.is_manual or entry.is_locked for entry in sources)
+            if name in EDITABLE_ELEMENTS and not protected and set(dependencies) & set(fetched_names):
+                fetched[name] = field_values.get(name, "")
+            source = sources[0] if sources else None
+            elements.append({
+                "name": name, "field_name": name, "field_label": field_label(name),
+                "field_value": file_values.get(name, "") if row else field_values.get(name, ""),
+                "file_value": file_values.get(name), "in_file": name in file_values,
+                "editable": name in EDITABLE_ELEMENTS and not error, "derived": name in DERIVED_ELEMENTS,
+                "source": metadata_source_view(source.value_source).to_payload() if source else None,
+                "is_manual": any(entry.is_manual for entry in sources),
+                "is_locked": any(entry.is_locked for entry in sources),
+                "lock_field": source.field_name if source else name,
+                "lock_available": bool(source) and name in EDITABLE_ELEMENTS and not error,
+            })
         return {
             "packaged": row is not None, "path": str(row[1]) if row else None,
             "synced_at": str(audit[0]) if audit else None, "error": error,
-            "elements": [
-                {"name": name, "field_value": (
-                    file_values[name] if name in DERIVED_ELEMENTS and name in file_values
-                    else values.get(name, field_values.get(name, file_values.get(name, "")))
-                 ),
-                 "file_value": file_values.get(name), "in_file": name in file_values,
-                 "editable": name in EDITABLE_ELEMENTS, "derived": name in DERIVED_ELEMENTS}
-                for name in names
-            ],
+            "elements": elements, "fetched_fields": fetched,
         }
 
-    async def sync_archive_metadata(self, candidate_id: int) -> dict:
+    async def metadata_editor(self, candidate_id: int, *, fetched_names=()) -> dict:
+        """Share archive fields and non-archive operator fields across both UIs."""
+        from app.api.serializers import metadata_entry
+        from app.review.models import split_metadata_entries
+        snapshot = await self.archive_metadata(candidate_id, fetched_names=fetched_names)
+        primary, _ = split_metadata_entries(await self._database.list_metadata(candidate_id))
+        snapshot["fields"] = snapshot.pop("elements")
+        for entry in primary:
+            if field_writes_archive(entry.field_name):
+                continue
+            field = metadata_entry(entry)
+            field.update(lock_field=entry.field_name, lock_available=field["editable"], archive_field=False)
+            snapshot["fields"].append(field)
+        return snapshot
+
+    async def sync_archive_metadata(self, candidate_id: int, *, fields=None, fetched_fields=None, operator_name="admin") -> dict:
         """Update ComicInfo in place; skipped writes retain the database edit.
 
         Unpacked works, running packs and unapproved works are reported as
@@ -297,9 +331,10 @@ class ArchivedWorkService:
         overtaking this operation. No image decoding or source archive is used.
         """
         library, _ = await self._roots()
-        return await asyncio.to_thread(self._sync_archive_metadata_sync, candidate_id, library)
+        return await asyncio.to_thread(self._sync_archive_metadata_sync, candidate_id, library, fields, fetched_fields or {}, operator_name)
 
-    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path) -> dict:
+    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin") -> dict:
+        from app.conversion.comicinfo import changed_elements, element_sources
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = self._cbz_row(connection, candidate_id)
@@ -325,9 +360,27 @@ class ArchivedWorkService:
                 with zipfile.ZipFile(path) as archive:
                     previous = archive.read("ComicInfo.xml")
                 metadata = self._metadata_rows(connection, candidate_id)
-                comicinfo = build_from_metadata(
-                    metadata, f"candidate-{candidate_id}", int(row[2] or 0), existing=previous,
-                )
+                projected = ET.fromstring(build_from_metadata(metadata, f"candidate-{candidate_id}", int(row[2] or 0)))
+                root = ET.fromstring(previous)
+                if root.tag != "ComicInfo":
+                    raise ET.ParseError("Expected ComicInfo root")
+                # Callers supply only this operation's edits. Legacy service callers
+                # default to manual overrides, never the whole database projection.
+                names = fields if fields is not None else [entry.field_name for entry in metadata if entry.is_manual]
+                updates = {name: projected.findtext(name, "") for name in changed_elements(names)}
+                values = {entry.field_name: entry.field_value for entry in reversed(metadata)}
+                protected = {entry.field_name for entry in metadata if entry.is_manual or entry.is_locked}
+                updates.update({name: value for name, value in (fetched_fields or {}).items()
+                                if name in EDITABLE_ELEMENTS and not set(element_sources(name, values)) & protected
+                                and name not in updates})
+                if not updates:
+                    return {"synced": False, "reason": "NO_ARCHIVE_CHANGES", "message": "元数据已保存，没有需要写回归档的修改"}
+                for name, value in updates.items():
+                    child = root.find(name)
+                    if child is None:
+                        child = ET.SubElement(root, name)
+                    child.text = value
+                comicinfo = ET.tostring(root, encoding="utf-8", xml_declaration=True)
                 rewrite_comicinfo(path, comicinfo)
                 with path.open("rb") as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
@@ -339,15 +392,28 @@ class ArchivedWorkService:
                 "UPDATE artifacts SET sha256 = ?, size_bytes = ? WHERE id = ?",
                 (digest, path.stat().st_size, row[0]),
             )
-            audit = connection.execute(
-                "SELECT id, details_json FROM review_actions WHERE candidate_id = ? "
-                "AND action = 'EDIT_METADATA' ORDER BY id DESC LIMIT 1", (candidate_id,),
-            ).fetchone()
+            audit = None
+            if names:
+                placeholders = ",".join("?" for _ in names)
+                audit = connection.execute(
+                    "SELECT id, details_json FROM review_actions WHERE candidate_id = ? "
+                    "AND action = 'EDIT_METADATA' AND json_extract(details_json, '$.field') IN ("
+                    + placeholders + ") ORDER BY id DESC LIMIT 1", (candidate_id, *names),
+                ).fetchone()
             if audit:
                 details = json.loads(audit[1])
                 details.update(archive_synced=True, path=str(path))
                 connection.execute("UPDATE review_actions SET details_json = ? WHERE id = ?",
                                    (json.dumps(details, ensure_ascii=False), audit[0]))
+            elif fetched_fields:
+                # A fetched-only save has no manual edit to annotate. Record the
+                # explicit file write without mislabelling an older manual edit.
+                connection.execute(
+                    "INSERT INTO review_actions (candidate_id, action, operator_name, details_json) "
+                    "VALUES (?, 'EDIT_METADATA', ?, ?)",
+                    (candidate_id, operator_name, json.dumps({"fetched_fields": sorted(updates),
+                     "archive_synced": True, "path": str(path)}, ensure_ascii=False)),
+                )
             return {"synced": True, "message": message, "path": str(path)}
 
     # ---------------------------------------------------------------- removal

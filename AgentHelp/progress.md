@@ -6926,3 +6926,59 @@ ComicInfo 回落。`test_archive_workflow.py` +3（元数据系列入库、无 A
 
 **文档同步。** README、docs/USAGE、docs/REALTIME_API、EHBot、两个方案、PHASES、
 AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
+
+## R87 — 公开 URL、WebUI 操作与统一元数据编辑（2026-10-13）
+
+**基准。** 版本保持 `0.3.0rc3`；迁移仍为 `025` / 25 条。
+运营者以「按这个方案动手罢」批准 `WEBUI_OPERATIONS_METADATA_FIX_PROPOSAL.md` v2 全部内容。
+
+**请求与实时连接。**
+
+- 新增 `PUBLIC_BASE_URL`，两份 Compose 透传同名环境变量；只允许 HTTP(S) origin，
+  域名大小写与默认端口规范化，拒绝凭据、路径、查询、片段与非法主机/端口。
+  固定 HTTP/WS scheme/Host，保留实际 client/path/root_path；HTTPS 代理不再依赖 Docker 网关 IP 或任意转发头。
+  原可信代理配置保留独立用途，显式开启仍要求可信 IP。
+- 已复现并修复 API/Web 同名自动审核路由导致的 405；API 启停与删除函数名加 api_ 前缀，
+  HTTP URL/方法不变，Web 名称留给模板。同步命令目录文档。
+- 模板生成同源路径，保留 URL 对象的 path 接口及路径参数 name；重定向保留 root_path，
+  消除保存元数据时从 HTTPS 跟随绝对 HTTP 地址的问题。CSP connect-src 补明确的同源 WS/WSS 地址。
+- 状态改为顶栏左侧文字，移除固定卡片和按钮；正常已连接、断线退避重连、重连自动快照。
+  浏览器无法读取被拒升级的状态码时，通过认证接口区分失效会话与临时代理故障。
+- 表单尊重 submitter/formaction/formmethod；兼容只支持单参数 FormData 的浏览器，保留重复候选 ID，
+  外部确认按钮也在请求期间禁用。JSON 422/405 和业务拒绝显示具体原因，不作为 HTML 替换内容。
+- 每页仅保留 50 快捷项，输入框加宽，任意正整数、回第 1 页和重复筛选参数规则继续生效。
+
+**统一元数据。**
+
+- 详情页移除两套编辑区，候选抽屉与详情共用 metadata_editor：未打包显示打包投影，
+  已打包读实际 ComicInfo，缺失字段为空；文件损坏明确报错，不拿数据库值冒充文件值。
+  metadata/raw_metadata 保留来源用途，非 ComicInfo 自定义字段同列显示并注明只入库。
+- 拉取持久化非手动、非锁定来源值，返回 fetched_fields；已打包只形成当前编辑界面草稿，
+  显式保存才写回，重新进入仍读文件。手改、显式锁定及本地未保存输入均受保护。
+- PATCH 支持仅 fetched_fields；拉取值不改标手动，手动 fields 与 locks 保持独立。
+  文件以当前 XML 为基准，只应用本次变化，保留未改字段、质量记录、生成事实、图片及 Pages 子结构。
+  原子流式替换、目录边界、运行中打包和审核状态守卫继续有效。
+- 片段刷新保留编辑器与抽屉原节点；失败/跳过保留输入供重试。拉取结果单独保存时记录本次文件写回，
+  不把历史的手改审计误标为已同步。同步响应继续明确数据库保存与文件写回的区别。
+
+**验证。**
+
+- 新增正式 37 条：公开 URL 规范化/配置拒绝/scope 20 条；实际规则表单、真实 TCP WS 的直连/
+  可信 HTTPS 代理/固定公开 URL/默认端口与部署前缀、精确 Origin 拒绝、真实 15 秒心跳、
+  WS 批量入队/422、实际 CBZ 的拉取草稿与显式保存/保护、普通表单差量保存和分页控件共 17 条。
+- 定向回归 21 文件、637 个不同用例最终通过：work_detail_web/settings_web/candidates_web/
+  downloaded_web/authentication/api_domains/config/api_contracts/conversion/comicinfo；
+  webui_operations_fix/archive_metadata/public_url/archived_works/downloaded_api/auto_approval_workflow/
+  settings_write_api/readiness/web_shell/ui_shell/realtime。
+  旧分页/CSP/绝对资源断言按新契约调整后通过；模板 url_for 的 name 参数冲突在本轮回归中修复。
+  自动审核测试停掉未配置凭据的下载 worker，再验证审核决策，避免排队后被抢先改成 FAILED 的竞态。
+- 真实 HTMX/Alpine DOM：两种部署前缀，重连自动快照、会话失效停止重试、422/405 不替换内容、
+  外部按钮方法覆盖及未确认写操作不重发；metadata DOM 验证拉取保护、来源区分、失败重试、成功重置。
+  使用实际已下载 Jinja 页面执行多选批量打包，捕获 HTTP 提交并实际交给路由，确认多 ID/action 和入队成功。
+- 整库 **2101 collected（+37，仅收集）**；最近全量通过仍是 R81–R84 的 2014。
+  Python/JS 语法、git diff --check、CodeGraph sync 通过。临时诊断脚本清理，测试结果保留在 ignored 缓存。
+
+**文档与边界。** README、USAGE、REALTIME_API、EHBot、方案、PHASES、AGENTS、task_plan、
+两份 Compose 与 .env.example 同步。Cloudflare beacon 由代理注入，部署说明要求关闭站点 Web Analytics 自动注入；
+没有修改 Cloudflare 控制台或放宽 script-src。实际代理与真实浏览器未联调，之前匿名公网的 502 不因代码修改而宣称消失。
+无移动端代码、迁移、镜像发布、push 或部署；一个 R87 本地提交。

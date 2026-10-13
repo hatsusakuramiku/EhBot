@@ -36,6 +36,7 @@ from app.downloads.models import (
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import METADATA_FIELDS, editable_metadata_field
+from app.conversion.comicinfo import EDITABLE_ELEMENTS
 from app.review.service import ReviewError, ReviewService
 
 
@@ -661,15 +662,24 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     """
     operator = await _guard(request)
     payload = await _body(request)
+    return await apply_metadata_patch(request, candidate_id, payload, operator)
+
+
+async def apply_metadata_patch(request: Request, candidate_id: int, payload: dict, operator: str) -> dict:
+    """Validated edit shared by JSON and the progressive HTML editor."""
     fields = payload.get("fields")
     locks = payload.get("locks")
+    fetched = payload.get("fetched_fields", {})
+    if not isinstance(fetched, dict) or any(name not in EDITABLE_ELEMENTS or not isinstance(value, str)
+                                           for name, value in fetched.items()):
+        raise ApiError("FETCHED_FIELDS_INVALID", "fetched_fields 必须是可编辑 ComicInfo 字段到字符串的映射")
     if fields is not None and not isinstance(fields, dict):
         raise ApiError("FIELDS_INVALID", "fields \u5fc5\u987b\u662f\u5b57\u6bb5\u5230\u503c\u7684\u6620\u5c04")
     if locks is not None and not isinstance(locks, dict):
         raise ApiError("LOCKS_INVALID", "locks \u5fc5\u987b\u662f\u5b57\u6bb5\u5230\u5e03\u5c14\u503c\u7684\u6620\u5c04")
     fields = fields or {}
     locks = locks or {}
-    if not fields and not locks:
+    if not fields and not locks and not fetched:
         raise ApiError(
             "FIELDS_REQUIRED", "\u8bf7\u63d0\u4f9b\u8981\u4fee\u6539\u7684\u5b57\u6bb5"
         )
@@ -703,7 +713,8 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
     except ReviewError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
 
-    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id)
+    archived = deps.archived_work_service(request)
+    sync = await archived.sync_archive_metadata(candidate_id, fields=fields, fetched_fields=fetched, operator_name=operator)
 
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
     return {
@@ -715,6 +726,7 @@ async def patch_metadata(request: Request, candidate_id: int) -> dict:
         "sync_skipped": sync.get("reason"),
         "sync_message": sync["message"],
         "metadata": await database.effective_metadata(candidate_id),
+        "metadata_editor": await archived.metadata_editor(candidate_id),
     }
 
 
@@ -792,7 +804,7 @@ async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
             "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
         )
     try:
-        await deps.exhentai_service(request).fetch_metadata_for_candidate(
+        fetched = await deps.exhentai_service(request).fetch_metadata_for_candidate(
             candidate_id
         )
     except ExHentaiDownloadError as exc:
@@ -801,6 +813,7 @@ async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
     return {
         "candidate_id": candidate_id,
         "has_gallery": candidate.ex_gid is not None,
+        "metadata_editor": await deps.archived_work_service(request).metadata_editor(candidate_id, fetched_names=fetched),
     }
 
 

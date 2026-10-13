@@ -58,6 +58,7 @@ async def test_edit_preserves_images_facts_and_extra_elements_and_updates_digest
     with zipfile.ZipFile(path) as archive:
         root = ET.fromstring(archive.read("ComicInfo.xml"))
         assert root.findtext("Series") == root.findtext("LocalizedSeries") == "New series"
+        assert root.findtext("Title") == "File title"
         assert root.findtext("Added") == "2020-01-01"
         assert root.findtext("PageCount") == "2"
         assert root.findtext("ScanInformation") == "Original quality"
@@ -155,10 +156,10 @@ def test_page_and_api_read_real_values_and_share_archive_edits(tmp_path):
         log_in(client, settings)
         before = client.get("/api/v1/works/1").json()["archive_metadata"]
         title = next(e for e in before["elements"] if e["name"] == "Title")
-        assert title["field_value"] == "Database title"
+        assert title["field_value"] == "File title"
         assert title["file_value"] == "File title"
         page = client.get("/works/1")
-        assert "文件中的旧值：File title" in page.text
+        assert "文件中的旧值" not in page.text
         assert 'data-archive-element="PageCount"' in page.text
         assert 'name="field_name" value="PageCount"' not in page.text
         token = csrf_token(client)

@@ -67,10 +67,10 @@
   <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/ui.js') }}"></script>
   <script defer src="{{ url_for('static', path='/realtime.js') }}"></script>
+  <script defer src="{{ url_for('static', path='/metadata.js') }}"></script>
   {% block head %}{% endblock %}
 </head>
 <body class="ui-page">
-  <div class="ui-realtime-status" data-realtime-status role="status" aria-live="polite" hidden></div>
   <a class="skip-link" href="#main">跳到主要内容</a>
   <div class="ui-shell" data-collapsed="false">
 
@@ -122,6 +122,7 @@
 
     <div class="ui-main">
       <header class="ui-topbar">
+        <span class="ui-realtime-status" data-realtime-status role="status" aria-live="polite">实时连接中</span>
         <a class="ui-brand ui-topbar-mobile-brand" href="/">
           <img src="{{ url_for('static', path='/ehbot-mark.svg') }}" alt="EhBot">
         </a>

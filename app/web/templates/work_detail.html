@@ -174,116 +174,55 @@
 
     <section class="ui-panel">
       <h2 class="ui-section-title">元数据</h2>
-      {% if work.metadata %}
-      {#- One form per field rather than one form for all of them: the audit
-          trail records EDIT_METADATA per field, and a single submit that wrote
-          every field would fill the timeline with edits the operator did not
-          make. `realtime.js` submits it locally; without it each row
-          is a working form. -#}
-      <div class="ui-kv" data-metadata-rows>
-        {% for entry in work.metadata %}
-        <div class="ui-kv-row" data-metadata-field="{{ entry.field_name }}">
-          <dt>
-            {{ entry.field_label }}
-            {{ ui.badge(entry.source) }}
-            {% if entry.is_locked %}<span class="ui-kv-note">已锁定</span>{% endif %}
-          </dt>
-          <dd>
-            {% if work.actions.edit_metadata and entry.editable %}
-            <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
-                  hx-post="/candidates/{{ work.candidate_id }}/metadata"
-                  class="ui-row-actions">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="field_name" value="{{ entry.field_name }}">
-              <input class="ui-input" type="text" name="field_value"
-                     value="{{ entry.field_value or '' }}"
-                     aria-label="{{ entry.field_label }}">
-              <button class="ui-btn" data-size="sm" type="submit">保存</button>
-            </form>
-            {% else %}
-            {{ entry.field_value or "—" }}
-            {% endif %}
-            {% if not entry.archive_field %}
-            <span class="ui-kv-note">仅数据库，不写入归档</span>
-            {% endif %}
-            {#- Detail-page tags are display-only; filtering belongs to lists. -#}
-            {% if entry.field_name in ("Tags", "TagsRaw") and entry.field_value %}
-            {{ ui.tag_list(entry.field_value.split(",")) }}
-            {% endif %}
-          </dd>
-        </div>
-        {% endfor %}
-      </div>
-      {% else %}
-      {{ ui.empty_state("还没有元数据", "从下方的来源拉取一次，或手动补充") }}
-      {% endif %}
-
-      {% if work.actions.edit_metadata %}
-      <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
-            hx-post="/candidates/{{ work.candidate_id }}/metadata" class="ui-form">
+      {% set editor = work.metadata_editor %}
+      {% if editor %}
+      <p class="ui-hint">{{ "正在编辑归档文件中的 ComicInfo.xml，保存后写回文件。" if editor.packaged else "尚未打包，以下是下次打包写入的元数据。" }}</p>
+      {% if editor.error %}{{ ui.callout(editor.error, tone="danger", role="alert") }}{% endif %}
+      <form id="work-metadata-editor" data-metadata-editor data-candidate="{{ work.candidate_id }}"
+            method="post" action="{{ url_for('edit_work_metadata', candidate_id=work.candidate_id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label class="ui-label" for="new-metadata-name">添加元数据字段</label>
-        <input id="new-metadata-name" class="ui-input" name="field_name" required
-               pattern="[A-Za-z][A-Za-z0-9_]{0,63}" placeholder="例如 Series、Translator">
-        <input class="ui-input" name="field_value" required aria-label="新字段的值">
-        <button class="ui-btn" data-size="sm" type="submit">添加</button>
-      </form>
-      {% endif %}
-
-      {% if work.raw_metadata %}
-      <details class="ui-section">
-        <summary>原始字段（{{ work.raw_metadata | length }}）</summary>
-        <dl class="ui-kv">
-          {% for entry in work.raw_metadata %}
-          <div class="ui-kv-row">
-            <dt>{{ entry.field_label }}</dt>
-            <dd data-tone="muted">{{ entry.field_value or "—" }}</dd>
+        <p class="ui-hint" data-metadata-status role="status" aria-live="polite"></p>
+        <div class="ui-kv" data-metadata-rows>
+          {% for entry in editor.fields %}
+          <div class="ui-kv-row" data-field-name="{{ entry.field_name }}" data-archive-element="{{ entry.field_name }}"
+               data-lock-field="{{ entry.lock_field }}" data-manual="{{ '1' if entry.is_manual else '0' }}">
+            <dt>{{ entry.field_label }}{% if entry.source %}{{ ui.badge(entry.source) }}{% endif %}</dt>
+            <dd>
+              {% if entry.editable %}
+              <input class="ui-input" name="field__{{ entry.field_name }}" data-field="value"
+                     data-original="{{ entry.field_value }}" value="{{ entry.field_value }}" aria-label="{{ entry.field_label }}">
+              <input type="hidden" name="original__{{ entry.field_name }}" value="{{ entry.field_value }}">
+              {% if entry.lock_available %}
+              <label class="ui-filter-option">
+                <input class="ui-checkbox" type="checkbox" name="lock__{{ entry.lock_field }}" data-field="lock"
+                       data-original="{{ '1' if entry.is_locked else '0' }}" {{ 'checked' if entry.is_locked else '' }}>
+                <span>锁定，拉取时不覆盖</span>
+              </label>
+              <input type="hidden" name="lock_original__{{ entry.lock_field }}" value="{{ '1' if entry.is_locked else '0' }}">
+              {% endif %}
+              {% else %}{{ entry.field_value or "—" }}<span class="ui-kv-note">不可编辑</span>{% endif %}
+              {% if entry.archive_field is defined and not entry.archive_field %}<span class="ui-kv-note">仅数据库，不写入归档</span>{% endif %}
+              {% if entry.field_name == 'Tags' and entry.field_value %}{{ ui.tag_list(entry.field_value.split(',')) }}{% endif %}
+            </dd>
           </div>
           {% endfor %}
-        </dl>
-      </details>
-      {% endif %}
-    </section>
-
-    {% if work.archive_metadata %}
-    <section class="ui-panel">
-      <h2 class="ui-section-title">归档文件（ComicInfo.xml）</h2>
-      {% if not work.archive_metadata.packaged %}
-      <p class="ui-hint">尚未打包，以下是将来写入归档的元数据。</p>
-      {% endif %}
-      {% if work.archive_metadata.error %}
-      <p class="ui-hint">{{ work.archive_metadata.error }}</p>
-      {% endif %}
-      <div class="ui-kv">
-        {% for element in work.archive_metadata.elements %}
-        <div class="ui-kv-row" data-archive-element="{{ element.name }}">
-          <dt>{{ element.name }}</dt>
-          <dd>
-            {% if element.editable and work.actions.edit_metadata %}
-            <form method="post" action="/candidates/{{ work.candidate_id }}/metadata"
-                  hx-post="/candidates/{{ work.candidate_id }}/metadata" class="ui-row-actions">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="field_name" value="{{ element.name }}">
-              <input class="ui-input" name="field_value" value="{{ element.field_value }}"
-                     aria-label="归档 {{ element.name }}">
-              <button class="ui-btn" data-size="sm" type="submit">保存</button>
-            </form>
-            {% else %}
-            {{ element.file_value if element.in_file else element.field_value }}
-            <span class="ui-kv-note">不可编辑</span>
-            {% endif %}
-            {% if element.in_file %}
-            <span class="ui-kv-note" {% if element.field_value != element.file_value %}data-tone="waiting"{% endif %}>
-              {{ "文件中的旧值" if element.field_value != element.file_value else "文件中的当前值" }}：{{ element.file_value }}
-            </span>
-            {% endif %}
-          </dd>
         </div>
+        <div class="ui-row-actions">
+          <input class="ui-input" name="new_field" data-new-field pattern="[A-Za-z][A-Za-z0-9_]{0,63}"
+                 placeholder="例如 Translator" aria-label="添加元数据字段">
+          <input class="ui-input" name="new_value" data-new-value aria-label="新字段的值">
+          <button class="ui-btn" data-variant="primary" type="submit" data-metadata-save>保存元数据</button>
+        </div>
+      </form>
+      {% endif %}
+      {% if work.raw_metadata %}
+      <details class="ui-section"><summary>原始抓取信息（只读）</summary><dl class="ui-kv">
+        {% for entry in work.raw_metadata %}
+        <div class="ui-kv-row"><dt>{{ entry.field_label }}</dt><dd>{{ entry.field_value or "—" }}</dd></div>
         {% endfor %}
-      </div>
-      <p class="ui-hint">保存会同步数据库与归档元数据，文件名和路径保持不变。</p>
+      </dl></details>
+      {% endif %}
     </section>
-    {% endif %}
 
     {% if work.messages %}
     <section class="ui-panel">

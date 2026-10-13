@@ -210,6 +210,8 @@
     entries.forEach(function (entry) {
       var row = rowTemplate.content.firstElementChild.cloneNode(true);
       row.setAttribute("data-field-name", entry.field_name);
+      row.dataset.lockField = entry.lock_field || entry.field_name;
+      row.dataset.manual = entry.is_manual ? "1" : "0";
       row.querySelector('[data-field="label"]').textContent = entry.field_label;
       badgeInto(row.querySelector('[data-field="source"]'), entry.source);
       var value = row.querySelector('[data-field="value"]');
@@ -218,7 +220,7 @@
       value.setAttribute("data-original", value.value);
       var lock = row.querySelector('[data-field="lock"]');
       lock.checked = !!entry.is_locked;
-      lock.disabled = !entry.editable;
+      lock.disabled = !entry.lock_available;
       lock.setAttribute("data-original", lock.checked ? "1" : "0");
       rowHost.appendChild(row);
     });
@@ -228,21 +230,7 @@
     /* Only what the operator actually touched. Sending every field would
      * re-stamp each one as a manual override and lose the provenance the drawer
      * is there to show. */
-    var fields = {};
-    var locks = {};
-    if (!rowHost) return { fields: fields, locks: locks };
-    rowHost.querySelectorAll("[data-field-name]").forEach(function (row) {
-      var name = row.getAttribute("data-field-name");
-      var value = row.querySelector('[data-field="value"]');
-      var lock = row.querySelector('[data-field="lock"]');
-      if (value.value !== value.getAttribute("data-original")) {
-        fields[name] = value.value;
-      }
-      if ((lock.checked ? "1" : "0") !== lock.getAttribute("data-original")) {
-        locks[name] = lock.checked;
-      }
-    });
-    return { fields: fields, locks: locks };
+    return window.EhBotMetadata.changes(rowHost);
   }
 
   function openDrawer(candidateId, trigger, note) {
@@ -264,7 +252,7 @@
         });
       })
       .then(function (payload) {
-        renderRows(payload.metadata || []);
+        renderRows(payload.metadata_editor ? payload.metadata_editor.fields : payload.metadata || []);
         /* `note` is the caller's word about what just happened -- a save, for
          * instance. Set after the load so it is not overwritten by it. */
         say(note || "");
@@ -303,7 +291,7 @@
       var payload = changes();
       if (
         !Object.keys(payload.fields).length &&
-        !Object.keys(payload.locks).length
+        !Object.keys(payload.locks).length && !Object.keys(payload.fetched_fields || {}).length
       ) {
         say("没有需要保存的修改");
         return;
@@ -330,7 +318,9 @@
            * a field can move the candidate out of 待补充 and can change what
            * every other field's provenance is, and the server is the only thing
            * that knows. */
-          openDrawer(openId, opener, body.sync_message || "已保存");
+          if (body.sync_skipped && !["WORK_NOT_PACKED", "NO_ARCHIVE_CHANGES"].includes(body.sync_skipped)) {
+            say(body.sync_message);
+          } else openDrawer(openId, opener, body.sync_message || "已保存");
         })
         .catch(function (body) {
           say((body && body.error && body.error.message) || "保存失败");

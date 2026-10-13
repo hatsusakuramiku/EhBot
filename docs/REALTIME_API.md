@@ -1,4 +1,4 @@
-# 实时 API：ehbot-realtime.v1（R86）
+# 实时 API：ehbot-realtime.v1（R86 / R87）
 
 本契约已在服务端和 WebUI 实现。EhBot-Mobile 后续接入本协议，本轮不修改移动端代码。
 服务端版本号仍为 `0.3.0rc3`，判断能力应请求 `GET /api/v1/realtime`，不能仅凭版本号判断。
@@ -126,8 +126,42 @@ location / {
 }
 ```
 
-HTTPS 由代理终止时，还需按现有可信代理配置传递并信任转发协议/主机，保持 Origin 同源。
+HTTPS 由代理终止时，推荐在 Compose 设置 `PUBLIC_BASE_URL: "https://ehbot.example"`。
+它固定公开协议、主机及端口，用于 HTTP/WS URL 生成、Origin 校验和内部命令桥；无需启用代理头信任或填写 Docker 网关 IP。
+空值保留直连及原可信代理行为。它不信任 X-Forwarded-For，不改变实际客户端来源；
+显式开启 `TRUST_PROXY_HEADERS` 时仍需独立设置 `TRUSTED_PROXY_IPS`。部署前缀仅用 `APP_ROOT_PATH`。
+Cookie Origin 按域名大小写和默认端口规范化后精确比较，协议、子域名、其他端口均不能混用。
 不要给 WS 另造不匹配的域名，或把 API Key 拼进 proxy_pass/访问日志。
+
+宿主机 Caddy → Docker 发布端口可直接 `reverse_proxy 127.0.0.1:8080`，Caddy 自动处理升级。
+外层 Cloudflare 保持 Full (strict)；关闭该站点 Web Analytics 自动脚本注入，避免 beacon.min.js 被应用 CSP 拒绝。
+应用仅为当前入口加入明确的 WS/WSS connect-src，不放宽脚本源。502 是独立的回源故障，应检查上游端口和服务状态。
+
+## R87 命令与元数据补充
+
+自动审核 API 命令名修正为 `api.api_toggle_auto_approval_rule` 和 `api.api_delete_auto_approval_rule`，
+HTTP URL 与 PUT/DELETE 方法不变；Web 命令仍为 `web.toggle_auto_approval_rule`、`web.delete_auto_approval_rule`。
+客户端从 commands 目录按 path/method 找对应操作，不能猜同名 Web 方法。
+验证拒绝的 command.error.error.message 包含实际字段/方法原因，JSON 错误不作为 HTML 片段替换内容。
+
+`api.get_work` 返回 `metadata_editor`（`packaged/path/error/synced_at/fields/fetched_fields`）。
+fields 使用 `field_name/field_label/field_value/editable/source/is_manual/is_locked/lock_field/lock_available`；
+归档字段已打包取文件值，未打包取打包投影。非归档自定义字段同列显示，`archive_field:false`。
+保留既有 metadata/raw_metadata/archive_metadata 供来源查询；archive_metadata.elements.field_value 也修正为当前编辑值。
+
+`api.fetch_work_metadata` 持久化拉取内容并返回上述编辑快照；`fetched_fields` 只列可覆盖的非手动、非锁定字段。
+已打包客户端将这些值合入当前草稿，保护本地未保存输入，拉取本身不改文件。
+未打包直接作为下次打包数据；已打包重新进入页面仍读取实际文件。
+
+```json
+{"type":"command","request_id":"save-fetch-42","name":"api.patch_metadata","payload":{"params":{"candidate_id":"42"},"body":{"fetched_fields":{"Title":"拉取的标题"},"fields":{"Translator":"手动更改的译者"}}}}
+```
+
+允许仅提交 fetched_fields，值取自拉取结果；fields 才记录为手改，locks 使用快照给出的 lock_field。
+保存只应用本次变化，保留未改 XML、生成事实、页结构、图片和路径。
+响应继续提供 archive_synced/sync_skipped/sync_message，并附 metadata_editor；
+锁操作或仅数据库字段可返回 `NO_ARCHIVE_CHANGES`。写回失败/跳过时保持草稿，不自动重发。
+成功保存后重新读取快照；后台状态事件只触发读取，不能隐式保存草稿。
 
 ## 验证命令
 

@@ -116,12 +116,14 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 
 | R85 | v0.3.0rc3 · 2026-10-12 | 每页条数手填无上限；详情页真实 ComicInfo 可读写、自定义字段、数据库与 CBZ 就地同步；移动端同构 | +23，2037 collected；相关 418 条最终通过，未跑全量 | `progress.md:6822` |
 | R86 | v0.3.0rc3 · 2026-10-12 | 服务端实时命令/快照 API、WebUI 共享 WebSocket 与局部更新；Tag 左键过滤/右键排除，移动端后续复用协议 | +27，2064 collected；相关 545 条最终通过，另有 DOM 验证，未跑全量 | `progress.md:6871` |
+| R87 | v0.3.0rc3 · 2026-10-13 | 公开 URL 配置修复 HTTPS WS/请求；规则 405、批量提交错误反馈、顶栏重连状态、每页 50 + 宽输入、统一文件基准元数据编辑与拉取草稿显式保存 | +37，2101 collected；相关 637 条最终通过，真实 TCP/CBZ 与 DOM 验证，未跑全量 | `progress.md:6930` |
 
-> 基线链（当前）：… → R61 1850 → R62/R63 1871 → （R64–R80 未跑全量）→ **R81–R84 2014（首度补跑全量，0 failed）** → R85 **2037 collected（仅收集）/ 相关 418 条最终通过** → R86 **2064 collected（仅收集）/ 相关 545 条最终通过**。以 `AGENTS.md` 的链为准；2014 仍是最近整库全绿数字。
+> 基线链（当前）：… → R61 1850 → R62/R63 1871 → （R64–R80 未跑全量）→ **R81–R84 2014（首度补跑全量，0 failed）** → R85 **2037 collected（仅收集）/ 相关 418 条最终通过** → R86 **2064 collected（仅收集）/ 相关 545 条最终通过** → R87 **2101 collected（仅收集）/ 相关 637 条最终通过**。以 `AGENTS.md` 的链为准；2014 仍是最近整库全绿数字。
 
 ## 三、当前状态
 
-- 最新阶段：**R86**（服务端实时 API / WebUI 局部更新 / Tag 过滤右键菜单；相关 545 条最终通过，2064 collected 仅收集；无迁移、无发布；移动端后续接入）。设计记录 `WEBUI_PARTIAL_REFRESH_WEBSOCKET_PROPOSAL.md` 与 `TAG_FILTER_CONTEXT_MENU_PROPOSAL.md`，协议见 `docs/REALTIME_API.md`。
+- 最新阶段：**R87**（公开 URL / 请求链修复 / 顶栏连接状态 / 统一元数据编辑；相关 637 条最终通过，2101 collected 仅收集；无迁移、无发布）。设计记录 `WEBUI_OPERATIONS_METADATA_FIX_PROPOSAL.md`，协议见 `docs/REALTIME_API.md`；实际 Cloudflare/Caddy 和真实浏览器未联调。
+- 前序：**R86**（服务端实时 API / WebUI 局部更新 / Tag 过滤右键菜单；相关 545 条最终通过，2064 collected 仅收集；移动端后续接入）。设计记录 `WEBUI_PARTIAL_REFRESH_WEBSOCKET_PROPOSAL.md` 与 `TAG_FILTER_CONTEXT_MENU_PROPOSAL.md`。
 - 前序：**R85**（每页条数手填无上限 / 真实归档元数据可读写 / 自定义字段 / 就地同步；相关 418 条通过，2037 collected 仅收集）。设计记录 `PAGE_SIZE_INPUT_AND_SERIES_DETAIL_PROPOSAL.md`。
 - 前序阶段：**R81–R84**（活动页标题改作品名 / 每页条数可选 / 打包系列 `Series` / 彻底移除「要求修订」；整库 **2014 collected / 0 failed**，数据库迁移 `025`）。
 - R81–R84 摘要：R81 活动页卡片主行改作品名（`title_subquery()` + `display_title`，任务 ID 降副行）；R82 候选与已下载页脚可切每页 20/50/100/200（默认 50，换条数回第 1 页）；R83 新增元数据字段 `Series` 与路径页「自动添加系列」开关（仅 AI 可用时有效，优先级＝元数据 > AI 路径所在文件夹 > 问模型并写回；开关开而 AI 不可用则首次打包进「需干预」、重新打包中止）；R84 彻底移除「要求修订」——状态/动作/网页按钮/JSON 端点（含 R70 的 `POST /api/v1/works/{id}/needs-revision`，**契约破坏**）与历史审计行一并清掉，迁移 `025` 把旧状态改判「待补充」。设计记录 `ACTIVITY_PAGING_SERIES_REVISION_PROPOSAL.md`。
