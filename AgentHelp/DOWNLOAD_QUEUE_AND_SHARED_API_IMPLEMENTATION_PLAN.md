@@ -9,7 +9,7 @@
 | 当前阶段 | P2 / R89 核心验收完成；下一阶段 P3（物理停止未实施） |
 | 已完成 | P0–P2；认证、多端会话、task/attempt、独立审批、作品槽、任务命令回执/操作与 HTTP/Web/WS 接通 |
 | 下一动作 | P3 从 queue_operations 开始：操作执行/恢复，本地子任务停止并 await、远端停止查回，attempt/generation 全提交路径与暂存屏障；A 未停 B 不开。不要重做 P1/P2 |
-| 工作区 | R88=cfa649d；R89 本地提交标题 feat(queue): persist task identities and atomic command receipts，最终 SHA 以 git log 为准；.scratch 原复现与 R89 XML/collect 结果保留未提交 |
+| 工作区 | R88=cfa649d；R89=7b8b297；.scratch 已加入 Git 忽略，保留原复现及 R88/R89 XML/collect 验证证据；一次性 pytest 临时目录与节点选择清单已清理 |
 | 版本/schema | 源码 0.3.0rc5、027 / 27；仅临时库迁移验证，无真实库升级/发布 |
 | 验证基线 | 2134 collected（+21，仅收集）；R89 相关 19 文件、453 个不同用例最终通过（部分节点定向补测）；首次失败与修正见 progress/R89；不是整库全绿 |
 | 环境 | Windows PowerShell；本 checkout 无 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout |

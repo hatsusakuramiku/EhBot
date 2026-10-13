@@ -7026,3 +7026,5 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 **文档与提交。** README/USAGE/REALTIME_API/EHBot/AGENTS/PHASES/计划/清单/findings 同步实际行为与 P3 边界；没有新增环境变量，.env/Compose 无表格事实变化。一个 R89 本地提交，标题 `feat(queue): persist task identities and atomic command receipts`，SHA 以 git log 为准；无 push/发布/部署。
 
 **下一步 P3。** 从 queue_operations 与 QueueControl 的 STOPPING 意图开始接执行/恢复，下载 coroutine 按 task/attempt/generation 跟踪，取消必须 cancel 后 await 收束；线程/子进程/远端资源分别确认停止。torrent push 保存可查回远端 handle，poller 每条写入/收货/auto-pack 都带 attempt/generation 条件；EH/Telegraph/Bot/MTProto 元数据与文件提交也要屏障。最小按 attempt staging 先落地，A 未停 B 不开；运行移除改为持久清理意图。复用原 `.scratch/download_queue_review_repro.py` 的六个触发条件，不用只把当前代码改成新断言来代替真实取消验收。P3–P12 未实施。
+
+**工作区清理（2026-10-13）。** 用户要求测试文件加入忽略、无用临时文件删除：`.gitignore` 增 `/.scratch/`；删除 18 个 R88/R89 pytest 临时目录（临时数据库与测试产物）及 `r88-smoke-nodes.txt`，保留 2 个审阅复现脚本和 XML/collect 验证证据。清理前核对全部目录位于本 checkout 的 `.scratch` 内且无链接；Git 未跟踪其中任何文件。R89 实际提交为 `7b8b297`。本次仅工作区维护，无用户功能或测试基线变化，无需重新运行产品测试。
