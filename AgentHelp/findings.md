@@ -237,3 +237,11 @@
 - 旧签名 Cookie 缺乏可撤销的设备身份，不能反复“升级”为新 session，否则注销后可重放旧 Cookie；026 强制旧 Cookie 重新登录。
 - P1 新合同 12 条通过；核心/设置首次旧契约 6 条失败已修复并定向复验；27 文件共 370 个不同用例最终通过，2113 collect。版本 rc4/026，仅源码/临时库验证，无镜像发布。
 - P2 接口调查：DownloadService 旧 retry 在状态裁决前执行 torrent verify/push/abandon；新控制核不能只包一层 API revision，应先事务受理意图再启动副作用，详见已批准方案。
+
+## 2026-10-13 P2 / R89 队列核心实施证据
+
+- DownloadService 入队仅按 provider 的 key 去重，worker SELECT/UPDATE 无短事务；conversion 同样有双领取窗口。027 的 queue_tasks 下载槽约束 + 既有 worker BEGIN IMMEDIATE 收口，不新增调度器。
+- EH/Telegraph 在完成时自行 INSERT/UPDATE download_jobs，torrent poller、归档移除也直接写表；因此仅外层 API 包装无法覆盖旧路径。本阶段以 SQL trigger 作兼容投影 adapter，任务/尝试历史与约束覆盖所有旧写者；generation 的实际 provider 提交资格仍需 P3 显式传递。
+- 取消前先 abandon、重试前先 verify/push 均改为先持久受理。STOPPING 不释放槽、不伪报远端已停；queue_operations 不带 candidate/task 外键，可在记录移除后继续收尾。停止处理器明确在 P3，未部署。
+- 用户提出运行记录不能移除：public remove/purge 在文件动作前检查所有来源；SQL 最终守卫禁止活动 job 删除。较早来源运行而最新来源完成的合同已覆盖；文件删除与新入队间的完整协调在 P3。
+- 21 个新合同通过；新旧审批证据/迁移回滚、跨凭据回执、SQL 注入失败时状态/操作/回执同回滚、下载和打包双 worker、旧整数 ID 复用、STOPPING/陈旧提交、旧来源移除保护均有临时库证据。最终回归汇总见 progress/R89。

@@ -627,7 +627,9 @@ async def test_the_queue_is_fifo_within_one_priority(tmp_path: Path) -> None:
     candidate_id = await seed_archive(database, file_name="comic.cbz")
     service = DownloadService(database, tmp_path / "work")
     first = enqueue_raw(database, candidate_id, "a", 100)
-    second = enqueue_raw(database, candidate_id, "b", 100)
+    with database.connection() as connection:
+        other_id = connection.execute("INSERT INTO candidates(status, filter_result) VALUES('APPROVED', 'ACCEPT')").lastrowid
+    second = enqueue_raw(database, other_id, "b", 100)
 
     claimed = [
         service._claim_pending_job_sync()["job_id"]  # noqa: SLF001
@@ -649,8 +651,11 @@ async def test_a_lower_priority_value_is_claimed_first(tmp_path: Path) -> None:
     candidate_id = await seed_archive(database, file_name="comic.cbz")
     service = DownloadService(database, tmp_path / "work")
     normal = enqueue_raw(database, candidate_id, "a", 100)
-    later = enqueue_raw(database, candidate_id, "b", 100)
-    urgent = enqueue_raw(database, candidate_id, "c", 10)
+    with database.connection() as connection:
+        later_id = connection.execute("INSERT INTO candidates(status, filter_result) VALUES('APPROVED', 'ACCEPT')").lastrowid
+        urgent_id = connection.execute("INSERT INTO candidates(status, filter_result) VALUES('APPROVED', 'ACCEPT')").lastrowid
+    later = enqueue_raw(database, later_id, "b", 100)
+    urgent = enqueue_raw(database, urgent_id, "c", 10)
 
     claimed = [
         service._claim_pending_job_sync()["job_id"]  # noqa: SLF001

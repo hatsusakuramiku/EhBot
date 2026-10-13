@@ -6,12 +6,12 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| 当前阶段 | P1 / R88 验收完成；下一阶段 P2 |
-| 已完成 | P0–P1；Web/API/WS、026、管理员/设备/令牌合同与文档已接通 |
-| 下一动作 | 核对 R88 本地提交与 git status，再按 P2 收口旧控制入口；不要重复实现认证 |
-| 工作区 | 起点 HEAD=2004b7e；R88 本地提交标题 feat(auth): add editable administrator identity and independent sessions，最终 SHA 以 git log 为准；审阅/方案入本次阶段，.scratch 原复现/验收结果保留未提交 |
-| 版本/schema | 源码 0.3.0rc4、026 / 26；仅临时库迁移验证，无真实库升级/发布 |
-| 验证基线 | 2113 collected（+12，仅收集）；370 个不同用例最终通过（27 文件，含 smoke）；首次失败与修正见 progress/R88；不是整库全绿 |
+| 当前阶段 | P2 / R89 核心验收完成；下一阶段 P3（物理停止未实施） |
+| 已完成 | P0–P2；认证、多端会话、task/attempt、独立审批、作品槽、任务命令回执/操作与 HTTP/Web/WS 接通 |
+| 下一动作 | P3 从 queue_operations 开始：操作执行/恢复，本地子任务停止并 await、远端停止查回，attempt/generation 全提交路径与暂存屏障；A 未停 B 不开。不要重做 P1/P2 |
+| 工作区 | R88=cfa649d；R89 本地提交标题 feat(queue): persist task identities and atomic command receipts，最终 SHA 以 git log 为准；.scratch 原复现与 R89 XML/collect 结果保留未提交 |
+| 版本/schema | 源码 0.3.0rc5、027 / 27；仅临时库迁移验证，无真实库升级/发布 |
+| 验证基线 | 2134 collected（+21，仅收集）；R89 相关 19 文件、453 个不同用例最终通过（部分节点定向补测）；首次失败与修正见 progress/R89；不是整库全绿 |
 | 环境 | Windows PowerShell；本 checkout 无 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout |
 | 边界 | 不读真实 data/private；临时数据库/文件测试；真实供应商、其他客户端仓库与部署另记未验证 |
 | 现场问题 | rg 不可用，用 CodeGraph/Select-String；git ignore 权限告警不影响查询，.git 写入需工具审批 |
@@ -26,7 +26,7 @@
 |---|---|---|---|
 | P0 | complete | 批准、处理计划与接手入口 | 方案/计划互链、既有证据保留 |
 | P1 / R88 | complete | 固定管理员身份、联合登录、可改名、多端会话、原子令牌对/刷新、配置并发 API、Web/WS | 12 个新合同及相关 370 个不同用例最终通过；2113 collect；rc4/026；提交见工作区栏 |
-| P2 | pending | task/attempt、revision/generation、回执/operation、审批事实、旧 ID 映射、控制入口收口 | 一个作品槽，事务意图/回执一致；旧 provider 兼容 adapter 受新核心裁决，无双调度 |
+| P2 / R89 | complete | task/attempt、revision/generation、回执/operation、审批事实、旧 ID 映射、任务命令入口收口 | 一个下载槽，事务意图/回执一致；既有 worker 原子认领，无双调度；21 新合同与相关 453 个用例最终通过。实际停止接 P3 |
 | P3 | pending | 真实取消/切源/移除、本地子任务收束、远端推送查回与停止确认、旧 poller 屏障、最小 staging | 依赖 P2；六个专项复现转回归；A 未停 B 不开，移除不复活 |
 | P4 | pending | 账号注册/独立配置版本、掩码查看/部分编辑/启停/删除、共享 API/UI | 依赖 P2–P3；先兼容单账号 runtime；断开不删凭据，编辑可停止旧执行 |
 | P5 | pending | ingest_entries 统一键附加表、各入口归一化、待入库领取、补来源、转发身份与历史迁移 | 依赖 P2；一键一候选/处理者，多观察保留；先裁决历史冲突再加唯一约束 |
@@ -54,6 +54,15 @@ P1 升级/回退边界：026 随启动事务执行，新库与旧 025 库均测�
 
 ## 执行与留痕规则
 
+### P2 / R89 实施裁决与接续边界
+
+- 采用 `app/downloads/queue.py` 的短事务命令核心与 027 SQL 兼容 adapter。`download_jobs` 仍是现有 provider/页面投影；稳定 `task_id` 和独立 `queue_tasks/queue_attempts` 保存任务与真实执行身份，不再将旧整数行当作可复用的任务身份。历史领取次数不伪造成逐条尝试。
+- SQL trigger 覆盖现有 conversion、delegated EH/Telegraph、torrent poller 和移除写者；作品下载槽有唯一索引，运行记录删除有最终数据库守卫。现有 download/conversion worker 用 `BEGIN IMMEDIATE` 原子认领并读取 task/attempt/generation；没有第二套调度器。
+- `/jobs` 的单项与批量、普通表单、WS 转发统一要求已读取的 UUID/revision/幂等键。回执查询先于当前版本核对，固定管理员跨凭据共享作用域；受理、操作及回执一起提交。`GET /tasks/{task_id}` 可读旧任务/尝试和独立收尾操作。七天回执清理保留未结束操作。
+- 审批独立持久化，迁移只读取 APPROVED 状态或 APPROVE/AUTO_APPROVE 审计；任意历史 job 不证明审批。历史多活动来源使 027 整笔回滚，必须先用旧版本核实/停止冲突任务，不静默杀远端或假定其已停。
+- P2 的运行取消/切源/远端重试/停止做种只持久化意图；STOPPING 保留作品槽并拒绝旧完成/产物提交。实际停止确认、操作恢复、attempt 全路径屏障与按尝试 staging 在 P3；旧候选/文件的完整清理以及全域客户端草稿 CAS 按 P3/P10 接续。P2 不可作为已完成物理取消的可部署版本。
+- P8 接续精确产物版本及打包依赖，P9 接续完整心跳/恢复预算。当前 DTO 继续兼容旧状态词与 integer job_id，新增 UUID/revision/generation/attempt_id；状态/API 最终统一在 P10 核对。
+
 - 用户已授权方案内实施；每阶段从调查、实现到测试/文档/提交闭环，不重复问许可。超出方案的业务变化再对齐。
 - 每阶段一个应用实现，旧入口薄适配；迁数据却保留全部旧写者绕过新核心的中间态不交付。
 - 定向测试，collect-only 与实际通过分开；完整测试/发布遵守仓库门槛。所有测试只接临时库和受控外部替身。
@@ -77,3 +86,7 @@ P1 升级/回退边界：026 随启动事务执行，新库与旧 025 库均测�
 | 2026-10-13 | 设置/API 回归 223 条中 3 条 SSE 夹具失败：伪造 authenticated 不再通过认证 | 临时库创建真实设备会话后直调流，6 个 SSE 用例复验通过；不削弱产品认证 |
 | 2026-10-13 | smoke 选择漏 class 前缀造成收集失败 | 补全节点名；14 条通过，另补 2 条间接登录夹具通过；移除本轮临时修改/选择脚本，原复现保留 |
 | 2026-10-13 | 首次本地 commit 失败：当前 checkout 缺 Git author 配置 | 最近三次提交作者/提交者一致；后续命令临时复用该身份，不改全局配置，不推送 |
+| 2026-10-13 | P2 调查 CLI 不支持 symbols、误猜 torrent/API/test 文件路径，首次 patch 重复指向 queue.py 被拒 | 使用 query/explore 与目录清单确认路径；重复目标合为一次补丁，没有部分写入 |
+| 2026-10-13 | R89 首轮下载 23 条有 2 个 FIFO 夹具失败；adapter 204 条有 33 个失败 | 同作品多活动任务夹具改为不同作品；种子旧立即停止断言改为持久受理/确认边界；schema 26→27；原 XML 保留 |
+| 2026-10-13 | 新 HTTP/WS 合同首次跨事件循环停止 worker、WS 参数形状错误；后续回归缺审批证据与旧 API allowed 丢失 | portal.call 在 app loop 停止测试 worker；按 params/body 协议；夹具显式审批，恢复 allowed 返回；不是放宽产品契约 |
+| 2026-10-13 | 源按钮旧测试期望 TG 与 Telegraph 同时活动；重下提前计数、工作详情旧表单缺前置条件 | 竞争来源明确拒绝；重下走核心且真实领取才计数；表单补观测身份/版本/幂等键；相关失败均定向复验通过 |

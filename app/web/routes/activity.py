@@ -11,7 +11,7 @@ from urllib.parse import quote_plus
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
-from app.api.actions import BATCH_JOB_ACTIONS, JOB_ACTIONS, apply_job_batch
+from app.api.actions import BATCH_JOB_ACTIONS, JOB_ACTIONS, apply_job_batch, apply_job_command
 from app.api.activity import queue_snapshot
 from app.api.contracts import ApiError
 from app.api.events import EVENT_DOWNLOAD
@@ -21,7 +21,6 @@ from app.downloads.models import (
     MAX_JOB_PRIORITY,
     MIN_JOB_PRIORITY,
 )
-from app.downloads.service import DownloadError
 from app.web import deps
 
 router = APIRouter()
@@ -210,6 +209,8 @@ async def activity_batch(
         return await _activity_redirect(request, f"未知的任务动作：{action}")
     if not job_ids:
         return await _activity_redirect(request, "请至少选择一个任务")
+    form = await request.form()
+    preconditions = {str(job_id): _form_preconditions(form, job_id) for job_id in job_ids}
     try:
         result = await apply_job_batch(
             deps.download_service(request),
@@ -217,6 +218,7 @@ async def activity_batch(
             list(dict.fromkeys(job_ids)),
             provider=provider,
             priority=priority,
+            preconditions=preconditions,
             announce=lambda job_id: request.app.state.event_bus.publish(
                 EVENT_DOWNLOAD, job_id=job_id
             ),
@@ -233,12 +235,25 @@ async def activity_batch(
     )
 
 
+def _form_preconditions(form, job_id: int) -> dict:
+    def value(name):
+        return form.get(name) or form.get(f"{name}_{job_id}")
+    revision = value("expected_revision")
+    try:
+        revision = int(revision)
+    except (TypeError, ValueError):
+        revision = None
+    return {"task_id": value("task_id"), "expected_revision": revision,
+            "idempotency_key": value("idempotency_key")}
+
+
 async def _job_action(
     request: Request,
     csrf_token: str,
     action,
     job_id: int,
     return_to: str | None = None,
+    **params,
 ):
     """Run one queue action and return where the form came from, either way.
 
@@ -252,15 +267,15 @@ async def _job_action(
     deps.validate_csrf(request, csrf_token)
     target = deps.local_return_to(return_to)
     try:
-        await action(job_id)
-    except DownloadError as exc:
+        form = await request.form()
+        await apply_job_command(request, job_id, action, {**_form_preconditions(form, job_id), **params})
+    except ApiError as exc:
         if target:
             return RedirectResponse(
-                f"{target}?error={quote_plus(exc.public_message)}",
+                f"{target}?error={quote_plus(exc.message)}",
                 status_code=303,
             )
-        return await _activity_redirect(request, exc.public_message)
-    request.app.state.event_bus.publish(EVENT_DOWNLOAD, job_id=job_id)
+        return await _activity_redirect(request, exc.message)
     if target:
         return RedirectResponse(target, status_code=303)
     return await _activity_redirect(request)
@@ -287,9 +302,10 @@ async def switch_download_source(
     return await _job_action(
         request,
         csrf_token,
-        lambda target: deps.download_service(request).switch_source(target, provider),
+        "switch-source",
         job_id,
         return_to,
+        provider=provider,
     )
 
 
@@ -318,7 +334,7 @@ async def activity_job_action(
     return await _job_action(
         request,
         csrf_token,
-        getattr(deps.download_service(request), method_name),
+        action,
         job_id,
         return_to,
     )

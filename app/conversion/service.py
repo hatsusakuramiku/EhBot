@@ -44,6 +44,7 @@ from app.conversion.naming import (
     render_library_path,
     unique_library_target,
 )
+from app.downloads.queue import task_snapshot
 from app.db.database import METADATA_SOURCE_RANK_SQL, Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -765,6 +766,7 @@ class ConversionService:
             details["refresh_ai_path"] = True
         details_json = json.dumps(details, separators=(",", ":"))
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             candidate_row = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -1057,6 +1059,7 @@ class ConversionService:
 
     def _claim_pending_job_sync(self) -> dict | None:
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
@@ -1084,6 +1087,7 @@ class ConversionService:
                 if isinstance(parsed, dict):
                     details = parsed
             return {
+                **task_snapshot(connection, int(row[0])),
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
                 # `refile` sends the job down the path-only branch below;

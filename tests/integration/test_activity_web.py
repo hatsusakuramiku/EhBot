@@ -10,6 +10,7 @@ ones the queue exists to show -- work that is waiting on the *operator*.
 from __future__ import annotations
 
 import asyncio
+from tests.integration.test_queue_control import observed
 import itertools
 import json
 from pathlib import Path
@@ -147,17 +148,17 @@ class Fixture:
             self.database, self.candidate_id, state="PAUSED"
         )
         self.paused_second = insert_job(
-            self.database, self.candidate_id, state="PAUSED"
+            self.database, seed_candidate(self.database), state="PAUSED"
         )
         self.failed = insert_job(
             self.database,
-            self.candidate_id,
+            seed_candidate(self.database),
             state="FAILED",
             error_code="TELEGRAM_TEMPORARY",
         )
         self.stalled = insert_job(
             self.database,
-            self.candidate_id,
+            seed_candidate(self.database),
             state="WAITING_TORRENT",
             provider=PROVIDER_EH_TORRENT,
             details={
@@ -176,8 +177,10 @@ class Fixture:
             create_app(self.settings), follow_redirects=False
         )
         self.client.__enter__()
+        self.client.portal.call(self.client.app.state.download_service.stop)
         authenticate(self.client, self.settings)
         self.csrf = self.client.get("/activity").context["csrf_token"]
+        self.drafts = {}
 
     def close(self) -> None:
         self.client.__exit__(None, None, None)
@@ -188,6 +191,16 @@ class Fixture:
             "action": action,
             "job_ids": [str(job_id) for job_id in job_ids],
         }
+        for job_id in job_ids:
+            cache_key = (job_id, action, str(extra))
+            if cache_key not in self.drafts:
+                if job_id == 999_999:
+                    draft = {"task_id": "removed-task", "expected_revision": 1, "idempotency_key": "removed-key"}
+                else:
+                    draft = observed(self.database, job_id)
+                self.drafts[cache_key] = draft
+            for name, value in self.drafts[cache_key].items():
+                data[f"{name}_{job_id}"] = str(value)
         data.update(extra)
         return self.client.post("/activity/jobs/batch", data=data)
 
@@ -601,7 +614,7 @@ def test_switch_source_is_reachable_and_not_shadowed(tmp_path: Path) -> None:
     try:
         response = fixture.client.post(
             f"/activity/jobs/{fixture.stalled}/switch-source",
-            data={"csrf_token": fixture.csrf, "provider": "NOT_A_PROVIDER"},
+            data={"csrf_token": fixture.csrf, "provider": "NOT_A_PROVIDER", **observed(fixture.database, fixture.stalled)},
         )
         assert response.status_code == 303
         message = redirect_message(response)

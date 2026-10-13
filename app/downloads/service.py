@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 from pathlib import Path
 import time
 
@@ -39,11 +40,7 @@ from app.downloads.models import (
 )
 
 
-class DownloadError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.public_message = message
+from app.downloads.queue import DownloadError, QueueControl, task_snapshot
 
 
 class DownloadService:
@@ -64,6 +61,7 @@ class DownloadService:
         notify=None,
     ) -> None:
         self._database = database
+        self._queue_control = QueueControl(database)
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
         # Resolved per delivery, like the bot token: the operator can log the
@@ -244,105 +242,49 @@ class DownloadService:
         redownload: bool = False,
     ) -> DownloadEnqueueResult:
         with self._database.connection() as connection:
-            candidate_row = connection.execute(
-                "SELECT status FROM candidates WHERE id = ?",
-                (candidate_id,),
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM candidates WHERE id = ?", (candidate_id,)).fetchone() is None:
+                raise DownloadError("CANDIDATE_NOT_FOUND", "Candidate does not exist")
+            if connection.execute("SELECT 1 FROM candidate_approvals WHERE candidate_id = ?", (candidate_id,)).fetchone() is None:
+                raise DownloadError("CANDIDATE_NOT_DOWNLOADABLE", "该候选没有有效审批事实，不能进入下载队列")
+            slot = connection.execute(
+                "SELECT legacy_job_id, provider FROM queue_tasks WHERE candidate_id = ? AND kind = 'DOWNLOAD' "
+                "AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'REMOVED')", (candidate_id,),
             ).fetchone()
-            if candidate_row is None:
-                raise DownloadError(
-                    "CANDIDATE_NOT_FOUND",
-                    "Candidate does not exist",
-                )
-            # Approval is a one-time door into the queue, and nothing a later
-            # job does withdraws it. A candidate that is currently APPROVED may
-            # enqueue (first entry); one that has *already* had a download job
-            # was approved when that job was enqueued, so it may enqueue again
-            # from any post-queue status -- APPROVED, PROCESSING, DOWNLOADED,
-            # FAILED, or even NEEDS_INFO / PENDING_REVIEW reached after a job
-            # failed or was cancelled. Rejecting on that check rather than on a
-            # fixed status list is what keeps a switched-source re-download, or
-            # a re-add after a failure, from requiring a second pass through
-            # review. Only a candidate that has never been approved (its status
-            # is PENDING_REVIEW / NEEDS_INFO / REJECTED, or a fresh
-            # NEEDS_INFO that no job has followed) is refused.
-            enqueueable_status = str(candidate_row[0])
-            if enqueueable_status != "APPROVED":
-                already_enqueued = connection.execute(
-                    "SELECT 1 FROM download_jobs "
-                    "WHERE candidate_id = ? LIMIT 1",
-                    (candidate_id,),
-                ).fetchone()
-            else:
-                already_enqueued = (1,)
-            if not already_enqueued:
-                raise DownloadError(
-                    "CANDIDATE_NOT_DOWNLOADABLE",
-                    "该候选尚未通过审批，不能进入下载队列",
-                )
             existing = connection.execute(
-                "SELECT state FROM download_jobs WHERE idempotency_key = ?",
-                (idempotency_key,),
+                "SELECT id, state FROM download_jobs WHERE idempotency_key = ?", (idempotency_key,),
             ).fetchone()
-            # A second enqueue of the same source updates the existing row back
-            # to PENDING when that row is FAILED or CANCELLED, instead of doing
-            # nothing. `DO NOTHING` made the whole recovery path silent: a
-            # requeued candidate that was approved again reported success while
-            # its dead job row stayed FAILED, so the book never downloaded and
-            # the page showed a failure the operator had just acted on.
-            #
-            # COMPLETED joins them only under `redownload`, which the operator
-            # routes pass for a source button the operator pressed by hand. A
-            # completed download is otherwise finished business -- the router
-            # must not fetch it again -- but pressing the button is the one
-            # place an operator says 「取一次这个来源」, and leaving COMPLETED
-            # out made that press a silent no-op: a book whose archive landed
-            # as a web page under a `.zip` name (the pre-R37 bug) keeps a
-            # COMPLETED row forever, so 「取原档」 queued nothing, the real
-            # archive was never re-fetched, and every re-pack re-read the same
-            # bad file. The open states stay alone: the worker holds those, and
-            # re-pending one would hand the same transfer out twice.
-            revive_states = [DOWNLOAD_STATE_FAILED, DOWNLOAD_STATE_CANCELLED]
-            if redownload:
-                revive_states.append(DOWNLOAD_STATE_COMPLETED)
-            connection.execute(
-                "INSERT INTO download_jobs "
-                "(candidate_id, idempotency_key, provider, state, "
-                "details_json) VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(idempotency_key) DO UPDATE SET "
-                "  state = excluded.state, "
-                "  details_json = excluded.details_json, "
-                "  error_code = NULL, "
-                "  error_message = NULL, "
-                "  lease_owner = NULL, "
-                "  lease_expires_at = NULL, "
-                "  retry_at = NULL, "
-                "  updated_at = CURRENT_TIMESTAMP "
-                "WHERE download_jobs.state IN ("
-                + ",".join("?" for _ in revive_states)
-                + ")",
-                (
-                    candidate_id,
-                    idempotency_key,
-                    provider,
-                    DOWNLOAD_STATE_PENDING,
-                    details_json,
-                    *revive_states,
-                ),
+            if slot is not None:
+                if existing is None or int(slot[0]) != int(existing[0]):
+                    raise DownloadError("WORK_SLOT_OCCUPIED", "另一下载来源已占用该作品槽，请先停止原任务")
+                if slot[1] != provider:
+                    raise DownloadError("WORK_SLOT_OCCUPIED", "另一下载来源已占用该作品槽，请先停止原任务")
+            revive = existing is not None and (
+                existing[1] in {DOWNLOAD_STATE_FAILED, DOWNLOAD_STATE_CANCELLED}
+                or (redownload and existing[1] == DOWNLOAD_STATE_COMPLETED)
             )
-            # Read from the pre-flight SELECT rather than from the row count:
-            # the upsert changes a row when it revives one too, and `created`
-            # answers 「这是一条新任务吗」 for the caller's flash message.
-            created = existing is None
-            row = connection.execute(
-                "SELECT id, state FROM download_jobs "
-                "WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            return DownloadEnqueueResult(
-                job_id=int(row[0]),
-                created=created,
-                state=str(row[1]),
-            )
+            if revive and provider == PROVIDER_EH_TORRENT:
+                saved = connection.execute("SELECT details_json FROM download_jobs WHERE id = ?", (existing[0],)).fetchone()[0]
+                if saved not in (None, "", "{}"):
+                    raise DownloadError("REMOTE_RECONCILIATION_REQUIRED", "请通过重试操作核实旧远端任务结束后再入队")
+            if existing is None:
+                job_id = connection.execute(
+                    "INSERT INTO download_jobs(candidate_id, idempotency_key, provider, state, details_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (candidate_id, idempotency_key, provider, DOWNLOAD_STATE_PENDING, details_json),
+                ).lastrowid
+            else:
+                job_id = int(existing[0])
+                if revive:
+                    connection.execute(
+                        "UPDATE download_jobs SET state = ?, details_json = ?, error_code = NULL, "
+                        "error_message = NULL, lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (DOWNLOAD_STATE_PENDING, details_json, job_id),
+                    )
+            snapshot = task_snapshot(connection, job_id)
+            return DownloadEnqueueResult(job_id=job_id, created=existing is None, state=snapshot["state"],
+                                         task_id=snapshot["task_id"], revision=snapshot["revision"])
 
     async def list_jobs_for_candidate(
         self, candidate_id: int
@@ -365,7 +307,7 @@ class DownloadService:
 
     def _list_active_pack_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
         return self._fetch_jobs(
-            "WHERE provider = ? AND state IN (?, ?, ?, ?) "
+            "WHERE provider = ? AND state IN (?, ?, ?, ?, ?) "
             "ORDER BY id DESC LIMIT 50",
             (
                 PROVIDER_CONVERSION,
@@ -373,6 +315,7 @@ class DownloadService:
                 "CONVERSION_RUNNING",
                 "CONVERSION_WAITING_VOLUMES",
                 "CONVERSION_WAITING_PASSWORD",
+                "STOPPING",
             ),
         )
 
@@ -419,421 +362,64 @@ class DownloadService:
             states + (DOWNLOAD_STATE_COMPLETED, PROVIDER_EH_TORRENT),
         )
 
-    async def retry_job(self, job_id: int) -> str:
-        """Requeue a failed or paused job without creating a duplicate.
+    async def command(self, job_id: int, action: str, *, task_id: str,
+                      expected_revision: int, idempotency_key: str, **params) -> dict:
+        """Apply a client command with its observed version and durable receipt."""
+        return await self._queue_control.command(job_id, action, task_id=task_id,
+            expected_revision=expected_revision, idempotency_key=idempotency_key, **params)
 
-        The torrent route tries two outcomes before a plain requeue. First the
-        cheap one: if the saved payload is already readable on disk (an operator
-        corrected the save path after a content-read failure), the job is
-        completed in place. Failing that, the seed is assumed gone -- a
-        `TORRENT_VANISHED` retry is exactly that -- so the retry re-adds the
-        torrent itself and parks the job on peers, rather than only requeuing
-        and waiting for the worker to push on its next cycle. Only a torrent
-        job whose re-add fails falls back to a plain requeue. The original row
-        is reused so the `idempotency_key` contract holds and the attempt
-        history is preserved.
-        """
-        provider, state = await asyncio.to_thread(
-            self._job_provider_state_sync, job_id
-        )
-        if provider == PROVIDER_EH_TORRENT:
-            if self._torrent_verify is not None and await self._torrent_verify(
-                job_id
-            ):
-                return DOWNLOAD_STATE_COMPLETED
-            if self._torrent_push is not None:
-                return await self._repark_torrent(job_id)
-        # A retry re-pushes the torrent, and qBittorrent absorbs a duplicate
-        # hash, so the stale entry is removed first to keep one job to one
-        # client entry rather than relying on that.
-        await self._abandon_torrent(job_id)
+    async def get_task(self, task_id: str) -> dict:
+        return await self._queue_control.get_task(task_id)
+
+    async def retry_job(self, job_id: int) -> str:
         return await asyncio.to_thread(self._retry_job_sync, job_id)
 
-    async def _repark_torrent(self, job_id: int) -> str:
-        """Re-add a seed that vanished and park the job back on peers.
-
-        A retry on a torrent job exists because the seed left qBittorrent, and
-        clicking 重试 must hand it back, not merely re-queue it. The stale
-        entry is abandoned first (a no-op when it is already gone) so one job
-        maps to one client entry, then the seed is pushed again and the job
-        returns to `WAITING_TORRENT` for the poller. A refused re-add surfaces
-        as the failure rather than being masked behind a requeue.
-        """
-        candidate_id = await asyncio.to_thread(
-            self._job_candidate_sync, job_id
-        )
-        await self._abandon_torrent(job_id)
-        try:
-            details = await self._torrent_push(candidate_id)
-        except Exception as exc:  # noqa: BLE001 - provider boundary
-            await asyncio.to_thread(
-                self._mark_job_failed_sync,
-                job_id,
-                str(getattr(exc, "code", "TORRENT_PUSH_REJECTED")),
-                str(getattr(exc, "public_message", exc)),
-            )
-            return DOWNLOAD_STATE_FAILED
-        await asyncio.to_thread(
-            self._retry_torrent_sync, job_id, details or {}
-        )
-        return DOWNLOAD_STATE_WAITING_TORRENT
-
-    def _retry_torrent_sync(self, job_id: int, details: dict) -> None:
-        """Re-park a re-added torrent, applying the same retry gates as
-        `retry_job` and restoring the candidate to `APPROVED`.
-
-        The plain retry path routes through `_retry_job_sync` for the state and
-        permanent-error checks and the approval restore; this is that same
-        gating but ending in `WAITING_TORRENT`, because the seed is already back
-        in the client. The push details are merged onto the previous attempt's
-        so a retry keeps whatever the earlier try learned.
-        """
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state, error_code, candidate_id FROM download_jobs "
-                "WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            state = str(row[0])
-            if state not in {
-                DOWNLOAD_STATE_FAILED,
-                DOWNLOAD_STATE_PAUSED,
-                DOWNLOAD_STATE_CANCELLED,
-            }:
-                raise DownloadError(
-                    "JOB_NOT_RETRYABLE",
-                    "只有已失败、已暂停或已取消的任务可以重试",
-                )
-            if row[1] is not None and str(row[1]) in PERMANENT_DOWNLOAD_ERRORS:
-                raise DownloadError(
-                    "JOB_PERMANENTLY_FAILED",
-                    "该任务的失败原因无法通过重试解决",
-                )
-            existing = self._safe_details(
-                connection.execute(
-                    "SELECT details_json FROM download_jobs WHERE id = ?",
-                    (job_id,),
-                ).fetchone()[0]
-            )
-            merged = dict(existing)
-            merged.update(details)
-            connection.execute(
-                "UPDATE download_jobs SET state = ?, details_json = ?, "
-                "error_code = NULL, error_message = NULL, "
-                "lease_owner = NULL, lease_expires_at = NULL, "
-                "retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (
-                    DOWNLOAD_STATE_WAITING_TORRENT,
-                    json.dumps(
-                        merged, separators=(",", ":"), ensure_ascii=False
-                    ),
-                    job_id,
-                ),
-            )
-            connection.execute(
-                "UPDATE candidates SET status = 'APPROVED', "
-                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN "
-                "('FAILED', 'PROCESSING', 'NEEDS_INFO')",
-                (int(row[2]),),
-            )
-
     def _retry_job_sync(self, job_id: int) -> str:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state, error_code, candidate_id FROM download_jobs "
-                "WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            state = str(row[0])
-            if state not in {
-                DOWNLOAD_STATE_FAILED,
-                DOWNLOAD_STATE_PAUSED,
-                DOWNLOAD_STATE_CANCELLED,
-            }:
-                raise DownloadError(
-                    "JOB_NOT_RETRYABLE",
-                    "只有已失败、已暂停或已取消的任务可以重试",
-                )
-            if row[1] is not None and str(row[1]) in PERMANENT_DOWNLOAD_ERRORS:
-                raise DownloadError(
-                    "JOB_PERMANENTLY_FAILED",
-                    "该任务的失败原因无法通过重试解决",
-                )
-            connection.execute(
-                "UPDATE download_jobs SET state = ?, error_code = NULL, "
-                "error_message = NULL, lease_owner = NULL, "
-                "lease_expires_at = NULL, retry_at = NULL, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (DOWNLOAD_STATE_PENDING, job_id),
-            )
-            # The candidate went to FAILED, or to NEEDS_INFO when the failure
-            # was a missing input, when the job did. Either way it has to be
-            # eligible again or the worker would refuse to process the retry.
-            connection.execute(
-                "UPDATE candidates SET status = 'APPROVED', "
-                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN "
-                "('FAILED', 'PROCESSING', 'NEEDS_INFO')",
-                (int(row[2]),),
-            )
-        return DOWNLOAD_STATE_PENDING
+        return self._queue_control.internal_command(job_id, "retry")["state"]
 
     async def pause_job(self, job_id: int) -> str:
-        """Hold a queued job so the worker skips it until it is resumed."""
         return await asyncio.to_thread(self._pause_job_sync, job_id)
 
     def _pause_job_sync(self, job_id: int) -> str:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            if str(row[0]) != DOWNLOAD_STATE_PENDING:
-                # An in-flight transfer cannot be suspended mid-stream; the
-                # honest options are to let it finish or to cancel it.
-                raise DownloadError(
-                    "JOB_NOT_PAUSABLE",
-                    "只有排队中的任务可以暂停；"
-                    "正在下载的任务请使用取消",
-                )
-            connection.execute(
-                "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
-                "lease_expires_at = NULL, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (DOWNLOAD_STATE_PAUSED, job_id),
-            )
-        return DOWNLOAD_STATE_PAUSED
+        return self._queue_control.internal_command(job_id, "pause")["state"]
 
     async def resume_job(self, job_id: int) -> str:
-        """Return a paused job to the queue."""
         return await asyncio.to_thread(self._resume_job_sync, job_id)
 
     def _resume_job_sync(self, job_id: int) -> str:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            if str(row[0]) != DOWNLOAD_STATE_PAUSED:
-                raise DownloadError(
-                    "JOB_NOT_PAUSED", "只有已暂停的任务可以继续"
-                )
-            connection.execute(
-                "UPDATE download_jobs SET state = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (DOWNLOAD_STATE_PENDING, job_id),
-            )
-        return DOWNLOAD_STATE_PENDING
+        return self._queue_control.internal_command(job_id, "resume")["state"]
 
     async def cancel_job(self, job_id: int) -> str:
-        """Cancel a job without withdrawing the candidate's approval.
-
-        The candidate was approved when its job entered the queue, and a cancel
-        is a queue-level action: it stops this attempt, it does not send the
-        work back through review. That is what lets the operator switch source
-        or re-enqueue after a cancelled or failed download without a second
-        approval gate.
-        """
-        await self._abandon_torrent(job_id)
         return await asyncio.to_thread(self._cancel_job_sync, job_id)
 
-    async def set_job_priority(self, job_id: int, priority: int) -> int:
-        """Move a job up or down the queue.
+    def _cancel_job_sync(self, job_id: int) -> str:
+        return self._queue_control.internal_command(job_id, "cancel")["state"]
 
-        Applies to both queues, since both claims order by `priority, id`. It is
-        accepted on a job that is already running rather than refused: the value
-        is what the *next* claim reads, so setting it on an in-flight job is
-        harmless and means a retry of that job inherits the operator's intent
-        instead of silently reverting to the default.
-        """
-        return await asyncio.to_thread(
-            self._set_job_priority_sync, job_id, priority
-        )
+    async def set_job_priority(self, job_id: int, priority: int) -> int:
+        return await asyncio.to_thread(self._set_job_priority_sync, job_id, priority)
 
     def _set_job_priority_sync(self, job_id: int, priority: int) -> int:
-        if priority < MIN_JOB_PRIORITY or priority > MAX_JOB_PRIORITY:
-            raise DownloadError(
-                "PRIORITY_OUT_OF_RANGE",
-                f"优先级需在 {MIN_JOB_PRIORITY} 到 {MAX_JOB_PRIORITY} 之间"
-                "，数值越小越靠前",
-            )
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            if str(row[0]) in TERMINAL_DOWNLOAD_STATES or str(row[0]) in {
-                CONVERSION_STATE_COMPLETED,
-                CONVERSION_STATE_FAILED,
-            }:
-                # Reordering something that will never be claimed again would
-                # look like it did something. Retry first, then reprioritise.
-                raise DownloadError(
-                    "JOB_NOT_QUEUED",
-                    "已结束的任务没有队列位置；请先重试再调整优先级",
-                )
-            connection.execute(
-                "UPDATE download_jobs SET priority = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (int(priority), job_id),
-            )
-        return int(priority)
+        return self._queue_control.internal_command(job_id, "priority", priority=priority)["priority"]
 
     async def stop_seeding(self, job_id: int) -> str:
-        """Stop sharing a finished torrent, keeping the archived file.
-
-        Seeding is deliberate — it repays the swarm the payload came from — so
-        it ends only when the operator says so. The job stays COMPLETED because
-        the download itself succeeded; only the client entry goes away.
-        """
-        provider, state = await asyncio.to_thread(
-            self._job_provider_state_sync, job_id
-        )
-        if provider != PROVIDER_EH_TORRENT or state != DOWNLOAD_STATE_COMPLETED:
-            raise DownloadError(
-                "JOB_NOT_SEEDING",
-                "只有已完成的种子任务"
-                "可以停止做种",
-            )
-        # Called directly rather than through `_abandon_torrent`, which only
-        # touches parked jobs: here the job is finished and the client entry is
-        # exactly what has to go. Files are never deleted, so the archive the
-        # library already registered survives.
-        if self._torrent_abandon is not None:
-            await self._torrent_abandon(job_id)
-        await asyncio.to_thread(self._clear_seeding_flag_sync, job_id)
-        return DOWNLOAD_STATE_COMPLETED
-
-    def _clear_seeding_flag_sync(self, job_id: int) -> None:
-        """Drop the seeding marker so the job leaves the dashboard."""
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT details_json FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                return
-            details = self._safe_details(row[0])
-            details["seeding"] = False
-            details["seeding_stopped_at"] = time.time()
-            connection.execute(
-                "UPDATE download_jobs SET details_json = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (
-                    json.dumps(
-                        details, separators=(",", ":"), ensure_ascii=False
-                    ),
-                    job_id,
-                ),
-            )
-
-    async def _abandon_torrent(self, job_id: int) -> None:
-        """Take a parked torrent back out of the client.
-
-        Leaving it behind would keep a torrent the operator abandoned running
-        in qBittorrent forever. The removal never deletes files, so an
-        already-finished payload the operator wants is still on disk.
-        """
-        if self._torrent_abandon is None:
-            return
-        provider, state = await asyncio.to_thread(
-            self._job_provider_state_sync, job_id
-        )
-        if (
-            provider == PROVIDER_EH_TORRENT
-            and state == DOWNLOAD_STATE_WAITING_TORRENT
-        ):
-            await self._torrent_abandon(job_id)
-
-    def _job_provider_state_sync(
-        self, job_id: int
-    ) -> tuple[str | None, str | None]:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT provider, state FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-        if row is None:
-            return None, None
-        return str(row[0]), str(row[1])
+        result = await asyncio.to_thread(self._queue_control.internal_command, job_id, "stop-seeding")
+        return result["state"]
 
     async def switch_source(self, job_id: int, provider: str) -> int:
-        """Abandon a parked torrent and queue a different source instead.
+        result = await asyncio.to_thread(self._queue_control.internal_command, job_id, "switch-source", provider=provider)
+        return result["job_id"]
 
-        This is the operator's answer to a stalled torrent. The switch is
-        explicit rather than automatic because dropping to preview grade or
-        spending GP are both decisions a service should not make on its own.
-        """
-        if provider not in {PROVIDER_TELEGRAPH, PROVIDER_EXHENTAI}:
-            raise DownloadError(
-                "PROVIDER_UNSUPPORTED",
-                f"\u4e0d\u652f\u6301\u5207\u6362\u5230 {provider}",
-            )
-        candidate_id = await asyncio.to_thread(
-            self._job_candidate_sync, job_id
-        )
-        # Cancelling no longer withdraws approval (that is a queue-level action),
-        # so the candidate is already enqueueable again; nothing to restore.
-        await self.cancel_job(job_id)
-        if provider == PROVIDER_TELEGRAPH:
-            result = await self.enqueue_telegraph_download(candidate_id)
-        else:
-            result = await self.enqueue_exhentai_download(candidate_id)
-        return result.job_id
+    def _job_provider_state_sync(self, job_id: int) -> tuple[str | None, str | None]:
+        with self._database.connection() as connection:
+            row = connection.execute("SELECT provider, state FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
+        return (str(row[0]), str(row[1])) if row else (None, None)
 
     def _job_candidate_sync(self, job_id: int) -> int:
         with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT candidate_id FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
+            row = connection.execute("SELECT candidate_id FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
-            raise DownloadError(
-                "JOB_NOT_FOUND", "\u4e0b\u8f7d\u4efb\u52a1\u4e0d\u5b58\u5728"
-            )
+            raise DownloadError("JOB_NOT_FOUND", "Task does not exist")
         return int(row[0])
-
-    def _cancel_job_sync(self, job_id: int) -> str:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT state, candidate_id FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                raise DownloadError("JOB_NOT_FOUND", "下载任务不存在")
-            if str(row[0]) == DOWNLOAD_STATE_COMPLETED:
-                raise DownloadError(
-                    "JOB_ALREADY_COMPLETED", "已完成的任务无法取消"
-                )
-            connection.execute(
-                "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
-                "lease_expires_at = NULL, retry_at = NULL, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (DOWNLOAD_STATE_CANCELLED, job_id),
-            )
-            # The candidate had already been approved when this job entered the
-            # queue; cancelling the attempt must not send it back through
-            # review. Return it to APPROVED so a source switch or a re-add can
-            # happen on the spot, without a second approval gate.
-            connection.execute(
-                "UPDATE candidates SET status = 'APPROVED', "
-                "filter_reason = '', updated_at = CURRENT_TIMESTAMP "
-                "WHERE id = ? AND status IN "
-                "('APPROVED', 'PROCESSING', 'FAILED', 'NEEDS_INFO')",
-                (int(row[1]),),
-            )
-        return DOWNLOAD_STATE_CANCELLED
 
     def _fetch_jobs(self, where_sql: str, params) -> tuple[DownloadJobSummary, ...]:
         with self._database.connection() as connection:
@@ -850,7 +436,12 @@ class DownloadService:
                 + title_subquery("download_jobs.candidate_id")
                 + ", "
                 "(SELECT ex_gid FROM candidates "
-                " WHERE id = download_jobs.candidate_id) "
+                " WHERE id = download_jobs.candidate_id), task_id, "
+                "(SELECT revision FROM queue_tasks WHERE task_id = download_jobs.task_id), "
+                "(SELECT generation FROM queue_tasks WHERE task_id = download_jobs.task_id), "
+                "(SELECT current_attempt_id FROM queue_tasks WHERE task_id = download_jobs.task_id), "
+                "(SELECT action FROM queue_operations WHERE task_id = download_jobs.task_id "
+                "AND status NOT IN ('COMPLETED', 'FAILED') LIMIT 1) "
                 "FROM download_jobs "
                 + where_sql,
                 params,
@@ -875,6 +466,9 @@ class DownloadService:
                 priority=int(row[13]),
                 title=str(row[14]) if row[14] is not None else None,
                 ex_gid=int(row[15]) if row[15] is not None else None,
+                task_id=str(row[16]), revision=int(row[17]), generation=int(row[18]),
+                attempt_id=str(row[19]) if row[19] is not None else None,
+                pending_operation=str(row[20]) if row[20] is not None else None,
             )
             for row in rows
         )
@@ -1011,6 +605,13 @@ class DownloadService:
             detail = await self._handle_job(job)
         except asyncio.CancelledError:
             raise
+        except sqlite3.IntegrityError as exc:
+            if str(exc) not in {"QUEUE_STOP_NOT_CONFIRMED", "QUEUE_STALE_ARTIFACT", "QUEUE_STALE_COMPLETION"}:
+                raise
+            # A revoked legacy execution may still return before P3 physically
+            # stops it. Reject its commit while keeping the scheduler alive.
+            logger.info("download_attempt_commit_rejected", extra=job_context)
+            return True
         except Exception as exc:  # noqa: BLE001
             await asyncio.to_thread(
                 self._mark_job_failed_sync,
@@ -1095,6 +696,7 @@ class DownloadService:
         (lower) and demote (higher) without renumbering the queue.
         """
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
@@ -1120,6 +722,7 @@ class DownloadService:
                 (int(row[1]),),
             )
             return {
+                **task_snapshot(connection, int(row[0])),
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
                 "provider": str(row[2]),

@@ -437,7 +437,7 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 
 - [x] P0：批准、详细计划与快速接手入口
 - [x] P1 / R88：管理员认证完整切片（rc4/026，12 新合同、370 个不同用例最终通过、2113 collect；本地提交见计划，无发布）
-- [ ] P2：任务/尝试/回执/收尾与入口收口
+- [x] P2 / R89：任务/尝试/审批/作品槽、原子认领、持久操作/回执、HTTP/Web/WS 任务命令；rc5/027、21 新合同、453 个不同用例最终通过、2134 collect。物理停止与完整屏障在 P3，勿部署中间切片
 - [ ] P3：真实取消、切源、运行时移除
 - [ ] P4：账号与凭据版本管理
 - [ ] P5：统一 unique_key 附加表及摄取

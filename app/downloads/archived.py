@@ -50,10 +50,10 @@ from app.conversion.comicinfo import (
 )
 from app.conversion.service import _PACK_FORBIDDEN_STATUSES
 from app.db.database import Database, METADATA_SOURCE_RANK_SQL
+from app.downloads.queue import QueueControl, DownloadError
 from app.downloads.models import (
     CONVERSION_STATE_RUNNING,
     CONVERSION_STATE_WAITING_PATH,
-    DOWNLOAD_STATE_PENDING,
     OPEN_DOWNLOAD_STATES,
     PROVIDER_CONVERSION,
     DownloadedWork,
@@ -210,6 +210,23 @@ class ArchivedWorkService:
                 "该作品没有已下载的档案，无法执行此操作",
             )
         return work
+
+    def _require_removable_sync(self, candidate_id: int) -> None:
+        """Check all providers before removal touches any files.
+
+        The database delete trigger repeats the guard when records are removed;
+        P3 replaces this preflight with a persistent removal/cleanup operation.
+        """
+        with self._database.connection() as connection:
+            active = connection.execute(
+                "SELECT state FROM download_jobs WHERE candidate_id = ? AND state NOT IN "
+                "('COMPLETED', 'FAILED', 'CANCELLED', 'CONVERSION_COMPLETED', 'CONVERSION_FAILED') LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+        if active is not None:
+            if active[0] == CONVERSION_STATE_RUNNING:
+                raise ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在打包，请先等待停止确认")
+            raise ArchivedWorkError("WORK_STILL_RUNNING", "该作品仍有下载任务在进行或等待停止确认，请先完成收尾")
 
     # ----------------------------------------------------- archive metadata
 
@@ -514,6 +531,7 @@ class ArchivedWorkService:
         download worker or the packer holds that row and would write to it (or
         to the file) after we deleted it. Cancel first, then remove.
         """
+        await asyncio.to_thread(self._require_removable_sync, candidate_id)
         work = await self._require_work(candidate_id)
         if work.state in OPEN_DOWNLOAD_STATES:
             raise ArchivedWorkError(
@@ -633,6 +651,7 @@ class ArchivedWorkService:
         records always go, and a file that could not be deleted is reported in
         `failed_files` rather than silently claimed as removed.
         """
+        await asyncio.to_thread(self._require_removable_sync, candidate_id)
         candidate = await self._database.get_candidate(candidate_id)
         if candidate is None:
             raise ArchivedWorkError(
@@ -682,12 +701,10 @@ class ArchivedWorkService:
     ) -> dict:
         """Run the work's source again, replacing what is on disk.
 
-        The original job row is reused and reset to PENDING rather than a new one
-        inserted, for the reason `retry_job` reuses it: `idempotency_key` is
-        UNIQUE per source, so a second row would need a different key and would
-        split one book's attempt history across two entries. Resetting keeps
-        `attempt_count` climbing, which is what makes a book that has been
-        re-fetched five times visible as such.
+        The provider projection keeps its integer id for compatibility. The
+        queue core creates a fresh durable task when a terminal job restarts;
+        each actual worker claim records its own attempt. Requeueing alone does
+        not count as a download attempt. Saved remote handles require cleanup.
 
         `retry_job` cannot serve this: it refuses a COMPLETED job on purpose,
         because inside the queue a completed download is done. Here the operator
@@ -726,17 +743,10 @@ class ArchivedWorkService:
         }
 
     def _reset_job_sync(self, job_id: int) -> None:
-        with self._database.connection() as connection:
-            cursor = connection.execute(
-                "UPDATE download_jobs SET state = ?, error_code = NULL, "
-                "error_message = NULL, lease_owner = NULL, "
-                "lease_expires_at = NULL, retry_at = NULL, "
-                "attempt_count = attempt_count + 1, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (DOWNLOAD_STATE_PENDING, job_id),
-            )
-            if int(cursor.rowcount or 0) == 0:
-                raise ArchivedWorkError("JOB_NOT_FOUND", "下载任务不存在")
+        try:
+            QueueControl(self._database).internal_command(job_id, "restart")
+        except DownloadError as exc:
+            raise ArchivedWorkError(exc.code, exc.public_message) from exc
 
     # ------------------------------------------------------------ relocation
 

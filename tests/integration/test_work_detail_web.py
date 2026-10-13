@@ -14,6 +14,7 @@ download worker and the row under test would move mid-assertion.
 from __future__ import annotations
 
 import asyncio
+from tests.integration.test_queue_control import observed
 import itertools
 import json
 from pathlib import Path
@@ -412,7 +413,7 @@ def test_a_job_action_taken_here_comes_back_here(tmp_path: Path) -> None:
 
         response = client.post(
             f"/activity/jobs/{job_id}/resume",
-            data={"csrf_token": csrf, "return_to": f"/works/{candidate_id}"},
+            data={"csrf_token": csrf, "return_to": f"/works/{candidate_id}", **observed(database, job_id)},
         )
 
     assert response.status_code == 303
@@ -438,7 +439,7 @@ def test_an_off_site_return_target_is_ignored_rather_than_followed(
         csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
         response = client.post(
             f"/activity/jobs/{job_id}/resume",
-            data={"csrf_token": csrf, "return_to": "https://evil.example/x"},
+            data={"csrf_token": csrf, "return_to": "https://evil.example/x", **observed(database, job_id)},
         )
 
     assert response.status_code == 303
@@ -604,6 +605,8 @@ def test_pressing_the_archive_button_refetches_a_completed_download(
         provider=PROVIDER_EXHENTAI,
         idempotency_key=f"exhentai:{candidate_id}",
     )
+    with database.connection() as connection:
+        connection.execute("INSERT INTO candidate_approvals(candidate_id, evidence) VALUES(?, 'fixture:approved')", (candidate_id,))
 
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)

@@ -7000,3 +7000,29 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 **下一动作。** P2：任务/尝试/回执与控制入口收口，方案 §6/§9.7、处理计划 P2；先核对 R88 提交及 git status。旧 DownloadService.retry 在状态裁决前就执行 torrent verify/push/abandon，新核心须先事务受理再做副作用，不能只加 API revision 包装。P2–P12 尚未实施；不重复认证、不启并行 agent、不动原审阅复现。
 
 **现场。** 无本地 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe 及本 checkout PYTHONPATH；不读真实私有凭据。git ignore 查询告警不阻塞；提交需工具审批，无推送/部署授权。首次计划补丁上下文错误未写入，核对末行后精确修正。
+
+## R89 — P2 持久任务、执行尝试与事务命令核心（v0.3.0rc5，2026-10-13）
+
+**授权与状态。** 用户「逐阶段继续」沿已批准方案推进；P0–P2 完成，下一阶段 P3。本阶段只验收任务控制/受理核心，运行取消、切源、远端重试和停止做种的物理执行仍由 P3 接续；未确认操作保持槽，未部署这个中间切片。接手以 DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN 的快速表及本条为准，不重复认证或新建调度器。
+
+**实现。**
+
+- 027 新增 candidate_approvals、queue_tasks、queue_attempts、queue_operations、queue_command_receipts，旧 download_jobs.task_id 映射到稳定任务身份。旧整数行留作 provider/页面兼容投影，终态重试/restart 创建新 task，真实领取新建 attempt；历史任务/失败原因不被后续尝试覆盖。旧累计次数不伪造逐条执行历史。
+- app/downloads/queue.py 集中短事务命令；一个作品一个活动下载槽由唯一索引裁决。现有下载与转换 worker BEGIN IMMEDIATE 认领，返回 task/attempt/generation，无双调度。SQL adapter 覆盖 conversion、EH/Telegraph 完成登记、torrent poller、移除等旧写者，不能通过直接 SQL 绕过作品槽/运行记录删除守卫。
+- `/api/v1/jobs` 单项/批量、activity 普通表单和 WS 转发共用 observed task_id/expected_revision/idempotency_key；固定管理员作用域跨 Cookie/Bearer 重放同回执，同键异内容/旧版本/旧任务身份返回 409。先读回执再读当前版本，状态/操作/回执同事务；七天保留且未结束操作的回执不删。进度不推进编辑版本，优先级不撤销执行代次。
+- 下载 retry 不再在裁决前 verify/push/abandon。取消运行任务、切源及保存远端 handle 的重试先写 STOPPING 和独立 operation；A 未停止时 B 无入队。停止做种保持实际做种可见，标注「停止待确认」并关闭重复按钮。旧完成/产物提交被 SQL guard 拒绝，下载 worker 不因受控陈旧拒绝而退出。P3 实现实际停止/恢复与完整 attempt fencing，P8/P9 实现发布/心跳预算。
+- 审批事实按真实 APPROVED 状态或 APPROVE/AUTO_APPROVE 审计迁移，不再用任意 download_job 证明批准；删除任务仍可依据批准事实再入队。public remove/purge 在文件动作前检查所有来源，数据库最终禁止活动 job 删除；较早来源运行、最新来源完成的删除合同通过。完整文件删除/新入队协调仍在 P3。
+- `GET /api/v1/tasks/{task_id}` 可读历史任务/尝试/操作，queue/work DTO 新增身份、revision、generation、attempt_id、pending_operation。源入队也返回新身份/版本。已下载重新开始通过核心状态裁决，排队不提前增加执行次数。旧候选/设置/元数据等全域版本/草稿收口仍属 P10。
+
+**迁移与回退。** 027 / 共 27 个，pyproject/uv.lock 源码 rc5。临时 026 库升级验证审批证据、活动尝试、重复 initialize；同作品两个活动来源使迁移整笔回滚，记录、列与迁移号不改，不把远端任务伪造为终止。真实升级前停服务、备份完整数据库目录，并在旧版本核实/停止冲突执行；回退恢复升级前快照及旧代码，不能只降源码或删除迁移号。本轮没有读取真实 private、迁移真实库、调用真实供应商或发布镜像。
+
+**验证。**
+
+- 新增正式 21 条任务核心合同全部通过：来源并发入队、下载/打包双 worker 认领、retry 新 task/attempt 与旧历史、整数 ID 复用、回执先于 revision、跨凭据重放、异内容冲突、双端竞争、回执注入故障整笔回滚、独立审批/移除后仍有效、拒绝前无远端副作用、STOPPING 保槽/禁止产物与完成/禁止运行删除、旧来源文件保护、下载 worker 陈旧完成拒绝、操作不随候选删除，以及 026 升级/冲突回滚。HTTP/Web/WS 通过 app 临时库实际路由验证。
+- 相关 **19 个文件、453 个不同现存用例最终通过**：downloads、queue_control、conversion、torrent_workflow、archived_works、database、activity_web、activity_grouping、api_contracts、api_domains、work_detail_web、download_logging、conversion_logging、torrent_logging、telegraph_workflow、review_actions、auto_approval_workflow、archive_workflow、realtime。部分失败节点定向补测；不是这些文件全部整份重跑。最后一批 pipeline 88/0，新增合同 21/0，停止做种/序列化相关 46/0。
+- 整库 **2134 collected（+21，仅收集）**；最近整库全绿仍 R81–R84 的 2014。XML 与 collect 原证据保留 `.scratch/r89-*`，按最后结果覆盖同 node、过滤已改名的旧节点得到 453/0；Python 语法、diff --check 与 CodeGraph 同步验证收尾。
+- 首次失败诚实保留：download 23 条有 2 个旧 FIFO 同作品夹具；adapter 204 条有 33 个多活动夹具/立即停止/schema 旧断言；HTTP/WS 合同错 loop/协议形状；API allowed 兼容返回丢失；工作详情夹具缺审批与旧表单前置条件；Telegraph 旧测试要求多源同时活动。按新契约修正夹具/断言与实际遗漏，定向复验通过，没有放宽槽、审批或版本守卫。
+
+**文档与提交。** README/USAGE/REALTIME_API/EHBot/AGENTS/PHASES/计划/清单/findings 同步实际行为与 P3 边界；没有新增环境变量，.env/Compose 无表格事实变化。一个 R89 本地提交，标题 `feat(queue): persist task identities and atomic command receipts`，SHA 以 git log 为准；无 push/发布/部署。
+
+**下一步 P3。** 从 queue_operations 与 QueueControl 的 STOPPING 意图开始接执行/恢复，下载 coroutine 按 task/attempt/generation 跟踪，取消必须 cancel 后 await 收束；线程/子进程/远端资源分别确认停止。torrent push 保存可查回远端 handle，poller 每条写入/收货/auto-pack 都带 attempt/generation 条件；EH/Telegraph/Bot/MTProto 元数据与文件提交也要屏障。最小按 attempt staging 先落地，A 未停 B 不开；运行移除改为持久清理意图。复用原 `.scratch/download_queue_review_repro.py` 的六个触发条件，不用只把当前代码改成新断言来代替真实取消验收。P3–P12 未实施。

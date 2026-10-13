@@ -14,6 +14,7 @@ and which one reads better depends on the call site.
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.templating import Jinja2Templates
 from jinja2 import pass_context
@@ -58,6 +59,7 @@ def build_templates() -> Jinja2Templates:
     def local_url_for(context, route_name, /, **params):
         return URL(context["request"].url_for(route_name, **params).path)
 
+    templates.env.globals["new_command_key"] = lambda: uuid4().hex
     templates.env.globals["url_for"] = local_url_for
     # Labels, tones and provider names come from `app.api.status`, so a state
     # reads the same in a template as it does in a JSON response.

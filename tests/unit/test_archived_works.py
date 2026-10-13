@@ -69,6 +69,7 @@ class Fixture:
                 "INSERT INTO candidates (status) VALUES ('DOWNLOADED')"
             )
             candidate_id = int(cursor.lastrowid)
+            connection.execute("INSERT INTO candidate_approvals(candidate_id, evidence) VALUES(?, 'fixture:approved')", (candidate_id,))
             connection.execute(
                 "INSERT INTO metadata_values "
                 "(candidate_id, field_name, field_value, value_source, "
@@ -348,7 +349,7 @@ class TestRedownload:
 
         assert result["repack"] is False
         download, _pack = fixture.jobs(candidate_id)
-        assert download == (DOWNLOAD_STATE_PENDING, 1)
+        assert download == (DOWNLOAD_STATE_PENDING, 0)
         assert fixture.notified == [candidate_id]
         assert fixture.repacked == []
 
@@ -375,7 +376,7 @@ class TestRedownload:
 
         assert raised.value.code == "WORK_STILL_RUNNING"
         # And the first request's row is untouched by the refusal.
-        assert fixture.jobs(candidate_id)[0] == (DOWNLOAD_STATE_PENDING, 1)
+        assert fixture.jobs(candidate_id)[0] == (DOWNLOAD_STATE_PENDING, 0)
 
     def test_a_work_being_re_downloaded_is_still_findable(
         self, fixture: Fixture

@@ -363,7 +363,7 @@ def test_a_small_attachment_still_wins_over_the_preview_page(
     assert [job.provider for job in jobs] == ["TELEGRAM"]
 
 
-def test_the_manual_preview_button_queues_one_job(tmp_path: Path) -> None:
+def test_the_manual_preview_button_refuses_a_second_active_source(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(
@@ -376,6 +376,7 @@ def test_the_manual_preview_button_queues_one_job(tmp_path: Path) -> None:
         telegraph_resolver=public_resolver,
     )
     with TestClient(app, follow_redirects=False) as client:
+        client.portal.call(app.state.download_service.stop)
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -389,8 +390,8 @@ def test_the_manual_preview_button_queues_one_job(tmp_path: Path) -> None:
             f"/candidates/{candidate_id}/telegraph",
             data={"csrf_token": csrf},
         )
-        assert response.status_code == 303
-        # Idempotent: pressing twice must not create a second job.
+        assert response.status_code == 400
+        # Repeating a competing source does not steal the existing work slot.
         client.post(
             f"/candidates/{candidate_id}/telegraph",
             data={"csrf_token": csrf},
@@ -401,7 +402,7 @@ def test_the_manual_preview_button_queues_one_job(tmp_path: Path) -> None:
             candidate_id
         )
     )
-    assert sorted(job.provider for job in jobs) == ["TELEGRAM", "TELEGRAPH"]
+    assert sorted(job.provider for job in jobs) == ["TELEGRAM"]
 
 
 @pytest.mark.asyncio

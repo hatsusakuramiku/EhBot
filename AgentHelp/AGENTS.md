@@ -136,8 +136,8 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 2113 collected（R88 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R88 新增 12 个管理员/会话/竞争/迁移合同用例，相关 27 个文件共 370 个不同用例最终通过（包括登录夹具 smoke；不是这些文件整份全部执行）；rc4/026 源码，无发布；本轮未运行整库测试。 Ending below this is a regression.
-**Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）。
+**Baseline: 2134 collected（R89 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R89 新增 21 个任务/尝试/并发/回执/迁移合同，相关 19 个文件共 453 个不同用例最终通过（部分节点定向补测；不是这 19 个文件全部整份执行）；rc5/027 源码，无发布；本轮未运行整库测试。 Ending below this is a regression.
+**Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）-> R89 2134（仅收集，相关 453 个不同用例最终通过；027/rc5，运行停止操作只持久受理、P3 接续物理停止，无发布）。
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with

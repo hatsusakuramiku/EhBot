@@ -19,9 +19,11 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from app.api import deps
+from app.api.contracts import ApiError
 from app.api.serializers import job_summary, queue_group_payload
 from app.api.status import ATTENTION_STATUS, attention_view, is_live
 from app.downloads.models import QUEUE_GROUPS
+from app.downloads.queue import DownloadError
 
 
 router = APIRouter(tags=["activity"])
@@ -132,6 +134,16 @@ async def get_history(
         "total": len(jobs),
         "limit": limit,
     }
+
+
+@router.get("/tasks/{task_id}")
+async def get_task(request: Request, task_id: str) -> dict:
+    """Read a durable task and its attempts even after the legacy row changes."""
+    await deps.require_session(request)
+    try:
+        return await deps.download_service(request).get_task(task_id)
+    except DownloadError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=404) from exc
 
 
 __all__ = [

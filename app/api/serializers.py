@@ -355,6 +355,8 @@ def _note_payload(job: Any) -> dict[str, Any] | None:
     """
     if not job.is_seeding:
         return None
+    if job.pending_operation == "stop-seeding":
+        return row_note_view("SEEDING_STOPPING").to_payload()
     view = row_note_view(NOTE_SEEDING)
     return view.to_payload() if view is not None else None
 
@@ -369,6 +371,11 @@ def job_summary(job: Any) -> dict[str, Any]:
     """
     return {
         "job_id": job.job_id,
+        "task_id": job.task_id,
+        "revision": job.revision,
+        "generation": job.generation,
+        "attempt_id": job.attempt_id,
+        "pending_operation": job.pending_operation,
         "candidate_id": job.candidate_id,
         # The work's name, resolved the same way every other list resolves it
         # (R81). `title` is `None` for a candidate still in 待补充; the row shows
@@ -404,7 +411,7 @@ def job_summary(job: Any) -> dict[str, Any]:
             "pause": job.is_pausable,
             "resume": job.state == "PAUSED",
             "cancel": job.is_cancellable,
-            "stop_seeding": job.is_seeding,
+            "stop_seeding": job.is_seeding and job.pending_operation != "stop-seeding",
         },
         "torrent": {
             "waiting_for_peers": job.is_waiting_for_peers,

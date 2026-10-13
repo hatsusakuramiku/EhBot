@@ -418,7 +418,7 @@ Telegram 监听与消息摄取、消息归并、ExHentai 元数据与中文标�
 
 - 审核前不下载完整文件；仅 `APPROVED`/`DOWNLOADED` 可入队。
 - 元数据以 ExHentai 为唯一权威源。
-- 幂等：`idempotency_key` + 唯一约束；重启恢复；重试复用同一任务行。
+- P2 / R89：任务 UUID 与旧整数编号分离；独立审批事实、作品槽、原子认领、每次执行独立 attempt；终态重试新建任务，旧历史保留。任务动作共享 revision/generation/管理员幂等回执，HTTP/Web/WS 缺少前置条件直接拒绝；进度不推进编辑版本。停止/切源意图持久化且保留槽，P3 接续物理执行与确认；全域并发收口仍按 P10。
 - 画质优先、成本其次；预览页是兜底而非默认；Archive Download 永远手动。
 - 种子停滞不是失败，交由操作员决策。
 - 打包是显式决策（`auto_pack_after_download` / `torrent_auto_pack` 默认关）。

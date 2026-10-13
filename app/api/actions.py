@@ -472,6 +472,7 @@ async def apply_job_batch(
     provider: str | None = None,
     priority: int | None = None,
     announce: Callable[[int], None] | None = None,
+    preconditions: dict | None = None,
 ) -> dict:
     """Run one lifecycle action against a selection of tasks.
 
@@ -483,32 +484,23 @@ async def apply_job_batch(
     with no number reached `set_job_priority(job_id, None)` and came back a 500.
     Both checks run before any job is touched.
 
-    Idempotent by construction rather than by loosening the single-job writers:
-    a job that cannot take the action -- already resumed, already cancelled,
-    since deleted -- is reported under ``skipped`` with the reason, and the rest
-    of the selection still runs. Re-sending the same batch is therefore safe and
-    changes nothing the first one already did, which is what an operator
-    double-clicking\u300c\u5168\u90e8\u6062\u590d\u300dneeds. Loosening `resume_job` itself would have
-    cost the single-job path its error message, which is the one place an
-    operator asks about exactly one job.
+    Each selected task carries its observed identity, revision and durable
+    idempotency key. Replays return each original receipt; a changed or removed
+    task is reported under skipped without preventing the remaining items.
     """
+    params = {}
     if action == JOB_ACTION_SWITCH_SOURCE:
-        target = _check_provider(provider)
-
-        async def run(job_id: int):
-            return await service.switch_source(job_id, target)
-
+        params["provider"] = _check_provider(provider)
     elif action == JOB_ACTION_PRIORITY:
-        position = _check_priority(priority)
+        params["priority"] = _check_priority(priority)
+    if not isinstance(preconditions, dict):
+        raise ApiError("PRECONDITIONS_REQUIRED", "请为每项任务提供已读取的身份、版本与幂等键")
+    if any(not isinstance(preconditions.get(str(job_id)), dict) for job_id in job_ids):
+        raise ApiError("PRECONDITIONS_REQUIRED", "请为每项任务提供已读取的身份、版本与幂等键")
 
-        async def run(job_id: int):
-            return await service.set_job_priority(job_id, position)
-
-    else:
-        method_name = JOB_ACTIONS[action]
-
-        async def run(job_id: int):
-            return await getattr(service, method_name)(job_id)
+    async def run(job_id: int):
+        observed = preconditions.get(str(job_id), {})
+        return await service.command(job_id, action, **command_preconditions(observed), **params)
 
     applied: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -531,11 +523,8 @@ async def apply_job_batch(
             continue
         applied.append({"job_id": job_id, "result": result})
         if announce is not None:
-            # Switching source replaces the job, so the id worth announcing is
-            # the new one; every other action keeps working on the same row.
-            announce(
-                int(result) if action == JOB_ACTION_SWITCH_SOURCE else job_id
-            )
+            # STOPPING announces the accepted operation, not a new transfer.
+            announce(result["job_id"])
 
     return {
         "action": action,
@@ -545,105 +534,56 @@ async def apply_job_batch(
     }
 
 
+def command_preconditions(payload: dict) -> dict:
+    """Do not fill client drafts with the server's latest task revision."""
+    return {"task_id": payload.get("task_id"), "expected_revision": payload.get("expected_revision"),
+            "idempotency_key": payload.get("idempotency_key")}
+
+
 @router.post("/jobs/batch")
 async def batch_job_action(request: Request) -> dict:
-    """Run one lifecycle action against a selection of tasks.
-
-    The argument is validated before any job is touched, so a bad provider name
-    cannot leave half a selection switched and half not. The loop itself lives
-    in `apply_job_batch`, which the `/activity` form posts through as well.
-    """
     await _guard(request)
     payload = await _body(request)
     action = str(payload.get("action") or "")
     if action not in BATCH_JOB_ACTIONS:
-        raise ApiError(
-            "ACTION_UNKNOWN",
-            f"\u672a\u77e5\u7684\u4efb\u52a1\u52a8\u4f5c\uff1a{action}",
-            details={"allowed": sorted(BATCH_JOB_ACTIONS)},
-        )
-    job_ids = _job_ids(payload.get("job_ids"))
-    # Raw, not pre-checked: `apply_job_batch` bounds whichever argument the
-    # action needs, so this path and the form path are validated by one copy.
-    return await apply_job_batch(
-        deps.download_service(request),
-        action,
-        job_ids,
-        provider=payload.get("provider"),
-        priority=payload.get("priority"),
-        announce=lambda job_id: _publish(
-            request, EVENT_DOWNLOAD, job_id=job_id
-        ),
-    )
+        raise ApiError("ACTION_UNKNOWN", "未知的任务动作", details={"allowed": sorted(BATCH_JOB_ACTIONS)})
+    return await apply_job_batch(deps.download_service(request), action, _job_ids(payload.get("job_ids")),
+        provider=payload.get("provider"), priority=payload.get("priority"), preconditions=payload.get("preconditions"),
+        announce=lambda job_id: _publish(request, EVENT_DOWNLOAD, job_id=job_id))
+
+
+async def apply_job_command(request: Request, job_id: int, action: str, payload: dict) -> dict:
+    params = {}
+    if action == "priority":
+        params["priority"] = _required_priority(payload)
+    elif action == "switch-source":
+        params["provider"] = _required_provider(payload)
+    elif action not in JOB_ACTIONS:
+        raise ApiError("ACTION_UNKNOWN", "未知的任务动作", details={"allowed": sorted(JOB_ACTIONS)})
+    try:
+        result = await deps.download_service(request).command(job_id, action, **command_preconditions(payload), **params)
+    except Exception as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_DOWNLOAD, job_id=result["job_id"])
+    return result
 
 
 @router.post("/jobs/{job_id}/priority")
 async def set_priority(request: Request, job_id: int) -> dict:
-    """Move one job up or down its queue.
-
-    Declared before the catch-all below, like `switch-source`: Starlette matches
-    routes in declaration order, so `/jobs/5/priority` would otherwise be
-    answered by `job_action` with ``action='priority'`` and refused as unknown.
-    """
     await _guard(request)
-    payload = await _body(request)
-    priority = _required_priority(payload)
-    service = deps.download_service(request)
-    try:
-        applied = await service.set_job_priority(job_id, priority)
-    except Exception as exc:  # noqa: BLE001 - re-raised below when unexpected
-        raise _translate(exc) from exc
-    _publish(request, EVENT_DOWNLOAD, job_id=job_id)
-    return {"job_id": job_id, "priority": applied}
+    return await apply_job_command(request, job_id, "priority", await _body(request))
 
 
 @router.post("/jobs/{job_id}/switch-source")
 async def switch_source(request: Request, job_id: int) -> dict:
-    """Move a job to a different provider.
-
-    Separate from the action table because it takes an argument, and because
-    switching source is a routing decision rather than a lifecycle transition.
-
-    Must stay above the catch-all `/jobs/{job_id}/{action}` route: it used to be
-    declared after it, which made this endpoint unreachable -- every request
-    landed on `job_action`, which does not know the name and answered 400
-    ACTION_UNKNOWN.
-    """
     await _guard(request)
-    payload = await _body(request)
-    provider = _required_provider(payload)
-    service = deps.download_service(request)
-    try:
-        new_job_id = await service.switch_source(job_id, provider)
-    except Exception as exc:  # noqa: BLE001 - re-raised below when unexpected
-        raise _translate(exc) from exc
-    _publish(request, EVENT_DOWNLOAD, job_id=new_job_id)
-    return {"job_id": new_job_id, "provider": provider}
+    return await apply_job_command(request, job_id, "switch-source", await _body(request))
 
 
 @router.post("/jobs/{job_id}/{action}")
 async def job_action(request: Request, job_id: int, action: str) -> dict:
-    """Run one lifecycle action against a download or packaging task.
-
-    Declared last on purpose. Its path pattern also matches `/jobs/5/priority`
-    and `/jobs/5/switch-source`, and Starlette takes the first route that
-    matches, so anything more specific has to be above it.
-    """
     await _guard(request)
-    method_name = JOB_ACTIONS.get(action)
-    if method_name is None:
-        raise ApiError(
-            "ACTION_UNKNOWN",
-            f"\u672a\u77e5\u7684\u4efb\u52a1\u52a8\u4f5c\uff1a{action}",
-            details={"allowed": sorted(JOB_ACTIONS)},
-        )
-    service = deps.download_service(request)
-    try:
-        state = await getattr(service, method_name)(job_id)
-    except Exception as exc:  # noqa: BLE001 - re-raised below when unexpected
-        raise _translate(exc) from exc
-    _publish(request, EVENT_DOWNLOAD, job_id=job_id)
-    return {"job_id": job_id, "action": action, "state": state}
+    return await apply_job_command(request, job_id, action, await _body(request))
 
 
 @router.patch("/works/{candidate_id}/metadata")
@@ -884,6 +824,8 @@ async def pull_work_source(
         "candidate_id": candidate_id,
         "provider": target,
         "job_id": result.job_id,
+        "task_id": result.task_id,
+        "revision": result.revision,
     }
 
 
@@ -915,6 +857,9 @@ def _translate(exc: Exception) -> Exception:
         # and the interface needs to tell「你发的参数不对」from「这条已经没了」
         # in order to decide between showing an error and refreshing the list.
         status = 404 if str(code).endswith("_NOT_FOUND") else 400
+        if code in {"REVISION_CONFLICT", "TASK_SUPERSEDED", "IDEMPOTENCY_CONFLICT", "WORK_SLOT_OCCUPIED",
+                    "OPERATION_IN_PROGRESS", "REMOTE_RECONCILIATION_REQUIRED"}:
+            status = 409
         return ApiError(str(code), str(message), status_code=status)
     return exc
 
@@ -929,6 +874,7 @@ __all__ = [
     "REVIEW_BATCH_ACTIONS",
     "apply_candidate_delete_batch",
     "apply_job_batch",
+    "apply_job_command",
     "apply_review_batch",
     "router",
 ]

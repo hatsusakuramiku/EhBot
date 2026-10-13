@@ -17,6 +17,7 @@ class DownloadState(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     PAUSED = "PAUSED"
+    STOPPING = "STOPPING"
 
 
 PROVIDER_TELEGRAM = "TELEGRAM"
@@ -88,6 +89,7 @@ OPEN_DOWNLOAD_STATES: frozenset[str] = frozenset(
         DownloadState.DOWNLOADING.value,
         DownloadState.WAITING_TORRENT.value,
         DownloadState.PAUSED.value,
+        DownloadState.STOPPING.value,
         DownloadState.FAILED.value,
     }
 )
@@ -367,6 +369,11 @@ class DownloadJobSummary:
     #: The gallery id, read alongside the title so `display_title` can fall back
     #: to `#<gid>` without a second query.
     ex_gid: int | None = None
+    task_id: str | None = None
+    revision: int = 1
+    generation: int = 1
+    attempt_id: str | None = None
+    pending_operation: str | None = None
 
     @property
     def display_title(self) -> str:
@@ -548,6 +555,8 @@ class DownloadEnqueueResult:
     job_id: int
     created: bool
     state: str
+    task_id: str | None = None
+    revision: int = 1
 
 
 DOWNLOAD_STATE_PENDING = "PENDING"

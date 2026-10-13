@@ -344,7 +344,7 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/jobs/999/retry",
-                json={},
+                json={"task_id": "removed-task", "expected_revision": 1, "idempotency_key": "missing-job"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -903,16 +903,17 @@ class TestPullSource:
         settings.data_path.mkdir(parents=True, exist_ok=True)
         app = create_app(settings)
         with TestClient(app) as client:
-            seed(settings, [(1, "APPROVED", "Book 1")])
-            set_candidate_fields(settings, 1, ex_gid=12345)
+            seed(settings, [(1, "APPROVED", "Book 1"), (2, "APPROVED", "Book 2"), (3, "APPROVED", "Book 3")])
+            for candidate_id in (1, 2, 3):
+                set_candidate_fields(settings, candidate_id, ex_gid=12345 + candidate_id)
             log_in(client, settings)
             jobs = {
                 provider: client.post(
-                    f"/api/v1/works/1/sources/{provider}",
+                    f"/api/v1/works/{candidate_id}/sources/{provider}",
                     json={},
                     headers={CSRF_HEADER: csrf_token(client)},
                 )
-                for provider in ("EXHENTAI", "TELEGRAPH", "EH_TORRENT")
+                for candidate_id, provider in enumerate(("EXHENTAI", "TELEGRAPH", "EH_TORRENT"), 1)
             }
 
         for provider, response in jobs.items():

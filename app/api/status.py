@@ -146,6 +146,7 @@ DOWNLOAD_STATUS: dict[str, StatusView] = {
         "WAITING_TORRENT", "等待做种", TONE_WAITING, live=True
     ),
     "PAUSED": _view("PAUSED", "已暂停", TONE_MUTED),
+    "STOPPING": _view("STOPPING", "正在停止", TONE_WAITING, live=True),
     "COMPLETED": _view("COMPLETED", "已完成", TONE_SUCCESS),
     "FAILED": _view("FAILED", "失败", TONE_DANGER),
     "CANCELLED": _view("CANCELLED", "已取消", TONE_MUTED),
@@ -242,6 +243,7 @@ NOTE_SEEDING = "SEEDING"
 
 ROW_NOTE_STATUS: dict[str, StatusView] = {
     NOTE_SEEDING: _view(NOTE_SEEDING, "正在做种", TONE_ACTIVE),
+    "SEEDING_STOPPING": _view("SEEDING_STOPPING", "正在做种（停止待确认）", TONE_WAITING),
 }
 
 #: The three stages one work passes through. A candidate, a download in flight

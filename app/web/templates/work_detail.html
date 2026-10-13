@@ -54,14 +54,17 @@
   </form>
 {%- endmacro %}
 
-{% macro job_button(job_id, action, label, csrf, return_to, variant=None) -%}
+{% macro job_button(job, action, label, csrf, return_to, variant=None) -%}
   {#- `return_to` is why a pause taken here does not drop the operator onto the
       queue page. It is validated server-side by `local_return_to`; a value that
       is not a rooted local path is ignored rather than followed. -#}
-  <form method="post" action="/activity/jobs/{{ job_id }}/{{ action }}"
-        hx-post="/activity/jobs/{{ job_id }}/{{ action }}">
+  <form method="post" action="/activity/jobs/{{ job.job_id }}/{{ action }}"
+        hx-post="/activity/jobs/{{ job.job_id }}/{{ action }}">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="hidden" name="return_to" value="{{ return_to }}">
+    <input type="hidden" name="task_id" value="{{ job.task_id }}">
+    <input type="hidden" name="expected_revision" value="{{ job.revision }}">
+    <input type="hidden" name="idempotency_key" value="{{ new_command_key() }}">
     <button class="ui-btn" {% if variant %}data-variant="{{ variant }}"{% endif %}
             data-size="sm" type="submit">{{ label }}</button>
   </form>
@@ -329,18 +332,18 @@
         {% if node.kind == "JOB" %}
           {% call ui.timeline_node(node.at, node.provider.label, status=node.state,
                                    reason=node.reason, key="job:" ~ node.job.job_id) %}
-            {% if node.actions.retry %}{{ job_button(node.job.job_id, "retry", "重试", csrf_token, work_href) }}{% endif %}
-            {% if node.actions.pause %}{{ job_button(node.job.job_id, "pause", "暂停", csrf_token, work_href) }}{% endif %}
-            {% if node.actions.resume %}{{ job_button(node.job.job_id, "resume", "继续", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.retry %}{{ job_button(node.job, "retry", "重试", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.pause %}{{ job_button(node.job, "pause", "暂停", csrf_token, work_href) }}{% endif %}
+            {% if node.actions.resume %}{{ job_button(node.job, "resume", "继续", csrf_token, work_href) }}{% endif %}
             {#- The one job action that cannot be undone from here, so it asks
                 first. `hidden` carries the return path the plain buttons put in
                 their own form. -#}
             {% if node.actions.cancel %}
             {{ ui.confirm("取消", "取消这项任务",
-                          "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                          "排队任务可立即取消；正在执行的任务先登记停止意图，停止确认后才释放作品槽。审批事实保留。",
                           confirm_label="确认取消",
                           action="/activity/jobs/" ~ node.job.job_id ~ "/cancel",
-                          csrf_token=csrf_token, hidden={"return_to": work_href},
+                          csrf_token=csrf_token, hidden={"return_to": work_href, "task_id": node.job.task_id, "expected_revision": node.job.revision, "idempotency_key": new_command_key()},
                           size="sm", key=node.job.job_id, swap=true) }}
             {% endif %}
           {% endcall %}

@@ -8,6 +8,7 @@ without a network or a real client.
 from __future__ import annotations
 
 import asyncio
+from tests.integration.test_queue_control import observed
 from dataclasses import replace
 import hashlib
 import json
@@ -591,15 +592,14 @@ async def test_a_hash_that_vanished_from_the_client_is_retryable(
     assert jobs[0].error_code == "TORRENT_VANISHED"
     assert jobs[0].is_retryable is True
 
-    # A retry re-adds the seed that vanished, then parks the job for the
-    # poller, instead of only requeuing it for a later push.
+    # A retry must persist reconciliation before any re-push. P3 executes
+    # this operation only after the previous remote handle is confirmed stopped.
     assert len(fake.added) == 1
     state = await downloads.retry_job(jobs[0].job_id)
-    assert state == "WAITING_TORRENT"
-    assert len(fake.added) == 2
-    jobs = await downloads.list_jobs_for_candidate(candidate_id)
-    assert jobs[0].state == "WAITING_TORRENT"
-    assert jobs[0].error_code is None
+    assert state == "STOPPING"
+    assert len(fake.added) == 1
+    with database.connection() as connection:
+        assert connection.execute("SELECT action, status FROM queue_operations").fetchone() == ('retry', 'PENDING')
 
 
 @pytest.mark.asyncio
@@ -660,11 +660,13 @@ async def test_switching_to_the_preview_source_removes_the_torrent(
 
     await downloads.switch_source(torrent_job.job_id, "TELEGRAPH")
 
-    assert fake.deleted == [(TORRENT_DIGEST, False)]
+    assert fake.deleted == []
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
-    providers = {job.provider: job.state for job in jobs}
-    assert providers["EH_TORRENT"] == "CANCELLED"
-    assert providers["TELEGRAPH"] == "PENDING"
+    assert [(job.provider, job.state) for job in jobs] == [("EH_TORRENT", "STOPPING")]
+    with database.connection() as connection:
+        operation = connection.execute("SELECT action, params_json FROM queue_operations").fetchone()
+        assert operation[0] == 'switch-source'
+        assert json.loads(operation[1])['provider'] == 'TELEGRAPH'
 
 
 @pytest.mark.asyncio
@@ -682,7 +684,8 @@ async def test_cancelling_a_parked_job_takes_it_out_of_the_client(
 
     await downloads.cancel_job(job_id)
 
-    assert fake.deleted == [(TORRENT_DIGEST, False)]
+    assert fake.deleted == []
+    assert (await downloads.list_jobs_for_candidate(candidate_id))[0].state == "STOPPING"
 
 
 @pytest.mark.asyncio
@@ -709,7 +712,7 @@ async def test_an_unreachable_client_does_not_block_cancelling(
     await downloads.cancel_job(job_id)
 
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
-    assert jobs[0].state == "CANCELLED"
+    assert jobs[0].state == "STOPPING"
 
 
 @pytest.mark.asyncio
@@ -965,14 +968,14 @@ def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
             )[0].job_id
         )
         stopped = client.post(
-            f"/activity/jobs/{job_id}/stop-seeding", data={"csrf_token": csrf}
+            f"/activity/jobs/{job_id}/stop-seeding", data={"csrf_token": csrf, **observed(database, job_id)}
         )
         assert stopped.status_code == 303
         after = client.get("/activity")
-        assert "\u6b63\u5728\u505a\u79cd" not in after.text
+        assert "\u6b63\u5728\u505a\u79cd" in after.text
 
-    # Stopping the seed removed the client entry without deleting files.
-    assert fake.deleted == [(TORRENT_DIGEST, False)]
+    # Accepted intent does not claim physical completion.
+    assert fake.deleted == []
 
 
 def test_the_settings_page_saves_a_client_without_echoing_the_password(
@@ -1333,12 +1336,12 @@ async def test_stopping_the_seed_removes_the_entry_but_keeps_the_archive(
 
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
     assert jobs[0].state == "COMPLETED"
-    assert jobs[0].is_seeding is False
+    assert jobs[0].is_seeding is True
     # Files are never deleted, so the archive conversion picked up survives.
-    assert fake.deleted == [(TORRENT_DIGEST, False)]
+    assert fake.deleted == []
     assert Path(jobs[0].artifact_path).exists()
-    assert all(
-        job.job_id != job_id for job in await downloads.list_active_jobs()
+    assert any(
+        job.job_id == job_id for job in await downloads.list_active_jobs()
     )
 
 

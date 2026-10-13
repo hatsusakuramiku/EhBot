@@ -34,6 +34,9 @@
   <tr data-job-id="{{ job.job_id }}">
     {% if selectable %}
     <td data-label="选择">
+      <input type="hidden" name="task_id_{{ job.job_id }}" value="{{ job.task_id }}">
+      <input type="hidden" name="expected_revision_{{ job.job_id }}" value="{{ job.revision }}">
+      <input type="hidden" name="idempotency_key_{{ job.job_id }}" value="{{ new_command_key() }}">
       <input class="ui-checkbox" type="checkbox" name="job_ids" value="{{ job.job_id }}"
              x-model="selected" aria-label="选择任务 #{{ job.job_id }}">
     </td>
@@ -125,7 +128,7 @@
         {% endif %}
         {% if job.actions.cancel %}
         {{ ui.confirm("取消", "取消这项任务",
-                      "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                      "排队任务可立即取消；正在执行的任务先登记停止意图，停止确认后才释放作品槽。审批事实保留。",
                       confirm_label="确认取消", form="queue-batch",
                       formaction=job_base ~ "/cancel",
                       size="sm", key=job.job_id) }}
@@ -229,7 +232,7 @@
           one asks first. The dialog's button submits this form by id -- see the
           `confirm` macro -- and carries the same `action=cancel`. -#}
       {{ ui.confirm("批量取消", "取消选中的任务",
-                    "任务会终止，候选保持「已通过」，可立即切换来源或重新入队；停放中的种子会同时从 qBittorrent 移除（不删除已下载的文件）。",
+                    "排队任务可立即取消；正在执行的任务先登记停止意图，停止确认后才释放作品槽。审批事实保留。",
                     confirm_label="确认取消", form="queue-batch",
                     field="action", value="cancel", size="sm") }}
     {% endcall %}
