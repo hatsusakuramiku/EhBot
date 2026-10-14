@@ -23,6 +23,7 @@ class DownloadError(ValueError):
 
 
 TERMINAL = frozenset({"COMPLETED", "FAILED", "CANCELLED", "CONVERSION_COMPLETED", "CONVERSION_FAILED"})
+STALE_EXECUTION_ERRORS = frozenset({"QUEUE_STOP_NOT_CONFIRMED", "QUEUE_STALE_ARTIFACT", "QUEUE_STALE_COMPLETION"})
 
 
 def task_snapshot(connection, job_id: int) -> dict:
@@ -75,10 +76,15 @@ class QueueControl:
         HTTP/Web/WS must call command instead and supply their observed identity
         and revision. Never use this to repair missing client preconditions.
         """
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = task_snapshot(connection, job_id)
-            return self._apply(connection, job_id, action, current, params)
+        try:
+            with self._database.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = task_snapshot(connection, job_id)
+                return self._apply(connection, job_id, action, current, params)
+        except sqlite3.IntegrityError as exc:
+            if 'queue_tasks.candidate_id' in str(exc):
+                raise DownloadError("WORK_SLOT_OCCUPIED", "另一下载任务已占用该作品槽") from exc
+            raise
 
     def _command_sync(self, job_id, action, task_id, expected_revision, key, params):
         if not isinstance(task_id, str) or not task_id:

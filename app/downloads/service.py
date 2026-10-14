@@ -40,7 +40,7 @@ from app.downloads.models import (
 )
 
 
-from app.downloads.queue import DownloadError, QueueControl, task_snapshot
+from app.downloads.queue import DownloadError, QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
 
 
 class DownloadService:
@@ -606,7 +606,7 @@ class DownloadService:
         except asyncio.CancelledError:
             raise
         except sqlite3.IntegrityError as exc:
-            if str(exc) not in {"QUEUE_STOP_NOT_CONFIRMED", "QUEUE_STALE_ARTIFACT", "QUEUE_STALE_COMPLETION"}:
+            if str(exc) not in STALE_EXECUTION_ERRORS:
                 raise
             # A revoked legacy execution may still return before P3 physically
             # stops it. Reject its commit while keeping the scheduler alive.

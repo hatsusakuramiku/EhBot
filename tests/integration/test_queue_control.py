@@ -105,6 +105,64 @@ def test_retry_new_task_and_attempt_preserves_history_and_rejects_old_draft(data
         assert c.execute('SELECT status FROM queue_tasks WHERE task_id = ?', (first['task_id'],)).fetchone()[0] == 'FAILED'
 
 
+@pytest.mark.parametrize('terminal,action', [('FAILED', 'retry'), ('COMPLETED', 'restart')])
+def test_remote_stop_intent_preserves_finished_attempt(database, tmp_path, terminal, action):
+    service = DownloadService(database, tmp_path)
+    job_id = pending(database, 'EH_TORRENT')
+    attempt = service._claim_pending_job_sync()
+    with database.connection() as c:
+        c.execute("UPDATE download_jobs SET details_json = ? WHERE id = ?",
+                  (json.dumps({'hash': 'a' * 40}), job_id))
+    if terminal == 'FAILED':
+        service._mark_job_failed_sync(job_id, 'TEMPORARY', 'original failure')
+    else:
+        service._mark_job_completed_sync(job_id)
+    with database.connection() as c:
+        original = c.execute('SELECT * FROM queue_attempts WHERE attempt_id = ?', (attempt['attempt_id'],)).fetchone()
+    result = asyncio.run(service.command(job_id, action, **observed(database, job_id)))
+    assert result['state'] == 'STOPPING' and result['operation_id']
+    with database.connection() as c:
+        assert c.execute('SELECT * FROM queue_attempts WHERE attempt_id = ?', (attempt['attempt_id'],)).fetchone() == original
+        assert c.execute('SELECT count(*) FROM queue_attempts').fetchone()[0] == 1
+
+
+def test_internal_retry_reports_slot_conflict_without_changing_history(database, tmp_path):
+    service = DownloadService(database, tmp_path)
+    job_id = pending(database)
+    service._claim_pending_job_sync()
+    service._mark_job_failed_sync(job_id, 'TEMPORARY', 'original failure')
+    service._enqueue_sync(1, 'TELEGRAPH', 'active-preview', '{}')
+    before = asyncio.run(service.get_task(observed(database, job_id)['task_id']))
+    with pytest.raises(DownloadError) as exc:
+        asyncio.run(service.retry_job(job_id))
+    assert exc.value.code == 'WORK_SLOT_OCCUPIED'
+    assert asyncio.run(service.get_task(before['task_id'])) == before
+
+
+@pytest.mark.asyncio
+async def test_revoked_conversion_commit_is_handled_as_a_stale_result(database, tmp_path):
+    with database.connection() as c:
+        job_id = c.execute("INSERT INTO download_jobs(candidate_id, idempotency_key, provider, state) "
+                           "VALUES(1, 'convert:1', 'CONVERSION', 'CONVERSION_PENDING')").lastrowid
+    service = ConversionService(database, tmp_path / 'work', tmp_path / 'library')
+    downloads = DownloadService(database, tmp_path)
+    started, released = asyncio.Event(), asyncio.Event()
+    async def legacy_handler(job):
+        started.set()
+        await released.wait()
+        with database.connection() as c:
+            c.execute("UPDATE download_jobs SET state = 'CONVERSION_COMPLETED' WHERE id = ?", (job['job_id'],))
+    service._handle_job = legacy_handler
+    worker = asyncio.create_task(service._process_one())
+    await asyncio.wait_for(started.wait(), 5)
+    await downloads.command(job_id, 'cancel', **observed(database, job_id))
+    released.set()
+    assert await asyncio.wait_for(worker, 5) is True
+    with database.connection() as c:
+        assert task_snapshot(c, job_id)['state'] == 'STOPPING'
+        assert c.execute('SELECT count(*) FROM queue_attempts').fetchone()[0] == 1
+
+
 def test_receipt_before_revision_check_and_key_content_conflict(database, tmp_path):
     service = DownloadService(database, tmp_path)
     job_id = pending(database)
@@ -114,6 +172,42 @@ def test_receipt_before_revision_check_and_key_content_conflict(database, tmp_pa
     with pytest.raises(DownloadError) as exc:
         asyncio.run(service.command(job_id, 'cancel', **draft))
     assert exc.value.code == 'IDEMPOTENCY_CONFLICT'
+
+
+def test_simultaneous_same_key_submissions_share_one_operation(database, tmp_path):
+    service = DownloadService(database, tmp_path)
+    job_id = pending(database)
+    service._claim_pending_job_sync()
+    draft = observed(database, job_id)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: asyncio.run(service.command(job_id, 'cancel', **draft)), range(2)))
+    assert results[0] == results[1]
+    with database.connection() as c:
+        assert c.execute('SELECT count(*) FROM queue_operations').fetchone()[0] == 1
+        assert c.execute('SELECT count(*) FROM queue_command_receipts').fetchone()[0] == 1
+        assert task_snapshot(c, job_id)['generation'] == results[0]['generation']
+
+
+def test_old_receipt_is_retained_until_its_operation_finishes(database, tmp_path):
+    service = DownloadService(database, tmp_path)
+    job_id = pending(database)
+    service._claim_pending_job_sync()
+    draft = observed(database, job_id)
+    result = asyncio.run(service.command(job_id, 'cancel', **draft))
+    with database.connection() as c:
+        c.execute("UPDATE queue_command_receipts SET created_at = datetime('now', '-8 days')")
+        c.execute("INSERT INTO candidates(id, status) VALUES(2, 'APPROVED')")
+        second = c.execute("INSERT INTO download_jobs(candidate_id, idempotency_key, provider, state) "
+                           "VALUES(2, 'second', 'TELEGRAM', 'PENDING')").lastrowid
+    asyncio.run(service.command(second, 'pause', **observed(database, second)))
+    assert asyncio.run(service.command(job_id, 'cancel', **draft)) == result
+    with database.connection() as c:
+        c.execute("UPDATE queue_operations SET status = 'COMPLETED' WHERE operation_id = ?", (result['operation_id'],))
+        c.execute("UPDATE download_jobs SET state = 'CANCELLED' WHERE id = ?", (job_id,))
+    asyncio.run(service.command(second, 'resume', **observed(database, second)))
+    with database.connection() as c:
+        assert c.execute('SELECT count(*) FROM queue_command_receipts WHERE idempotency_key = ?',
+                         (draft['idempotency_key'],)).fetchone()[0] == 0
 
 
 def test_different_devices_revision_competition_has_one_winner(database, tmp_path):
@@ -281,13 +375,13 @@ def test_legacy_job_id_reuse_cannot_redirect_old_task_command(database, tmp_path
     assert asyncio.run(service.get_task(old['task_id']))['status'] == 'REMOVED'
 
 
-def old_database(tmp_path, rows):
+def old_database(tmp_path, rows, last_version=26):
     path = tmp_path / 'old.db'
     with sqlite3.connect(path) as c:
         c.execute('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
         for migration in sorted(Path('app/db/migrations').glob('*.sql')):
             version = int(migration.name.split('_')[0])
-            if version >= 27:
+            if version > last_version:
                 break
             c.executescript(migration.read_text(encoding='utf-8'))
             c.execute('INSERT INTO schema_migrations VALUES(?, CURRENT_TIMESTAMP)', (version,))
@@ -310,6 +404,25 @@ def test_upgrade_backfills_approval_evidence_and_running_attempt_without_fabrica
         assert c.execute('SELECT count(*) FROM queue_tasks').fetchone()[0] == 2
         assert c.execute('SELECT count(*) FROM queue_attempts').fetchone()[0] == 1
         assert c.execute('SELECT count(*) FROM schema_migrations WHERE version = 27').fetchone()[0] == 1
+
+
+def test_upgrade_027_preserves_finished_attempt_and_is_idempotent(tmp_path):
+    db = old_database(tmp_path, [(1, 'EH_TORRENT', 'PENDING', 'one')], last_version=27)
+    service = DownloadService(db, tmp_path)
+    attempt = service._claim_pending_job_sync()
+    job_id = attempt['job_id']
+    with db.connection() as c:
+        c.execute("UPDATE download_jobs SET details_json = ? WHERE id = ?",
+                  (json.dumps({'hash': 'a' * 40}), job_id))
+    service._mark_job_failed_sync(job_id, 'TEMPORARY', 'failure before upgrade')
+    before = asyncio.run(service.get_task(attempt['task_id']))['attempts']
+    asyncio.run(db.initialize())
+    asyncio.run(db.initialize())
+    result = asyncio.run(service.command(job_id, 'retry', **observed(db, job_id)))
+    assert result['state'] == 'STOPPING'
+    assert asyncio.run(service.get_task(attempt['task_id']))['attempts'] == before
+    with db.connection() as c:
+        assert c.execute('SELECT count(*) FROM schema_migrations WHERE version = 28').fetchone()[0] == 1
 
 
 def test_upgrade_with_two_active_sources_rolls_back_and_keeps_both_remote_records(tmp_path):
@@ -363,7 +476,27 @@ def test_http_web_ws_share_preconditions_and_receipt_across_credentials(tmp_path
             hello(client, ws)
             frame = call(ws, 'api.job_action', {'params': {'job_id': job_id, 'action': 'pause'}, 'body': draft})[0]
             assert frame['type'] == 'command.result'
+            assert frame['data'] == result
         form = {**draft, 'csrf_token': csrf}
         posted = client.post(f'/activity/jobs/{job_id}/pause', data=form, follow_redirects=False)
         assert posted.status_code == 303 and 'error=' not in posted.headers['location']
         assert len(client.get('/activity').context['snapshot']['downloads']) > 0
+        with db.connection() as c:
+            batch_jobs = []
+            for candidate_id in (2, 3):
+                c.execute("INSERT INTO candidates(id, status) VALUES(?, 'APPROVED')", (candidate_id,))
+                batch_jobs.append(c.execute("INSERT INTO download_jobs(candidate_id, idempotency_key, provider, state) "
+                                            "VALUES(?, ?, 'TELEGRAM', 'PENDING')", (candidate_id, uuid4().hex)).lastrowid)
+        preconditions = {str(jid): observed(db, jid) for jid in batch_jobs}
+        advance = client.post(f'/api/v1/jobs/{batch_jobs[0]}/priority',
+                              json={**preconditions[str(batch_jobs[0])], 'idempotency_key': uuid4().hex, 'priority': 10},
+                              headers=bearer(token))
+        assert advance.status_code == 200
+        payload = {'action': 'pause', 'job_ids': batch_jobs, 'preconditions': preconditions}
+        batch = client.post('/api/v1/jobs/batch', json=payload, headers=bearer(token))
+        assert batch.status_code == 200
+        data = batch.json()
+        assert [item['job_id'] for item in data['applied']] == [batch_jobs[1]]
+        assert data['skipped'] == [{'job_id': batch_jobs[0], 'code': 'REVISION_CONFLICT',
+                                    'message': '任务已被另一端修改，请刷新后核对'}]
+        assert client.post('/api/v1/jobs/batch', json=payload, headers=bearer(token)).json() == data

@@ -245,3 +245,9 @@
 - 取消前先 abandon、重试前先 verify/push 均改为先持久受理。STOPPING 不释放槽、不伪报远端已停；queue_operations 不带 candidate/task 外键，可在记录移除后继续收尾。停止处理器明确在 P3，未部署。
 - 用户提出运行记录不能移除：public remove/purge 在文件动作前检查所有来源；SQL 最终守卫禁止活动 job 删除。较早来源运行而最新来源完成的合同已覆盖；文件删除与新入队间的完整协调在 P3。
 - 21 个新合同通过；新旧审批证据/迁移回滚、跨凭据回执、SQL 注入失败时状态/操作/回执同回滚、下载和打包双 worker、旧整数 ID 复用、STOPPING/陈旧提交、旧来源移除保护均有临时库证据。最终回归汇总见 progress/R89。
+
+## 2026-10-14 R89 完成核验补漏
+
+- 实际新复现的 4 条失败：FAILED/COMPLETED 种子尝试在后续 STOPPING 中被改写；内部 retry 槽冲突泄露 SQLite 异常；打包旧完成被拒后又写 FAILED 触发同一 guard。均不是 P3 的物理停止测试。
+- 追加 028 修正 adapter 对 finished_at 非空历史的更新，027 冻结；内部命令统一槽冲突业务反馈，下载/打包复用陈旧提交拒绝集合。028 不凭空恢复此前已丢失的历史。
+- 新增 7 用例，核心合同 28；同键并发、八天未结束操作回执、HTTP/Web/WS 同结果与混合批量裁决已验。19 文件完整 460 passed / 0 failed / 0 skipped，2141 collect-only。要求映射见 R89_COMPLETION_AUDIT，实际命令与证据见 progress/R89。

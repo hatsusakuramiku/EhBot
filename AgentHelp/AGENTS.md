@@ -136,8 +136,8 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 2134 collected（R89 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R89 新增 21 个任务/尝试/并发/回执/迁移合同，相关 19 个文件共 453 个不同用例最终通过（部分节点定向补测；不是这 19 个文件全部整份执行）；rc5/027 源码，无发布；本轮未运行整库测试。 Ending below this is a regression.
-**Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）-> R89 2134（仅收集，相关 453 个不同用例最终通过；027/rc5，运行停止操作只持久受理、P3 接续物理停止，无发布）。
+**Baseline: 2141 collected（R89 2026-10-14 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R89 核心合同 28 条；本次相关 19 个文件完整定向运行 460 passed / 0 failed / 0 skipped；rc5/028 源码，无发布。逐项完成核验见 `R89_COMPLETION_AUDIT.md`，未运行整库测试。 Ending below this is a regression.
+**Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）-> R89 初验 2134 / 453 个不同用例最终通过（027）-> R89 复核 2141 / 相关 19 文件完整 460 条通过（028/rc5，运行停止操作只持久受理、P3 接续物理停止，无发布）。
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with

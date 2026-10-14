@@ -7028,3 +7028,15 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 **下一步 P3。** 从 queue_operations 与 QueueControl 的 STOPPING 意图开始接执行/恢复，下载 coroutine 按 task/attempt/generation 跟踪，取消必须 cancel 后 await 收束；线程/子进程/远端资源分别确认停止。torrent push 保存可查回远端 handle，poller 每条写入/收货/auto-pack 都带 attempt/generation 条件；EH/Telegraph/Bot/MTProto 元数据与文件提交也要屏障。最小按 attempt staging 先落地，A 未停 B 不开；运行移除改为持久清理意图。复用原 `.scratch/download_queue_review_repro.py` 的六个触发条件，不用只把当前代码改成新断言来代替真实取消验收。P3–P12 未实施。
 
 **工作区清理（2026-10-13）。** 用户要求测试文件加入忽略、无用临时文件删除：`.gitignore` 增 `/.scratch/`；删除 18 个 R88/R89 pytest 临时目录（临时数据库与测试产物）及 `r88-smoke-nodes.txt`，保留 2 个审阅复现脚本和 XML/collect 验证证据。清理前核对全部目录位于本 checkout 的 `.scratch` 内且无链接；Git 未跟踪其中任何文件。R89 实际提交为 `7b8b297`。本次仅工作区维护，无用户功能或测试基线变化，无需重新运行产品测试。
+
+**完成核验与补漏（2026-10-14，仍属 R89 / P2）。** 用户目标「持续工作，直到 R89 全部处理完成」。核对 cfa649d 的原 P2 范围、现行计划/方案、实际源码及提交后，新增逐项要求映射 R89_COMPLETION_AUDIT，未将 P3 的物理停止或 P8–P10 的后续范围缩入/冒充 R89 完成。
+
+- 新复现 4 条先失败（`.scratch/r89-audit-red.xml`）：种子失败/完成后 retry/restart 进入 STOPPING 时覆盖已结束 attempt 的状态及错误；内部 retry 唯一槽冲突未译为业务错误；打包旧完成拒绝后再次写 FAILED 触发 guard。追加 028_queue_attempt_history.sql 冻结已结束历史，027 不改写；internal_command 与客户端返回相同 WORK_SLOT_OCCUPIED；下载/打包共用 SQL 陈旧提交拒绝集合。历史已缺失的数据不伪造恢复。
+- 新增 7 正式用例，核心合同 21→28；同时加强原 HTTP/Web/WS 合同：WS 重放 data 与 HTTP 回执一致，批量含旧版本/成功项目逐项裁决，重复批量仍返回原结果；同键并发只生成一份操作/回执，八天未结束操作回执保留、结束后按七天规则清理。
+- 最终 **19 文件完整运行 460 passed / 0 failed / 0 skipped**（288.915 秒，`.scratch/r89-audit-final.xml`）：downloads/queue_control/conversion/torrent_workflow/archived_works/database/activity_web/activity_grouping/api_contracts/api_domains/work_detail_web/download_logging/conversion_logging/torrent_logging/telegraph_workflow/review_actions/auto_approval_workflow/archive_workflow/realtime；全部指定文件逐份运行，不再用多次选择的汇总冒充整份通过。核心 7 文件先验 154/0、合同单独 28/0，XML 分别为 r89-audit-core-run/r89-audit-contract。
+- 执行环境为 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout；pytest 使用 `--basetemp=.scratch/r89-audit-final-tmp --junitxml=.scratch/r89-audit-final.xml`。整库仅执行 `pytest tests --collect-only -q -o addopts=`，**2141 collected（新增 7，R89 合计 +28）**；`.scratch/r89-audit-collect.txt`。最近整库全绿仍为 R81–R84 的 2014。
+- 首次选测误写不存在的 tests/integration/test_conversion.py，未执行测试；确认真实路径 tests/unit/test_conversion.py 后重新执行。collect 初次叠加 -q 只列文件计数，清除配置 addopts 后获取明确收集总数。没有放宽产品契约或忽略真实失败。
+- README/USAGE/REALTIME_API/EHBot/PHASES/AGENTS/计划/清单/findings 同步，版本仍为未发布 0.3.0rc5，schema 更新至 028 / 28；新库、026/027 升级和重复 initialize 均在临时库验证，真实库未迁移。compileall、diff --check 与 CodeGraph sync 作为提交前检查。本轮临时 pytest 目录在验证后清理，XML/collect 证据保留于已忽略 .scratch。
+- 原 R89=7b8b297 和用户指定清理提交 cb69d72 保留，不改写既有 Git 历史；本次补漏本地提交标题 `fix(queue): close R89 history and command arbitration gaps`，最终 SHA 以 git log 为准，无 push/发布/部署。
+
+**核验结论。** R89 / P2 已按原阶段门槛完整验收，需求→实现→正式回归→迁移→文档/接手记录均有当前证据。下一阶段仍为 P3：实际停止/切源/运行移除、收束、远端核实与最小 staging；STOPPING 当前只持久受理、继续保留槽，不能将本次修复说成下载已经物理终止。

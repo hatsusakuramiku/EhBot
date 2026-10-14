@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -44,7 +45,7 @@ from app.conversion.naming import (
     render_library_path,
     unique_library_target,
 )
-from app.downloads.queue import task_snapshot
+from app.downloads.queue import STALE_EXECUTION_ERRORS, task_snapshot
 from app.db.database import METADATA_SOURCE_RANK_SQL, Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -988,6 +989,11 @@ class ConversionService:
             await self._handle_job(job)
         except asyncio.CancelledError:
             raise
+        except sqlite3.IntegrityError as exc:
+            if str(exc) not in STALE_EXECUTION_ERRORS:
+                raise
+            logger.info("conversion_attempt_commit_rejected", extra=job_context)
+            return True
         except Exception as exc:  # noqa: BLE001
             await asyncio.to_thread(
                 self._mark_failed_sync, job["job_id"], "WORKER_EXCEPTION", str(exc)

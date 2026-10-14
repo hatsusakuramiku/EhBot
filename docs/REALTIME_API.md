@@ -166,7 +166,7 @@ fields 使用 `field_name/field_label/field_value/editable/source/is_manual/is_l
 
 ## 验证命令
 
-P2 / schema 027：`api.job_action`、`api.set_priority`、`api.switch_source` 的 `payload.body` 必须包含
+P2 / schema 028（任务契约从 027 引入）：`api.job_action`、`api.set_priority`、`api.switch_source` 的 `payload.body` 必须包含
 `task_id`、`expected_revision`（正整数）、`idempotency_key`（1–200 字符）。读取 `/api/v1/queue`、作品详情或
 `/api/v1/tasks/{task_id}` 得到任务身份与版本，不能使用旧整数编号代替 UUID；HTTP、WS、普通表单共享相同裁决。
 
@@ -179,6 +179,7 @@ P2 / schema 027：`api.job_action`、`api.set_priority`、`api.switch_source` �
 同键同内容先返回回执；同键异内容、旧版本或旧任务身份返回 409（IDEMPOTENCY_CONFLICT / REVISION_CONFLICT / TASK_SUPERSEDED）。
 回执与状态/操作同事务；已受理未确认的操作返回 operation_id，不能将 WS command.result 当作物理停止完成。
 回执保留七天，尚未结束的操作回执不清理；超出保留期先核对任务现状，再决定是否新发命令。
+任务详情的已结束 attempt 保留执行事实；后续远端核实的状态在 task/operation 中表达，不将旧失败改成 STOPPING 或抹掉旧错误。
 
 P2 的 STOPPING 会保留作品槽；P3 才执行并核实停止、切源及远端重试。旧客户端缺少前置条件直接拒绝，不自动采用服务器最新版本。
 
