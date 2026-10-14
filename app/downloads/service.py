@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from pathlib import Path
 import time
+from uuid import uuid4
 
 from app.connections.models import ProviderConnectionError, refusal_detail
 from app.connections.telegram import TelegramBotApi
@@ -41,6 +42,7 @@ from app.downloads.models import (
 
 
 from app.downloads.queue import DownloadError, QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
+from app.downloads.execution import attempt_path, execution_scope, failure_transaction, run_sync
 
 
 class DownloadService:
@@ -55,13 +57,18 @@ class DownloadService:
         torrent_push=None,
         torrent_abandon=None,
         torrent_verify=None,
+        torrent_stop=None,
+        stop_pack=None,
+        cleanup_removals=None,
         auto_pack=None,
         auto_pack_enabled=None,
         work_path_provider=None,
         notify=None,
+        exhentai_preflight=None,
+        telegraph_preflight=None,
     ) -> None:
         self._database = database
-        self._queue_control = QueueControl(database)
+        self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
         self._work_path = work_path
         self._telegram_client_factory = telegram_client_factory
         # Resolved per delivery, like the bot token: the operator can log the
@@ -71,6 +78,8 @@ class DownloadService:
         self._telegram_user_client = telegram_user_client
         self._exhentai_download = exhentai_download
         self._telegraph_download = telegraph_download
+        self._exhentai_preflight = exhentai_preflight
+        self._telegraph_preflight = telegraph_preflight
         # Pushing hands the transfer to qBittorrent; abandoning takes it back
         # out when the operator cancels or switches sources. Verifying asks the
         # torrent service whether a finished payload is already readable on
@@ -79,6 +88,9 @@ class DownloadService:
         self._torrent_push = torrent_push
         self._torrent_abandon = torrent_abandon
         self._torrent_verify = torrent_verify
+        self._torrent_stop = torrent_stop
+        self._stop_pack = stop_pack
+        self._cleanup_removals = cleanup_removals
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -89,6 +101,9 @@ class DownloadService:
         # fire-and-forget: this service must keep working with nothing attached.
         self._notify = notify
         self._worker_task: asyncio.Task[None] | None = None
+        self._active_attempts: dict[str, asyncio.Task] = {}
+        self._operation_task: asyncio.Task | None = None
+        self._operation_lock = asyncio.Lock()
 
     async def _effective_work_path(self) -> Path:
         if self._work_path_provider is None:
@@ -224,7 +239,7 @@ class DownloadService:
         *,
         redownload: bool = False,
     ) -> DownloadEnqueueResult:
-        return await asyncio.to_thread(
+        return await run_sync(
             self._enqueue_sync,
             candidate_id,
             provider,
@@ -289,7 +304,7 @@ class DownloadService:
     async def list_jobs_for_candidate(
         self, candidate_id: int
     ) -> tuple[DownloadJobSummary, ...]:
-        return await asyncio.to_thread(
+        return await run_sync(
             self._list_jobs_sync, candidate_id
         )
 
@@ -303,7 +318,7 @@ class DownloadService:
 
     async def list_active_pack_jobs(self) -> tuple[DownloadJobSummary, ...]:
         """In-flight conversion (packaging) jobs for the downloads dashboard."""
-        return await asyncio.to_thread(self._list_active_pack_jobs_sync)
+        return await run_sync(self._list_active_pack_jobs_sync)
 
     def _list_active_pack_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
         return self._fetch_jobs(
@@ -328,7 +343,7 @@ class DownloadService:
         is a query here rather than a separate table: every COMPLETED / FAILED
         / CANCELLED job shows up, newest first.
         """
-        return await asyncio.to_thread(
+        return await run_sync(
             self._list_history_jobs_sync, int(limit)
         )
 
@@ -344,7 +359,7 @@ class DownloadService:
         )
 
     async def list_active_jobs(self) -> tuple[DownloadJobSummary, ...]:
-        return await asyncio.to_thread(self._list_active_jobs_sync)
+        return await run_sync(self._list_active_jobs_sync)
 
     def _list_active_jobs_sync(self) -> tuple[DownloadJobSummary, ...]:
         states = tuple(sorted(OPEN_DOWNLOAD_STATES))
@@ -372,42 +387,58 @@ class DownloadService:
         return await self._queue_control.get_task(task_id)
 
     async def retry_job(self, job_id: int) -> str:
-        return await asyncio.to_thread(self._retry_job_sync, job_id)
+        return await run_sync(self._retry_job_sync, job_id)
 
     def _retry_job_sync(self, job_id: int) -> str:
         return self._queue_control.internal_command(job_id, "retry")["state"]
 
     async def pause_job(self, job_id: int) -> str:
-        return await asyncio.to_thread(self._pause_job_sync, job_id)
+        return await run_sync(self._pause_job_sync, job_id)
 
     def _pause_job_sync(self, job_id: int) -> str:
         return self._queue_control.internal_command(job_id, "pause")["state"]
 
     async def resume_job(self, job_id: int) -> str:
-        return await asyncio.to_thread(self._resume_job_sync, job_id)
+        return await run_sync(self._resume_job_sync, job_id)
 
     def _resume_job_sync(self, job_id: int) -> str:
         return self._queue_control.internal_command(job_id, "resume")["state"]
 
     async def cancel_job(self, job_id: int) -> str:
-        return await asyncio.to_thread(self._cancel_job_sync, job_id)
+        return await run_sync(self._cancel_job_sync, job_id)
 
     def _cancel_job_sync(self, job_id: int) -> str:
         return self._queue_control.internal_command(job_id, "cancel")["state"]
 
     async def set_job_priority(self, job_id: int, priority: int) -> int:
-        return await asyncio.to_thread(self._set_job_priority_sync, job_id, priority)
+        return await run_sync(self._set_job_priority_sync, job_id, priority)
 
     def _set_job_priority_sync(self, job_id: int, priority: int) -> int:
         return self._queue_control.internal_command(job_id, "priority", priority=priority)["priority"]
 
     async def stop_seeding(self, job_id: int) -> str:
-        result = await asyncio.to_thread(self._queue_control.internal_command, job_id, "stop-seeding")
+        result = await run_sync(self._queue_control.internal_command, job_id, "stop-seeding")
         return result["state"]
 
     async def switch_source(self, job_id: int, provider: str) -> int:
-        result = await asyncio.to_thread(self._queue_control.internal_command, job_id, "switch-source", provider=provider)
+        with self._database.connection() as connection:
+            current = task_snapshot(connection, job_id)
+        result = await self.command(
+            job_id, "switch-source", provider=provider, task_id=current["task_id"],
+            expected_revision=current["revision"], idempotency_key=uuid4().hex,
+        )
         return result["job_id"]
+
+    async def _preflight_switch(self, candidate_id: int, provider: str) -> None:
+        validator = self._exhentai_preflight if provider == PROVIDER_EXHENTAI else self._telegraph_preflight
+        if validator is None:
+            raise DownloadError(f"{provider}_NOT_CONFIG", "目标来源的预检服务未配置")
+        try:
+            await validator(candidate_id)
+        except Exception as exc:
+            if hasattr(exc, "code") and hasattr(exc, "public_message"):
+                raise DownloadError(exc.code, exc.public_message) from exc
+            raise
 
     def _job_provider_state_sync(self, job_id: int) -> tuple[str | None, str | None]:
         with self._database.connection() as connection:
@@ -491,6 +522,7 @@ class DownloadService:
         self._worker_task = asyncio.create_task(
             self._run_worker(), name="download-worker"
         )
+        self._operation_task = asyncio.create_task(self._run_operations(), name="queue-operations")
 
     async def reclaim_expired_leases(self) -> int:
         """Return jobs whose lease outlived the process that held it.
@@ -517,7 +549,7 @@ class DownloadService:
         attempt happened, and a book that has been interrupted four times should
         read as such.
         """
-        reclaimed = await asyncio.to_thread(self._reclaim_expired_leases_sync)
+        reclaimed = await run_sync(self._reclaim_expired_leases_sync)
         if reclaimed:
             # Warning, not info: this only happens after an unclean stop, and
             # it is the one line that explains why a job's attempt count grew
@@ -531,13 +563,29 @@ class DownloadService:
 
     def _reclaim_expired_leases_sync(self) -> int:
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                "SELECT id, candidate_id FROM download_jobs "
+                "SELECT id, candidate_id, provider, details_json FROM download_jobs "
                 "WHERE state = ? AND lease_expires_at IS NOT NULL "
                 "AND lease_expires_at < datetime('now')",
                 (DOWNLOAD_STATE_DOWNLOADING,),
             ).fetchall()
-            for job_id, candidate_id in rows:
+            for job_id, candidate_id, provider, details_json in rows:
+                current = task_snapshot(connection, job_id)
+                if provider == PROVIDER_EH_TORRENT and (
+                    self._safe_details(details_json).get("hash") or connection.execute(
+                        "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED'",
+                        (current["task_id"],),
+                    ).fetchone() is not None
+                ):
+                    # A process may die after remote acceptance but before park.
+                    # Never push a second transfer while its saved intent is unresolved.
+                    self._queue_control._operation(connection, job_id, "restart", current, {})
+                    connection.execute(
+                        "UPDATE download_jobs SET state = 'STOPPING', lease_owner = NULL, lease_expires_at = NULL, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,),
+                    )
+                    continue
                 connection.execute(
                     "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
                     "lease_expires_at = NULL, retry_at = NULL, "
@@ -556,11 +604,60 @@ class DownloadService:
         return len(rows)
 
     async def stop(self) -> None:
-        if self._worker_task is None:
-            return
-        self._worker_task.cancel()
-        await asyncio.gather(self._worker_task, return_exceptions=True)
+        tasks = [task for task in (self._worker_task, self._operation_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._worker_task = None
+        self._operation_task = None
+
+    async def stop_attempt(self, task_id: str) -> None:
+        """Cancel only the named execution and wait for its actual cleanup."""
+        task = self._active_attempts.get(task_id)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def process_operations(self) -> int:
+        """Execute durable stop intentions; unconfirmed resources keep their slot."""
+        completed = 0
+        async with self._operation_lock:
+            for operation in await run_sync(self._queue_control.pending_operations):
+                try:
+                    if operation["provider"] == PROVIDER_CONVERSION:
+                        if self._stop_pack is None:
+                            raise DownloadError("PACK_STOP_UNAVAILABLE", "打包停止服务尚未接通")
+                        await self._stop_pack(operation["task_id"])
+                    else:
+                        await self.stop_attempt(operation["task_id"])
+                    if operation["provider"] == PROVIDER_EH_TORRENT:
+                        if self._torrent_stop is None:
+                            raise DownloadError("REMOTE_STOP_UNAVAILABLE", "远端停止服务尚未接通")
+                        await self._torrent_stop(operation)
+                    await run_sync(self._queue_control.finish_operation, operation)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await run_sync(self._queue_control.operation_error, operation["operation_id"],
+                                   str(getattr(exc, "code", "STOP_NOT_CONFIRMED")))
+                    continue
+                completed += 1
+                self._announce(operation["legacy_job_id"], operation["candidate_id"])
+            if self._cleanup_removals is not None:
+                await self._cleanup_removals()
+        return completed
+
+    async def _run_operations(self) -> None:
+        while True:
+            try:
+                await self.process_operations()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception("queue_operation_error")
+            await asyncio.sleep(1.0)
 
     async def _run_worker(self) -> None:
         while True:
@@ -578,9 +675,38 @@ class DownloadService:
                 await asyncio.sleep(1.0)
 
     async def _process_one(self) -> bool:
-        job = await asyncio.to_thread(self._claim_pending_job_sync)
+        job = await run_sync(self._claim_pending_job_sync)
         if job is None:
             return False
+        task = asyncio.create_task(self._execute_attempt(job), name=f"download-{job['attempt_id']}")
+        self._active_attempts[job["task_id"]] = task
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            # A stop operation cancelled the child, not the worker itself.
+            return True
+        finally:
+            self._active_attempts.pop(job["task_id"], None)
+
+    async def _execute_attempt(self, job: dict) -> bool:
+        with execution_scope(self._database.path, job) as execution:
+            try:
+                await run_sync(self._check_execution_sync, execution)
+                return await self._process_claimed_job(job)
+            except sqlite3.IntegrityError as exc:
+                if str(exc) not in STALE_EXECUTION_ERRORS:
+                    raise
+                return True
+
+    def _check_execution_sync(self, execution) -> None:
+        with self._database.connection() as connection:
+            execution.check(connection)
+
+    async def _process_claimed_job(self, job: dict) -> bool:
         self._announce(job["job_id"], job["candidate_id"])
         # One claimed / one finished record per job, logged here because this is
         # the single point every delivery passes through -- the same reason
@@ -613,7 +739,7 @@ class DownloadService:
             logger.info("download_attempt_commit_rejected", extra=job_context)
             return True
         except Exception as exc:  # noqa: BLE001
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 "DOWNLOAD_WORKER_EXCEPTION",
@@ -636,7 +762,7 @@ class DownloadService:
             # cancelled, or failed, and only the row tells the difference.
             # Read it back so a download failure is not reported as
             # `download_job_finished`.
-            final_state, error_code, error_message = await asyncio.to_thread(
+            final_state, error_code, error_message = await run_sync(
                 self._read_final_state_sync, job["job_id"]
             )
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -702,7 +828,8 @@ class DownloadService:
                 "details_json, attempt_count FROM download_jobs "
                 "WHERE state = ? AND provider IN ("
                 + ",".join("?" for _ in SUPPORTED_PROVIDERS)
-                + ") ORDER BY priority, id LIMIT 1",
+                + ") AND candidate_id NOT IN (SELECT candidate_id FROM queue_blocked_candidates) "
+                "ORDER BY priority, id LIMIT 1",
                 (DOWNLOAD_STATE_PENDING, *SUPPORTED_PROVIDERS),
             ).fetchone()
             if row is None:
@@ -765,7 +892,7 @@ class DownloadService:
         if job["provider"] == PROVIDER_TELEGRAM_USER:
             return await self._run_telegram_user_job(job)
         if job["provider"] != PROVIDER_TELEGRAM:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 "PROVIDER_UNSUPPORTED",
@@ -778,7 +905,7 @@ class DownloadService:
             file_name = str(details.get("file_name") or f"{file_id}.bin")
             api = await self._telegram_api()
             if api is None:
-                await asyncio.to_thread(
+                await run_sync(
                     self._mark_job_failed_sync,
                     job["job_id"],
                     "TELEGRAM_NOT_CONFIG",
@@ -792,22 +919,23 @@ class DownloadService:
                 / "downloads"
                 / f"job-{job['job_id']}-{Path(file_name).name}"
             )
+            destination = attempt_path(destination)
             size = await api.download_file(
                 file_info.file_path, destination
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._record_artifact_sync,
                 job["job_id"],
                 destination,
                 size,
                 file_info.file_unique_id,
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_completed_sync, job["job_id"]
             )
             await self._maybe_auto_pack(job["candidate_id"])
         except ProviderConnectionError as exc:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 exc.code,
@@ -834,7 +962,7 @@ class DownloadService:
                 details.get("file_name") or f"message-{message_id}.bin"
             )
         except (KeyError, TypeError, ValueError):
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 "ATTACHMENT_INVALID",
@@ -845,7 +973,7 @@ class DownloadService:
         if self._telegram_user_client is not None:
             client = await self._telegram_user_client()
         if client is None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 "TELEGRAM_USER_NOT_CONFIG",
@@ -856,26 +984,27 @@ class DownloadService:
         destination = (
             work_path / "downloads" / f"job-{job['job_id']}-{Path(file_name).name}"
         )
+        destination = attempt_path(destination)
         try:
             size = await client.download_message_media(
                 chat_id, message_id, destination
             )
         except ProviderConnectionError as exc:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 exc.code,
                 exc.public_message,
             )
             return refusal_detail(exc)
-        await asyncio.to_thread(
+        await run_sync(
             self._record_artifact_sync,
             job["job_id"],
             destination,
             size,
             str(details.get("file_unique_id") or f"{chat_id}:{message_id}"),
         )
-        await asyncio.to_thread(self._mark_job_completed_sync, job["job_id"])
+        await run_sync(self._mark_job_completed_sync, job["job_id"])
         await self._maybe_auto_pack(job["candidate_id"])
         return None
 
@@ -888,7 +1017,7 @@ class DownloadService:
         queue, and `TorrentService`'s poller advances it from there.
         """
         if self._torrent_push is None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 "TORRENT_CLIENT_NOT_CONFIG",
@@ -898,14 +1027,14 @@ class DownloadService:
         try:
             details = await self._torrent_push(job["candidate_id"])
         except Exception as exc:  # noqa: BLE001 - provider boundary
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 str(getattr(exc, "code", "TORRENT_PUSH_REJECTED")),
                 str(getattr(exc, "public_message", exc)),
             )
             return
-        await asyncio.to_thread(
+        await run_sync(
             self._park_job_sync, job["job_id"], details or {}
         )
 
@@ -961,7 +1090,7 @@ class DownloadService:
         `public_message`; anything else falls back to the provider default.
         """
         if handler is None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 missing_code,
@@ -971,14 +1100,14 @@ class DownloadService:
         try:
             await handler(job["candidate_id"])
         except Exception as exc:  # noqa: BLE001 - provider boundary
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_job_failed_sync,
                 job["job_id"],
                 str(getattr(exc, "code", default_error)),
                 str(getattr(exc, "public_message", exc)),
             )
             return
-        await asyncio.to_thread(
+        await run_sync(
             self._mark_job_completed_sync, job["job_id"]
         )
         await self._maybe_auto_pack(job["candidate_id"])
@@ -1075,7 +1204,7 @@ class DownloadService:
         candidate_status = (
             "NEEDS_INFO" if code in NEEDS_INFO_DOWNLOAD_ERRORS else "FAILED"
         )
-        with self._database.connection() as connection:
+        with failure_transaction(self._database) as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
                 "error_message = ?, lease_owner = NULL, "
@@ -1090,6 +1219,18 @@ class DownloadService:
                 "WHERE id = ?)",
                 (candidate_status, message, job_id),
             )
+            # A failed push/poll may still own an external transfer. Preserve
+            # the FAILED attempt, but retain the active slot for its cleanup.
+            current = task_snapshot(connection, job_id)
+            if connection.execute(
+                "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED' "
+                "UNION ALL SELECT 1 FROM download_jobs WHERE id = ? AND provider = 'EH_TORRENT' "
+                "AND details_json NOT IN ('', '{}') LIMIT 1",
+                (current["task_id"], job_id),
+            ).fetchone() is not None:
+                self._queue_control._operation(connection, job_id, "cancel", current, {})
+                connection.execute("UPDATE download_jobs SET state = 'STOPPING', updated_at = CURRENT_TIMESTAMP "
+                                   "WHERE id = ?", (job_id,))
 
     def _read_final_state_sync(
         self, job_id: int

@@ -46,6 +46,7 @@ from app.conversion.naming import (
     unique_library_target,
 )
 from app.downloads.queue import STALE_EXECUTION_ERRORS, task_snapshot
+from app.downloads.execution import attempt_path, current_execution, execution_scope, run_sync
 from app.db.database import METADATA_SOURCE_RANK_SQL, Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -148,6 +149,7 @@ class ConversionService:
             default_work_path=work_path,
         )
         self._worker_task: asyncio.Task[None] | None = None
+        self._active_attempts: dict[str, asyncio.Task] = {}
         self._notify = notify
         # Optional because a deployment without ExHentai configured has nothing
         # to enrich from, and because most tests construct this service directly
@@ -362,7 +364,7 @@ class ConversionService:
         """
         fallback = f"candidate-{candidate_id}"
         reserved = frozenset(
-            await asyncio.to_thread(self._existing_cbz_paths_sync, candidate_id)
+            await run_sync(self._existing_cbz_paths_sync, candidate_id)
         )
         # An operator who renamed or moved this book has pinned where it lives,
         # and a repack must land there. Re-rendering the template would move the
@@ -371,7 +373,7 @@ class ConversionService:
         # rename would read as undone *and* duplicated. The pin wins over the
         # template for the same reason `is_locked` wins over a scrape: it is a
         # judgement the operator already made about this one book.
-        pinned = await asyncio.to_thread(
+        pinned = await run_sync(
             self._pinned_library_path_sync, candidate_id
         )
         if pinned is not None:
@@ -408,7 +410,7 @@ class ConversionService:
                     f"归档路径占 {encoded} 字节，超过本机文件系统给这个书库留下的 "
                     f"{limits.relative_max} 字节，请在作品详情页改短归档路径",
                 )
-            return await asyncio.to_thread(
+            return await run_sync(
                 unique_library_target, library_path / pinned, reserved=reserved
             )
         # AI mode replaces the template entirely (proposal §2): the two answer
@@ -423,7 +425,7 @@ class ConversionService:
                 refresh=refresh_ai_path,
             )
             if from_ai is not None:
-                return await asyncio.to_thread(
+                return await run_sync(
                     unique_library_target,
                     library_path / from_ai,
                     reserved=reserved,
@@ -469,7 +471,7 @@ class ConversionService:
         # Appended rather than `with_suffix`, which would read 「Vol. 1」 as a
         # name with a `. 1` extension and publish the book as `Vol.cbz`.
         target = library_path / relative.parent / f"{relative.name}{CBZ_SUFFIX}"
-        return await asyncio.to_thread(
+        return await run_sync(
             unique_library_target, target, reserved=reserved
         )
 
@@ -560,7 +562,7 @@ class ConversionService:
         Exposed because `planned_library_path` needs them and the batch has no
         business reaching into `_fetch_metadata_sync`.
         """
-        return await asyncio.to_thread(self._fetch_metadata_sync, candidate_id)
+        return await run_sync(self._fetch_metadata_sync, candidate_id)
 
     @staticmethod
     def title_of(metadata, candidate_id: int) -> str:
@@ -661,14 +663,14 @@ class ConversionService:
             return
         if await self.path_source() == PATH_SOURCE_AI:
             return
-        metadata = await asyncio.to_thread(
+        metadata = await run_sync(
             self._fetch_metadata_sync, candidate_id
         )
         if _metadata_lookup(metadata, "Series"):
             return
         if await self._series_ai_usable():
             return
-        if not await asyncio.to_thread(self._has_cbz_sync, candidate_id):
+        if not await run_sync(self._has_cbz_sync, candidate_id):
             return
         raise ConversionError(
             "SERIES_AI_UNAVAILABLE",
@@ -750,7 +752,7 @@ class ConversionService:
             # task exists -- see the helper. A first pack is let through so the
             # job can park in 需干预 with the same reason.
             await self._refuse_series_before_enqueue(candidate_id)
-        return await asyncio.to_thread(
+        return await run_sync(
             self._enqueue_sync, candidate_id, refile, refresh_ai_path
         )
 
@@ -923,7 +925,7 @@ class ConversionService:
         它做完了没有」 is to do it again, where marking it failed would ask an
         operator to press retry for a failure that never happened.
         """
-        reclaimed = await asyncio.to_thread(self._reclaim_running_jobs_sync)
+        reclaimed = await run_sync(self._reclaim_running_jobs_sync)
         if reclaimed:
             logging.getLogger(__name__).warning(
                 "conversion_jobs_reclaimed jobs=%d",
@@ -971,9 +973,41 @@ class ConversionService:
                 await asyncio.sleep(1.0)
 
     async def _process_one(self) -> bool:
-        job = await asyncio.to_thread(self._claim_pending_job_sync)
+        job = await run_sync(self._claim_pending_job_sync)
         if job is None:
             return False
+        task = asyncio.create_task(self._execute_attempt(job), name=f"pack-{job['attempt_id']}")
+        self._active_attempts[job["task_id"]] = task
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            return True
+        finally:
+            self._active_attempts.pop(job["task_id"], None)
+
+    async def stop_attempt(self, task_id: str) -> None:
+        task = self._active_attempts.get(task_id)
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _execute_attempt(self, job: dict) -> bool:
+        with execution_scope(self._database.path, job) as execution:
+            try:
+                with self._database.connection() as connection:
+                    execution.check(connection)
+                return await self._process_claimed_job(job)
+            except sqlite3.IntegrityError as exc:
+                if str(exc) not in STALE_EXECUTION_ERRORS:
+                    raise
+                return True
+
+    async def _process_claimed_job(self, job: dict) -> bool:
         self._announce(job["job_id"], job["candidate_id"])
         # Paired claimed / finished records, at the same single point
         # `_announce` uses. `provider` is not logged: this queue only ever holds
@@ -995,7 +1029,7 @@ class ConversionService:
             logger.info("conversion_attempt_commit_rejected", extra=job_context)
             return True
         except Exception as exc:  # noqa: BLE001
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync, job["job_id"], "WORKER_EXCEPTION", str(exc)
             )
             logger.exception(
@@ -1013,7 +1047,7 @@ class ConversionService:
             # and log accordingly so a packaging failure is not recorded as
             # `conversion_job_finished` -- the bug that hid the original
             # complaint behind a misleading "finished" line.
-            final_state, error_code, error_message = await asyncio.to_thread(
+            final_state, error_code, error_message = await run_sync(
                 self._read_final_state_sync, job["job_id"]
             )
             duration_ms = int((time.monotonic() - started) * 1000)
@@ -1069,6 +1103,7 @@ class ConversionService:
             row = connection.execute(
                 "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
+                "AND candidate_id NOT IN (SELECT candidate_id FROM queue_blocked_candidates) "
                 # Same ordering as the download claim: a promoted packaging job
                 # runs first, and within one priority the queue stays FIFO. The
                 # two queues are separate but an operator adjusts priority the
@@ -1117,11 +1152,11 @@ class ConversionService:
             # legitimately be gone.
             await self._handle_refile_job(job)
             return
-        source_artifact = await asyncio.to_thread(
+        source_artifact = await run_sync(
             self._fetch_source_artifact_sync, job["candidate_id"]
         )
         if source_artifact is None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync,
                 job["job_id"],
                 "ARCHIVE_NOT_READY",
@@ -1130,7 +1165,7 @@ class ConversionService:
             return
         source_path = Path(source_artifact["path"])
         if not source_path.exists():
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync,
                 job["job_id"],
                 "ARCHIVE_MISSING",
@@ -1150,7 +1185,7 @@ class ConversionService:
         # when somebody opened 待审核. So an unattended deployment reliably
         # produced exactly the badly-named files nobody was there to notice.
         await self.ensure_metadata(job["candidate_id"])
-        metadata = await asyncio.to_thread(
+        metadata = await run_sync(
             self._fetch_metadata_sync, job["candidate_id"]
         )
         title = (
@@ -1182,7 +1217,7 @@ class ConversionService:
                     "error_code": exc.code,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_waiting_sync,
                 job["job_id"],
                 CONVERSION_STATE_WAITING_PATH,
@@ -1212,17 +1247,17 @@ class ConversionService:
                     "error_message": exc.public_message,
                 },
             )
-            if await asyncio.to_thread(
+            if await run_sync(
                 self._has_cbz_sync, job["candidate_id"]
             ):
-                await asyncio.to_thread(
+                await run_sync(
                     self._mark_failed_sync,
                     job["job_id"],
                     exc.code,
                     exc.public_message,
                 )
             else:
-                await asyncio.to_thread(
+                await run_sync(
                     self._mark_waiting_sync,
                     job["job_id"],
                     CONVERSION_STATE_WAITING_PATH,
@@ -1233,12 +1268,14 @@ class ConversionService:
             return
         image_quality = await self._settings.image_quality()
         processor = await self._build_processor(image_quality)
+        staged_target = (attempt_path(library_target.parent / ".ehbot-staging" / library_target.name)
+                         if current_execution.get() is not None else library_target)
         try:
-            result = await asyncio.to_thread(
+            result = await run_sync(
                 processor.process,
                 source_path,
-                destination=library_target,
-                work_directory=work_path / "conversion",
+                destination=staged_target,
+                work_directory=attempt_path(work_path / "conversion" / "extract").parent,
                 comicinfo_builder=lambda page_count: self._build_comicinfo(
                     metadata, title, page_count, image_quality, series
                 ),
@@ -1253,7 +1290,7 @@ class ConversionService:
                     "error_code": exc.code,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_waiting_sync,
                 job["job_id"],
                 CONVERSION_STATE_WAITING_VOLUMES,
@@ -1271,7 +1308,7 @@ class ConversionService:
                     "error_code": exc.code,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_waiting_sync,
                 job["job_id"],
                 CONVERSION_STATE_WAITING_PASSWORD,
@@ -1294,7 +1331,7 @@ class ConversionService:
                     "error_message": exc.public_message,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync,
                 job["job_id"],
                 exc.code,
@@ -1303,14 +1340,16 @@ class ConversionService:
             return
         if result.password_id is not None:
             await self._settings.mark_password_success(result.password_id)
-        await asyncio.to_thread(
+        if staged_target != library_target:
+            await run_sync(self._publish_attempt_sync, Path(result.cbz_path), library_target)
+        await run_sync(
             self._record_cbz_artifact_sync,
             job["job_id"],
-            result.cbz_path,
+            library_target,
             result.page_count,
             library_path,
         )
-        await asyncio.to_thread(
+        await run_sync(
             self._mark_completed_sync,
             job["job_id"],
             {
@@ -1324,7 +1363,14 @@ class ConversionService:
             },
         )
         if not await self._settings.keep_original():
-            await asyncio.to_thread(self._remove_original_sync, source_path)
+            await run_sync(self._remove_original_sync, source_path)
+
+    def _publish_attempt_sync(self, staged: Path, destination: Path) -> None:
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_execution.get().check(connection)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(destination)
 
     async def _handle_refile_job(self, job: dict) -> None:
         """Recompute one published book's path and move the file there.
@@ -1359,7 +1405,7 @@ class ConversionService:
                     "error_code": exc.code,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_waiting_sync,
                 job["job_id"],
                 CONVERSION_STATE_WAITING_PATH,
@@ -1369,7 +1415,7 @@ class ConversionService:
             )
             return
         if self._refile is None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync,
                 job["job_id"],
                 "REFILE_UNAVAILABLE",
@@ -1385,11 +1431,11 @@ class ConversionService:
                 "conversion_refile_failed",
                 extra={**job_context, "error_code": code},
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._mark_failed_sync, job["job_id"], code, message
             )
             return
-        await asyncio.to_thread(
+        await run_sync(
             self._mark_completed_sync,
             job["job_id"],
             {

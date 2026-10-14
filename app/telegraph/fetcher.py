@@ -100,37 +100,52 @@ class TelegraphFetcher:
 
         semaphore = asyncio.Semaphore(max(1, limits.concurrency))
         results: list[FetchedImage | None] = [None] * len(image_urls)
+        total = 0
 
         async def worker(index: int, url: str) -> None:
+            nonlocal total
             async with semaphore:
-                results[index] = await self._fetch_one(index, url, page_url)
+                item = await self._fetch_one(index, url, page_url)
+                # No await between accounting and the limit check: concurrent
+                # completions cannot each spend the same remaining budget.
+                total += len(item.data)
+                if total > limits.max_total_bytes:
+                    raise TelegraphError("TELEGRAPH_LIMIT_EXCEEDED", "预览页总字节数超过上限")
+                results[index] = item
 
+        tasks = [
+            asyncio.create_task(worker(index, url))
+            for index, url in enumerate(image_urls)
+        ]
         try:
             async with asyncio.timeout(limits.timeout_seconds):
-                await asyncio.gather(
-                    *(
-                        worker(index, url)
-                        for index, url in enumerate(image_urls)
-                    )
-                )
+                await asyncio.gather(*tasks)
         except TimeoutError as exc:
             raise TelegraphError(
                 "TELEGRAPH_LIMIT_EXCEEDED",
                 f"预览页抓取超过 {limits.timeout_seconds:.0f} 秒上限",
             ) from exc
+        finally:
+            # gather propagates a sibling's failure without stopping the other
+            # requests. Do not let a failed source return while they still run.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            cleanup = asyncio.gather(*tasks, return_exceptions=True)
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
-        total = 0
         images: list[FetchedImage] = []
         for item in results:
             if item is None:
                 raise TelegraphError(
                     "TELEGRAPH_IMAGE_FAILED", "有图片未能抓取"
-                )
-            total += len(item.data)
-            if total > limits.max_total_bytes:
-                raise TelegraphError(
-                    "TELEGRAPH_LIMIT_EXCEEDED",
-                    "预览页总字节数超过上限",
                 )
             images.append(item)
         return tuple(images)

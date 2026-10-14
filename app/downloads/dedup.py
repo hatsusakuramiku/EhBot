@@ -22,11 +22,9 @@ Two things worth knowing before editing:
   in-flight guards and the path-inside-the-library check all live there; a
   dedup pass that reimplemented them would be a second definition of "delete a
   work" and would drift.
-* **A loser's in-flight download is cancelled here, not by the operator.** The
-  whole point is one click, and `purge_work` refuses a work whose job is still
-  open. A *packaging* job is different: the worker holds that row and there is
-  no cancel for it, so that one loser is reported as skipped rather than
-  half-deleted -- the next pass clears it once the pack has finished.
+* **Running removal uses the same durable purge as every other client.** It
+  retains independent stop/file operations rather than issuing a preliminary
+  cancel that could race completion or release a slot too early.
 """
 
 from __future__ import annotations
@@ -36,11 +34,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 from app.candidates.models import display_title
-from app.downloads.models import (
-    DOWNLOAD_STATE_CANCELLED,
-    DOWNLOAD_STATE_COMPLETED,
-    PROVIDER_CONVERSION,
-)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -161,25 +154,6 @@ async def build_dedup_plan(database) -> dict:
     }
 
 
-async def _cancel_open_downloads(download_service, candidate_id: int) -> int:
-    """Cancel the loser's unfinished downloads so the purge guard lets it go.
-
-    Terminal rows and the packaging task are left alone: a completed download
-    is not in flight, and a packaging task is not cancellable from here (its
-    worker holds the row -- see the module docstring). Returns how many were
-    cancelled, which the caller reports rather than silently swallowing.
-    """
-    cancelled = 0
-    for job in await download_service.list_jobs_for_candidate(candidate_id):
-        if job.provider == PROVIDER_CONVERSION:
-            continue
-        if job.state in (DOWNLOAD_STATE_COMPLETED, DOWNLOAD_STATE_CANCELLED):
-            continue
-        await download_service.cancel_job(job.job_id)
-        cancelled += 1
-    return cancelled
-
-
 async def apply_dedup(
     database,
     archived_service,
@@ -192,9 +166,8 @@ async def apply_dedup(
 
     A genuine fault is re-raised rather than folded into `skipped`, the same
     rule `apply_downloaded_batch` follows: a broken filesystem must not read as
-    「12 件已移除」. A domain refusal (the packaging task still running) is a
-    skip with its reason attached, because the operator's next action is to run
-    this again rather than to repair anything.
+    「12 件已移除」. A missing candidate is a skip with its reason attached;
+    running producers are stopped by the shared durable removal operation.
     """
     groups = group_candidates(await database.duplicate_gallery_groups())
     removed: list[dict] = []
@@ -203,10 +176,7 @@ async def apply_dedup(
         for loser in group.remove:
             reason = removal_reason(loser, group.keep)
             try:
-                cancelled = await _cancel_open_downloads(
-                    download_service, loser.candidate_id
-                )
-                await archived_service.purge_work(
+                result = await archived_service.purge_work(
                     loser.candidate_id,
                     delete_files=True,
                     operator_name=operator_name,
@@ -231,7 +201,9 @@ async def apply_dedup(
                     "ex_gid": group.ex_gid,
                     "kept_candidate_id": group.keep.candidate_id,
                     "reason": reason,
-                    "cancelled_jobs": cancelled,
+                    "cancelled_jobs": 0,
+                    "removal_id": result["removal_id"],
+                    "cleanup_status": result["cleanup_status"],
                 }
             )
             if announce is not None:

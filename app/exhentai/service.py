@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.downloads.execution import attempt_path, run_sync
+
 import asyncio
 import hashlib
 import json
@@ -84,14 +86,14 @@ class ExHentaiService:
         batch enrichment and the manual-add validation path so the three cannot
         drift into persisting different subsets of the same gallery.
         """
-        await asyncio.to_thread(
+        await run_sync(
             self._persist_metadata_sync, candidate_id, metadata
         )
         if gallery is not None:
-            await asyncio.to_thread(
+            await run_sync(
                 self._persist_torrents_sync, candidate_id, gallery
             )
-            await asyncio.to_thread(
+            await run_sync(
                 self._persist_cover_sync, candidate_id, gallery
             )
         await self._database.re_evaluate_candidate_metadata_rules(
@@ -99,7 +101,7 @@ class ExHentaiService:
         )
 
     async def enrich_candidates_for_review(self, candidates: list) -> int:
-        refs = await asyncio.to_thread(
+        refs = await run_sync(
             self._missing_metadata_refs_sync, candidates
         )
         return await self._enrich_refs(refs)
@@ -122,7 +124,7 @@ class ExHentaiService:
         ids = tuple(int(candidate_id) for candidate_id in candidate_ids)
         if not ids:
             return 0
-        refs = await asyncio.to_thread(self._missing_metadata_ids_sync, ids)
+        refs = await run_sync(self._missing_metadata_ids_sync, ids)
         return await self._enrich_refs(refs)
 
     async def _enrich_refs(self, refs: list[tuple[int, int, str]]) -> int:
@@ -251,6 +253,17 @@ class ExHentaiService:
             )
             return metadata, None
 
+    async def preflight_archive_for_candidate(self, candidate_id: int) -> None:
+        """Check the authenticated gallery without requesting a paid archive."""
+        gid, token = await self._candidate_gid_token(candidate_id)
+        if gid <= 0 or not token or token == "None":
+            raise ExHentaiDownloadError("CANDIDATE_HAS_NO_EX_REFERENCE", "候选没有有效的 ExHentai 画廊链接")
+        credentials = await self._credentials_provider()
+        if credentials is None:
+            raise ExHentaiDownloadError("EXHENTAI_NOT_CONFIG", "ExHentai Cookie 未配置")
+        async with self._http_session() as client:
+            await ExHentaiDownloader(client).fetch_metadata(credentials, gid, token)
+
     async def download_archive_for_candidate(
         self, candidate_id: int
     ) -> dict:
@@ -272,10 +285,11 @@ class ExHentaiService:
                 / "exhentai"
                 / f"gallery-{gid}.zip"
             )
+            destination = attempt_path(destination)
             size = await downloader.download_archive(
                 credentials, archive_url, destination
             )
-        await asyncio.to_thread(
+        await run_sync(
             self._record_artifact_sync,
             candidate_id,
             destination,
@@ -299,7 +313,7 @@ class ExHentaiService:
     async def _candidate_gid_token(
         self, candidate_id: int
     ) -> tuple[int, str]:
-        return await asyncio.to_thread(
+        return await run_sync(
             self._candidate_gid_token_sync, candidate_id
         )
 

@@ -311,8 +311,8 @@ async def apply_candidate_delete_batch(
     """Purge a selection of candidates, records and optionally files.
 
     One candidate at a time, for the reason `apply_review_batch` acts per
-    candidate: one work with a download still in flight must not refuse the
-    other forty-nine. A refused work -- running task, missing row -- is reported
+    candidate: a missing work must not refuse the
+    other forty-nine. A refused work -- missing row -- is reported
     under ``skipped`` with the reason, and re-sending the batch finishes what a
     half-failed first attempt started.
 
@@ -352,6 +352,9 @@ async def apply_candidate_delete_batch(
             {
                 "candidate_id": candidate_id,
                 "removed_jobs": result["removed_jobs"],
+                "removal_id": result["removal_id"],
+                "operation_ids": result["operation_ids"],
+                "cleanup_status": result["cleanup_status"],
                 "deleted_files": list(result["deleted_files"]),
                 "failed_files": list(result["failed_files"]),
             }
@@ -858,7 +861,7 @@ def _translate(exc: Exception) -> Exception:
         # in order to decide between showing an error and refreshing the list.
         status = 404 if str(code).endswith("_NOT_FOUND") else 400
         if code in {"REVISION_CONFLICT", "TASK_SUPERSEDED", "IDEMPOTENCY_CONFLICT", "WORK_SLOT_OCCUPIED",
-                    "OPERATION_IN_PROGRESS", "REMOTE_RECONCILIATION_REQUIRED"}:
+                    "OPERATION_IN_PROGRESS", "REMOTE_RECONCILIATION_REQUIRED", "SOURCE_CHANGED"}:
             status = 409
         return ApiError(str(code), str(message), status_code=status)
     return exc

@@ -15,6 +15,6 @@ __pycache__/
 /TG*
 /AgentHelp/reference_messages/
 
-# pytest junitxml / local build output
+# Local build output, test reports and reproduction scripts
 build/
 /.scratch/

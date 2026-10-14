@@ -533,7 +533,7 @@ async def delete_candidate(
         )
     operator = request.session.get("username", "admin")
     try:
-        await deps.archived_work_service(request).purge_work(
+        result = await deps.archived_work_service(request).purge_work(
             candidate_id,
             delete_files=mode == "delete-files",
             operator_name=operator,
@@ -557,6 +557,8 @@ async def delete_candidate(
     target = deps.local_return_to(return_to)
     if not target or target.startswith(f"/works/{candidate_id}"):
         target = "/candidates"
+    if result["cleanup_status"] == "PENDING":
+        target = _with_message(target, "notice", "记录已删除，后台正在确认停止与处理文件")
     return RedirectResponse(target, status_code=303)
 
 

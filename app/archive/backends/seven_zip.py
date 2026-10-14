@@ -4,6 +4,7 @@ import logging
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from app.archive.errors import (
@@ -20,6 +21,7 @@ from app.archive.models import (
 )
 from app.archive.safety import normalize_member_name
 from app.archive.toolchain import installed_executable
+from app.archive.processes import check_execution, managed_process
 
 
 HEADER_SIZE = 16
@@ -92,17 +94,27 @@ class SevenZipBackend:
     ) -> tuple[int, str]:
         executable = self._executable()
         try:
-            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            with managed_process(
                 [executable, *arguments],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=self._profile.timeout_seconds,
-                check=False,
-                shell=False,
                 cwd=str(working_directory) if working_directory else None,
-            )
+            ) as process:
+                deadline = time.monotonic() + self._profile.timeout_seconds
+                while True:
+                    check_execution()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired("archive tool", self._profile.timeout_seconds)
+                    try:
+                        stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                        check_execution()
+                        return process.returncode, f"{stdout}\n{stderr}"
+                    except subprocess.TimeoutExpired:
+                        continue
         except subprocess.TimeoutExpired as exc:
             raise ArchiveError(
                 "ARCHIVE_TOOL_TIMEOUT",
@@ -112,7 +124,6 @@ class SevenZipBackend:
             raise ArchiveToolUnavailable(
                 f"\u65e0\u6cd5\u542f\u52a8\u5f52\u6863\u5de5\u5177: {exc}"
             ) from exc
-        return completed.returncode, f"{completed.stdout}\n{completed.stderr}"
 
     def _invoke(
         self, arguments: tuple[str, ...], working_directory: Path | None = None
@@ -203,27 +214,37 @@ class SevenZipBackend:
             str(volumes[0]),
             member.name,
         ]
+        header = []
+        reader = None
         try:
-            process = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            with managed_process(
                 arguments,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                shell=False,
-            )
+            ) as process:
+                def read_header():
+                    try:
+                        header.append(process.stdout.read(HEADER_SIZE) or b"")
+                    except OSError:
+                        header.append(b"")
+                reader = threading.Thread(target=read_header)
+                reader.start()
+                deadline = time.monotonic() + HEADER_PROBE_TIMEOUT
+                while reader.is_alive():
+                    check_execution()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return b""
+                    reader.join(timeout=min(0.2, remaining))
+                check_execution()
+                return header[0]
         except OSError:
             return b""
-        killer = threading.Timer(HEADER_PROBE_TIMEOUT, process.kill)
-        killer.start()
-        try:
-            return process.stdout.read(HEADER_SIZE) or b""
         finally:
-            killer.cancel()
-            process.stdout.close()
-            try:
-                process.kill()
-            except OSError:  # pragma: no cover - already gone
-                pass
-            process.wait()
+            # The managed context has stopped the whole tree and closed pipes,
+            # so the bounded reader can now be joined without an orphan writer.
+            if reader is not None:
+                reader.join()
 
     def test_password(
         self, volumes: tuple[Path, ...], password: str | None

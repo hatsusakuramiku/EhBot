@@ -7040,3 +7040,55 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 - 原 R89=7b8b297 和用户指定清理提交 cb69d72 保留，不改写既有 Git 历史；本次补漏本地提交标题 `fix(queue): close R89 history and command arbitration gaps`，最终 SHA 以 git log 为准，无 push/发布/部署。
 
 **核验结论。** R89 / P2 已按原阶段门槛完整验收，需求→实现→正式回归→迁移→文档/接手记录均有当前证据。下一阶段仍为 P3：实际停止/切源/运行移除、收束、远端核实与最小 staging；STOPPING 当前只持久受理、继续保留槽，不能将本次修复说成下载已经物理终止。
+
+## P3 / R90 实施记录（进行中，2026-10-14，尚未阶段验收）
+
+**授权与现场。** 持续目标为 P3–P12 全部完成；未缩为本切片。前序 HEAD=6b728ba，P1/P2 不重做；本记录对应未提交工作区，不表示 R90 完成。源码版本仍 rc5，029_queue_remote_resources 为本次未提交新迁移，既有 027/028 不改写；不读真实 private、不迁真实库、不调用真实供应商、不发布。
+
+**已有实现。** execution.py 的 execution_scope/attempt_path/run_sync；Database.connection 写事务提交身份屏障；下载/打包受管子任务与 stop_attempt；QueueControl.pending_operations/finish_operation/error、DownloadService.process_operations/后台操作处理；torrent 受管 poller、资源 push 意图/归属 tag/远端实例/停止查回、Malformed status 与 delete HTTP 校验。远端未知保持 STOPPING/槽，SHARED 只解除项目关联。失败尝试先保存原 FAILED 事实，再同事务登记收尾并保槽。TG/EH/Telegraph/torrent 原档按 attempt 隔离，打包先在 library 同挂载隐藏暂存目录产生 CBZ；取消时实际线程退出但不能晚替换旧 CBZ。仍不是 P8 的可恢复发布完整方案。
+
+**正式回归与失败记录。** 新增 test_telegraph_cancellation（3）、test_execution_identity（5）、test_queue_stopping（4）、test_remote_stop_confirmation（7）、test_pack_cancellation（1），合计 20 个新合同。整库 **2161 collected，仅收集**（.scratch/p3-collect.txt），最近已验收基线仍 R89 的 2141/460，最近整库全绿仍 R81–R84 的 2014。
+
+- preview 先红 1/3，HTTP sibling 未取消；修复后新旧 Telegraph 单元 40/0（p3-preview.xml）。执行/旧队列/下载/Telegraph 68/0（p3-execution.xml）；停止+执行+队列 37/0（p3-stopping.xml）；远端专项6/0；远端+旧 torrent/database 112/0（p3-remote-safety.xml）；真实打包取消1/0（p3-pack-stop.xml）。计数有重叠，不可相加冒充不同用例或整库通过。
+- 旧停止做种测试预置外部种子而要求删除：改为通过真实推送取得 tag 后校验自有资源删除；产品继续保护外部种子。最初失败保存在控制台，p3-remote-safety.xml 是修正后复验。
+- 第一轮26前的25文件完整运行562条，9失败：7个由本轮打包产物登记误传str给Path接口导致，2个torrent日志夹具直接插WAITING_TORRENT缺真实attempt。改回Path并使夹具经历PENDING→DOWNLOADING→WAITING_TORRENT；archive/remote/logging/identity45条定向通过（p3-core-fixes.xml）。首次562结果留于p3-core-final.xml。
+- 重跑26文件563条、3失败（p3-core-verified.xml，331.443秒）：旧027升级夹具调用新服务去查029表；两个种子失败夹具仍假定FAILED立即可重试。改为旧schema直接SQL复现、失败历史加STOPPING保槽并核实停止后重试。随后119条复验还有1个实际遗漏：027的CANCELLED守卫禁止了有持久retry意图的STOPPING。029重建该守卫，仅允许当前task/generation的未结束retry/restart意图；旧完成仍被拒绝。同时保存操作历史后测试明确选择retry行，不误读较早cancel行。
+- 最后**9文件完整153/0**（p3-latest-contract.xml，31.598秒）：queue_control/torrent_workflow/remote_stop_confirmation/torrent/torrent_logging/pack_cancellation/queue_stopping/execution_identity/database。按最新结果覆盖26文件中相同node，得到**564个不同现存用例最终通过、0未解决失败**；不是26文件在最终源码上同一次全跑，更不是整库全绿。加种成功但未查到归属tag的状态仍为INTENDED/UNKNOWN，不能将请求已受理当作已注册；poll观察到tag后才能记REGISTERED。新专项1条覆盖此窗口。
+- 测试仅临时库和受控HTTP，XML保留已忽略.scratch，临时库/产物目录完成后删除。两次选测误用不存在路径（test_torrent_client、integration/test_archived_works），未执行用例，随后枚举实际文件并核验数量再运行；一次Python -c引号被PowerShell吃掉未写文件，改用UTF8 .NET替换。语法、diff --check、CodeGraph sync 已通过；没有正在运行的测试，未提交。
+
+**下一步精确接续。** P3 尚待持久运行移除（先撤销执行并从用户列表移除、独立收尾/文件清理操作保留）、移除后重加新身份/槽协调、旧schema种子资源失败保槽、累计预览限额早收束、文件清理/停止断点恢复与029旧库/冲突迁移回归、六个原始触发条件逐项核验。运行移除依据已批准方案§6–§8；不能继续以“请先取消再删”作为最终行为，也不能先改终态删除而丢掉停止资源。P8接可恢复发布与精确artifact依赖；P9接worker_session/心跳/预算。完成P3后才提升版本、同步R90完整阶段基线并作一阶段本地提交；P4–P12保持待实现。
+
+**用户指定临时文件清理（2026-10-14）。** `.scratch/` 仅放本地复现脚本与测试输出，现有 `.gitignore` 的 `/.scratch/` 已生效，目录内无 Git 跟踪文件；本次明确忽略项注释并删除 39 份过时报告。保留两个审阅复现脚本用于后续逐项核验，以及 P3 的 core-verified/last-fixes/latest-contract/collect、R89 的 audit-final/audit-collect 六份验证证据。此前条目中其他 XML/collect 文件名是历史执行记录，对应本地输出已清理。未改应用源码、运行正式测试或完成新阶段；无 README/USAGE 文档变更，因为用户可见功能不变。P3 仍进行中。
+
+**P3 运行移除、暂存清单与限额切片（2026-10-14，继续进行中，未提交）。**
+
+- 在尚未提交的 029 中加入 queue_removals 与 queue_attempt_paths：移除事务先保存所有当前执行/远端细节、文件和路径钉清单，再删 job/artifact；彻底删除还删除候选及审核记录。原 queue_tasks/attempts/operations 独立保留；任务 REMOVED 只表示业务行移除，不表示物理停止。独立 PENDING removal 按候选、画廊 ID 或规范磁链 hash 继续预留作品；重新入队使用新 UUID，下载/打包领取查询和 INSERT/UPDATE 最终守卫均拒绝抢跑。27/28 冻结，真实库未迁移。
+- QueueControl.finish_operation 的 remove 分支不再依赖已删 job；DownloadService 确认本地下载/打包和远端停止后完成停止操作，再调用 ArchivedWorkService.process_removals。已有切源操作被移除接管并保存 superseded_action，不会在停止后自动开启 B。远端资源按 task_id 过滤，避免整数 job_id 复用误查后继；旧种子只有 details/hash 而没有新资源登记时，失败仍保留 STOPPING/槽和原 FAILED attempt。
+- attempt_path 在产生字节之前持久登记隔离目录并核对身份。确认生产者退出后，清理已登记目录中的未发布残片/晚生成文件；默认保留文件清单中的已登记原档和 CBZ，明确删文件时也处理这些文件。逐项检查当前受管目录、符号链接/目录联接、其他 artifact 引用，不使用无边界递归删除。清理失败保持 PENDING 并可查询/重试；重启重新读取持久清单。彻底删除后的收尾不触碰复用整数 candidate_id 的新路径钉。
+- 共享 API 新增 GET /api/v1/removals/{removal_id}（Cookie/Bearer 鉴权、未知 ID 404），业务候选删后仍可查停止错误和文件结果。移除响应透传 removal_id/operation_ids/cleanup_status，task 查询新增 removals。Web 提示后台收尾，去重直接使用同一持久 purge，不再先取消再删除；兼容 cancelled_jobs=0 表示没有独立预先取消，实际停止结果看移除操作。
+- Telegraph 累计字节预算在每张图片完成时原子累加，超限立即取消并等待其他请求清理，不再等所有图片完成后才判定。此检查针对已完成图片的累计字节；不声称改成逐网络块的流式硬预算。
+- 新增 test_running_removal 的 11 个合同，真实线程打包测试扩为 cancel/purge 两种（净 +1），累计预算 HTTP 合同 +1；本轮净 +13，P3 累计 +33，整库 **2174 collected，仅收集**（p3-removal-collect.txt）。覆盖运行删除/晚写回滚、整数 ID 复用、新 UUID/同画廊或 hash 等待、切源被移除接管、远端未停保文件/预留、失败清理恢复、共享文件拒删、直接认领/插入守卫、HTTP 查询、028→029 重复初始化、旧种子失败保槽、默认保留产物/清残片及新路径钉保护。
+- 最终 **12 文件完整 204 passed / 0 failed / 0 skipped，25.935 秒**（p3-final-contract.xml）：running_removal、pack_cancellation、queue_control、database、remote_stop_confirmation、queue_stopping、execution_identity、archived_works、telegraph_cancellation、telegraph、telegraph_workflow、dedup。Web/单元另外 **5 文件完整 134/0，126.405 秒**（p3-removal-web-fixed.xml）：downloaded_web、work_detail_web、dedup、downloaded_api、review_batch；相关 API 后验 **3/0**（p3-removal-api-followup.xml）。计数有重叠，不相加冒充整库执行。此前 8 文件 138/0 和 manifest 203/0 已由最终核心复验取代。
+- 首轮移除 74 条有 4 个旧禁止移除断言失败；按新契约替换。第一次新合同误用了不存在的 get_job，失败后测试生产者等待清理导致测试停滞；中断确已运行的测试会话，改用实际 observed/task 入口并给测试清理屏障超时。一次共享文件夹具在 CANCELLED 后插 artifact 被守卫拒绝，改为真实完成状态。旧 027 升级夹具不能调用新 claim/view 查询，改用当时 schema 的 SQL 重现，再升级使用当前服务。旧远端 FAILED 重试夹具先确认持久停止，保留原失败历史。
+- Web/API 初验 **175 条 5 失败，275.231 秒**（p3-removal-web.xml）：2 个由本轮提示代码将打包整数返回误当 dict 导致，已按 action 分支修复；1 个 downloaded Library 夹具没有独立审批事实，补明确 fixture 审批；1 个去重预先取消产生未完成停止而旧审计仍要求文件已删，改为直接持久 purge，并用 PAUSED 夹具隔离 worker 竞争；1 个旧运行禁止删除断言按新行为替换。134/0 与 API 后验及最终 204/0 覆盖修正，无未解决的本轮失败。一次文档补丁多次改同一行失败，合并为单行差异后成功。
+- README/USAGE/EHBot/REALTIME_API/AGENTS/PHASES/计划/清单/findings 同步。compileall、collect、CodeGraph sync、diff --check 均作为收尾检查；未执行整库/真实供应商/发布部署。已清理本轮 16 个临时测试目录、10 份被最终验证取代的报告；保留最终合同、Web 初次失败/复验、API 后验、预算与 collect 证据，均在已忽略 .scratch。P3 未完成，版本仍 rc5，未提交、不提升版本。
+
+**下一步接手。** 持续目标仍是 P3–P12 全部完成。P3 先核验切源 B 的可用性/参数预检（不能撤销 A 才发现 B 不可用）、refile 与 7-Zip 全路径停止/文件提交、完整恢复/029 迁移冲突及六项原始触发正式验收。现有运行移除/暂存登记与清理/累计预览限额不要重写。重点入口 ArchivedWorkService.refile_work/_refile_sync、ConversionService 的 refile/processor 路径、DownloadService.command/_run_operations/reclaim、TorrentService 的资源恢复；两个原始审阅脚本仍留在 .scratch 供逐项映射，不把旧脚本退出码当当前正式验收。完整核验 P3 后才更新 R90 版本/基线并作本地阶段提交；P4–P12 未实施，目标保持 active。
+
+**临时输出清理补记（2026-10-14）。** 按用户要求再次核对 `.scratch`：`/.scratch/` 忽略规则有效，无 Git 跟踪文件。删除剩余 12 份 XML/TXT 测试输出，仅保留后续 P3 验收仍需要的 `download_queue_review_repro.py`、`project_review_repro.py`。清理前核对目录及每个目标均为本 checkout 内的普通文件、无链接，并读取 XML 汇总核对既有记录：R89 最终 460/0、P3 最终核心 204/0、Web 复验 134/0、API 后验 3/0；初验失败也仍保留在上述文字记录中。此前条目中的 XML/collect 文件名为历史执行记录，原始本地输出现已删除。处理计划接手表同步；本次无产品功能或 README/USAGE 文档变更，无新增测试执行、版本提升或阶段验收。
+
+**测试会话结束后清理（2026-10-14）。** 两个遗留测试会话均已退出，先读取 XML 并将准确结果写入 `R90_COMPLETION_AUDIT.md`：旧模块的 29 文件验收 643/0，共享种子拒绝修改后的三文件回归 47 条 / 11 失败，均位于 torrent workflow，尚待处理，P3 不视为验收通过。随后核对本 checkout 内 `.scratch` 绝对路径、每个目标及目录子项无链接，删除 13 个 pytest 临时目录和 15 份 XML/TXT 输出；仅保留两个后续审阅仍有用途的原始复现脚本。`git check-ignore` 确认二者均被忽略，`git ls-files .scratch` 为空。后续测试输出同样在进程退出、结果记入进度后清理，不累计保留临时数据库或产物。无产品功能与 README/USAGE 变更，无新增测试执行、版本提升或阶段提交；下一步继续处理共享种子拒绝合同及 P3 验收。
+
+## R90 — P3 真实停止、切源预检与独立运行移除（2026-10-14）
+
+- **状态：complete。** 源码 `0.3.0rc6` / schema `029`，P3 已验收，本地阶段提交见 git log；整体 P3–P12 目标保持 active，下一阶段 P4。027/028 原迁移不改写，029 交付后冻结。未升级真实数据库、未 push/发布/部署。
+- DownloadService / ConversionService 按 task/attempt/generation 管理真实执行，停止 await 请求与线程退出；7-Zip 普通调用/成员头探测的 POSIX 进程组及 Windows Job 均受管。CBZ 按尝试暂存、发布时核对执行身份，refile 在短写事务内核对、移动、登记 artifact/pin，SQL 失败先恢复文件再释放写锁。
+- 切源前真实只读预检 B，预检失败保留 A；回执先查、最终受理重验 revision 与目标引用，变化返回 409 SOURCE_CHANGED。远端推送先持久意图并等待 HTTP 结果，查回归属、删除后确认消失才完成 operation；未知或实例/归属变化保槽。推送接受至 park 的租约恢复先 STOPPING/restart 核实，不重复 add，旧 SQL 回收写者同样被 029 守卫拒绝。
+- 新共享种子拒绝附着：预存资源与 add 409 均返回 TORRENT_RESOURCE_SHARED，不删除外部种子；历史共享只解除关联。轮询必须核对本 attempt 的实例与标签，未知/改变时不能写进度、登记产物或启 B。新增三种实际 HTTP 归属竞态合同验证上述规则。
+- 运行移除立即删除业务行并保存独立停止/清理清单；操作及 removal 查询在候选删除后仍可用。暂存目录在输出前登记，默认保留已登记产物而清理残片；重加新 UUID 在同作品旧资源/文件清理未完成前等待，旧整数 ID 复用不能使晚结果或旧 pin 清理命中新任务。失败清理与停止按持久记录恢复。
+- 六项原审阅触发的真实回归映射及全部 P3 要求见 `R90_COMPLETION_AUDIT.md`。EH/torrent 的晚写入调用真实 provider 持久化入口，不用假 completion 代替。029 临时库覆盖升级、重复初始化、冲突整笔回滚及修正后重试。
+- **最终验证：2213 collected（仅收集，较 R89 净增 72）。** 29 文件完整运行 **625 passed / 0 failed / 0 skipped，290.819 秒**（p3-release-contract.xml，名称不代表发布）；最后轮询归属检查修改后三文件完整复验 **51/0，24.529 秒**（p3-owned-poll.xml）。以后一组覆盖同节点前一组，**628 个不同用例最终通过**；不宣称最终源码单次全跑 29 文件或整库全绿。真实 7-Zip 27 条包含其中。
+- 29 文件清单：integration 的 source_preflight、queue_control、queue_stopping、remote_stop_confirmation、running_removal、torrent_workflow、refile_cancellation、archive_process_cancellation、provider_late_results、execution_identity、pack_cancellation、database、downloaded_web、work_detail_web、downloads、telegraph_workflow、seven_zip_real、downloaded_api_actions、activity_web、archive_metadata、archive_workflow；unit 的 archived_works、dedup、torrent_logging、telegraph_cancellation、torrent、archive_processing、rearchive、review_batch。最后三文件为 remote_stop_confirmation、torrent_workflow、torrent_logging。运行命令均为项目 Python / `-m pytest`、明确文件、临时 basetemp、JUnit、`--tb=short -q`，PYTHONPATH 指向本 checkout。
+- 早期共享拒绝复验 47 条 / 11 失败：旧受管夹具预先 seed 为外部已有资源，重复推送仍断言附着；修正状态时机，明确 add 后产生受管状态，并更新拒绝合同；48/0 后再补轮询归属检查，51/0 验证全部修正。一次 Python -c 引号丢失未改文件，改 stdin 执行；一次补丁因第三个 Web seed 形状不同整批拒绝，核对原文后修正，无部分写入。无未解决 P3 失败。
+- README、USAGE、REALTIME_API、EHBot、PHASES、AGENTS 基线、实施计划、task_plan、findings 同步；compileall、diff --check、CodeGraph sync 通过。测试结果转入本条与 audit 后，全部临时输出/目录清理，只保留两个原始审阅复现脚本；固定校验的 managed 7-Zip 保留于已忽略 data/tools。
+- **后续边界：** P4 独立账号/凭据版本、掩码查看编辑与共享 API；P5 unique_key；P6 多 TG；P7 EH 池；P8 可恢复发布/精确产物依赖；P9 心跳/快速重启与预算；P10 全域 API/草稿并发；P11 其余审阅缺陷；P12 最终合同/本地联调。没有真实 TG/EH/qBittorrent、代理、其他客户端或正式部署验收，不能由 P3 定向测试代替。

@@ -110,7 +110,7 @@ class QBittorrentClient:
             return ""
         return str(body.get("save_path") or "") if isinstance(body, dict) else ""
 
-    async def add_torrent(self, payload: bytes, digest: str) -> bool:
+    async def add_torrent(self, payload: bytes, digest: str, *, ownership_tag: str = "") -> bool:
         """Hand a verified `.torrent` to the client.
 
         Returns True when the client already held this infohash. That is not an
@@ -127,6 +127,7 @@ class QBittorrentClient:
         await self.login()
         data = {
             "savepath": self._config.save_path,
+            "tags": ownership_tag,
             "category": self._config.category,
             "paused": "false",
             "autoTMM": "false",
@@ -160,7 +161,7 @@ class QBittorrentClient:
             )
         return self._check_add_body(response)
 
-    async def add_magnet(self, magnet_url: str) -> bool:
+    async def add_magnet(self, magnet_url: str, *, ownership_tag: str = "") -> bool:
         """Hand a magnet link to the client via the `urls` form field.
 
         qBittorrent resolves the torrent (name, files) from the hash/DHT
@@ -176,6 +177,7 @@ class QBittorrentClient:
             "paused": "false",
             "autoTMM": "false",
             "urls": magnet_url,
+            "tags": ownership_tag,
         }
         response = await self._request(
             "POST",
@@ -252,11 +254,13 @@ class QBittorrentClient:
                 "TORRENT_CLIENT_UNREACHABLE",
                 "qBittorrent 返回了无法解析的内容",
             ) from exc
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list):
+            raise TorrentError("TORRENT_CLIENT_UNREACHABLE", "qBittorrent 状态响应不是任务列表")
+        if not rows:
             return None
         row = rows[0]
         if not isinstance(row, dict):
-            return None
+            raise TorrentError("TORRENT_CLIENT_UNREACHABLE", "qBittorrent 状态响应包含无效任务")
         eta = row.get("eta")
         return TorrentStatus(
             hash=str(row.get("hash") or digest).lower(),
@@ -273,11 +277,12 @@ class QBittorrentClient:
             ),
             content_path=str(row.get("content_path") or ""),
             size=int(row.get("size") or 0),
+            tags=tuple(tag.strip() for tag in str(row.get("tags") or "").split(",") if tag.strip()),
         )
 
     async def delete(self, digest: str, *, delete_files: bool) -> None:
         await self.login()
-        await self._request(
+        response = await self._request(
             "POST",
             "/torrents/delete",
             data={
@@ -285,6 +290,8 @@ class QBittorrentClient:
                 "deleteFiles": "true" if delete_files else "false",
             },
         )
+        if not response.is_success:
+            raise TorrentError("TORRENT_STOP_REJECTED", "qBittorrent 未受理停止请求")
 
 
 __all__ = ["API_PREFIX", "QBittorrentClient"]

@@ -181,7 +181,9 @@ P2 / schema 028（任务契约从 027 引入）：`api.job_action`、`api.set_pr
 回执保留七天，尚未结束的操作回执不清理；超出保留期先核对任务现状，再决定是否新发命令。
 任务详情的已结束 attempt 保留执行事实；后续远端核实的状态在 task/operation 中表达，不将旧失败改成 STOPPING 或抹掉旧错误。
 
-P2 的 STOPPING 会保留作品槽；P3 才执行并核实停止、切源及远端重试。旧客户端缺少前置条件直接拒绝，不自动采用服务器最新版本。
+STOPPING 保留作品槽。已验收 P3 / schema 029 接入本地请求/线程/进程树收束与远端推送查回/归属核实；确认停止后才完成 operation 并入队切源/重试目标。推送结果未知、失联或实例/归属改变时 operation 保持未完成并记录 error_code；新共享种子拒绝附着，轮询核对原实例和本 attempt 标签后才写进度/产物。运行移除立即删除业务行，返回 `removal_id`、`operation_ids`、`cleanup_status`，独立收尾继续保留。`GET /api/v1/removals/{removal_id}` 复用 Cookie/Bearer 鉴权，返回状态、关联任务、停止错误与 deleted_files/failed_files；业务候选已删除时仍可查。任务详情新增 `removals`，其 PENDING 表示独立作品预留尚未释放，不能用任务的 REMOVED 推断下载已停止。默认保留文件，同作品新任务排队等待停止和文件清理确认。完整发布崩溃恢复、心跳/预算按 P8/P9 接续。旧客户端缺少前置条件直接拒绝，不自动采用服务器最新版本。
+
+`switch-source` 先读取管理员作用域回执，再在数据库写事务外验证目标凭据/链接与页面可读性；不下载目标原档或图片。最终受理事务再次核对 task/revision 和目标引用，目标信息变化返回 `409 SOURCE_CHANGED`，拒绝时旧任务不撤销。相同命令已有回执时跳过预检，即使目标之后失效仍返回原结果；HTTP、Web 表单、批量与 WS 都走相同命令入口。预检通过不表示实际切换完成，仍按 operation 等待旧来源停止。
 
 Python：`python -m pytest tests/integration/test_realtime.py`（使用项目环境）。
 DOM 行为：在临时目录安装 `jsdom` 后运行 `node tests/web/realtime.cjs <jsdom 绝对路径>`。

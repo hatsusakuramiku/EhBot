@@ -71,13 +71,15 @@ TORRENT_PAYLOAD, TORRENT_DIGEST = build_torrent()
 class FakeClient:
     """A qBittorrent stand-in that records what it was told to do."""
 
-    def __init__(self, *, content_path: str = "", size: int = 1234) -> None:
+    def __init__(self, *, content_path: str = "", size: int = 1234,
+                 on_add_status: dict | None = None) -> None:
         self.added: list[bytes] = []
         self.deleted: list[tuple[str, bool]] = []
         self.logins = 0
         self.rows: list[dict] = []
         self.content_path = content_path
         self.size = size
+        self.on_add_status = on_add_status
         self.add_status = 200
         #: Set to answer `torrents/add` the way a modern client does for a hash
         #: it already holds.
@@ -94,6 +96,7 @@ class FakeClient:
             "eta": 600,
             "content_path": self.content_path,
             "size": self.size,
+            "tags": getattr(self, "ownership_tag", ""),
         }
         row.update(overrides)
         self.rows = [row]
@@ -108,8 +111,12 @@ class FakeClient:
                 return httpx.Response(200, text="v4.6.2")
             if path.endswith("/torrents/add"):
                 self.added.append(request.content)
+                tag = re.search(rb'name="tags"\r\n\r\n([^\r\n]+)', request.content)
+                self.ownership_tag = tag.group(1).decode() if tag else ""
                 if self.add_conflicts:
                     return httpx.Response(409, text="Conflict")
+                if self.add_status == 200 and self.on_add_status is not None:
+                    self.seed_status(**self.on_add_status)
                 return httpx.Response(self.add_status, text="Ok.")
             if path.endswith("/torrents/info"):
                 return httpx.Response(200, json=self.rows)
@@ -123,6 +130,7 @@ class FakeClient:
                         form.get("deleteFiles") == "true",
                     )
                 )
+                self.rows = []
                 return httpx.Response(200, text="Ok.")
             return httpx.Response(404)
 
@@ -255,6 +263,7 @@ def build_download_service(
         torrent_push=torrent.push_for_candidate,
         torrent_abandon=torrent.abandon,
         telegraph_download=lambda candidate_id: asyncio.sleep(0),
+        telegraph_preflight=lambda candidate_id: asyncio.sleep(0),
     )
 
 
@@ -388,11 +397,11 @@ async def test_polling_records_progress_without_advancing_the_job(
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status()
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status()
 
     assert await torrent.poll_once() == 1
 
@@ -411,11 +420,11 @@ async def test_a_stalled_torrent_waits_and_reports_how_long(
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient()
-    fake.seed_status(state="stalledDL", num_seeds=0, progress=0.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="stalledDL", num_seeds=0, progress=0.0)
 
     await torrent.poll_once()
     # Backdate the stall so the elapsed-time reporting is observable.
@@ -443,11 +452,11 @@ async def test_a_stall_clears_once_a_seeder_appears(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient()
-    fake.seed_status(state="stalledDL", num_seeds=0, progress=0.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="stalledDL", num_seeds=0, progress=0.0)
     await torrent.poll_once()
 
     fake.seed_status(state="downloading", num_seeds=3, progress=0.4)
@@ -469,11 +478,11 @@ async def test_a_finished_single_archive_is_delivered_by_hard_link(
         content_path="/downloads/ehbot/Book.zip",
         size=source.stat().st_size,
     )
-    fake.seed_status(state="uploading", progress=1.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="uploading", progress=1.0)
 
     await torrent.poll_once()
 
@@ -505,11 +514,11 @@ async def test_the_recorded_digest_matches_the_delivered_file(
     candidate_id = await seed_torrent_candidate(database)
     source = write_seed_archive(tmp_path)
     fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status(state="stalledUP", progress=1.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="stalledUP", progress=1.0)
 
     await torrent.poll_once()
 
@@ -533,11 +542,11 @@ async def test_a_finished_directory_is_packed_in_natural_order(
     for index in (10, 9, 1):
         (folder / f"page-{index}.jpg").write_bytes(JPEG)
     fake = FakeClient(content_path="/downloads/ehbot/Book")
-    fake.seed_status(state="uploading", progress=1.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="uploading", progress=1.0)
 
     await torrent.poll_once()
 
@@ -557,13 +566,16 @@ async def test_seeding_is_dropped_only_when_the_operator_asked(
     candidate_id = await seed_torrent_candidate(database)
     write_seed_archive(tmp_path)
     fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status(state="uploading", progress=1.0)
     torrent = build_torrent_service(
         database, tmp_path, fake, keep_seeding=False
     )
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+
+    # The transfer must be created by this attempt, rather than pre-existing
+    # in another application's client. Confirm its actual ownership tag.
+    fake.seed_status(state="uploading", progress=1.0, tags=fake.ownership_tag)
 
     await torrent.poll_once()
 
@@ -585,12 +597,21 @@ async def test_a_hash_that_vanished_from_the_client_is_retryable(
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
 
+    fake.seed_status()
+    await torrent.poll_once()  # Confirm registration before the transfer disappears.
+    fake.rows = []
     await torrent.poll_once()
 
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
-    assert jobs[0].state == "FAILED"
+    assert jobs[0].state == "STOPPING"
     assert jobs[0].error_code == "TORRENT_VANISHED"
-    assert jobs[0].is_retryable is True
+    assert jobs[0].is_retryable is False
+    task = await downloads.get_task(jobs[0].task_id)
+    assert task["attempts"][0]["status"] == "FAILED"
+    await torrent.stop_for_operation({"task_id": jobs[0].task_id, "legacy_job_id": jobs[0].job_id,
+                                      "resource_json": "{}"})
+    operation = downloads._queue_control.pending_operations()[0]
+    downloads._queue_control.finish_operation(operation)
 
     # A retry must persist reconciliation before any re-push. P3 executes
     # this operation only after the previous remote handle is confirmed stopped.
@@ -599,7 +620,7 @@ async def test_a_hash_that_vanished_from_the_client_is_retryable(
     assert state == "STOPPING"
     assert len(fake.added) == 1
     with database.connection() as connection:
-        assert connection.execute("SELECT action, status FROM queue_operations").fetchone() == ('retry', 'PENDING')
+        assert connection.execute("SELECT action, status FROM queue_operations WHERE action = 'retry'").fetchone() == ('retry', 'PENDING')
 
 
 @pytest.mark.asyncio
@@ -607,17 +628,19 @@ async def test_a_client_error_state_fails_the_job(tmp_path: Path) -> None:
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient()
-    fake.seed_status(state="missingFiles")
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="missingFiles")
 
     await torrent.poll_once()
 
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
     assert jobs[0].error_code == "TORRENT_PUSH_REJECTED"
-    assert jobs[0].is_retryable is True
+    assert jobs[0].state == "STOPPING" and jobs[0].is_retryable is False
+    task = await downloads.get_task(jobs[0].task_id)
+    assert task["attempts"][0]["status"] == "FAILED"
 
 
 @pytest.mark.asyncio
@@ -651,11 +674,11 @@ async def test_switching_to_the_preview_source_removes_the_torrent(
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient()
-    fake.seed_status(state="stalledDL", num_seeds=0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="stalledDL", num_seeds=0)
     torrent_job = (await downloads.list_jobs_for_candidate(candidate_id))[0]
 
     await downloads.switch_source(torrent_job.job_id, "TELEGRAPH")
@@ -731,11 +754,11 @@ async def test_the_torrent_archive_converts_to_a_cbz_with_source_grade(
             (candidate_id,),
         )
     fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status(state="uploading", progress=1.0)
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
     await downloads._process_one()  # noqa: SLF001
+    fake.seed_status(state="uploading", progress=1.0)
     await torrent.poll_once()
 
     conversion = ConversionService(
@@ -845,8 +868,7 @@ def test_the_queue_shows_progress_and_offers_the_manual_actions(
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_torrent_candidate(database))
     (tmp_path / "seed").mkdir(parents=True, exist_ok=True)
-    fake = FakeClient()
-    fake.seed_status(state="stalledDL", num_seeds=0, progress=0.42)
+    fake = FakeClient(on_add_status={"state": "stalledDL", "num_seeds": 0, "progress": 0.42})
     store_exhentai_cookies(settings)
     app = create_app(
         settings,
@@ -919,8 +941,8 @@ def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_torrent_candidate(database))
     write_seed_archive(tmp_path)
-    fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status(state="uploading", progress=1.0, upspeed=8192)
+    fake = FakeClient(content_path="/downloads/ehbot/Book.zip",
+                      on_add_status={"state": "uploading", "progress": 1.0, "upspeed": 8192})
     store_exhentai_cookies(settings)
     app = create_app(
         settings,
@@ -1050,8 +1072,8 @@ def test_auto_pack_carries_a_delivered_torrent_into_the_library(
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_torrent_candidate(database))
     write_seed_archive(tmp_path)
-    fake = FakeClient(content_path="/downloads/ehbot/Book.zip")
-    fake.seed_status(state="uploading", progress=1.0)
+    fake = FakeClient(content_path="/downloads/ehbot/Book.zip",
+                      on_add_status={"state": "uploading", "progress": 1.0})
     store_exhentai_cookies(settings)
     app = create_app(
         settings,
@@ -1233,19 +1255,17 @@ async def test_a_failed_auto_pack_does_not_fail_the_download(
 
 
 @pytest.mark.asyncio
-async def test_a_duplicate_push_is_flagged_for_the_operator(
-    tmp_path: Path,
+@pytest.mark.parametrize("already_present", [False, True])
+async def test_a_duplicate_push_is_refused_without_managing_the_external_torrent(
+    tmp_path: Path, already_present: bool,
 ) -> None:
-    """A hash the client already holds parks, but says so.
-
-    The push is not a failure — the payload is on its way — but the entry doing
-    the work is not the one EhBot just described, so its save path and category
-    may differ and delivery could look in the wrong directory.
-    """
+    """A pre-existing hash or conflicting add cannot become our managed transfer."""
     database = Database(tmp_path / "ehbot.db")
     candidate_id = await seed_torrent_candidate(database)
     fake = FakeClient()
     fake.add_conflicts = True
+    if already_present:
+        fake.seed_status(tags="another-application")
     torrent = build_torrent_service(database, tmp_path, fake)
     downloads = build_download_service(database, tmp_path, torrent)
     await downloads.enqueue_torrent_download(candidate_id)
@@ -1253,8 +1273,14 @@ async def test_a_duplicate_push_is_flagged_for_the_operator(
     await downloads._process_one()  # noqa: SLF001
 
     jobs = await downloads.list_jobs_for_candidate(candidate_id)
-    assert jobs[0].state == "WAITING_TORRENT"
-    assert jobs[0].was_already_in_client is True
+    assert jobs[0].state == "FAILED"
+    assert jobs[0].error_code == "TORRENT_RESOURCE_SHARED"
+    assert len(fake.added) == (0 if already_present else 1)
+    assert fake.deleted == []
+    assert await torrent.poll_once() == 0
+    with database.connection() as connection:
+        assert connection.execute("SELECT ownership, status FROM queue_remote_resources").fetchone() == ("SHARED", "STOP_CONFIRMED")
+    assert (await downloads.enqueue_telegraph_download(candidate_id)).created
 
 
 @pytest.mark.asyncio

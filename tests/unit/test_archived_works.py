@@ -292,7 +292,7 @@ class TestRemoval:
         )
         assert [entry.action for entry in actions] == ["APPROVE"]
 
-    def test_a_work_with_a_task_in_flight_is_refused_not_raced(
+    def test_a_queued_work_is_removed_without_a_running_producer(
         self, fixture: Fixture
     ) -> None:
         candidate_id, _, _ = fixture.packaged()
@@ -303,34 +303,31 @@ class TestRemoval:
                 (DOWNLOAD_STATE_PENDING, candidate_id, PROVIDER_CONVERSION),
             )
 
-        with pytest.raises(ArchivedWorkError) as raised:
-            asyncio.run(fixture.service.remove_work(candidate_id))
+        result = asyncio.run(fixture.service.remove_work(candidate_id))
+        assert result["cleanup_status"] == "COMPLETED"
+        assert fixture.jobs(candidate_id) == []
+        assert len(fixture.audit()) == 1
 
-        assert raised.value.code == "WORK_STILL_RUNNING"
-        assert fixture.audit() == []
-
-    def test_a_work_being_packed_right_now_is_refused(
+    def test_a_running_pack_is_removed_with_independent_stop_tracking(
         self, fixture: Fixture
     ) -> None:
         candidate_id, _, _ = fixture.packaged(
             pack_state=CONVERSION_STATE_RUNNING
         )
 
-        with pytest.raises(ArchivedWorkError) as raised:
-            asyncio.run(fixture.service.remove_work(candidate_id))
+        result = asyncio.run(fixture.service.remove_work(candidate_id))
+        assert result["cleanup_status"] == "PENDING"
+        assert fixture.jobs(candidate_id) == []
 
-        assert raised.value.code == "WORK_PACK_RUNNING"
-
-    def test_a_work_with_no_archive_cannot_be_removed(
+    def test_a_job_without_an_archive_can_still_be_removed(
         self, fixture: Fixture
     ) -> None:
         candidate_id = fixture.candidate()
         fixture.job(candidate_id)
 
-        with pytest.raises(ArchivedWorkError) as raised:
-            asyncio.run(fixture.service.remove_work(candidate_id))
-
-        assert raised.value.code == "WORK_NOT_DOWNLOADED"
+        result = asyncio.run(fixture.service.remove_work(candidate_id))
+        assert result["removed_jobs"] == 1
+        assert fixture.jobs(candidate_id) == []
 
 
 class TestRedownload:
@@ -1151,7 +1148,7 @@ class TestPurge:
 
         assert raised.value.code == "CANDIDATE_NOT_FOUND"
 
-    def test_a_work_in_flight_is_refused_not_raced(
+    def test_a_queued_candidate_is_purged_and_existing_files_are_preserved(
         self, fixture: Fixture
     ) -> None:
         candidate_id, archive, cbz = fixture.packaged()
@@ -1162,11 +1159,9 @@ class TestPurge:
                 (DOWNLOAD_STATE_PENDING, candidate_id, PROVIDER_CONVERSION),
             )
 
-        with pytest.raises(ArchivedWorkError) as raised:
-            asyncio.run(fixture.service.purge_work(candidate_id))
-
-        assert raised.value.code == "WORK_STILL_RUNNING"
-        assert fixture.candidate_rows() == 1
+        result = asyncio.run(fixture.service.purge_work(candidate_id))
+        assert result["cleanup_status"] == "COMPLETED"
+        assert fixture.candidate_rows() == 0
         assert archive.exists()
         assert cbz.exists()
 

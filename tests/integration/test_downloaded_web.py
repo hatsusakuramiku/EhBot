@@ -123,6 +123,8 @@ class Library:
                     (ex_gid,),
                 ).lastrowid
             )
+            connection.execute("INSERT INTO candidate_approvals(candidate_id, evidence) VALUES(?, 'fixture:approved')",
+                               (candidate_id,))
             connection.execute(
                 "INSERT INTO metadata_values (candidate_id, field_name, "
                 "field_value, value_source, confidence, is_manual) "
@@ -1260,16 +1262,11 @@ def test_dedup_removes_the_loser_with_its_files_and_is_idempotent(
     assert "没有发现重复作品" in again.text
 
 
-def test_dedup_cancels_an_in_flight_download_before_removing(tmp_path: Path) -> None:
-    """One click, no manual cancel (R59): the open job must not block the purge.
-
-    Without the cancel, `purge_work` refuses an open download and the loser
-    would be reported as skipped -- exactly the extra step the operator asked
-    not to have.
-    """
+def test_dedup_removes_a_paused_work_without_a_preliminary_cancel(tmp_path: Path) -> None:
+    """One click uses the same durable removal as other client operations."""
     settings, library, _ = seeded(tmp_path)
     keeper, loser = _duplicate_pair(
-        library, loser_kwargs={"download_state": DOWNLOAD_STATE_PENDING}
+        library, loser_kwargs={"download_state": 'PAUSED'}
     )
 
     client = logged_in(settings)

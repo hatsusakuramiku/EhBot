@@ -60,6 +60,7 @@ class TorrentStatus:
     #: Trails the required fields with a default because it matters only after
     #: the download finishes, when the client switches to sharing the payload.
     upspeed: int = 0
+    tags: tuple[str, ...] = ()
 
     #: States where the client is trying but has nothing to talk to.
     STALLED_STATES = frozenset({"stalledDL", "metaDL"})

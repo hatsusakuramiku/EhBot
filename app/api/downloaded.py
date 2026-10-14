@@ -357,6 +357,16 @@ async def apply_downloaded_batch(
     }
 
 
+@router.get("/removals/{removal_id}")
+async def api_removal(request: Request, removal_id: str) -> dict[str, Any]:
+    """Read durable stop and file cleanup even after candidate/job deletion."""
+    await deps.require_session(request)
+    try:
+        return await deps.archived_work_service(request).get_removal(removal_id)
+    except Exception as exc:
+        raise _translate(exc) from exc
+
+
 @router.get("/downloaded")
 async def downloaded_list(request: Request) -> dict[str, Any]:
     """The 已下载内容 list, same snapshot the page renders."""

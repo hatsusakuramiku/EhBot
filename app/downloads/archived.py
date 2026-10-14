@@ -7,8 +7,8 @@ Why this is its own service rather than more methods on `DownloadService`
 ------------------------------------------------------------------------
 `DownloadService` owns the *queue*: it claims jobs, leases them, retries them
 and writes their terminal states, and every method on it is about a task in
-flight. The three actions here are about a work that has already finished --
-they delete bookkeeping, move files inside the library and requeue a source --
+flight. These actions manage work records and published files --
+they remove records, move files inside the library and requeue a source --
 and two of them touch the filesystem outside the work directory, which the
 download worker never does. Keeping them apart is what lets the queue's
 invariants stay readable, and it is why the worker cannot accidentally call
@@ -28,10 +28,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import zipfile
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 
 from app.conversion.naming import (
     CBZ_SUFFIX,
@@ -51,6 +53,7 @@ from app.conversion.comicinfo import (
 from app.conversion.service import _PACK_FORBIDDEN_STATUSES
 from app.db.database import Database, METADATA_SOURCE_RANK_SQL
 from app.downloads.queue import QueueControl, DownloadError
+from app.downloads.execution import current_execution, run_sync
 from app.downloads.models import (
     CONVERSION_STATE_RUNNING,
     CONVERSION_STATE_WAITING_PATH,
@@ -165,7 +168,7 @@ def _parse_relative_path(raw: str, limits: LibraryLimits) -> PurePosixPath:
 
 
 class ArchivedWorkService:
-    """Actions on a work whose download has already finished."""
+    """Work records and files, including durable removal of running producers."""
 
     def __init__(
         self,
@@ -186,6 +189,7 @@ class ArchivedWorkService:
         # a test can observe the chaining without running a packer.
         self._conversion_enqueue = conversion_enqueue
         self._notify = notify
+        self._removal_lock = asyncio.Lock()
 
     async def _roots(self) -> tuple[Path, Path]:
         """The library and work directories as configured right now.
@@ -210,23 +214,6 @@ class ArchivedWorkService:
                 "该作品没有已下载的档案，无法执行此操作",
             )
         return work
-
-    def _require_removable_sync(self, candidate_id: int) -> None:
-        """Check all providers before removal touches any files.
-
-        The database delete trigger repeats the guard when records are removed;
-        P3 replaces this preflight with a persistent removal/cleanup operation.
-        """
-        with self._database.connection() as connection:
-            active = connection.execute(
-                "SELECT state FROM download_jobs WHERE candidate_id = ? AND state NOT IN "
-                "('COMPLETED', 'FAILED', 'CANCELLED', 'CONVERSION_COMPLETED', 'CONVERSION_FAILED') LIMIT 1",
-                (candidate_id,),
-            ).fetchone()
-        if active is not None:
-            if active[0] == CONVERSION_STATE_RUNNING:
-                raise ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在打包，请先等待停止确认")
-            raise ArchivedWorkError("WORK_STILL_RUNNING", "该作品仍有下载任务在进行或等待停止确认，请先完成收尾")
 
     # ----------------------------------------------------- archive metadata
 
@@ -435,39 +422,18 @@ class ArchivedWorkService:
 
     # ---------------------------------------------------------------- removal
 
-    async def _delete_work_files(
-        self, candidate_id: int
-    ) -> tuple[list[str], list[str]]:
-        """Delete every artifact this candidate produced, and its pinned CBZ.
 
-        Shared by 移除 and 彻底删除, which differ in what they do to the records
-        but not in what "delete the files" means. It reads *all* artifacts rather
-        than the newest download's two paths: a work tried through two sources has
-        two archive files, and removing one of them was the old defect.
-
-        The CBZ lives under the library, every other artifact under the work
-        directory; each path is validated against its own root, so a path that has
-        drifted between the two is refused rather than deleted from whichever tree
-        happens to contain it.
-        """
-        library_root, work_root = await self._roots()
-        targets: list[tuple[str, Path]] = []
-        for artifact_type, raw in await self._database.candidate_artifacts(
-            candidate_id
-        ):
-            root = library_root if artifact_type == "CBZ" else work_root
-            targets.append((raw, root))
-        pin = await self._database.archive_path_pin(candidate_id)
-        if pin is not None and pin.get("relative_path"):
-            targets.append(
-                (str(library_root / str(pin["relative_path"])), library_root)
-            )
-
+    async def _delete_targets(self, targets) -> tuple[list[str], list[str]]:
+        """Apply a persisted file manifest with the same managed-root checks."""
+        allowed_roots = {root.resolve() for root in await self._roots()}
         deleted: list[str] = []
         failed: list[str] = []
         seen: set[str] = set()
         for raw, root in targets:
+            root = Path(root)
             try:
+                if root.resolve() not in allowed_roots:
+                    raise ArchivedWorkError("PATH_OUTSIDE_ROOT", "清理目录已不在当前受管目录内")
                 target = _resolve_inside(root, Path(raw))
             except ArchivedWorkError:
                 # Refusing one file must not abandon the removal: the operator
@@ -483,16 +449,13 @@ class ArchivedWorkService:
                 continue
             seen.add(str(target))
             try:
-                await asyncio.to_thread(target.unlink)
+                await run_sync(self._unlink_unreferenced_sync, target, raw)
             except FileNotFoundError:
                 # Already gone is the desired end state, not an error. It still
                 # counts as deleted: the operator asked for it not to be there,
                 # and the audit row should not claim the bytes might remain.
                 deleted.append(raw)
-                if root == library_root:
-                    await asyncio.to_thread(
-                        _prune_empty_parents, target, library_root
-                    )
+                await run_sync(_prune_empty_parents, target, root)
                 continue
             except OSError:
                 failed.append(raw)
@@ -502,194 +465,251 @@ class ArchivedWorkService:
                 )
                 continue
             deleted.append(raw)
-            if root == library_root:
-                await asyncio.to_thread(_prune_empty_parents, target, library_root)
+            await run_sync(_prune_empty_parents, target, root)
         return deleted, failed
 
-    async def remove_work(
-        self,
-        candidate_id: int,
-        *,
-        delete_files: bool = False,
-        operator_name: str = "admin",
-    ) -> dict:
-        """Remove a downloaded work's records, and optionally its files.
-
-        Two steps that must not be conflated, so the return value reports them
-        separately: `removed_jobs` is bookkeeping, `deleted_files` is bytes. The
-        requirements document makes file deletion opt-in and off by default, and
-        the parameter keeps that shape -- a caller that forgets it deletes
-        nothing rather than everything.
-
-        **Every** job the candidate owns is removed, not just the newest download
-        and the packaging task. A work tried through several sources holds one
-        row per source (each has its own idempotency key), and removing only the
-        newest left the others' rows and files behind -- they still appeared in
-        the activity history and could still be listed as downloaded content.
-
-        A work with a task still in flight is refused rather than raced: the
-        download worker or the packer holds that row and would write to it (or
-        to the file) after we deleted it. Cancel first, then remove.
-        """
-        await asyncio.to_thread(self._require_removable_sync, candidate_id)
-        work = await self._require_work(candidate_id)
-        if work.state in OPEN_DOWNLOAD_STATES:
-            raise ArchivedWorkError(
-                "WORK_STILL_RUNNING",
-                "该作品仍有下载任务在进行，请先取消或等待完成再移除",
-            )
-        if work.pack_state == CONVERSION_STATE_RUNNING:
-            raise ArchivedWorkError(
-                "WORK_PACK_RUNNING",
-                "该作品正在打包，请等待打包结束再移除",
-            )
-        jobs = await self._database.candidate_jobs(candidate_id)
-        deleted: list[str] = []
-        failed: list[str] = []
-        if delete_files:
-            deleted, failed = await self._delete_work_files(candidate_id)
-
-        removed_jobs = await asyncio.to_thread(
-            self._remove_records_sync,
-            work,
-            jobs,
-            bool(delete_files) and not failed,
-            operator_name,
-        )
-        if delete_files and not failed:
-            # The pin named a file that no longer exists, so keeping it would
-            # make a later re-download publish to a path chosen for a book that
-            # was deleted -- and hold that name against every other work in the
-            # meantime. A records-only removal keeps the pin on purpose: the file
-            # is still there, and the operator's decision about where it lives
-            # has not changed.
-            await self._database.clear_archive_path_pin(candidate_id)
-        if self._notify is not None:
-            self._notify(candidate_id)
-        return {
-            "candidate_id": candidate_id,
-            "removed_jobs": removed_jobs,
-            "deleted_files": tuple(deleted),
-            "failed_files": tuple(failed),
-        }
-
-    def _remove_records_sync(
-        self,
-        work: DownloadedWork,
-        jobs: list[tuple[int, str]],
-        deleted_files: bool,
-        operator_name: str,
-    ) -> int:
-        """Delete every job row for the work, leaving one audit row per job.
-
-        `artifacts` is deleted first because it holds a foreign key onto
-        `download_jobs` and `PRAGMA foreign_keys` is ON for every connection --
-        the other order fails rather than cascading.
-
-        The candidate is deliberately left alone. It is the work's identity, it
-        carries the metadata and the review history, and deleting it would
-        orphan `review_actions` rows that point at it. Removing downloaded
-        content means the download is gone, not that the book was never seen.
-        """
-        if not jobs:
-            jobs = [(work.job_id, work.provider)]
-        job_ids = [job_id for job_id, _ in jobs]
-        placeholders = ", ".join("?" for _ in job_ids)
+    def _unlink_unreferenced_sync(self, target: Path, raw: str) -> None:
+        """Serialize a short unlink with publishers and refuse a surviving owner."""
         with self._database.connection() as connection:
-            connection.execute(
-                f"DELETE FROM artifacts WHERE job_id IN ({placeholders})",
-                tuple(job_ids),
-            )
-            cursor = connection.execute(
-                f"DELETE FROM download_jobs WHERE id IN ({placeholders})",
-                tuple(job_ids),
-            )
-            removed = int(cursor.rowcount or 0)
-            # One audit row per *removal*, matching the table's original shape:
-            # `removed_works` answers「这本书的记录去哪了」, and one row per
-            # provider attempt would read as several books. The newest job is
-            # the identity the operator saw on `/downloaded`.
-            connection.execute(
-                "INSERT INTO removed_works "
-                "(candidate_id, job_id, provider, title, archive_path, "
-                " cbz_path, deleted_files, operator_name) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    work.candidate_id,
-                    work.job_id,
-                    work.provider,
-                    work.title,
-                    work.archive_path,
-                    work.cbz_path,
-                    1 if deleted_files else 0,
-                    operator_name,
-                ),
-            )
-        return removed
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM artifacts WHERE path IN (?, ?)",
+                                  (raw, str(target))).fetchone() is not None:
+                raise OSError("File is still referenced by another artifact")
+            target.unlink()
 
-    # ------------------------------------------------------------- full purge
+    async def remove_work(
+        self, candidate_id: int, *, delete_files: bool = False, operator_name: str = "admin",
+    ) -> dict:
+        """Remove job records immediately; durable operations stop their producers.
+
+        delete_files=False preserves existing files; True cleans the persisted
+        manifest only after all local and remote executions have stopped.
+        """
+        return await self._remove(candidate_id, delete_files, operator_name, purge=False)
 
     async def purge_work(
-        self,
-        candidate_id: int,
-        *,
-        delete_files: bool = False,
-        operator_name: str = "admin",
+        self, candidate_id: int, *, delete_files: bool = False, operator_name: str = "admin",
     ) -> dict:
-        """Delete the candidate and every work it produced.
+        """Delete candidate and jobs while independent stop/cleanup records survive."""
+        return await self._remove(candidate_id, delete_files, operator_name, purge=True)
 
-        `remove_work` above removes a *download* and leaves the candidate, which
-        is right for「这本书我下载错了」. This is the other decision --「这条候选
-        根本不该存在」-- and it goes all the way: the candidate row, its
-        messages, metadata, review history, path pin, jobs and artifacts. A
-        half-removal would leave a row the interface keeps offering actions for.
-
-        `delete_files` keeps the same opt-in shape and default as `remove_work`.
-        The in-flight guard is the same too: the worker holds that row.
-
-        Refuses rather than half-deletes when a task is running; otherwise the
-        records always go, and a file that could not be deleted is reported in
-        `failed_files` rather than silently claimed as removed.
-        """
-        await asyncio.to_thread(self._require_removable_sync, candidate_id)
-        candidate = await self._database.get_candidate(candidate_id)
-        if candidate is None:
-            raise ArchivedWorkError(
-                "CANDIDATE_NOT_FOUND", "该候选不存在或已被删除"
-            )
+    async def _remove(self, candidate_id, delete_files, operator_name, *, purge):
+        library, work_root = await self._roots()
         work = await self._database.downloaded_work(candidate_id)
-        if work is not None:
-            if work.state in OPEN_DOWNLOAD_STATES:
-                raise ArchivedWorkError(
-                    "WORK_STILL_RUNNING",
-                    "该作品仍有下载任务在进行，请先取消或等待完成再删除",
-                )
-            if work.pack_state == CONVERSION_STATE_RUNNING:
-                raise ArchivedWorkError(
-                    "WORK_PACK_RUNNING",
-                    "该作品正在打包，请等待打包结束再删除",
-                )
-        jobs = await self._database.candidate_jobs(candidate_id)
-        deleted: list[str] = []
-        failed: list[str] = []
-        if delete_files:
-            deleted, failed = await self._delete_work_files(candidate_id)
-        records = await self._database.purge_candidate(
-            candidate_id,
-            deleted_files=bool(delete_files) and not failed,
-            operator_name=operator_name,
-            job_ids=[job_id for job_id, _ in jobs],
-            jobs=jobs,
-        )
+        result = await run_sync(self._begin_removal_sync, candidate_id, bool(delete_files),
+                                operator_name, purge, library, work_root, work)
+        # Completed/queued work needs no asynchronous stop. Keep its historical
+        # immediate file-result contract, while running work returns its identity.
+        await self.process_removals()
+        with self._database.connection() as connection:
+            row = connection.execute(
+                "SELECT status, deleted_json, failed_json FROM queue_removals WHERE removal_id = ?",
+                (result["removal_id"],),
+            ).fetchone()
+        result.update(cleanup_status=row[0], deleted_files=tuple(json.loads(row[1])),
+                      failed_files=tuple(json.loads(row[2])))
         if self._notify is not None:
             self._notify(candidate_id)
-        return {
-            "candidate_id": candidate_id,
-            "removed_candidate": records["removed_candidate"],
-            "removed_jobs": records["removed_jobs"],
-            "deleted_files": tuple(deleted),
-            "failed_files": tuple(failed),
-        }
+        return result
+
+    def _begin_removal_sync(self, candidate_id, delete_files, operator_name, purge,
+                            library, work_root, work):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidate = connection.execute(
+                "SELECT ex_gid, CASE WHEN magnet_url IS NOT NULL THEN torrent_hash END "
+                "FROM candidates WHERE id = ?", (candidate_id,),
+            ).fetchone()
+            if candidate is None:
+                raise ArchivedWorkError("CANDIDATE_NOT_FOUND", "该候选不存在或已被删除")
+            jobs = connection.execute(
+                "SELECT j.id, j.provider, j.state, j.details_json, j.task_id, "
+                "t.current_attempt_id, t.generation FROM download_jobs j "
+                "JOIN queue_tasks t ON t.task_id = j.task_id WHERE j.candidate_id = ? ORDER BY j.id",
+                (candidate_id,),
+            ).fetchall()
+            if not purge and not jobs:
+                raise ArchivedWorkError("WORK_NOT_DOWNLOADED", "该作品没有下载任务，无法移除")
+            targets = [
+                [str(row[1]), str(library if row[0] == "CBZ" else work_root)]
+                for row in connection.execute(
+                    "SELECT a.artifact_type, a.path FROM artifacts a JOIN download_jobs j "
+                    "ON j.id = a.job_id WHERE j.candidate_id = ?", (candidate_id,),
+                )
+            ]
+            pin = connection.execute(
+                "SELECT relative_path FROM work_archive_paths WHERE candidate_id = ?", (candidate_id,),
+            ).fetchone()
+            if pin is not None and pin[0]:
+                targets.append([str(library / pin[0]), str(library)])
+            removal_id = uuid4().hex
+            directories = []
+            for job in jobs:
+                for row in connection.execute("SELECT directory FROM queue_attempt_paths WHERE task_id = ?", (job[4],)):
+                    directory = Path(row[0])
+                    root = library if directory.resolve().is_relative_to(library.resolve()) else work_root
+                    directories.append([str(directory), str(root)])
+            connection.execute(
+                "INSERT INTO queue_removals(removal_id, candidate_id, ex_gid, torrent_hash, "
+                "delete_files, purge_candidate, targets_json, directories_json, task_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (removal_id, candidate_id, candidate[0], candidate[1], int(delete_files), int(purge),
+                 json.dumps(targets), json.dumps(directories), json.dumps([row[4] for row in jobs])),
+            )
+            for job_id, provider, state, details, task_id, attempt_id, generation in jobs:
+                previous = connection.execute(
+                    "SELECT operation_id, action FROM queue_operations WHERE task_id = ? "
+                    "AND status NOT IN ('COMPLETED', 'FAILED')", (task_id,),
+                ).fetchone()
+                params = {"removal_id": removal_id}
+                if previous is not None:
+                    params["superseded_action"] = previous[1]
+                    connection.execute(
+                        "UPDATE queue_operations SET action = 'remove', params_json = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE operation_id = ?",
+                        (json.dumps(params), previous[0]),
+                    )
+                else:
+                    # A completed torrent may still seed. Even a legacy handle
+                    # must be reconciled instead of interpreting FAILED as stopped.
+                    remote = provider == "EH_TORRENT" and (
+                        details not in (None, "", "{}") or connection.execute(
+                            "SELECT 1 FROM queue_remote_resources WHERE task_id = ? "
+                            "AND status <> 'STOP_CONFIRMED'", (task_id,),
+                        ).fetchone() is not None
+                    )
+                    running = state in {"DOWNLOADING", "WAITING_TORRENT", "CONVERSION_RUNNING", "STOPPING"}
+                    connection.execute(
+                        "INSERT INTO queue_operations(operation_id, task_id, attempt_id, generation, "
+                        "legacy_job_id, candidate_id, action, params_json, resource_json, status) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 'remove', ?, ?, ?)",
+                        (uuid4().hex, task_id, attempt_id, generation, job_id, candidate_id,
+                         json.dumps(params), details or "{}",
+                         "PENDING" if running or remote else "COMPLETED"),
+                    )
+            audit_id = None
+            if jobs:
+                identity = next((row for row in reversed(jobs) if row[1] != PROVIDER_CONVERSION), jobs[-1])
+                audit_id = connection.execute(
+                    "INSERT INTO removed_works(candidate_id, job_id, provider, title, archive_path, "
+                    "cbz_path, deleted_files, operator_name) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                    (candidate_id, work.job_id if work else identity[0],
+                     work.provider if work else identity[1], work.title if work else None,
+                     work.archive_path if work else None, work.cbz_path if work else None, operator_name),
+                ).lastrowid
+                connection.execute("UPDATE queue_removals SET audit_id = ? WHERE removal_id = ?",
+                                   (audit_id, removal_id))
+            connection.execute(
+                "DELETE FROM artifacts WHERE job_id IN (SELECT id FROM download_jobs WHERE candidate_id = ?)",
+                (candidate_id,),
+            )
+            connection.execute("DELETE FROM download_jobs WHERE candidate_id = ?", (candidate_id,))
+            if purge:
+                connection.execute("DELETE FROM review_actions WHERE candidate_id = ?", (candidate_id,))
+                connection.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
+            return {"candidate_id": candidate_id, "removed_jobs": len(jobs), "removal_id": removal_id,
+                    "task_ids": [row[4] for row in jobs],
+                    "operation_ids": [row[0] for row in connection.execute(
+                        "SELECT operation_id FROM queue_operations WHERE json_extract(params_json, '$.removal_id') = ?",
+                        (removal_id,))],
+                    **({"removed_candidate": 1} if purge else {})}
+
+    async def process_removals(self) -> int:
+        """Resume persisted manifests only after every producer stop is confirmed."""
+        async with self._removal_lock:
+            with self._database.connection() as connection:
+                rows = connection.execute(
+                    "SELECT removal_id, candidate_id, delete_files, purge_candidate, targets_json, directories_json, audit_id FROM queue_removals r "
+                    "WHERE status = 'PENDING' AND NOT EXISTS(SELECT 1 FROM queue_operations o "
+                    "WHERE json_extract(o.params_json, '$.removal_id') = r.removal_id "
+                    "AND o.status <> 'COMPLETED') ORDER BY created_at, removal_id",
+                ).fetchall()
+            for removal_id, candidate_id, delete_files, purge_candidate, targets_json, directories_json, audit_id in rows:
+                deleted, failed = ([], [])
+                if delete_files:
+                    deleted, failed = await self._delete_targets(json.loads(targets_json))
+                retained = set() if delete_files else {Path(raw).resolve() for raw, _ in json.loads(targets_json)}
+                leftovers, refused = await self._delete_directories(json.loads(directories_json), retained)
+                deleted = list(dict.fromkeys(deleted + leftovers))
+                failed = list(dict.fromkeys(failed + refused))
+                with self._database.connection() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "UPDATE queue_removals SET status = ?, deleted_json = ?, failed_json = ?, "
+                        "updated_at = CURRENT_TIMESTAMP WHERE removal_id = ?",
+                        ("PENDING" if failed else "COMPLETED", json.dumps(deleted), json.dumps(failed), removal_id),
+                    )
+                    if delete_files and not failed:
+                        connection.execute("UPDATE removed_works SET deleted_files = 1 WHERE id = ?", (audit_id,))
+                        # A re-added candidate may have a new pin: only clear the
+                        # captured path, never its replacement.
+                        for raw, root in ([] if purge_candidate else json.loads(targets_json)):
+                            connection.execute(
+                                "DELETE FROM work_archive_paths WHERE candidate_id = ? "
+                                "AND relative_path = ?",
+                                (candidate_id, str(Path(raw).relative_to(root)).replace("\\", "/")
+                                 if Path(raw).is_relative_to(root) else ""),
+                            )
+                if self._notify is not None:
+                    self._notify(candidate_id)
+            return len(rows)
+
+    async def _delete_directories(self, directories, retained: set[Path]) -> tuple[list[str], list[str]]:
+        """Clean only registered attempt trees, never the shared work/library root."""
+        deleted, failed = [], []
+        allowed_roots = {root.resolve() for root in await self._roots()}
+        for raw, root_raw in directories:
+            directory, root = Path(raw), Path(root_raw)
+            try:
+                if root.resolve() not in allowed_roots or directory.is_symlink() or directory.is_junction():
+                    raise OSError("Unmanaged or redirected attempt directory")
+                target = _resolve_inside(root, directory)
+                if target == root.resolve():
+                    raise OSError("Attempt directory cannot be a managed root")
+                if not target.exists():
+                    continue
+                children = await run_sync(lambda: list(target.rglob("*")))
+                files = []
+                for child in children:
+                    if child.is_symlink() or child.is_junction():
+                        failed.append(str(child))
+                    elif child.is_file() and child.resolve() not in retained:
+                        files.append([str(child), str(root)])
+                gone, refused = await self._delete_targets(files)
+                deleted.extend(gone)
+                failed.extend(refused)
+                for child in sorted(children, key=lambda path: len(path.parts), reverse=True):
+                    if (child.is_dir() and not child.is_symlink() and not child.is_junction()
+                            and not any(path.is_relative_to(child) for path in retained)):
+                        await run_sync(child.rmdir)
+                if target.exists() and not any(path.is_relative_to(target) for path in retained):
+                    await run_sync(target.rmdir)
+            except (OSError, ArchivedWorkError):
+                failed.append(raw)
+        return deleted, failed
+
+    async def get_removal(self, removal_id: str) -> dict:
+        """Read stop and file-cleanup facts independently of removed business rows."""
+        return await run_sync(self._get_removal_sync, removal_id)
+
+    def _get_removal_sync(self, removal_id: str) -> dict:
+        with self._database.connection() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT removal_id, candidate_id, status, delete_files, task_ids_json, deleted_json, "
+                "failed_json, created_at, updated_at FROM queue_removals WHERE removal_id = ?", (removal_id,),
+            ).fetchone()
+            if row is None:
+                raise ArchivedWorkError("REMOVAL_NOT_FOUND", "移除操作不存在")
+            result = dict(row)
+            for raw, public in (("task_ids_json", "task_ids"), ("deleted_json", "deleted_files"),
+                                ("failed_json", "failed_files")):
+                result[public] = json.loads(result.pop(raw))
+            result["delete_files"] = bool(result["delete_files"])
+            result["operations"] = [dict(row) for row in connection.execute(
+                "SELECT operation_id, task_id, action, status, error_code FROM queue_operations "
+                "WHERE json_extract(params_json, '$.removal_id') = ? ORDER BY operation_id", (removal_id,),
+            )]
+            return result
 
     # ----------------------------------------------------------- re-download
 
@@ -873,102 +893,83 @@ class ArchivedWorkService:
         moved off. Named at the call site rather than left to `is_manual`, so the
         single place this codebase demotes a decision is greppable.
         """
-        try:
-            resolved = unique_library_target(
-                target, reserved=frozenset({str(source)})
-            )
-        except LibraryTemplateError as exc:
-            raise ArchivedWorkError(exc.code, exc.public_message) from exc
-        if resolved == source:
-            # `unique_library_target` keeps a name this book already owns, so a
-            # target that resolves back to the file being moved is 「already
-            # there」 rather than a move onto itself. Still recorded: a re-file
-            # that recomputed the path it already had has to (re)pin it, or a pin
-            # left pointing at the previous template sends the next one round
-            # again.
-            await self._record_relocation(
-                work,
-                resolved,
-                library_root,
-                is_manual,
-                override_manual,
-                operator_name,
-            )
-            return {
-                "candidate_id": work.candidate_id,
-                "path": str(resolved),
-                "relative_path": resolved.relative_to(
-                    library_root.resolve()
-                ).as_posix(),
-                "moved": False,
-            }
-        await asyncio.to_thread(
-            resolved.parent.mkdir, parents=True, exist_ok=True
+        result = await run_sync(
+            self._relocate_sync, work, source, target, library_root,
+            is_manual, override_manual, operator_name,
         )
-        try:
-            await asyncio.to_thread(source.replace, resolved)
-        except OSError as exc:
-            raise ArchivedWorkError(
-                "FILE_MOVE_FAILED", f"移动文件失败：{exc}"
-            ) from exc
-        await asyncio.to_thread(_prune_empty_parents, source, library_root)
-        await self._record_relocation(
-            work,
-            resolved,
-            library_root,
-            is_manual,
-            override_manual,
-            operator_name,
-        )
-        return {
-            "candidate_id": work.candidate_id,
-            "path": str(resolved),
-            "relative_path": resolved.relative_to(
-                library_root.resolve()
-            ).as_posix(),
-            "moved": True,
-        }
+        if self._notify is not None:
+            self._notify(work.candidate_id)
+        return result
 
-    async def _record_relocation(
+    def _relocate_sync(
         self,
         work: DownloadedWork,
-        resolved: Path,
+        source: Path,
+        target: Path,
         library_root: Path,
         is_manual: bool,
         override_manual: bool,
         operator_name: str,
-    ) -> None:
-        """Write where the file now is, on both the artifact row and the pin.
-
-        Both, because they answer the same question from two directions: the
-        artifact row is what the 已下载内容 list shows for this run, and the pin is
-        what survives the row and decides where the *next* pack lands. A rename
-        made from the list used to write only the first, and the detail page's
-        form -- which reads the pin -- then disagreed with the list about where
-        the book belonged.
-        """
-        relative = resolved.relative_to(library_root.resolve())
-        await asyncio.to_thread(
-            self._record_path_sync,
-            work.pack_job_id,
-            str(resolved),
-            relative.as_posix(),
-        )
-        if override_manual:
-            await self._database.override_archive_path_pin(
-                work.candidate_id,
-                relative.as_posix(),
-                operator_name=operator_name,
-            )
-        else:
-            await self._database.set_archive_path_pin(
-                work.candidate_id,
-                relative.as_posix(),
-                is_manual=is_manual,
-                operator_name=operator_name,
-            )
-        if self._notify is not None:
-            self._notify(work.candidate_id)
+    ) -> dict:
+        """Fence the move and its records against cancellation under one writer lock."""
+        moved = False
+        resolved = source
+        try:
+            with self._database.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                execution = current_execution.get()
+                if execution is not None:
+                    execution.check(connection)
+                row = connection.execute(
+                    "SELECT a.path, j.state FROM artifacts a JOIN download_jobs j ON j.id = a.job_id "
+                    "WHERE j.id = ? AND j.candidate_id = ? AND a.artifact_type = 'CBZ'",
+                    (work.pack_job_id, work.candidate_id),
+                ).fetchone()
+                source = _resolve_inside(library_root, source)
+                target = _resolve_inside(library_root, target)
+                if row is None or Path(row[0]).resolve() != source:
+                    raise ArchivedWorkError("WORK_PATH_CHANGED", "作品路径或记录已改变，请刷新后重试")
+                if execution is None and row[1] in {CONVERSION_STATE_RUNNING, "STOPPING"}:
+                    raise ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在执行或停止，请等待收尾后修改路径")
+                try:
+                    resolved = unique_library_target(target, reserved=frozenset({str(source)}))
+                except LibraryTemplateError as exc:
+                    raise ArchivedWorkError(exc.code, exc.public_message) from exc
+                relative = resolved.relative_to(library_root.resolve()).as_posix()
+                try:
+                    if resolved != source:
+                        resolved.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            source.replace(resolved)
+                        except OSError as exc:
+                            raise ArchivedWorkError("FILE_MOVE_FAILED", f"移动文件失败：{exc}") from exc
+                        moved = True
+                    connection.execute(
+                        "UPDATE artifacts SET path = ?, library_relative_path = ? "
+                        "WHERE job_id = ? AND artifact_type = 'CBZ'",
+                        (str(resolved), relative, work.pack_job_id),
+                    )
+                    self._database.write_archive_path_pin(
+                        connection, work.candidate_id, relative, is_manual, operator_name,
+                        override_manual=override_manual,
+                    )
+                except BaseException:
+                    # Restore on SQL failure before another writer can observe
+                    # the rolled-back path and start removal/republication.
+                    if moved:
+                        resolved.replace(source)
+                        moved = False
+                    raise
+        except BaseException:
+            # Ordinary write/commit failures restore the previously published
+            # bytes. Crash recovery for publication is completed in P8.
+            if moved:
+                resolved.replace(source)
+            raise
+        if moved:
+            _prune_empty_parents(source, library_root)
+        return {"candidate_id": work.candidate_id, "path": str(resolved),
+                "relative_path": relative, "moved": moved}
 
     async def clear_path_pin(self, candidate_id: int) -> None:
         """Drop where this book was told to land, so the current mode decides.

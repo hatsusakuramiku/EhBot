@@ -136,8 +136,10 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 "tests={0} failures={1} errors={2}" -f $s.tests, $s.failures, $s.errors
 ```
 
-**Baseline: 2141 collected（R89 2026-10-14 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R89 核心合同 28 条；本次相关 19 个文件完整定向运行 460 passed / 0 failed / 0 skipped；rc5/028 源码，无发布。逐项完成核验见 `R89_COMPLETION_AUDIT.md`，未运行整库测试。 Ending below this is a regression.
+**Baseline: 2213 collected（R90 2026-10-14 collect-only）; last full-suite result: 2014 collected, 0 failed（R81–R84）。** R90 / P3 净增 72；相关 29 文件完整运行 625/0，最后三文件复验 51/0，按用例取最新结果共 628 个不同用例通过，0 failed / 0 skipped；包含真实 7-Zip 27 条；rc6/029，无发布。逐项完成核验见 `R90_COMPLETION_AUDIT.md`，未运行整库测试。 Ending below this is a regression.
 **Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）-> R89 初验 2134 / 453 个不同用例最终通过（027）-> R89 复核 2141 / 相关 19 文件完整 460 条通过（028/rc5，运行停止操作只持久受理、P3 接续物理停止，无发布）。
+**Completed P3 / R90:** 029 records remote intentions, attempt paths and independent removals; local requests/threads/process trees drain before slot release. Target preflight runs before revocation and is revalidated at acceptance. New shared torrents are refused; pollers must verify the original instance and attempt tag before progress/delivery. Durable stops/removal manifests recover independently of deleted business rows; re-added work waits for cleanup. Refile and CBZ publication check execution identity. Full publication crash recovery is P8; worker sessions/heartbeats/budgets are P9. P4 account registry and credential revisions come next. Read the R90 audit and implementation-plan handoff; do not reimplement P3 or treat its tests as whole-suite/release acceptance.
+R90 extends R89 2141 -> **2213 collected only / 628 distinct related cases finally passed**, 029/rc6, no release.
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with
@@ -747,9 +749,11 @@ Several are locked by tests. Do not "simplify" them:
   default off. Re-packaging an already packaged work is allowed and requeues the
   same task row: every state but RUNNING is requeueable, and 重新打包 is why
   COMPLETED is on that list.
-- Removing downloaded content never deletes a file unless the request named the
-  file-deleting action, and never touches a work whose download or packaging task
-  is still in flight.
+  - Removing downloaded content never deletes a file unless the request named the
+    file-deleting action. Running removal revokes execution and deletes business
+    records immediately, retaining independent queue_operations/queue_removals.
+    Files wait for all producer stops; a fresh task may queue but cannot claim
+    while its matching gallery/magnet/candidate removal reservation is pending.
 - 彻底删除 (purge) and 移除 (remove) both clear **every** job the candidate owns,
   not just the newest download and its packaging row: a work tried through
   several sources holds one job per source, and leaving the siblings behind was

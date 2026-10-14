@@ -115,6 +115,13 @@ def test_remote_stop_intent_preserves_finished_attempt(database, tmp_path, termi
                   (json.dumps({'hash': 'a' * 40}), job_id))
     if terminal == 'FAILED':
         service._mark_job_failed_sync(job_id, 'TEMPORARY', 'original failure')
+        # A legacy remote handle now also retains its slot on failure. Only
+        # after the fixture confirms its stop can a new retry be requested.
+        with pytest.raises(DownloadError) as blocked:
+            asyncio.run(service.command(job_id, action, **observed(database, job_id)))
+        assert blocked.value.code == 'JOB_NOT_RETRYABLE'
+        operation = service._queue_control.pending_operations()[0]
+        service._queue_control.finish_operation(operation)
     else:
         service._mark_job_completed_sync(job_id)
     with database.connection() as c:
@@ -267,7 +274,7 @@ def test_running_records_cannot_be_deleted_by_raw_legacy_writer(database, tmp_pa
         assert task_snapshot(c, job_id)['state'] == 'DOWNLOADING'
 
 
-def test_remove_checks_older_running_source_before_deleting_files(database, tmp_path):
+def test_remove_tracks_older_running_source_before_deleting_files(database, tmp_path):
     pending(database)
     downloads = DownloadService(database, tmp_path)
     downloads._claim_pending_job_sync()
@@ -278,11 +285,10 @@ def test_remove_checks_older_running_source_before_deleting_files(database, tmp_
                            "VALUES(1, 'finished-preview', 'TELEGRAPH', 'COMPLETED')").lastrowid
         c.execute("INSERT INTO artifacts(job_id, artifact_type, path) VALUES(?, 'ARCHIVE', ?)", (newest, str(source)))
     archived = ArchivedWorkService(database, library_path=tmp_path / 'library', work_path=tmp_path)
-    with pytest.raises(ArchivedWorkError) as exc:
-        asyncio.run(archived.remove_work(1, delete_files=True))
-    assert exc.value.code == 'WORK_STILL_RUNNING' and source.exists()
+    result = asyncio.run(archived.remove_work(1, delete_files=True))
+    assert result['cleanup_status'] == 'PENDING' and source.exists()
     with database.connection() as c:
-        assert c.execute('SELECT count(*) FROM download_jobs').fetchone()[0] == 2
+        assert c.execute('SELECT count(*) FROM download_jobs').fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -352,7 +358,7 @@ def test_retry_refusal_performs_no_remote_side_effects(database, tmp_path):
 
 def test_switch_source_persists_intent_without_enqueuing_second_source(database, tmp_path):
     job_id = pending(database)
-    service = DownloadService(database, tmp_path)
+    service = DownloadService(database, tmp_path, telegraph_preflight=lambda _: asyncio.sleep(0))
     result = asyncio.run(service.command(job_id, 'switch-source', provider='TELEGRAPH', **observed(database, job_id)))
     assert result['state'] == 'STOPPING'
     assert service._claim_pending_job_sync() is None
@@ -409,13 +415,23 @@ def test_upgrade_backfills_approval_evidence_and_running_attempt_without_fabrica
 def test_upgrade_027_preserves_finished_attempt_and_is_idempotent(tmp_path):
     db = old_database(tmp_path, [(1, 'EH_TORRENT', 'PENDING', 'one')], last_version=27)
     service = DownloadService(db, tmp_path)
-    attempt = service._claim_pending_job_sync()
+    with db.connection() as c:
+        c.execute("UPDATE download_jobs SET state = 'DOWNLOADING', attempt_count = 1")
+        attempt = task_snapshot(c, c.execute('SELECT id FROM download_jobs').fetchone()[0])
+        attempt['job_id'] = c.execute('SELECT id FROM download_jobs').fetchone()[0]
     job_id = attempt['job_id']
     with db.connection() as c:
         c.execute("UPDATE download_jobs SET details_json = ? WHERE id = ?",
                   (json.dumps({'hash': 'a' * 40}), job_id))
-    service._mark_job_failed_sync(job_id, 'TEMPORARY', 'failure before upgrade')
-    before = asyncio.run(service.get_task(attempt['task_id']))['attempts']
+    # Reproduce the old writer on its actual schema, then upgrade before using
+    # the current service's resource-aware failure/cleanup implementation.
+    with db.connection() as c:
+        c.execute("UPDATE download_jobs SET state = 'FAILED', error_code = 'TEMPORARY', "
+                  "error_message = 'failure before upgrade' WHERE id = ?", (job_id,))
+    with db.connection() as c:
+        c.row_factory = sqlite3.Row
+        before = [dict(row) for row in c.execute('SELECT * FROM queue_attempts WHERE task_id = ?',
+                                               (attempt['task_id'],))]
     asyncio.run(db.initialize())
     asyncio.run(db.initialize())
     result = asyncio.run(service.command(job_id, 'retry', **observed(db, job_id)))

@@ -1303,8 +1303,8 @@ class TestPurgeFromThePage:
 
     The record removal and the file removal are two dialogs on the same route,
     chosen by `mode`, so the tests that matter are that the safe one keeps the
-    files, the destructive one takes them, and a work still in flight refuses
-    rather than racing the worker.
+    files, the destructive one takes them, and running work leaves durable stop
+    information while its business records disappear.
     """
 
     def test_deleting_a_work_returns_to_the_list_and_the_work_is_gone(
@@ -1388,7 +1388,7 @@ class TestPurgeFromThePage:
         assert not cbz.exists()
         assert not cbz.parent.exists()
 
-    def test_a_work_in_flight_is_refused_and_the_page_stays(
+    def test_a_paused_work_is_deleted_without_requiring_prior_cancellation(
         self, tmp_path: Path
     ) -> None:
         settings = make_settings(tmp_path)
@@ -1396,9 +1396,7 @@ class TestPurgeFromThePage:
         candidate_id = asyncio.run(seed_work(database, status="DOWNLOADED"))
         # PAUSED, not PENDING: the running worker claims a pending job and
         # fails it before the request arrives, which would turn this into a
-        # test about the worker. A paused job is in flight and stays put. It
-        # carries the archive from its previous run, which is what makes it a
-        # work the guard can see -- a job row alone has no artifact.
+        # test about the worker. Removal needs no asynchronous stop for PAUSED.
         job_id = insert_job(database, candidate_id, state="PAUSED")
         insert_artifact(
             database, job_id, artifact_type="ARCHIVE", path="/work/source.zip"
@@ -1413,9 +1411,8 @@ class TestPurgeFromThePage:
             )
             still_there = client.get(f"/works/{candidate_id}")
 
-        assert response.status_code == 400
-        assert "仍有下载任务在进行" in response.text
-        assert still_there.status_code == 200
+        assert response.status_code == 303
+        assert still_there.status_code == 404
 
     def test_the_delete_buttons_are_on_the_page_at_every_stage(
         self, tmp_path: Path

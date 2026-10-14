@@ -8,6 +8,8 @@ ComicInfo injection, atomic publication — is the existing pipeline unchanged.
 
 from __future__ import annotations
 
+from app.downloads.execution import attempt_path, run_sync
+
 import asyncio
 import hashlib
 import json
@@ -95,10 +97,16 @@ class TelegraphService:
             )
         return self._http_client
 
+    async def preflight_for_candidate(self, candidate_id: int) -> None:
+        """Check the preview link and page count without downloading images."""
+        preview_url, expected_pages = await run_sync(self._candidate_preview_sync, candidate_id)
+        page = await TelegraphClient(self._client()).fetch_page(preview_url)
+        self._check_page_count(page, expected_pages)
+
     async def download_for_candidate(
         self, candidate_id: int
     ) -> TelegraphFetchResult:
-        preview_url, expected_pages = await asyncio.to_thread(
+        preview_url, expected_pages = await run_sync(
             self._candidate_preview_sync, candidate_id
         )
         client = self._client()
@@ -119,7 +127,8 @@ class TelegraphService:
         destination = (
             work_path / "telegraph" / f"candidate-{candidate_id}.zip"
         )
-        total_bytes = await asyncio.to_thread(
+        destination = attempt_path(destination)
+        total_bytes = await run_sync(
             pack_images, images, destination
         )
         hosts = tuple(
@@ -134,10 +143,10 @@ class TelegraphService:
             total_bytes=total_bytes,
             hosts=hosts,
         )
-        await asyncio.to_thread(
+        await run_sync(
             self._record_artifact_sync, candidate_id, destination, result
         )
-        await asyncio.to_thread(
+        await run_sync(
             self._record_provenance_sync, candidate_id, result
         )
         logging.getLogger(__name__).info(

@@ -311,7 +311,11 @@ def _summarise(result: dict) -> tuple[str | None, str | None]:
     """
     applied = len(result["applied"])
     skipped = result["skipped"]
+    pending = (sum(item["result"].get("cleanup_status") == "PENDING" for item in result["applied"])
+               if result["action"] == "remove" else 0)
     if not skipped:
+        if pending:
+            return (None, f"已移除 {applied} 件作品记录，{pending} 件等待后台停止与文件清理")
         return (None, f"{applied} 件作品已执行")
     return (
         f"{applied} 件已执行，{len(skipped)} 件跳过：{skipped[0]['message']}",
@@ -364,8 +368,11 @@ async def downloaded_dedup_run(
         ),
     )
     removed = len(result["removed"])
+    pending = sum(item["cleanup_status"] == "PENDING" for item in result["removed"])
     skipped = result["skipped"]
     if not skipped:
+        if pending:
+            return _redirect("all", notice=f"已移除 {removed} 件重复作品记录，{pending} 件等待后台停止与文件清理")
         return _redirect("all", notice=f"去重完成：移除 {removed} 件重复作品")
     return _redirect(
         "all",

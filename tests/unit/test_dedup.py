@@ -163,7 +163,7 @@ class _FakeArchived:
         if candidate_id in self._refusals:
             raise self._refusals[candidate_id]
         self.purged.append((candidate_id, delete_files, operator_name))
-        return {"candidate_id": candidate_id}
+        return {"candidate_id": candidate_id, "removal_id": f"remove-{candidate_id}", "cleanup_status": "COMPLETED"}
 
 
 class _FakeDownloads:
@@ -179,8 +179,8 @@ class _FakeDownloads:
         return "CANCELLED"
 
 
-def test_apply_dedup_cancels_open_downloads_then_purges_with_files() -> None:
-    """The cancel is what makes one click enough: purge refuses an open job."""
+def test_apply_dedup_uses_durable_purge_without_a_preliminary_cancel() -> None:
+    """The shared removal owns all stop identities and the file manifest."""
     rows = [_row(1, packaged=True, page_count=20), _row(2)]
     downloads = _FakeDownloads(
         {
@@ -203,9 +203,7 @@ def test_apply_dedup_cancels_open_downloads_then_purges_with_files() -> None:
         )
     )
 
-    # Only the download job is cancelled; the packaging task is not cancellable
-    # from here and must be left to its worker.
-    assert downloads.cancelled == [11]
+    assert downloads.cancelled == []
     assert archived.purged == [(2, True, "tester")]
     assert result["removed"] == [
         {
@@ -213,7 +211,9 @@ def test_apply_dedup_cancels_open_downloads_then_purges_with_files() -> None:
             "ex_gid": 1,
             "kept_candidate_id": 1,
             "reason": "未完成下载或打包",
-            "cancelled_jobs": 1,
+            "cancelled_jobs": 0,
+            "removal_id": "remove-2",
+            "cleanup_status": "COMPLETED",
         }
     ]
     assert result["kept"] == [1]
@@ -222,9 +222,9 @@ def test_apply_dedup_cancels_open_downloads_then_purges_with_files() -> None:
 
 
 def test_apply_dedup_skips_a_refused_removal_and_keeps_the_rest() -> None:
-    """A running pack is a skip with a reason, not a half-deleted work."""
+    """A missing candidate is a skip with a reason, not a batch failure."""
     rows = [_row(1, packaged=True), _row(2), _row(3)]
-    refusal = ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在打包")
+    refusal = ArchivedWorkError("CANDIDATE_NOT_FOUND", "该候选不存在")
     archived = _FakeArchived(refusals={2: refusal})
 
     result = asyncio.run(
@@ -236,8 +236,8 @@ def test_apply_dedup_skips_a_refused_removal_and_keeps_the_rest() -> None:
         {
             "candidate_id": 2,
             "ex_gid": 1,
-            "code": "WORK_PACK_RUNNING",
-            "message": "该作品正在打包",
+            "code": "CANDIDATE_NOT_FOUND",
+            "message": "该候选不存在",
         }
     ]
     assert [entry["candidate_id"] for entry in result["removed"]] == [3]

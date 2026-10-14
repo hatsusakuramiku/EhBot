@@ -528,6 +528,15 @@ def build_lifespan(
                         application, "telegraph_service", TELEGRAPH_UNAVAILABLE
                     ).download_for_candidate(candidate_id)
                 ),
+                exhentai_preflight=(
+                    lambda candidate_id: application.state.exhentai_service
+                    .preflight_archive_for_candidate(candidate_id)
+                ),
+                telegraph_preflight=(
+                    lambda candidate_id: _required(
+                        application, "telegraph_service", TELEGRAPH_UNAVAILABLE
+                    ).preflight_for_candidate(candidate_id)
+                ),
                 torrent_push=(
                     lambda candidate_id: _required(
                         application, "torrent_service", TORRENT_UNAVAILABLE
@@ -543,6 +552,13 @@ def build_lifespan(
                         application, "torrent_service", TORRENT_UNAVAILABLE
                     ).complete_if_ready(job_id)
                 ),
+                torrent_stop=(
+                    lambda operation: _required(
+                        application, "torrent_service", TORRENT_UNAVAILABLE
+                    ).stop_for_operation(operation)
+                ),
+                stop_pack=(lambda task_id: application.state.conversion_service.stop_attempt(task_id)),
+                cleanup_removals=(lambda: application.state.archived_work_service.process_removals()),
                 # Auto-pack a finished download into a CBZ. The idempotent
                 # conversion insert makes the torrent route's own auto-pack a
                 # no-op here, so a single conversion job is created per

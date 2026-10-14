@@ -15,12 +15,15 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 from pathlib import Path
 import time
 
 import httpx
 
 from app.db.database import Database
+from app.downloads.execution import attempt_path, current_execution, execution_scope, failure_transaction, run_sync
+from app.downloads.queue import QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
 from app.torrent.client import QBittorrentClient
 from app.torrent.delivery import resolve_content_path, take_delivery
 from app.torrent.fetcher import TorrentFileFetcher
@@ -76,6 +79,7 @@ class TorrentService:
         self._auto_pack = auto_pack
         self._notify = notify
         self._poller_task: asyncio.Task[None] | None = None
+        self._active_attempts: dict[str, asyncio.Task] = {}
 
     async def _effective_work_path(self) -> Path:
         if self._work_path_provider is None:
@@ -112,11 +116,11 @@ class TorrentService:
         here: the return of this call means the client accepted the torrent,
         not that a payload exists.
         """
-        magnet = await asyncio.to_thread(self._candidate_magnet_sync, candidate_id)
+        magnet = await run_sync(self._candidate_magnet_sync, candidate_id)
         if magnet is not None:
             magnet_url, digest = magnet
             config = await self._config()
-            already_present = await self._client(config).add_magnet(magnet_url)
+            already_present = await self._push_owned(config, digest, magnet_url=magnet_url)
             logging.getLogger(__name__).info(
                 "magnet_pushed candidate=%d hash=%s duplicate=%s",
                 candidate_id,
@@ -132,7 +136,7 @@ class TorrentService:
             if already_present:
                 details["was_already_in_client"] = True
             return details
-        gid, token, digest = await asyncio.to_thread(
+        gid, token, digest = await run_sync(
             self._candidate_torrent_sync, candidate_id
         )
         config = await self._config()
@@ -150,9 +154,7 @@ class TorrentService:
         payload = await TorrentFileFetcher(self._http_client).fetch(
             credentials, gid, token, digest
         )
-        already_present = await self._client(config).add_torrent(
-            payload, digest
-        )
+        already_present = await self._push_owned(config, digest, payload=payload)
         logging.getLogger(__name__).info(
             "torrent_pushed candidate=%d hash=%s duplicate=%s",
             candidate_id,
@@ -172,6 +174,122 @@ class TorrentService:
             details["was_already_in_client"] = True
         return details
 
+    async def _push_owned(self, config, digest, *, magnet_url=None, payload=None) -> bool:
+        """Persist a tagged intention before sending a remotely visible push."""
+        client = self._client(config)
+        execution = current_execution.get()
+        if execution is None:
+            if magnet_url is not None:
+                return await client.add_magnet(magnet_url)
+            return await client.add_torrent(payload, digest)
+        present = await client.status(digest)
+        tag = f"ehbot-{execution.attempt_id}"
+        with self._database.connection() as connection:
+            execution.check(connection)
+        await run_sync(self._save_resource_sync, execution, config.base_url, digest, tag,
+                       "SHARED" if present is not None else "UNKNOWN", "INTENDED")
+        if present is not None:
+            already_present = True
+        else:
+            request = asyncio.create_task(
+                client.add_magnet(magnet_url, ownership_tag=tag) if magnet_url is not None
+                else client.add_torrent(payload, digest, ownership_tag=tag)
+            )
+            cancelled = False
+            try:
+                while not request.done():
+                    try:
+                        await asyncio.shield(request)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                already_present = request.result()
+            except TorrentError as exc:
+                if exc.code in {"TORRENT_FILE_INVALID", "TORRENT_PUSH_REJECTED"}:
+                    await run_sync(self._save_resource_sync, execution, config.base_url, digest, tag,
+                                   "UNKNOWN", "STOP_CONFIRMED")
+                raise
+        if already_present:
+            await run_sync(self._save_resource_sync, execution, config.base_url, digest, tag,
+                           "SHARED", "STOP_CONFIRMED")
+            raise TorrentError("TORRENT_RESOURCE_SHARED", "远端已有该种子且本项目不能独占停止，已拒绝附着为受管下载")
+        else:
+            registered = await client.status(digest)
+            confirmed = registered is not None and tag in registered.tags
+            ownership, resource_status = ("OWNED", "REGISTERED") if confirmed else ("UNKNOWN", "INTENDED")
+        await run_sync(self._save_resource_sync, execution, config.base_url, digest, tag,
+                       ownership, resource_status)
+        if present is None and cancelled:
+            raise asyncio.CancelledError
+        return already_present
+
+    def _save_resource_sync(self, execution, instance_url, digest, tag, ownership, status) -> None:
+        # Resource bookkeeping must survive revocation while a push is in flight.
+        # This narrow transaction changes no work, metadata or artifact.
+        token = current_execution.set(None)
+        try:
+            with self._database.connection() as connection:
+                if status == "INTENDED":
+                    execution.check(connection)
+                job_id = connection.execute("SELECT legacy_job_id FROM queue_tasks WHERE task_id = ?",
+                                            (execution.task_id,)).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO queue_remote_resources(resource_id, task_id, attempt_id, legacy_job_id, "
+                    "instance_url, digest, ownership_tag, ownership, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(resource_id) DO UPDATE SET ownership = excluded.ownership, status = excluded.status, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (execution.attempt_id, execution.task_id, execution.attempt_id, job_id, instance_url,
+                     digest, tag, ownership, status),
+                )
+        finally:
+            current_execution.reset(token)
+
+    async def stop_for_operation(self, operation: dict) -> None:
+        """Find interrupted pushes and confirm only resources this service owns."""
+        task = self._active_attempts.get(operation["task_id"])
+        if task is not None and task is not asyncio.current_task():
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        resources = await run_sync(self._resources_sync, operation["legacy_job_id"], operation["task_id"])
+        details = json.loads(operation["resource_json"] or "{}")
+        if not resources and not details.get("hash"):
+            return
+        config = await self._config()
+        client = self._client(config)
+        if not resources:
+            if details.get("hash"):
+                if await client.status(details["hash"]) is not None:
+                    raise TorrentError("REMOTE_OWNERSHIP_UNKNOWN", "旧种子的资源归属不明，停止尚未确认")
+            return
+        for resource in resources:
+            if resource["instance_url"] != config.base_url:
+                raise TorrentError("REMOTE_INSTANCE_CHANGED", "远端实例已改变，必须恢复原连接才能确认停止")
+            if resource["ownership"] != "SHARED":
+                status = await client.status(resource["digest"])
+                if status is None and resource["status"] == "INTENDED":
+                    raise TorrentError("REMOTE_PUSH_UNCONFIRMED", "推送结果未知，不能仅凭暂时查不到种子确认停止")
+                if status is not None:
+                    if resource["ownership_tag"] not in status.tags:
+                        raise TorrentError("REMOTE_OWNERSHIP_UNKNOWN", "远端资源归属无法核实，停止尚未确认")
+                    await client.delete(resource["digest"], delete_files=False)
+                    if await client.status(resource["digest"]) is not None:
+                        raise TorrentError("REMOTE_STOP_NOT_CONFIRMED", "远端仍持有该任务，等待停止确认")
+            await run_sync(self._confirm_resource_sync, resource["resource_id"])
+
+    def _resources_sync(self, job_id: int, task_id: str | None = None) -> list[dict]:
+        with self._database.connection() as connection:
+            connection.row_factory = sqlite3.Row
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM queue_remote_resources WHERE legacy_job_id = ? AND status <> 'STOP_CONFIRMED' "
+                "AND (? IS NULL OR task_id = ?)",
+                (job_id, task_id, task_id),
+            )]
+
+    def _confirm_resource_sync(self, resource_id: str) -> None:
+        with self._database.connection() as connection:
+            connection.execute("UPDATE queue_remote_resources SET status = 'STOP_CONFIRMED', "
+                               "updated_at = CURRENT_TIMESTAMP WHERE resource_id = ?", (resource_id,))
+
     async def complete_if_ready(self, job_id: int) -> bool:
         """Finish a parked torrent whose payload is already readable on disk.
 
@@ -183,7 +301,7 @@ class TorrentService:
         Settings are re-read in this method so a corrected save path takes
         effect at once, satisfying the "re-read on every retry" contract.
         """
-        candidate_id, details = await asyncio.to_thread(
+        candidate_id, details = await run_sync(
             self._job_candidate_details_sync, job_id
         )
         digest = str(details.get("hash") or "")
@@ -202,7 +320,7 @@ class TorrentService:
             ):
                 return False
             work_path = await self._effective_work_path()
-            delivery = await asyncio.to_thread(
+            delivery = await run_sync(
                 self._take_delivery_sync,
                 candidate_id,
                 status,
@@ -214,9 +332,9 @@ class TorrentService:
             merged["archive_bytes"] = delivery.size_bytes
             merged["packed_directory"] = delivery.was_directory
             merged["completed_at"] = time.time()
-            merged["seeding"] = config.keep_seeding
+            merged["seeding"] = True
             merged["retried_complete"] = True
-            await asyncio.to_thread(
+            await run_sync(
                 self._complete_sync,
                 job_id,
                 candidate_id,
@@ -224,10 +342,7 @@ class TorrentService:
                 merged,
             )
             if not config.keep_seeding:
-                try:
-                    await self._client(config).delete(digest, delete_files=False)
-                except TorrentError:  # noqa: BLE001 - cleanup is best-effort
-                    pass
+                await self._cleanup_completed_resource(job_id, merged)
             if config.auto_pack:
                 await self._queue_pack(candidate_id)
             return True
@@ -238,24 +353,21 @@ class TorrentService:
             return False
 
     async def abandon(self, job_id: int) -> None:
-        """Remove a parked torrent from the client, ignoring what is gone.
+        """Legacy adapter to the same ownership check and confirmed stop path."""
+        details = await run_sync(self._job_details_sync, job_id)
+        with self._database.connection() as connection:
+            snapshot = task_snapshot(connection, job_id)
+        await self.stop_for_operation({"legacy_job_id": job_id, "task_id": snapshot["task_id"],
+                                       "resource_json": json.dumps(details)})
 
-        Called when the operator switches sources or cancels. Failures are
-        swallowed on purpose: the queue action must still succeed even if the
-        client is unreachable, otherwise a stalled job could not be abandoned
-        precisely when the client is the problem.
-        """
-        details = await asyncio.to_thread(self._job_details_sync, job_id)
-        digest = str(details.get("hash") or "")
-        if not digest:
-            return
+    async def _cleanup_completed_resource(self, job_id: int, details: dict) -> None:
         try:
-            config = await self._config()
-            await self._client(config).delete(digest, delete_files=False)
-        except (TorrentError, httpx.HTTPError) as exc:
-            logging.getLogger(__name__).info(
-                "torrent_abandon_ignored job=%d error=%s", job_id, exc
-            )
+            await self.abandon(job_id)
+        except TorrentError as exc:
+            logging.getLogger(__name__).warning("torrent_cleanup_unconfirmed job=%d code=%s", job_id, exc.code)
+            return
+        details["seeding"] = False
+        await run_sync(self._update_details_sync, job_id, details)
 
     async def start(self) -> None:
         if self._poller_task is not None:
@@ -291,7 +403,7 @@ class TorrentService:
         the database each pass, so a process that comes back up re-attaches to
         whatever the client is still working on.
         """
-        jobs = await asyncio.to_thread(self._waiting_jobs_sync)
+        jobs = await run_sync(self._waiting_jobs_sync)
         if jobs:
             logging.getLogger(__name__).info(
                 "torrent_poll_started jobs=%d", len(jobs)
@@ -303,7 +415,15 @@ class TorrentService:
                 "candidate_id": job.get("candidate_id"),
             }
             try:
-                await self._advance_job(job)
+                await self._run_poll_attempt(job)
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+                continue
+            except sqlite3.IntegrityError as exc:
+                if str(exc) not in STALE_EXECUTION_ERRORS:
+                    raise
+                continue
             except TorrentError as exc:
                 # A mapped provider error: the original message and code are
                 # what an operator needs, but the traceback is not interesting
@@ -316,8 +436,8 @@ class TorrentService:
                         "error_message": exc.public_message,
                     },
                 )
-                await asyncio.to_thread(
-                    self._mark_failed_sync,
+                await self._fail_poll_attempt(
+                    job,
                     job["job_id"],
                     exc.code,
                     exc.public_message,
@@ -335,8 +455,8 @@ class TorrentService:
                         ),
                     },
                 )
-                await asyncio.to_thread(
-                    self._mark_failed_sync,
+                await self._fail_poll_attempt(
+                    job,
                     job["job_id"],
                     str(getattr(exc, "code", "TORRENT_POLL_FAILED")),
                     str(getattr(exc, "public_message", exc)),
@@ -344,6 +464,32 @@ class TorrentService:
             if self._notify is not None:
                 self._notify(job_id=job["job_id"], candidate_id=job["candidate_id"])
         return len(jobs)
+
+    async def _fail_poll_attempt(self, job, job_id, code, message) -> None:
+        with execution_scope(self._database.path, job):
+            try:
+                await run_sync(self._mark_failed_sync, job_id, code, message)
+            except sqlite3.IntegrityError as exc:
+                if str(exc) not in STALE_EXECUTION_ERRORS:
+                    raise
+
+    async def _run_poll_attempt(self, job: dict) -> None:
+        async def advance():
+            with execution_scope(self._database.path, job) as execution:
+                with self._database.connection() as connection:
+                    execution.check(connection)
+                await self._advance_job(job)
+        task = asyncio.create_task(advance(), name=f"torrent-{job['attempt_id']}")
+        self._active_attempts[job["task_id"]] = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            self._active_attempts.pop(job["task_id"], None)
 
     async def _advance_job(self, job: dict) -> None:
         details = job["details"]
@@ -366,6 +512,7 @@ class TorrentService:
                 f"qBittorrent \u62a5\u544a\u9519\u8bef\u72b6\u6001: "
                 f"{status.state}",
             )
+        await run_sync(self._observe_resource_sync, job["job_id"], status, config.base_url)
         merged = self._merge_progress(details, status)
         logging.getLogger(__name__).info(
             "torrent_progress job=%d hash=%s state=%s progress=%.1f%% "
@@ -378,11 +525,11 @@ class TorrentService:
             status.dlspeed,
         )
         if not status.is_complete:
-            await asyncio.to_thread(
+            await run_sync(
                 self._update_details_sync, job["job_id"], merged
             )
             return
-        delivery = await asyncio.to_thread(
+        delivery = await run_sync(
             self._take_delivery_sync,
             job["candidate_id"],
             status,
@@ -395,8 +542,8 @@ class TorrentService:
         merged["completed_at"] = time.time()
         # Recorded before the removal attempt so the finished job states what
         # was meant to happen to the seed even if the removal itself fails.
-        merged["seeding"] = config.keep_seeding
-        await asyncio.to_thread(
+        merged["seeding"] = True
+        await run_sync(
             self._complete_sync,
             job["job_id"],
             job["candidate_id"],
@@ -404,16 +551,7 @@ class TorrentService:
             merged,
         )
         if not config.keep_seeding:
-            try:
-                await self._client(config).delete(
-                    digest, delete_files=False
-                )
-            except TorrentError as exc:
-                logging.getLogger(__name__).info(
-                    "torrent_cleanup_ignored job=%d error=%s",
-                    job["job_id"],
-                    exc,
-                )
+            await self._cleanup_completed_resource(job["job_id"], merged)
         logging.getLogger(__name__).info(
             "torrent_download_completed candidate=%d bytes=%d",
             job["candidate_id"],
@@ -421,6 +559,26 @@ class TorrentService:
         )
         if config.auto_pack:
             await self._queue_pack(job["candidate_id"])
+
+    def _observe_resource_sync(self, job_id: int, status: TorrentStatus, instance_url: str) -> None:
+        """Confirm this attempt's remote identity before progress or delivery."""
+        execution = current_execution.get()
+        with self._database.connection() as connection:
+            resource = connection.execute(
+                "SELECT instance_url, ownership_tag FROM queue_remote_resources "
+                "WHERE legacy_job_id = ? AND task_id = ? AND attempt_id = ? "
+                "AND digest = ? AND ownership <> 'SHARED' AND status <> 'STOP_CONFIRMED'",
+                (job_id, execution.task_id, execution.attempt_id, status.hash),
+            ).fetchone()
+            if resource is None or resource[1] not in status.tags:
+                raise TorrentError("REMOTE_OWNERSHIP_UNKNOWN", "远端资源归属无法核实，不能提交进度或产物")
+            if resource[0] != instance_url:
+                raise TorrentError("REMOTE_INSTANCE_CHANGED", "远端实例已改变，不能提交进度或产物")
+            connection.execute(
+                "UPDATE queue_remote_resources SET ownership = 'OWNED', status = 'REGISTERED', "
+                "updated_at = CURRENT_TIMESTAMP WHERE resource_id = ?",
+                (execution.attempt_id,),
+            )
 
     async def _queue_pack(self, candidate_id: int) -> None:
         """Hand a finished download to the conversion queue.
@@ -484,7 +642,7 @@ class TorrentService:
             status.content_path, config.save_path, config.local_save_path
         )
         return take_delivery(
-            content_path, work_path / "torrent", candidate_id
+            content_path, attempt_path(work_path / "torrent" / "payload").parent, candidate_id
         )
 
     def _candidate_magnet_sync(
@@ -577,19 +735,15 @@ class TorrentService:
                 "ORDER BY id",
                 (PROVIDER_NAME,),
             ).fetchall()
-        jobs: list[dict] = []
-        for row in rows:
-            try:
-                details = json.loads(str(row[2] or "{}"))
-            except ValueError:
-                details = {}
-            jobs.append(
-                {
-                    "job_id": int(row[0]),
-                    "candidate_id": int(row[1]),
-                    "details": details if isinstance(details, dict) else {},
-                }
-            )
+            jobs: list[dict] = []
+            for row in rows:
+                try:
+                    details = json.loads(str(row[2] or "{}"))
+                except ValueError:
+                    details = {}
+                jobs.append({"job_id": int(row[0]), "candidate_id": int(row[1]),
+                             "details": details if isinstance(details, dict) else {},
+                             **task_snapshot(connection, int(row[0]))})
         return tuple(jobs)
 
     def _update_details_sync(self, job_id: int, details: dict) -> None:
@@ -679,7 +833,7 @@ class TorrentService:
     def _mark_failed_sync(
         self, job_id: int, code: str, message: str
     ) -> None:
-        with self._database.connection() as connection:
+        with failure_transaction(self._database) as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = 'FAILED', error_code = ?, "
                 "error_message = ?, lease_owner = NULL, "
@@ -694,6 +848,14 @@ class TorrentService:
                 "WHERE id = ?)",
                 (message, job_id),
             )
+            if connection.execute(
+                "SELECT 1 FROM queue_remote_resources WHERE legacy_job_id = ? AND status <> 'STOP_CONFIRMED'",
+                (job_id,),
+            ).fetchone() is not None:
+                current = task_snapshot(connection, job_id)
+                QueueControl._operation(connection, job_id, "cancel", current, {})
+                connection.execute("UPDATE download_jobs SET state = 'STOPPING', updated_at = CURRENT_TIMESTAMP "
+                                   "WHERE id = ?", (job_id,))
 
 
 __all__ = [

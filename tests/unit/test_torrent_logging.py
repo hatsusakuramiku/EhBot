@@ -40,10 +40,12 @@ async def _seed_waiting_torrent(database: Database) -> tuple[int, int]:
                 "INSERT INTO download_jobs "
                 "(candidate_id, provider, state, priority, attempt_count, "
                 "idempotency_key, details_json, created_at, updated_at) "
-                "VALUES (?, ?, 'WAITING_TORRENT', 100, 0, ?, '{}', "
+                "VALUES (?, ?, 'PENDING', 100, 0, ?, '{}', "
                 "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                 (candidate_id, PROVIDER_NAME, f"torrent-{candidate_id}"),
             )
+            conn.execute("UPDATE download_jobs SET state = 'DOWNLOADING' WHERE id = ?", (cur.lastrowid,))
+            conn.execute("UPDATE download_jobs SET state = 'WAITING_TORRENT' WHERE id = ?", (cur.lastrowid,))
             return int(cur.lastrowid), candidate_id
     return await asyncio.to_thread(_seed)
 

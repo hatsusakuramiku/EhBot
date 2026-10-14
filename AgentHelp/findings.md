@@ -251,3 +251,29 @@
 - 实际新复现的 4 条失败：FAILED/COMPLETED 种子尝试在后续 STOPPING 中被改写；内部 retry 槽冲突泄露 SQLite 异常；打包旧完成被拒后又写 FAILED 触发同一 guard。均不是 P3 的物理停止测试。
 - 追加 028 修正 adapter 对 finished_at 非空历史的更新，027 冻结；内部命令统一槽冲突业务反馈，下载/打包复用陈旧提交拒绝集合。028 不凭空恢复此前已丢失的历史。
 - 新增 7 用例，核心合同 28；同键并发、八天未结束操作回执、HTTP/Web/WS 同结果与混合批量裁决已验。19 文件完整 460 passed / 0 failed / 0 skipped，2141 collect-only。要求映射见 R89_COMPLETION_AUDIT，实际命令与证据见 progress/R89。
+
+## 2026-10-14 P3 实施调查与实际复现（尚未验收）
+
+- 原始 preview sibling 触发条件已转正式 HTTP 回归：第一张图片失败时另一请求继续运行，先红 1/3；改成显式取消/等待所有子任务，失败、超时、外部取消连同既有 Telegraph 单元共 40/0。
+- asyncio.to_thread 的 await 取消不结束线程；run_sync 在取消（含重复取消）时等待真实线程退出，再传播 CancelledError。TG/EH/Telegraph/torrent/conversion 的线程操作已接入，真实打包线程取消不晚替换旧 CBZ 有正式证据。
+- 使用 execution_scope 的 ContextVar 将真实 task/attempt/generation 传至供应商和线程；Database.connection 在写事务提交前核对身份。辅助元数据写入也回滚，避免只屏障主产物而让旧来源污染元数据。失败并保留远端收尾槽使用 failure_transaction，在 BEGIN IMMEDIATE 内先核对身份，再原子保存 FAILED 历史和 STOPPING 意图。
+- 种子旧 abandon 吞异常、delete 不校验 HTTP、status 将无效 JSON 结构解释为“不存在”，都可能伪造停止。现行实现校验请求与查回，未知归属/实例变化/推送结果未知均保槽；SHARED 只解除本项目关联。029 保存 hash/实例/attempt tag/归属/推送意图，不存远端密码或 EH passkey。
+- 推送中取消不能先让 HTTP add 继续无人管理：受管 add 等待响应并保存资源事实后再传播取消；响应丢失时保留 INTENDED，暂时查不到不证明停止。失败尝试先保存 FAILED，再同事务建立 cancel operation 和 STOPPING，避免先释放槽。
+- 本条记录时 P3 尚缺持久运行移除、用户列表即时移除与独立资源清理、移除后重加身份/槽协调、完整断点恢复/迁移和六项原始复现核验；运行移除后续进展见本文末尾。P8 继续可恢复文件发布与精确 artifact 依赖，P9 继续 worker_session/心跳预算；不能冒充已完成。
+
+## 2026-10-14 P3 运行移除、重加预留与暂存清理
+
+- 旧 active-delete guard 拒绝运行移除；原 queue_job_delete 释放旧 task 槽。采用独立 queue_removals 预留：业务行即时消失，旧任务记录显示 REMOVED，但真实停止/清理继续持久化，匹配的新候选可排队而不可领取。画廊匹配不含 token，纯磁链 hash 不分大小写；P5 后再统一到其 unique_key，当前不新增另一套摄取机制。
+- 远端停止按 task_id 筛选资源，不能仅按可复用整数 job_id 查；旧 details/hash 也不能因缺新资源行就放弃停止。失败历史和停止意图分开保存。
+- 文件清单必须在删除业务行的同一事务捕获；目录必须在实际输出之前登记，否则取消线程晚产出的孤立 CBZ 无从清理。默认保留已登记产物，旧尝试未发布残片仍清理；复用整数候选 ID 后不能清掉新候选的 pin。路径漂移/其他 artifact 引用/链接均拒绝并保留失败信息。
+- 去重不需要预先 cancel：直接共享持久 purge 才不会人为制造停止操作与文件完成审计的竞争。Web 提示需只针对 remove 的 dict 结果，repack 返回整数。
+- 累计预览预算在单张图片完成时即判定，超限会取消并 drain sibling；相关 53 条通过。当前不是逐网络块流式预算，不扩张性能结论。
+- 最终核心 12 文件 204/0；Web/单元 5 文件 134/0、API 后验 3/0；2174 仅 collected，P3 新合同累计 33。正式证据与首次失败见 progress 最末。P3 尚待切源目标预检、refile/7-Zip 全路径文件提交、完整恢复和六项原触发验收；P4–P12 范围不变。
+
+## 2026-10-14 P3 / R90 完成核验
+
+- 目标预检先查回执，在写锁外执行真实只读 EH/Telegraph 检查，受理再核对目标引用与任务版本；失败不撤销 A。
+- refile 真入口为 `_relocate_sync`，不是旧接手说明里的 `_refile_sync`；文件移动与 artifact/pin 同短事务，普通 SQL 失败在释放写锁前补偿。发布崩溃恢复仍接 P8。
+- 7-Zip 普通执行与成员头读取均受管；Windows 暂停创建后加入 Job，再恢复主线程；停止等待整个 Job 清空。真实 26.02 工具的 27 条合同已运行，无 skip。
+- 原“共享种子也可附着”的行为违反已批准互斥方案，已改为新共享拒绝；历史关联只解除。加种成功不等于归属已确认，轮询在原实例/本 attempt 标签核实后才能写进度或产物；归属或实例变化保槽，禁止 B 接替。
+- 切源、refile、进程树、provider 晚返回、推送至 park 断点、029 冲突回滚及六项原触发全部有正式回归。最终 29 文件 625/0 与最后三文件 51/0 按节点覆盖为 628 个不同用例最终通过；2213 collect-only、rc6/029；首次失败与修正记录见 R90 audit/progress。P4–P12 仍待实施。

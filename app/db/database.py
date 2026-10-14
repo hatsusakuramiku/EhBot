@@ -51,6 +51,7 @@ from app.downloads.models import (
     DownloadedWork,
     ReArchiveCandidate,
 )
+from app.downloads.execution import current_execution
 
 from app.review.models import (
     MetadataEntry,
@@ -737,6 +738,10 @@ class Database:
         try:
             with connection:
                 yield connection
+                execution = current_execution.get()
+                if (connection.total_changes and execution is not None
+                        and execution.database_path == self.path):
+                    execution.check(connection)
         finally:
             connection.close()
 
@@ -2595,31 +2600,29 @@ class Database:
         operator_name: str,
     ) -> None:
         with self.connection() as connection:
-            connection.execute(
-                "INSERT INTO work_archive_paths "
-                "(candidate_id, relative_path, is_manual, operator_name) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(candidate_id) DO UPDATE SET "
-                "  relative_path = excluded.relative_path, "
-                "  is_manual = excluded.is_manual, "
-                "  operator_name = excluded.operator_name, "
-                "  updated_at = CURRENT_TIMESTAMP "
-                # The guard, and it has to sit on the whole UPDATE rather than on
-                # `is_manual` alone. Keeping the flag while still assigning
-                # `relative_path = excluded.relative_path` preserved the *label*
-                # on the operator's decision and threw away the decision itself,
-                # which is the failure this protects against: a batch repack
-                # would report the path as operator-set while having replaced it
-                # with the template's.
-                "WHERE NOT (work_archive_paths.is_manual = 1 "
-                "           AND excluded.is_manual = 0)",
-                (
-                    candidate_id,
-                    relative_path,
-                    1 if is_manual else 0,
-                    operator_name,
-                ),
-            )
+            self.write_archive_path_pin(connection, candidate_id, relative_path, is_manual, operator_name)
+
+    @staticmethod
+    def write_archive_path_pin(
+        connection: sqlite3.Connection, candidate_id: int, relative_path: str,
+        is_manual: bool, operator_name: str, *, override_manual: bool = False,
+    ) -> None:
+        """Write a pin in the caller's transaction; only forced refile overrides manual paths."""
+        connection.execute(
+            "INSERT INTO work_archive_paths "
+            "(candidate_id, relative_path, is_manual, operator_name) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(candidate_id) DO UPDATE SET "
+            "  relative_path = excluded.relative_path, "
+            "  is_manual = excluded.is_manual, "
+            "  operator_name = excluded.operator_name, "
+            "  updated_at = CURRENT_TIMESTAMP "
+            # Guard the whole UPDATE: retaining only is_manual while changing
+            # relative_path would still overwrite the operator's decision.
+            "WHERE ? OR NOT (work_archive_paths.is_manual = 1 "
+            "           AND excluded.is_manual = 0)",
+            (candidate_id, relative_path, 1 if is_manual else 0, operator_name, override_manual),
+        )
 
     async def override_archive_path_pin(
         self,
@@ -2652,16 +2655,8 @@ class Database:
         self, candidate_id: int, relative_path: str, operator_name: str
     ) -> None:
         with self.connection() as connection:
-            connection.execute(
-                "INSERT INTO work_archive_paths "
-                "(candidate_id, relative_path, is_manual, operator_name) "
-                "VALUES (?, ?, 0, ?) "
-                "ON CONFLICT(candidate_id) DO UPDATE SET "
-                "  relative_path = excluded.relative_path, "
-                "  is_manual = 0, "
-                "  operator_name = excluded.operator_name, "
-                "  updated_at = CURRENT_TIMESTAMP",
-                (candidate_id, relative_path, operator_name),
+            self.write_archive_path_pin(
+                connection, candidate_id, relative_path, False, operator_name, override_manual=True,
             )
 
     async def clear_archive_path_pin(self, candidate_id: int) -> None:
