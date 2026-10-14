@@ -67,7 +67,7 @@ def _configure_exhentai(client: TestClient, monkeypatch) -> None:
         manager,
         "snapshot",
         lambda: SimpleNamespace(
-            exhentai=SimpleNamespace(configured=True)
+            exhentai=SimpleNamespace(configured=True, state="connected")
         ),
     )
 
@@ -117,6 +117,23 @@ def _no_candidate_count(settings: Settings) -> int:
         return int(
             connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
         )
+
+
+def test_saved_disabled_eh_account_cannot_validate_or_ingest_manual_link(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        _authenticate(client, settings)
+        csrf = client.get("/settings/connections").context["csrf_token"]
+        created = client.post("/api/v1/accounts/commands", headers={CSRF_HEADER: csrf}, json={
+            "action":"create", "idempotency_key":"disabled-manual-account", "kind":"EH", "label":"Saved only",
+            "fields":{"ipb_member_id":"1234", "ipb_pass_hash":"test-cookie", "igneous":"test-igneous"}})
+        assert created.status_code == 200
+        fetched = _stub_gallery_fetch(client, monkeypatch)
+        response = _post(client, "/manual-add", {"input":"https://exhentai.org/g/1234/token/"})
+        assert response.status_code == 400
+        assert "账号尚未启用" in response.text
+        assert fetched == []
+        assert _no_candidate_count(settings) == 0
 
 
 def test_manual_add_page_renders(tmp_path) -> None:

@@ -17,16 +17,13 @@ import asyncio
 import json
 from pathlib import Path
 import sqlite3
+from uuid import uuid4
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.connections.manager import (
-    TELEGRAM_USER_API_SECRET,
-    TELEGRAM_USER_SESSION_SECRET,
-)
 from app.db.database import Database
 from tests.ingest_admission import permit_all_message_types
 from app.main import create_app
@@ -213,28 +210,32 @@ def make_app(tmp_path: Path, script: dict):
     return app, settings, stub
 
 
+def account_command(client, action, account=None, **params):
+    payload = {"action": action, "idempotency_key": uuid4().hex, **params}
+    if account is not None:
+        payload.update(account_id=account["account_id"], expected_revision=account["revision"])
+    return client.post("/api/v1/accounts/commands", json=payload,
+        headers={"X-CSRF-Token": client.get("/settings/connections").context["csrf_token"]})
+
+
+def start_account_login(client):
+    created = account_command(client, "create", kind="TG_USER", label="Big files", fields={
+        "api_id":"1234567", "api_hash":"a" * 32, "phone":"+8613800138000"})
+    assert created.status_code == 200
+    account = created.json()["result"]
+    started = account_command(client, "login-start", account)
+    assert started.status_code == 200
+    return account, started.json()["result"]["challenge_id"]
+
+
 def login(client: TestClient, *, code: str = "12345", password: str | None = None):
+    account, challenge = start_account_login(client)
     page = client.get("/settings/connections")
-    started = client.post(
-        "/connections/telegram-user/login",
-        data={
-            "api_id": "1234567",
-            "api_hash": "a" * 32,
-            "phone": "+8613800138000",
-            "csrf_token": page.context["csrf_token"],
-        },
-        follow_redirects=True,
-    )
-    verified = client.post(
-        "/connections/telegram-user/verify",
-        data={
-            "code": code,
-            "password": password or "",
-            "csrf_token": started.context["csrf_token"],
-        },
-        follow_redirects=True,
-    )
-    return started, verified
+    verified = account_command(client, "login-complete", account, challenge_id=challenge, code=code, password=password or "")
+    assert verified.status_code == 200
+    enabled = account_command(client, "enable", verified.json()["result"])
+    assert enabled.status_code == 200
+    return page, client.get("/settings/connections")
 
 
 def test_a_full_login_stores_the_session_and_reports_the_account(
@@ -248,11 +249,13 @@ def test_a_full_login_stores_the_session_and_reports_the_account(
         started, verified = login(client)
         status = client.get("/api/connections/status").json()
         final_page = client.get("/settings/connections")
+        account = client.get("/api/v1/accounts").json()["items"][0]
+        stored = client.portal.call(app.state.connection_manager.registry.context, account["account_id"])
 
-    # Step one parks the login on the code, naming where it was sent.
+    # Login state stays observable; saved phone is masked until explicit reveal.
     assert started.context["connections"]["telegram_user"]["awaiting_code"] is True
     assert (
-        started.context["connections"]["telegram_user"]["phone"] == "+8613800138000"
+        started.context["connections"]["telegram_user"]["phone"] is None
     )
     assert verified.status_code == 200
     assert status["telegram_user"]["state"] == "connected"
@@ -264,8 +267,7 @@ def test_a_full_login_stores_the_session_and_reports_the_account(
     assert rendered["state"]["label"] == "已连接"
     # The session is a full account credential, so it lives in the private store
     # and nowhere else.
-    stored = (settings.data_path / "private" / TELEGRAM_USER_SESSION_SECRET)
-    assert stored.read_text(encoding="utf-8") == "session-blob"
+    assert stored.values["session"] == "session-blob"
 
 
 def test_the_session_is_never_echoed_back_to_the_page(tmp_path: Path) -> None:
@@ -280,7 +282,7 @@ def test_the_session_is_never_echoed_back_to_the_page(tmp_path: Path) -> None:
 
     assert "super-secret-session" not in page.text
     assert "super-secret-session" not in status
-    # The api_hash is a credential too, and the form must come back empty.
+    # Saved API fields remain editable through masks; secrets never echo.
     assert "a" * 32 not in page.text
 
 
@@ -297,31 +299,12 @@ def test_a_two_factor_account_is_asked_for_its_password(tmp_path: Path) -> None:
     )
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/settings/connections")
-        client.post(
-            "/connections/telegram-user/login",
-            data={
-                "api_id": "1234567",
-                "api_hash": "a" * 32,
-                "phone": "+8613800138000",
-                "csrf_token": page.context["csrf_token"],
-            },
-            follow_redirects=True,
-        )
-        refused = client.post(
-            "/connections/telegram-user/verify",
-            data={"code": "12345", "password": "", "csrf_token": page.context["csrf_token"]},
-        )
+        account, challenge = start_account_login(client)
+        refused = account_command(client, "login-complete", account, challenge_id=challenge, code="12345", password="")
         awaiting = client.get("/settings/connections")
-        finished = client.post(
-            "/connections/telegram-user/verify",
-            data={
-                "code": "",
-                "password": "vault-pass",
-                "csrf_token": awaiting.context["csrf_token"],
-            },
-            follow_redirects=True,
-        )
+        finished = account_command(client, "login-complete", account, challenge_id=challenge, code="", password="vault-pass")
+        assert finished.status_code == 200
+        assert account_command(client, "enable", finished.json()["result"]).status_code == 200
         status = client.get("/settings/connections").context["connections"]
 
     # A 2FA prompt is not the operator's mistake, so the login parks rather than
@@ -341,21 +324,8 @@ def test_a_wrong_code_keeps_the_login_open(tmp_path: Path) -> None:
     )
     with TestClient(app) as client:
         authenticate(client, settings)
-        page = client.get("/settings/connections")
-        client.post(
-            "/connections/telegram-user/login",
-            data={
-                "api_id": "1234567",
-                "api_hash": "a" * 32,
-                "phone": "+8613800138000",
-                "csrf_token": page.context["csrf_token"],
-            },
-            follow_redirects=True,
-        )
-        refused = client.post(
-            "/connections/telegram-user/verify",
-            data={"code": "00000", "password": "", "csrf_token": page.context["csrf_token"]},
-        )
+        account, challenge = start_account_login(client)
+        refused = account_command(client, "login-complete", account, challenge_id=challenge, code="00000", password="")
         after = client.get("/settings/connections")
 
     assert refused.status_code == 400
@@ -381,27 +351,24 @@ def test_an_empty_verification_is_refused_without_calling_telegram(
     assert refused.status_code == 400
 
 
-def test_disconnecting_forgets_both_secrets(tmp_path: Path) -> None:
+def test_disabling_retains_api_and_session_secrets(tmp_path: Path) -> None:
     app, settings, _ = make_app(
         tmp_path, {"code": "12345", "session": "s", "payload": b"x"}
     )
     with TestClient(app) as client:
         authenticate(client, settings)
         login(client)
-        page = client.get("/settings/connections")
-        client.post(
-            "/connections/telegram-user/disconnect",
-            data={"csrf_token": page.context["csrf_token"]},
-            follow_redirects=True,
-        )
+        account = client.get("/api/v1/accounts").json()["items"][0]
+        disabled = account_command(client, "disable", account)
+        assert disabled.status_code == 202
+        client.portal.call(app.state.connection_manager.process_operations)
         status = client.get("/settings/connections").context["connections"]
+        saved = client.portal.call(app.state.connection_manager.registry.context, account["account_id"])
 
     assert status["telegram_user"]["state"]["code"] == "not_configured"
-    private = settings.data_path / "private"
-    # Both, not just the session: 「断开」 means this deployment no longer holds a
-    # credential for that account.
-    assert not (private / TELEGRAM_USER_SESSION_SECRET).exists()
-    assert not (private / TELEGRAM_USER_API_SECRET).exists()
+    assert saved.values["session"] == "s"
+    assert saved.values["api_id"] == "1234567"
+    assert saved.values["api_hash"] == "a" * 32
 
 
 def test_the_login_forms_require_csrf(tmp_path: Path) -> None:
@@ -516,9 +483,7 @@ def test_reading_chats_without_a_logged_in_account_says_why(
         )
 
     assert refused.status_code == 400
-    assert refused.context["error"] == (
-        "尚未登录 Telegram 用户账户，请先在「外部连接」完成登录"
-    )
+    assert refused.context["error"] == "请先启用 TG 用户账号"
     assert forged.status_code == 400
     assert forged.context["error"] == "来源类型、ID 或名称无效"
 
@@ -709,4 +674,4 @@ def test_a_download_without_a_session_fails_with_a_named_reason(
     assert state == "FAILED"
     # Named, because「没登录」is fixable by the operator and a generic download
     # failure would not tell them that.
-    assert code == "TELEGRAM_USER_NOT_CONFIG"
+    assert code == "ACCOUNT_NOT_ENABLED"

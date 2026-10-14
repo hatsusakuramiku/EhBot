@@ -62,7 +62,10 @@ async def disconnect_telegram(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    await deps.connection_manager(request).disconnect_telegram()
+    try:
+        await deps.connection_manager(request).disconnect_telegram()
+    except ProviderConnectionError as exc:
+        return await render_settings(request, SETTINGS_CONNECTIONS, error=exc.public_message, status_code=409)
     return settings_redirect(request, SETTINGS_CONNECTIONS)
 
 
@@ -137,7 +140,10 @@ async def disconnect_telegram_user(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    await deps.connection_manager(request).disconnect_telegram_user()
+    try:
+        await deps.connection_manager(request).disconnect_telegram_user()
+    except ProviderConnectionError as exc:
+        return await render_settings(request, SETTINGS_CONNECTIONS, error=exc.public_message, status_code=409)
     return settings_redirect(request, SETTINGS_CONNECTIONS)
 
 
@@ -176,7 +182,10 @@ async def disconnect_exhentai(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    await deps.connection_manager(request).disconnect_exhentai()
+    try:
+        await deps.connection_manager(request).disconnect_exhentai()
+    except ProviderConnectionError as exc:
+        return await render_settings(request, SETTINGS_CONNECTIONS, error=exc.public_message, status_code=409)
     return settings_redirect(request, SETTINGS_CONNECTIONS)
 
 

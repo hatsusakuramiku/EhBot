@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
+from functools import wraps
 
 import httpx
 
@@ -29,6 +31,15 @@ from app.thumbnails.identity import identity_hash
 PROVIDER_NAME = "EXHENTAI"
 
 
+def _account_request(method):
+    """Keep account requests and their metadata/artifact commits in one lease."""
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        async with self.account_request():
+            return await method(self, *args, **kwargs)
+    return wrapped
+
+
 class ExHentaiService:
     def __init__(
         self,
@@ -39,6 +50,7 @@ class ExHentaiService:
         http_client: httpx.AsyncClient | None = None,
         translator: TagTranslator | None = None,
         work_path_provider=None,
+        account_scope=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -49,6 +61,16 @@ class ExHentaiService:
         # Resolved per download so an operator directory change applies
         # without a restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
+        self._account_scope = account_scope
+
+    @asynccontextmanager
+    async def account_request(self):
+        """Hold the selected account through a request and its caller's writes."""
+        if self._account_scope is None:
+            yield
+            return
+        async with self._account_scope("EH", required=False):
+            yield
 
     async def _effective_work_path(self) -> Path:
         if self._work_path_provider is None:
@@ -56,12 +78,14 @@ class ExHentaiService:
         resolved = await self._work_path_provider()
         return resolved or self._work_path
 
+    @_account_request
     async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
         metadata, gallery = await self._fetch_metadata(gid, token)
         await self.persist_gallery_metadata(candidate_id, metadata, gallery)
         return metadata
 
+    @_account_request
     async def fetch_metadata_for_gallery(
         self, gid: int, token: str
     ) -> tuple[dict, GalleryData | None]:
@@ -127,6 +151,7 @@ class ExHentaiService:
         refs = await run_sync(self._missing_metadata_ids_sync, ids)
         return await self._enrich_refs(refs)
 
+    @_account_request
     async def _enrich_refs(self, refs: list[tuple[int, int, str]]) -> int:
         """Fetch and persist metadata for gallery references already filtered.
 
@@ -253,6 +278,7 @@ class ExHentaiService:
             )
             return metadata, None
 
+    @_account_request
     async def preflight_archive_for_candidate(self, candidate_id: int) -> None:
         """Check the authenticated gallery without requesting a paid archive."""
         gid, token = await self._candidate_gid_token(candidate_id)
@@ -264,6 +290,7 @@ class ExHentaiService:
         async with self._http_session() as client:
             await ExHentaiDownloader(client).fetch_metadata(credentials, gid, token)
 
+    @_account_request
     async def download_archive_for_candidate(
         self, candidate_id: int
     ) -> dict:

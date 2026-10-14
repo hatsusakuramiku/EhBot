@@ -192,6 +192,9 @@ def section_tabs(active: str) -> list[dict[str, Any]]:
 async def _connections_section(request: Request) -> dict[str, Any]:
     manager = deps.optional_service(request, "connection_manager")
     return {
+        "accounts": await manager.registry.list_accounts() if manager is not None and hasattr(manager, "registry") else [],
+        "account_runtime": {account_id: manager.account_status(account_id) for account_id in manager._states}
+            if manager is not None and hasattr(manager, "account_status") else {},
         # None rather than an empty snapshot when the manager is absent: the page
         # says 「尚未就绪」 for that, which is true, where zeroed health would be a
         # claim that both providers are disconnected.

@@ -47,7 +47,9 @@ from app.auto_approval.sweeper import AutoApprovalSweeper
 from app.candidates.admission import CandidateAdmissionService
 from app.candidates.ingestor import CandidateIngestor
 from app.connections.exhentai import ExHentaiCredentials
-from app.connections.manager import ConnectionManager
+from app.connections.accounts import AccountRegistry
+from app.connections.runtime import current_account_context
+from app.connections.service import AccountService
 from app.conversion.service import ConversionService
 from app.downloads.archived import ArchivedWorkService
 from app.downloads.service import DownloadService
@@ -110,29 +112,30 @@ def _source_priority(application: FastAPI) -> tuple[str, ...]:
     return tuple(cached)
 
 
-async def _telegram_context(secret_store, default_client):
+async def _telegram_context(account_service, default_client):
     """The bot token and the client to send it with.
 
     Read per call rather than captured: the token can be replaced from the 外部连接
     tab while the process runs, and the send path must pick that up without a
     restart.
     """
-    token = await asyncio.to_thread(secret_store.read, "telegram_bot_token")
+    context = current_account_context.get()
+    token = context.values.get("bot_token") if context is not None and context.kind == "TG_BOT" else None
     return token, default_client
 
 
-async def _exhentai_credentials(secret_store):
+async def _exhentai_credentials(account_service):
     """The stored gallery cookies, or None when they are absent or unreadable.
 
     None rather than an exception: no credential is a normal state (a fresh
     install), and so is a stored blob this version can no longer parse. Both mean
     the same thing to a caller -- fall back to what works without a session.
     """
-    cookies_json = await asyncio.to_thread(secret_store.read, "exhentai_cookies")
-    if not cookies_json:
+    context = current_account_context.get()
+    if context is None or context.kind != "EH":
         return None
     try:
-        return ExHentaiCredentials.from_json(cookies_json)
+        return account_service._eh_credentials(context.values)
     except (ValueError, KeyError):
         return None
 
@@ -395,9 +398,8 @@ def build_lifespan(
                 follow_redirects=True,
                 transport=exhentai_transport,
             )
-            connection_manager = ConnectionManager(
-                secret_store,
-                database,
+            connection_manager = AccountService(
+                AccountRegistry(database, secret_store),
                 telegram_client=telegram_client,
                 exhentai_client=exhentai_client,
                 candidate_ingestor=CandidateIngestor(
@@ -413,6 +415,7 @@ def build_lifespan(
                 # exists is left to the first timed sweep.
                 on_candidates_ingested=lambda: _on_candidates_ingested(application),
                 on_state_changed=lambda: application.state.event_bus.publish(EVENT_CONNECTION),
+                process_queue_operations=lambda: application.state.download_service.process_operations(),
             )
             application.state.connection_manager = connection_manager
             await connection_manager.start()
@@ -478,7 +481,7 @@ def build_lifespan(
                         archive_settings_service.torrent_client
                     ),
                     credentials_provider=(
-                        lambda: _exhentai_credentials(secret_store)
+                        lambda: _exhentai_credentials(connection_manager)
                     ),
                     http_client=exhentai_client,
                     client_http_client=torrent_client,
@@ -487,6 +490,7 @@ def build_lifespan(
                     notify=(lambda **data: application.state.event_bus.publish(
                         EVENT_DOWNLOAD, **data
                     )),
+                    account_scope=connection_manager.use_kind,
                     # Read off application.state per delivery: the conversion service
                     # is constructed further down in this same scope, so the
                     # name is not bound yet and the module-level accessor is
@@ -503,7 +507,7 @@ def build_lifespan(
                 database,
                 app_settings.work_path,
                 telegram_client_factory=(
-                    lambda: _telegram_context(secret_store, telegram_client)
+                    lambda: _telegram_context(connection_manager, telegram_client)
                 ),
                 # Handed out by the connection manager because it owns the
                 # session: a second reader of the credential store would be a
@@ -559,6 +563,7 @@ def build_lifespan(
                 ),
                 stop_pack=(lambda task_id: application.state.conversion_service.stop_attempt(task_id)),
                 cleanup_removals=(lambda: application.state.archived_work_service.process_removals()),
+                account_scope=connection_manager.use_kind,
                 # Auto-pack a finished download into a CBZ. The idempotent
                 # conversion insert makes the torrent route's own auto-pack a
                 # no-op here, so a single conversion job is created per
@@ -713,10 +718,11 @@ def build_lifespan(
                 app_settings.work_path,
                 app_settings.library_path,
                 credentials_provider=(
-                    lambda: _exhentai_credentials(secret_store)
+                    lambda: _exhentai_credentials(connection_manager)
                 ),
                 http_client=exhentai_client,
                 translator=tag_translator,
+                account_scope=connection_manager.use_kind,
                 work_path_provider=archive_settings_service.work_path,
             )
             application.state.exhentai_service = exhentai_service

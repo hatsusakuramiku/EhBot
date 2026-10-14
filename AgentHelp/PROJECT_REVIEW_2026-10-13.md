@@ -144,12 +144,7 @@ CodeGraph 已同步，用于定位文件和调用路径；覆盖不足的查询�
 - pytest 退出清理历史 `pytest-current` 时出现 Windows 权限错误；前三组进程返回 0，第四组因封面断言失败返回 1。该清理告警与真正的用例失败分开记录；单例复跑使用独立 basetemp，返回 0。
 - 未执行整库 pytest，未运行真实 7-Zip 集成、DOM（本环境未找到 jsdom）、浏览器/移动设备、Cloudflare/Caddy 或真实供应商联调；没有性能压测。业务域审阅、静态检查、隔离复现和外部环境验收互不替代。
 
-复现命令（在仓库根目录，使用已有解释器）：
-
-```powershell
-$env:PYTHONPATH = (Get-Location).Path
-& E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe .scratch/project_review_repro.py
-```
+临时复现脚本已于 2026-10-14 按用户要求清理，以上保留历史执行结果，不再提供旧脚本运行入口。下载队列已修复场景的正式回归入口见 `R90_COMPLETION_AUDIT.md`；其余场景继续按处理计划实施和验证。
 
 建议先处理第 1、2 项，再处理第 3–6 项，最后调整第 7 项的 I/O/写锁协调和第 8 项的封面抓取去重。后续实施应按项目规则先形成修复方案，明确每项的状态契约与回归场景，再进入代码修改。
 

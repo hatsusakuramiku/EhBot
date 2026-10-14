@@ -94,7 +94,7 @@ flowchart LR
 
 ### 3.3 本轮额外验证
 
-`.scratch/download_queue_review_repro.py` 执行返回 0，输出：
+早期临时脚本 `.scratch/download_queue_review_repro.py` 执行返回 0，输出如下。脚本已于 2026-10-14 清理，此处保留历史证据；新模型正式回归入口见 `R90_COMPLETION_AUDIT.md`。
 
 | 隔离场景 | 实际结果 |
 |---|---|

@@ -32,6 +32,7 @@ from app.candidates.models import (
     TelegramSourceConfig,
 )
 from app.candidates.rules import MISSING_TITLE_REASON, evaluate_metadata_rules
+from app.connections.execution import current_account_executions
 from app.search.query import (
     PAGE_CANDIDATES,
     PAGE_DOWNLOADED,
@@ -742,6 +743,10 @@ class Database:
                 if (connection.total_changes and execution is not None
                         and execution.database_path == self.path):
                     execution.check(connection)
+                if connection.total_changes:
+                    for account_execution in current_account_executions.get():
+                        if account_execution.database_path == self.path:
+                            account_execution.check(connection)
         finally:
             connection.close()
 

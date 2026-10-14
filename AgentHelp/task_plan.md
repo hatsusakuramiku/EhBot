@@ -439,7 +439,7 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] P1 / R88：管理员认证完整切片（rc4/026，12 新合同、370 个不同用例最终通过、2113 collect；本地提交见计划，无发布）
 - [x] P2 / R89：任务/尝试/审批/作品槽、原子认领、持久操作/回执、HTTP/Web/WS 任务命令；2026-10-14 复核补漏，rc5/028、28 个合同、19 文件完整 460 条通过、2141 collect；[完成核验](R89_COMPLETION_AUDIT.md)。物理停止与完整屏障在 P3，勿部署中间切片
 - [x] P3 / R90：真实停止、目标预检、远端归属/共享拒绝、受管 7-Zip、refile/产物屏障、独立运行移除/清理与恢复、重加等待及六项原触发回归；rc6/029、2213 collect、628 个不同用例最终通过。完整发布崩溃恢复与心跳按 P8/P9
-- [ ] P4：账号与凭据版本管理
+- [x] P4 / R91：实际 startup/provider/账号版本/持久停止与共享 API/WS/Web 接通；掩码查看编辑、独立登录、停用保留与固定结果回执；rc7/030，2280 collect、322 个不同用例最终通过、两个 DOM 脚本通过；每类型先启用一个，完整多账号按 P5–P7 接续，见 R91 audit/progress
 - [ ] P5：统一 unique_key 附加表及摄取
 - [ ] P6：多 TG 监听与来源账号下载
 - [ ] P7：EH 轮询与有界接替

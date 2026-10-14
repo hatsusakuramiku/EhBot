@@ -375,10 +375,20 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         )
         # Connect Telegram bot
         page = client.get("/settings/connections")
-        client.post(
-            "/connections/telegram",
-            data={"csrf_token": page.context["csrf_token"], "bot_token": "test"},
-        )
+        headers = {"X-CSRF-Token": page.context["csrf_token"]}
+        created = client.post("/api/v1/accounts/commands", headers=headers, json={
+            "action": "create", "kind": "TG_BOT", "label": "Download Bot",
+            "fields": {"bot_token": "test"}, "idempotency_key": "download-create-bot",
+        })
+        assert created.status_code == 200
+        account = created.json()["result"]
+        for action in ("test", "enable"):
+            response = client.post("/api/v1/accounts/commands", headers=headers, json={
+                "action": action, "account_id": account["account_id"],
+                "expected_revision": account["revision"], "idempotency_key": f"download-{action}-bot",
+            })
+            assert response.status_code == 200
+            account = response.json()["result"]
         # Trigger download
         page = client.get(f"/works/{candidate_id}")
         response = client.post(

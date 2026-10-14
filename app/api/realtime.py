@@ -35,7 +35,7 @@ MAX_FRAME_BYTES = 262144
 
 def command_catalogue() -> dict[str, dict]:
     """Publish only finite JSON/HTML routes; exclude auth, streams and files."""
-    from app.api import actions, activity, candidates, downloaded, logs, settings, summary, works
+    from app.api import accounts, actions, activity, candidates, downloaded, logs, settings, summary, works
     from app.web.routes import (
         activity as web_activity, auto_approval, candidates as web_candidates,
         connections, dashboard, downloaded as web_downloaded, logs as web_logs,
@@ -43,14 +43,15 @@ def command_catalogue() -> dict[str, dict]:
     )
     catalogue = {}
     groups = (
-        ("api", "/api/v1", [actions, activity, candidates, downloaded, logs, settings, summary, works]),
+        ("api", "/api/v1", [accounts, actions, activity, candidates, downloaded, logs, settings, summary, works]),
         ("web", "", [web_activity, auto_approval, web_candidates, connections, dashboard,
                      web_downloaded, web_logs, manual_add, settings_pages, web_works]),
     )
     for namespace, prefix, modules in groups:
         for module in modules:
             for route in module.router.routes:
-                if not isinstance(route, APIRoute) or route.path.endswith("/stream"):
+                if (not isinstance(route, APIRoute) or route.path.endswith("/stream")
+                        or route.name == "api_account_reveal"):
                     continue
                 method = next(iter(route.methods))
                 name = f"{namespace}.{route.name}"

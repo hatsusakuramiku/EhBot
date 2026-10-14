@@ -140,6 +140,11 @@ $s = ([xml](Get-Content "$env:TEMP\pt.xml")).testsuites.testsuite
 **Latest baseline extension:** R85 2037（仅收集）-> R86 2064（仅收集，相关 545 条最终通过）-> R87 2101（仅收集，相关 637 条最终通过；无迁移、无发布）-> R88 2113（仅收集，相关 370 个不同用例最终通过；026/rc4，无发布）-> R89 初验 2134 / 453 个不同用例最终通过（027）-> R89 复核 2141 / 相关 19 文件完整 460 条通过（028/rc5，运行停止操作只持久受理、P3 接续物理停止，无发布）。
 **Completed P3 / R90:** 029 records remote intentions, attempt paths and independent removals; local requests/threads/process trees drain before slot release. Target preflight runs before revocation and is revalidated at acceptance. New shared torrents are refused; pollers must verify the original instance and attempt tag before progress/delivery. Durable stops/removal manifests recover independently of deleted business rows; re-added work waits for cleanup. Refile and CBZ publication check execution identity. Full publication crash recovery is P8; worker sessions/heartbeats/budgets are P9. P4 account registry and credential revisions come next. Read the R90 audit and implementation-plan handoff; do not reimplement P3 or treat its tests as whole-suite/release acceptance.
 R90 extends R89 2141 -> **2213 collected only / 628 distinct related cases finally passed**, 029/rc6, no release.
+**In-progress P4 / R91:** R90 commit is `5be84e1`. Workspace adds uncommitted 030 and `app/connections/accounts.py`: independent disabled account configurations, immutable credential files, partial CAS edits, exact version reads, masked summaries and explicit configuration reveal excluding TG session; repeatable/concurrent legacy import with retained markers. **2231 collected only** (+18); four full files (account_registry/database/running_removal/secret_store) **56/0**, 10.595s. Import is not wired to startup; runtime/stop binding, lifecycle/login APIs, command receipts and UI remain unfinished. Existing connection behavior has not changed; do not claim multi-account listening or persistent disconnect is delivered. Keep rc6 until full P4 acceptance, do not modify frozen 027-029.
+**P4 continuation:** workspace now has account lifecycle/runtime/commit guards, 030 pending-operation/dependency/receipt tables and exact attempt credential bindings. **2250 collected only** (+37 over R90); ten full files **116/0**, 23.241s. ConnectionManager/wiring still use legacy secrets and destructive disconnects; actual provider/startup/API/UI integration remains required before rc7 or P4 acceptance. Latest details are in R91 progress and the implementation plan. `.scratch` is ignored and cleaned after recording results; do not retain reproduction scripts or test artifacts.
+
+**Current baseline / completed P4 R91 (supersedes the earlier historical snapshots above): 2280 collected only / 322 distinct related cases finally passed; rc7/030.** Sixteen full integration files passed 321/0 (274.521s); after the final login-cancel revision check, service/accounts_api passed 28/0 (14.805s), with overlap replaced by the latest result. Actual production wiring is AccountService; startup restores explicit activation, provider/listener/manual-add requests hold immutable leases, and old unversioned connection writes refuse changes. Shared account API, independent login challenges, fixed masked stop results, CSRF/no-store reveal, runtime health and Web masks/editing are connected. Three kinds retain configuration/session through disable/restart/re-enable. Account and realtime DOM scenarios pass with real HTMX preserved nodes. P4 is accepted; 027–030 are frozen. Next is P5 unified ingestion keys; P6/P7 remove the per-kind runtime limit. No whole-suite run, push, release, deployment or real supplier use; see R91_COMPLETION_AUDIT and progress. Temporary reports/dependencies are cleaned after recording results.
+
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with
@@ -236,7 +241,7 @@ operator navigation).
   would report「Telegram 原档」for a job whose real problem is an expired session.
   A file under 20 MB still goes to the bot — it is already receiving the message
   and needs no second credential. The session string is a full account
-  credential: `data/private/telegram_user_session` only, never in a page, a
+  credential: immutable private account-version files (legacy session imported once), never in a page, a
   payload or a log, and a test asserts it.
 - **State vocabulary lives only in `app/api/status.py`**; DTO-to-JSON conversion
   only in `app/api/serializers.py`. Payloads carry resolved `label`/`tone`/`live`
@@ -774,7 +779,7 @@ Several are locked by tests. Do not "simplify" them:
 - The shipped parse rule is 「only a message carrying an
   ExHentai/e-hentai gallery link becomes a candidate」. Reads of the stored
   scheme never raise (bad values fall back to the default); writes are strict.
-- Credentials: never plaintext, never echoed to a page, never logged.
+- Credentials: private files only; no values in database, logs, WS events or default snapshots. Saved configuration uses fixed masks and may be explicitly revealed over authenticated HTTP with CSRF/no-store, edited and hidden again. TG session is never revealed. Disable retains configuration/session; delete is separate and waits for old execution cleanup. This permanently single-admin project supports multiple external account configurations; simultaneous TG listening/EH rotation remain P6/P7 until those stages pass.
 - Security gates (path traversal, decompression bombs, SSRF, image magic
   numbers) must never be loosened. The thumbnail proxy is inside this rule: it
   reuses the telegraph SSRF guard, gates on `looks_like_image`, bounds decoded

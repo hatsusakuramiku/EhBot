@@ -86,7 +86,29 @@ def test_admin_can_connect_and_disconnect_providers_without_secret_echo(
         authenticate(client, settings)
         page = client.get("/settings/connections")
         csrf_token = page.context["csrf_token"]
-
+        client.headers["X-CSRF-Token"] = csrf_token
+        accounts = []
+        for kind, fields in (
+            ("TG_BOT", {"bot_token": "123:must-not-render"}),
+            ("EH", {"ipb_member_id": "10001", "ipb_pass_hash": "pass-must-not-render", "igneous": "igneous-must-not-render"}),
+        ):
+            created = client.post("/api/v1/accounts/commands", json={
+                "action": "create", "kind": kind, "label": kind, "fields": fields,
+                "idempotency_key": f"create-{kind}",
+            })
+            assert created.status_code == 200
+            account = created.json()["result"]
+            for action in ("test", "enable"):
+                result = client.post("/api/v1/accounts/commands", json={
+                    "action": action, "account_id": account["account_id"],
+                    "expected_revision": account["revision"], "idempotency_key": f"{action}-{kind}",
+                })
+                assert result.status_code == 200
+                account = result.json()["result"]
+            accounts.append((account, fields))
+        connected_page = client.get("/settings/connections")
+        status = client.get("/api/connections/status")
+        # Old writes lack account identity/version and must never bypass CAS.
         telegram = client.post(
             "/connections/telegram",
             data={"bot_token": "123:must-not-render", "csrf_token": csrf_token},
@@ -102,9 +124,6 @@ def test_admin_can_connect_and_disconnect_providers_without_secret_echo(
             },
             follow_redirects=False,
         )
-        connected_page = client.get("/settings/connections")
-        status = client.get("/api/connections/status")
-
         telegram_disconnect = client.post(
             "/connections/telegram/disconnect",
             data={"csrf_token": csrf_token},
@@ -115,11 +134,26 @@ def test_admin_can_connect_and_disconnect_providers_without_secret_echo(
             data={"csrf_token": csrf_token},
             follow_redirects=False,
         )
+        for account, fields in accounts:
+            unchanged = client.get(f"/api/v1/accounts/{account['account_id']}").json()
+            assert unchanged == account
+            disabled = client.post("/api/v1/accounts/commands", json={
+                "action": "disable", "account_id": account["account_id"],
+                "expected_revision": account["revision"], "idempotency_key": f"disable-{account['kind']}",
+            })
+            assert disabled.status_code == 202
+            client.portal.call(app.state.connection_manager.process_operations)
+            operation = client.get(f"/api/v1/accounts/operations/{disabled.json()['operation_id']}").json()
+            assert operation["status"] == "COMPLETED"
+            saved = client.get(f"/api/v1/accounts/{account['account_id']}").json()
+            assert not saved["enabled"]
+            revealed = client.post(f"/api/v1/accounts/{account['account_id']}/reveal", json={"expected_revision": saved["revision"]})
+            assert revealed.json()["fields"] == fields
 
-    assert telegram.status_code == 303
-    assert exhentai.status_code == 303
-    assert telegram_disconnect.status_code == 303
-    assert exhentai_disconnect.status_code == 303
+    assert telegram.status_code == 400
+    assert exhentai.status_code == 400
+    assert telegram_disconnect.status_code == 409
+    assert exhentai_disconnect.status_code == 409
     assert "@ehbot_intake_bot" in connected_page.text
     assert "Member 10001" in connected_page.text
     assert "must-not-render" not in connected_page.text

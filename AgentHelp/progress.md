@@ -7092,3 +7092,45 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 - 早期共享拒绝复验 47 条 / 11 失败：旧受管夹具预先 seed 为外部已有资源，重复推送仍断言附着；修正状态时机，明确 add 后产生受管状态，并更新拒绝合同；48/0 后再补轮询归属检查，51/0 验证全部修正。一次 Python -c 引号丢失未改文件，改 stdin 执行；一次补丁因第三个 Web seed 形状不同整批拒绝，核对原文后修正，无部分写入。无未解决 P3 失败。
 - README、USAGE、REALTIME_API、EHBot、PHASES、AGENTS 基线、实施计划、task_plan、findings 同步；compileall、diff --check、CodeGraph sync 通过。测试结果转入本条与 audit 后，全部临时输出/目录清理，只保留两个原始审阅复现脚本；固定校验的 managed 7-Zip 保留于已忽略 data/tools。
 - **后续边界：** P4 独立账号/凭据版本、掩码查看编辑与共享 API；P5 unique_key；P6 多 TG；P7 EH 池；P8 可恢复发布/精确产物依赖；P9 心跳/快速重启与预算；P10 全域 API/草稿并发；P11 其余审阅缺陷；P12 最终合同/本地联调。没有真实 TG/EH/qBittorrent、代理、其他客户端或正式部署验收，不能由 P3 定向测试代替。
+
+**R90 本地提交确认：** `5be84e1 feat(queue): confirm execution stops and preserve durable removals`。提交 53 个文件，提交后工作区干净；随后开始下述 P4 切片。没有推送、发布或部署。
+
+## R91 — P4 账号与凭据版本管理（2026-10-14，进行中）
+
+- **状态：in_progress，未阶段验收/提交。** 已提交基线 R90 / rc6 / 029；当前工作区新增 030，仍 rc6，不把存储切片当作 P4 全部交付。P3–P12 总目标 active，P5–P12 未实施。
+- 新增 `app/connections/accounts.py`、`030_external_accounts.sql` 与 `test_account_registry.py`。external_accounts 有稳定 UUID/类型/别名/公开平台身份、revision、credential_revision 和私有引用；external_account_credentials 保存不可变版本引用。启用身份不得为空，同类型启用平台身份唯一。数据库无明文配置，新账号默认停用/未验证。
+- 使用现有 SecretStore / write_private_text 权限与原子写；每个同版本竞争者写独立带随机后缀私有文件后再事务 CAS，失败方仅清理确定未引用的文件，不覆盖赢家。文件写失败不绑定数据库，SQL/版本竞争失败回滚配置及版本。旧版本按明确 credential_revision 读回供精确执行上下文使用，AccountContext repr 隐藏值。
+- 存储列表默认固定掩码；显式 reveal 允许当前配置字段，过滤 TG session。部分编辑保留未提交字段；空值/掩码/不明字段拒绝，明确 clear_fields 才清空；纯别名修改不推进凭据版本。active 账号凭据变更暂由存储层拒绝，下一切片协调器先确认旧执行/监听停止再提交。平台验证结果绑定被测试的凭据版本，迟到验证与身份换人不覆盖原来源身份。
+- import_legacy 复制旧 Bot Token、EH Cookie、TG API/session 至独立私有版本，保留旧文件及唯一 legacy_slot；重复/并发导入同账号，失败方清理未绑定文件，删除后的标记阻止重启复活。session 仍仅私有上下文可用，不进入查看响应。旧手机号原代码未持久化，迁移没有猜填。**当前尚未把 importer 接 startup，也未修改现有 ConnectionManager 的断开/运行行为。**
+- **验证：新增 18 条正式合同，2231 collected，仅收集。** 最后四文件完整 **56 passed / 0 failed / 0 skipped，10.595 秒**（p4-registry-contract.xml）：account_registry、database、running_removal、secret_store。覆盖新库、29→30、重复初始化、冲突整笔回滚后重试、受管移除兼容、真实文件并发编辑/导入和秘密边界；database 迁移计数断言更新为 30。早期两文件 15/0、四文件 54/0、三文件 44/0 均通过，计数重叠，不相加。
+- compileall、collect、CodeGraph sync、diff --check 用作切片检查；测试均使用临时库/私有目录，没有读真实 data/private 或真实供应商。所有测试会话已退出，报告计数转入本条后清理所有 P4 XML/TXT/临时目录，.scratch 继续只留两个已忽略的审阅复现脚本。README 仅同步工作区进度；**无连接管理产品行为/USAGE 变更**，因为运行/API/UI 尚未接入。
+- **精确接续：** 先用 CodeGraph 核对 `ConnectionManager` 的 start/configure/disconnect、Telegram 用户 API/session/challenge，以及 wiring 的 Bot/EH/user credential provider；把旧运行入口接 Registry/账号版本，绑定 attempt 并通过 P3 核心等待旧执行停止，普通断开持久停用且保留配置/session。随后补账号生命周期协调器、公开 HTTP API 的 revision/管理员回执/Cookie/Bearer/CSRF/no-store、Web 掩码显示/部分编辑及登录挑战隔离。多监听/P6、EH 池/P7 分阶段继续，不能用存储测试冒充这些能力。
+
+**临时脚本清理补记（2026-10-14）。** 按用户要求删除 `.scratch` 内剩余两个早期审阅复现脚本及空目录；删除前确认目录/文件无链接、目标均在本 checkout，且没有被 Git 跟踪。`.gitignore` 原已包含 `/.scratch/`，保留该规则供后续临时测试使用。审阅报告、队列方案和 R90 audit 标明原脚本已清理，并移除失效运行命令；历史执行结果保留，正式测试位于 `tests/`。无产品行为与 README/USAGE 文档变更，未运行测试、未改变版本或阶段验收状态。
+
+**R91 停止协调与请求边界切片（2026-10-14，仍 in_progress）。** 新增 lifecycle.py、runtime.py、connections/execution.py 及两份正式测试；030 未冻结，新增 verified_credential_revision、停止意图/依赖/命令回执与 attempt/account/credential_revision 绑定。AccountLifecycle 同事务停用新选择、撤销队列执行并保存回执；待修改值只在不可变私有文件，停止未知不提交新凭据；确认后绑定新版本或软删除，保留原版本和导入标记。已移除业务行、已有队列操作和完成后做种均纳入停止依赖。启用要求精确版本验证，同平台身份竞争返回业务错误。AccountRuntime.use 按账号/版本覆盖整段监听/请求，取消后等待实际退出；重复 stop 不打断正在执行的 finally，处理器取消不能假确认。非队列迟到元数据写通过账号 ContextVar 和 Database.connection 提交检查整笔回滚，to_thread 同样受保护。
+
+- **最新验证：十文件完整 116 passed / 0 failures / 0 errors / 0 skipped，23.241 秒**（p4-stop-final.xml）：account_runtime、account_lifecycle、account_registry、database、queue_stopping、running_removal、execution_identity、provider_late_results、queue_control、secret_store。新增 lifecycle 13/runtime 6，加已有 registry 18，共 37 条新合同。覆盖真实 HTTP 替身清理、真实阻塞线程、迟到元数据事务、队列 cleanup 屏障、远端未知重试/重启、删除业务行后停止依赖、已完成做种、回执失败整笔回滚/私有文件清理、finalize 失败可重试、并发修改/唯一身份、processor 取消与嵌套 lease。
+- collect 命令返回 0，逐文件收集行累加 **2250 collected，仅收集**；pytest 配置不打印总计，累计数字由完整 collect 输出计算。compileall 与 CodeGraph sync 通过。此前两文件 43/0、六文件 72/0、七文件 78/0 及 runtime 单文件 5/0 为重叠验证，不累加。
+- 首次测试未建立 .scratch 父目录导致 43 个 setup errors，没有用例执行；创建已忽略临时父目录后 43/0。生命周期首轮 10 条中 5 条夹具缺候选触发外键失败，补正式夹具候选；次轮 9/1 的迟到完成错误实际由 SQL 守卫先报 QUEUE_STOP_NOT_CONFIRMED，校准断言后通过。保留失败记录，未放宽产品约束。
+- 实际连接管理、startup 导入、Bot/EH/user provider 和登录仍未接这些边界，旧断开删除尚未修复；API/UI 尚未实现，rc6 不变、P4 未验收/提交。README 仅更新实施进度，**无产品行为与 USAGE 变更**。下一步按处理计划接手表接实际入口；不可把凭据借用提前结束、把停止处理放在借用内部或仅取消监听便确认账号停止。
+- 本轮全部测试会话已退出；XML/collect 结果转入以上记录后，核对临时根目录为本 checkout 的 .scratch、子项无链接/路径越界并全部清理，目录已不存在。最终 diff --check 通过，无真实私有文件读取、供应商调用、发布或部署。
+
+**R91 实际入口接入与临时产物清理补记（2026-10-14，仍 in_progress）。** 工作区已将 wiring 接至 AccountService，新增独立账号 listener、startup 导入、Bot/EH/user 请求账号上下文、共享 accounts API/命令回执/HTTP 显式查看及 Web 掩码编辑、启停和登录界面；旧无账号身份/版本的配置与断开入口拒绝。当前每种类型只允许一个账号启用，多监听/P6、EH 池/P7 尚未交付。上述接入仍需完整审查和验收，不能沿用前段“尚未接入”的描述，也不能将源码接入等同已验收。
+
+- 清理前读取 JUnit：12 文件运行 **205 passed / 0 failures / 0 errors / 0 skipped，107.251 秒**；之后源码继续调整，账户五文件最后复验 **57 passed / 0 failures / 0 errors / 0 skipped，21.009 秒**。两组覆盖重叠，不能相加或宣称当前源码全量通过。首次 service 8 条中 6 条因 async fixture 声明错误失败，修正后 8/0；首次 runtime 集成 155 条中 3 条因 EH 首页测试替身返回 404 失败，修正后上述 205/0。保留失败和最终结果，临时 XML 不作为正式交付文件。
+- DOM 验证所需 jsdom 安装因 registry 网络访问 EACCES 退出（npm session 20217 已结束），**DOM 测试未执行**。待验证创建命令重试的幂等键、实时替换后表单重复绑定/草稿保留、旧连接测试契约及 provider/停止竞争；P4 未验收/未提交，仍 rc6，030 未冻结；最后已记录 collect 2250 不代表本次新增 API/service 测试后的总数。
+- 按用户要求清理 `.scratch`：已有 `/.scratch/` 忽略规则，Git 未跟踪任何内部文件；确认根目录及全部子项无链接、无路径越界后，删除测试临时数据库/目录、七份 XML、失败 npm 缓存及临时依赖目录，共 950 个文件。正式回归保留在 `tests/`；后续临时验证结束、结果转入日志后及时清理，不保留无用产物。
+- 本次只清理临时产物并同步接手记录，无产品行为与 README/USAGE 变更；未重跑测试，未更改版本、阶段验收或提交状态，无真实供应商调用、发布或部署。
+
+**R91 / P4 最终验收（2026-10-14，complete，源码 0.3.0rc7 / 030）。** 本段取代上面的历史 in_progress 状态；P3–P12 总目标继续 active，P5–P12 尚未实施。完整要求映射见 `R91_COMPLETION_AUDIT.md`。
+
+- 实际 wiring 已使用 AccountService；startup 导入/恢复明确激活意图、Bot/EH/user credential 读取、下载/元数据/归档/种子与手动添加调用者写入均接账号版本借用。Bot API 只能在监听借用内构造，防旧 Token 配新版本。手动添加要求已启用 EH，停用等待验证和入库请求退出。启用账号重新验证保留实际运行状态；删除完成清理运行投影。
+- 共享 accounts 命令/回执/操作查询、Cookie/Bearer/CSRF/no-store 和 WS 目录接通；显式 reveal 过滤 session。停止完成固定保存掩码 result/revision，之后其他端修改不改变原回执结果。验证结果和取消登录重核账号 revision；多个 TG 挑战独立，取消 A 不影响 B，三类停用→重启→启用保留原配置/session。
+- Web JSON 表单绕过实时捕获层，不重复发送；创建/编辑在回复丢失时保留同一 payload/key；真实 HTMX 保留的草稿节点只绑定一次并使用新 root/CSRF。显示/隐藏不覆盖修改，登录挑战不会因其他操作刷新丢失，已接受字段完成后还原掩码与固定 revision。实际连接健康与持久启用状态分别显示；默认快照不回显已保存手机号，显式查看才显示。账号页需要 JS 或共享 API，文档明确边界。
+- **最终验证：16 文件完整 321 passed / 0 failures / 0 errors / 0 skipped，274.521 秒**（p4-acceptance.xml）：account_registry、account_lifecycle、account_runtime、account_service、accounts_api、connections_web、telegram_user_web、manual_add、database、downloads、exhentai_torrents、source_preflight、torrent_workflow、running_removal、realtime、settings_write_api。最后取消登录校验修改后 service/accounts_api 完整 **28/0，14.805 秒**（p4-flow.xml）；覆盖相同节点取后一次，共 **322 个不同用例最终通过**，不声称最终源码单次跑完 16 文件或整库全绿。
+- 最新 collect 返回 0，逐文件合计 **2280 collected，仅收集**，较 R90 净增 67。两个 Node DOM 脚本 accounts.cjs/realtime.cjs 通过，后者覆盖 root/proxy prefix；compileall、JS syntax、CodeGraph sync、diff --check 通过。所有测试使用临时库/私有目录、受控 HTTP/Telethon 替身，无真实供应商。
+- 过程失败留痕：初次 135 条中 1 条为旧 disconnect 命名断言（ACCOUNT_API_REQUIRED 应为 ACCOUNT_REVISION_REQUIRED），校正后通过；provider 六文件 124 条中 1 条仍调用退役 Bot 表单，改共享创建→测试→启用后 downloads 全文件 23/0；旧 TG user Web 13 条中 2 条为未启用错误命名/提示旧断言，校正后 user/service/API 三文件 40/0。不是放宽产品旧写旁路。九文件 180/0、三文件 40/0、重启 service 16/0 等均重叠，最终计数不累加。
+- jsdom 首次受限网络安装 EACCES，后通过工具审批安装临时依赖并完成 DOM 验证；所有 npm/pytest/Node 会话结束，结果已转入本条后核对临时目录无链接/越界且不被 Git 跟踪，删除 `.scratch` 全部 3690 个临时文件，目录已不存在。无真实库升级、推送、发布、部署。版本升 rc7、030 冻结；阶段本地提交确认随后补记。
+- **接续 P5：** 以 CandidateIngestor、Database.save_candidate_message/create_manual_candidate、gid 判重和元数据补全入口为调查起点，031 建统一 ingest_entries 键/附加来源、未入库领取与恢复、转发坐标及历史冲突裁决；同类只启用一个直至 P6/P7。不要把 P4 当成全部多账号或 P3–P12 目标完成。
+- 首次阶段 commit 因本环境没有 Git author identity 退出，文件已暂存但没有提交；核对最新三个本地提交的身份一致后，沿用该身份以单次 `git -c` 参数提交，不改全局配置、不请求重复开工授权。

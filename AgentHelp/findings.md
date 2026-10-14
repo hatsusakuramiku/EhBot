@@ -277,3 +277,19 @@
 - 7-Zip 普通执行与成员头读取均受管；Windows 暂停创建后加入 Job，再恢复主线程；停止等待整个 Job 清空。真实 26.02 工具的 27 条合同已运行，无 skip。
 - 原“共享种子也可附着”的行为违反已批准互斥方案，已改为新共享拒绝；历史关联只解除。加种成功不等于归属已确认，轮询在原实例/本 attempt 标签核实后才能写进度或产物；归属或实例变化保槽，禁止 B 接替。
 - 切源、refile、进程树、provider 晚返回、推送至 park 断点、029 冲突回滚及六项原触发全部有正式回归。最终 29 文件 625/0 与最后三文件 51/0 按节点覆盖为 628 个不同用例最终通过；2213 collect-only、rc6/029；首次失败与修正记录见 R90 audit/progress。P4–P12 仍待实施。
+
+## 2026-10-14 P4 存储与旧配置导入切片
+
+- 现有 SecretStore 名称仅允许小写字母/数字/下划线，write_private_text 已用独立临时文件原子替换。无需重造文件权限/原子写模块；新版本以 account UUID、credential_revision、独立随机后缀命名，否则同版本并发写文件会在数据库 CAS 之前覆盖赢家。
+- 030 的 external_accounts 只保存公开身份、配置/凭据版本及引用；external_account_credentials 保留精确版本引用。enabled 平台身份唯一且不能为空；配置值只在私有文件。新增账号默认停用/未验证；存储层不允许直接修改 active 账号凭据，等待后续协调器确认旧执行停止，纯别名变化不改凭据版本。
+- AccountRegistry.reveal 只允许 Bot Token、EH 三字段、TG API ID/Hash/手机号，不返回 session；公共快照默认固定掩码，AccountContext repr 不含秘密。未提交字段保持原值，空字符串/掩码/不明字段拒绝，明确 clear_fields 才清空。
+- 旧 Bot/Cookie/TG API/session 可重复/并发复制至一份独立账号；legacy_slot 保留导入标记，删除后不会因旧私有文件还在而重新导入。原文件先保留，待运行适配切换后处理；旧手机号原实现未持久化，不能凭空补出。import_legacy 尚未接 startup。
+- 18 条正式合同覆盖上述文件/DB/CAS/导入与 29→30 冲突回滚；相关四文件完整 56/0，2231 仅 collected。未接 runtime、停止、账号生命周期 HTTP/WS、掩码编辑界面，不将存储切片当作 P4 已完成或产品已支持多账号。
+
+## 2026-10-14 P4 持久停止与账号请求边界
+
+- 仅 remote_identity 不能证明新凭据已经验证；030 增 verified_credential_revision，凭据修改后保留来源身份但启用必须重新验证。stop_operation_id 期间编辑、启用、迟到验证和新借用均拒绝。
+- AccountLifecycle 在短事务内受理停止、停用新选择、P3 队列撤销、停止依赖与管理员回执；凭据待修改值只写独立私有文件，数据库/回执不含明文。未知停止保持 PENDING，最终成功才绑定新文件/软删除；重复命令先读回执，业务行删除后仍可重放。
+- 按 attempt/account/credential_revision 绑定，停止查询不能仅 inner join download_jobs：已移除业务行的 queue_operations、已有 switch/retry 意图与已完成受管做种仍需等待。复用 QueueControl._apply 和 DownloadService.process_operations，不另造物理停止逻辑。
+- AccountRuntime.use 覆盖完整请求生命周期，按账号/版本跟踪 lease，停止 await lease 退出；HTTP 替身和真实阻塞线程证明等待实际清理。重复处理不能再次 cancel 正在 finally 的任务。非队列元数据/摄取也通过 AccountExecution 与 Database.connection 短事务检查拒绝迟到写入；该 ContextVar 随 to_thread 传播。
+- AccountService 已成为生产 wiring；旧 ConnectionManager 仅由账号 listener 复用摄取逻辑，旧配置/断开入口无账号身份或版本时拒绝。已接 startup/provider/API/UI，但 P4 仍需阶段最终回归和提交；不包含真实供应商或正式部署验收。

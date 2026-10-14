@@ -186,6 +186,10 @@ STOPPING 保留作品槽。已验收 P3 / schema 029 接入本地请求/线程/�
 `switch-source` 先读取管理员作用域回执，再在数据库写事务外验证目标凭据/链接与页面可读性；不下载目标原档或图片。最终受理事务再次核对 task/revision 和目标引用，目标信息变化返回 `409 SOURCE_CHANGED`，拒绝时旧任务不撤销。相同命令已有回执时跳过预检，即使目标之后失效仍返回原结果；HTTP、Web 表单、批量与 WS 都走相同命令入口。预检通过不表示实际切换完成，仍按 operation 等待旧来源停止。
 
 Python：`python -m pytest tests/integration/test_realtime.py`（使用项目环境）。
+账号管理接口（已验收 P4 / rc7 / 030）：`GET /api/v1/accounts`（掩码列表）、`GET /accounts/{account_id}`、`POST /accounts/commands`、`GET /accounts/commands/{idempotency_key}` 与 `GET /accounts/operations/{operation_id}`，后三者均在 `/api/v1` 下。命令 action 为 create/rename/edit/test/enable/disable/delete/login-start/login-complete/login-cancel，非 create 必须提交 account_id、expected_revision，所有命令要求 idempotency_key。DB 配置命令与回执同事务；网络命令先持久受理，相同键不重复验证或发送验证码。UNKNOWN/PENDING 不表示成功，也不自动重放副作用，先核对账号状态再决定新的显式操作。
+
+edit/disable/delete 可返回 202 和 operation_id；账号立即停止新选择，旧执行与远端停止确认后才完成，旧私有凭据版本在此期间保留。operation 完成时返回固定的掩码 `result`（删除为 account_id/deleted），后续其他客户端修改不改变该操作结果；客户端使用这次结果的 revision，不用另一次 GET 的最新版本悄悄覆盖草稿。列表另外返回按 account_id 映射的 `runtime`（state/error），启用意图与实际连接健康分别观察。login-complete/login-cancel 还要求 challenge_id；登录挑战仅进程内有效，旧版本或其他账号的挑战拒绝。HTTP Cookie 需要 X-CSRF-Token，Bearer 免 CSRF；读取/查看响应 no-store。`POST /api/v1/accounts/{account_id}/reveal` 明确查看配置，要求 expected_revision 与相同鉴权/CSRF，过滤 TG session。reveal 不在 WS 命令目录中，WS 只传掩码与非敏感回执。Web 复用这些 HTTP JSON 命令，WS 转发其余账号接口也进入同一核心。账号表单直接用 HTTP JSON 提交，实时表单转发不会重复接管；回复丢失后原输入重试复用原幂等键。P6/P7 再接同时监听和账号池，每类型当前只启用一个。
 DOM 行为：在临时目录安装 `jsdom` 后运行 `node tests/web/realtime.cjs <jsdom 绝对路径>`。
+账号表单另外运行 `node tests/web/accounts.cjs <jsdom 绝对路径>`，验证捕获阶段不重复提交、丢失回复重试、保留节点只绑定一次、CSRF 更新、掩码/草稿/登录挑战及停止完成后的固定版本结果。临时依赖和测试产物验证后清理。
 该测试使用真实 HTMX/Alpine 和 WebUI 脚本，验证 Tag 左/右键、固定 URL、输入/勾选/焦点保留、按钮禁用、多值表单、断线不重发、HTTP 降级、序列/旧响应校正、日志快照及代理前缀。
 DOM 测试与真实浏览器/移动设备联调分别记录，不能互相替代。

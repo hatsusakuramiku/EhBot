@@ -60,6 +60,7 @@ class DownloadService:
         torrent_stop=None,
         stop_pack=None,
         cleanup_removals=None,
+        account_scope=None,
         auto_pack=None,
         auto_pack_enabled=None,
         work_path_provider=None,
@@ -91,6 +92,7 @@ class DownloadService:
         self._torrent_stop = torrent_stop
         self._stop_pack = stop_pack
         self._cleanup_removals = cleanup_removals
+        self._account_scope = account_scope
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -859,6 +861,24 @@ class DownloadService:
             }
 
     async def _handle_job(self, job: dict) -> str | None:
+        """Hold the selected account version through requests and final writes."""
+        if self._account_scope is None:
+            return await self._handle_job_unscoped(job)
+        kinds = {PROVIDER_TELEGRAM: "TG_BOT", PROVIDER_TELEGRAM_USER: "TG_USER",
+                 PROVIDER_EXHENTAI: "EH", PROVIDER_EH_TORRENT: "EH"}
+        kind = kinds.get(job["provider"])
+        if kind is None:
+            return await self._handle_job_unscoped(job)
+        try:
+            # Magnets may not need an EH account; .torrent fetch still rejects
+            # missing credentials through its existing named provider error.
+            async with self._account_scope(kind, required=job["provider"] != PROVIDER_EH_TORRENT):
+                return await self._handle_job_unscoped(job)
+        except ProviderConnectionError as exc:
+            await run_sync(self._mark_job_failed_sync, job["job_id"], exc.code, exc.public_message)
+            return None
+
+    async def _handle_job_unscoped(self, job: dict) -> str | None:
         """Run one delivery, returning the untranslated cause of a refusal.
 
         The interface must never see a provider's own words, but the log has to:

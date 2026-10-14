@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api import deps
 from app.api.actions import router as actions_router
+from app.api.accounts import router as accounts_router
 from app.api.auth import router as auth_router
 from app.api.activity import router as activity_router
 from app.api.candidates import router as candidates_router
@@ -41,6 +42,7 @@ router = APIRouter(prefix="/api/v1", tags=["api"])
 # Auth first: its literal paths must not be shadowed by a domain route,
 # and the login/refresh pair deliberately requires no session.
 router.include_router(auth_router)
+router.include_router(accounts_router)
 router.include_router(summary_router)
 router.include_router(candidates_router)
 router.include_router(works_router)

@@ -343,7 +343,9 @@
     if (node.form && node.name !== "candidate_ids" && node.name !== "job_ids") node.form.dataset.dirty = "true";
   });
   document.addEventListener("submit", function (event) {
+    if (event.defaultPrevented) return;
     var form = event.target, submitter = event.submitter;
+      if (form.matches("[data-account-create],[data-account-edit]")) return;
     if (form.matches("[data-metadata-editor]") || form.action.endsWith("/exhentai-metadata")) return;
     var method = (submitter && submitter.getAttribute("formmethod") || form.getAttribute("method") || "GET").toUpperCase();
     var url = submitter && submitter.getAttribute("formaction") || form.getAttribute("action") || current;

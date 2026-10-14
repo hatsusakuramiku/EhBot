@@ -69,7 +69,7 @@ def test_the_login_code_and_the_2fa_password_are_one_of_the_two(
     assert response.json()["error"]["code"] == "CODE_OR_PASSWORD_REQUIRED"
 
 
-def test_disconnecting_returns_the_snapshot_and_never_a_credential(
+def test_legacy_disconnect_without_account_revision_is_refused(
     tmp_path: Path,
 ) -> None:
     settings = _settings(tmp_path)
@@ -77,13 +77,9 @@ def test_disconnecting_returns_the_snapshot_and_never_a_credential(
         csrf = _authenticate(client, settings)
         response = _put(client, csrf, {"action": "telegram-disconnect"})
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     payload = response.json()
-    # The shape the GET already serves, plus the tab strip.
-    assert payload["section"]["code"] == "connections"
-    assert "connections" in payload
-    # A credential is reported as a state, never as a value: the response is the
-    # snapshot, so no field could carry the token back even if one were stored.
+    assert payload["error"]["code"] == "ACCOUNT_REVISION_REQUIRED"
     assert "bot_token" not in json.dumps(payload)
 
 

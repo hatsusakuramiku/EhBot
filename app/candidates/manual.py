@@ -24,7 +24,7 @@ from app.review.service import ReviewError
 
 #: Stated once because two places show it: the page's disabled-button notice,
 #: the 400 a page submit with no connection gets, and the JSON API's refusal.
-NOT_CONFIGURED_MESSAGE = "未配置 Exhentai 连接，请先在「连接」页配置后再手动添加"
+NOT_CONFIGURED_MESSAGE = "未配置 Exhentai 连接或账号尚未启用，请先保存、测试并启用账号后再手动添加"
 
 
 def exhentai_configured(manager) -> bool:
@@ -37,7 +37,7 @@ def exhentai_configured(manager) -> bool:
     if manager is None:
         return False
     try:
-        return bool(manager.snapshot().exhentai.configured)
+        return manager.snapshot().exhentai.state == "connected"
     except Exception:  # noqa: BLE001 - a status we cannot read is not a yes
         return False
 
@@ -83,6 +83,16 @@ async def ingest_manual_link(
     existing = await database.candidate_id_for_gallery(gid)
     if existing is not None:
         raise DuplicateGalleryCandidate(existing)
+    # The caller's candidate/metadata writes belong to the same borrowed
+    # account as validation. A stop cannot finish while they are pending.
+    async with exhentai_service.account_request():
+        return await _ingest_validated_gallery(gid, token, database=database,
+            exhentai_service=exhentai_service, orchestrator=orchestrator,
+            download_service=download_service)
+
+
+async def _ingest_validated_gallery(gid, token, *, database, exhentai_service,
+                                    orchestrator, download_service):
     # Raises for a gallery that is gone, needs a login or is unreachable.
     metadata, gallery = await exhentai_service.fetch_metadata_for_gallery(
         gid, token

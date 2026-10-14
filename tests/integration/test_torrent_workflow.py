@@ -141,6 +141,8 @@ def exhentai_transport(
     *, page_status: int = 200, digest: str = TORRENT_DIGEST
 ) -> httpx.MockTransport:
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "exhentai.org" and request.url.path == "/":
+            return httpx.Response(200, text="ExHentai")
         if "gallerytorrents" in request.url.path:
             if page_status != 200:
                 return httpx.Response(page_status)

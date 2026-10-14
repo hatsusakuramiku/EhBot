@@ -64,6 +64,7 @@ class TorrentService:
         work_path_provider=None,
         auto_pack=None,
         notify=None,
+        account_scope=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -78,6 +79,7 @@ class TorrentService:
         # about the conversion queue; the torrent route only says "it is ready".
         self._auto_pack = auto_pack
         self._notify = notify
+        self._account_scope = account_scope
         self._poller_task: asyncio.Task[None] | None = None
         self._active_attempts: dict[str, asyncio.Task] = {}
 
@@ -110,6 +112,13 @@ class TorrentService:
         return await self._client(config).version()
 
     async def push_for_candidate(self, candidate_id: int) -> dict:
+        """Borrow EH credentials for the entire fetch/push, including intent writes."""
+        if self._account_scope is not None:
+            async with self._account_scope("EH", required=False):
+                return await self._push_for_candidate(candidate_id)
+        return await self._push_for_candidate(candidate_id)
+
+    async def _push_for_candidate(self, candidate_id: int) -> dict:
         """Fetch the `.torrent` and hand it to the client.
 
         Returns the details the queue parks on the job. Nothing is downloaded
