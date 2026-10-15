@@ -73,6 +73,7 @@ class DownloadService:
         telegram_user_source=None,
         telegram_bot_source=None,
         exhentai_source=None,
+        manual_enqueue=None,
     ) -> None:
         self._database = database
         self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
@@ -102,6 +103,7 @@ class DownloadService:
         self._telegram_user_source = telegram_user_source
         self._telegram_bot_source = telegram_bot_source
         self._exhentai_source = exhentai_source
+        self._manual_enqueue = manual_enqueue
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -317,6 +319,7 @@ class DownloadService:
         redownload: bool = False,
         automatic_match=None,
     ) -> DownloadEnqueueResult:
+        pack_requested = await self._auto_pack_enabled() if self._auto_pack_enabled is not None else None
         return await run_sync(
             self._enqueue_sync,
             candidate_id,
@@ -325,6 +328,7 @@ class DownloadService:
             details_json,
             redownload,
             automatic_match,
+            pack_requested,
         )
 
     def _enqueue_sync(
@@ -335,6 +339,7 @@ class DownloadService:
         details_json: str,
         redownload: bool = False,
         automatic_match=None,
+        pack_requested=None,
     ) -> DownloadEnqueueResult:
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -384,6 +389,13 @@ class DownloadService:
                         (DOWNLOAD_STATE_PENDING, details_json, job_id),
                     )
             snapshot = task_snapshot(connection, job_id)
+            connection.execute("DELETE FROM manual_download_intents WHERE candidate_id = ?", (candidate_id,))
+            if pack_requested is not None and (existing is None or revive):
+                if provider == PROVIDER_EH_TORRENT:
+                    torrent_pack = connection.execute("SELECT value FROM archive_settings WHERE key = 'torrent_auto_pack'").fetchone()
+                    pack_requested = pack_requested or bool(torrent_pack and torrent_pack[0] in {'1', 'true', 'yes'})
+                connection.execute("UPDATE queue_pack_intents SET pack_requested = ? WHERE task_id = ?",
+                                   (int(bool(pack_requested)), snapshot["task_id"]))
             if automatic_match is not None:
                 from app.auto_approval.commit import record_decision
                 record_decision(connection, candidate_id, automatic_match, [job_id])
@@ -845,6 +857,13 @@ class DownloadService:
                 await asyncio.sleep(1.0)
 
     async def _process_one(self) -> bool:
+        if self._manual_enqueue is not None:
+            def pending_manual():
+                with self._database.connection() as connection:
+                    return [row[0] for row in connection.execute("SELECT candidate_id FROM manual_download_intents "
+                        "WHERE retry_at IS NULL OR retry_at <= CURRENT_TIMESTAMP ORDER BY attempts, candidate_id LIMIT 10")]
+            for candidate_id in await run_sync(pending_manual):
+                await self._manual_enqueue(candidate_id)
         job = await run_sync(self._claim_pending_job_sync)
         if job is None:
             return False
@@ -1361,8 +1380,11 @@ class DownloadService:
         """
         if self._auto_pack is None:
             return
-        _enabled = self._auto_pack_enabled
-        if _enabled is not None and not await _enabled():
+        def requested():
+            with self._database.connection() as connection:
+                return connection.execute("SELECT 1 FROM queue_pack_intents p JOIN queue_tasks t ON t.task_id = p.task_id "
+                    "WHERE t.candidate_id = ? AND p.pack_requested = 1 AND p.status = 'READY'", (candidate_id,)).fetchone() is not None
+        if not await run_sync(requested):
             return
         try:
             await self._auto_pack(candidate_id)
@@ -1382,9 +1404,10 @@ class DownloadService:
             return None
         return TelegramBotApi(token, client)
 
-    def _mark_job_completed_sync(self, job_id: int) -> None:
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+    def _mark_job_completed_sync(self, job_id: int, connection=None) -> None:
+        with (self._database.connection() if connection is None else nullcontext(connection)) as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             self._check_job_source_sync(connection, job_id)
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
@@ -1432,6 +1455,7 @@ class DownloadService:
                     int(size),
                 ),
             )
+            self._mark_job_completed_sync(job_id, connection)
 
     def _check_job_source_sync(self, connection, job_id: int) -> None:
         """A source edit cannot publish bytes fetched under an older revision."""

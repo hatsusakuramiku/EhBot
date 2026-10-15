@@ -361,8 +361,7 @@ class TorrentService:
             )
             if not config.keep_seeding:
                 await self._cleanup_completed_resource(job_id, merged)
-            if config.auto_pack:
-                await self._queue_pack(candidate_id)
+            await self._queue_pack(candidate_id)
             return True
         except (TorrentError, httpx.HTTPError, OSError):
             # The client may be down or the payload still not quite readable;
@@ -575,8 +574,7 @@ class TorrentService:
             job["candidate_id"],
             delivery.size_bytes,
         )
-        if config.auto_pack:
-            await self._queue_pack(job["candidate_id"])
+        await self._queue_pack(job["candidate_id"])
 
     def _observe_resource_sync(self, job_id: int, status: TorrentStatus, instance_url: str) -> None:
         """Confirm this attempt's remote identity before progress or delivery."""
@@ -607,6 +605,12 @@ class TorrentService:
         archive the operator can still convert by hand.
         """
         if self._auto_pack is None:
+            return
+        def requested():
+            with self._database.connection() as connection:
+                return connection.execute("SELECT 1 FROM queue_pack_intents p JOIN queue_tasks t ON t.task_id = p.task_id "
+                    "WHERE t.candidate_id = ? AND p.pack_requested = 1 AND p.status = 'READY'", (candidate_id,)).fetchone() is not None
+        if not await run_sync(requested):
             return
         try:
             await self._auto_pack(candidate_id)

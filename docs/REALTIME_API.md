@@ -223,3 +223,7 @@ P6 来源命令（032 已冻结；Cookie/CSRF、Bearer 和 WS 共用同一核心
 
 
 P7 / 036 已冻结：归档/认证种子复用任务命令和操作查询，不新增平行下载接口。task.attempts 的 details_json 保留 account_id、credential_revision、有限账号池；原始错误保留在各次 attempt。GP/认证明确失败可生成新的 attempt；共享限流不轮换。费用结果不明返回 EH_ARCHIVE_RESULT_UNKNOWN，普通 retry/restart 只读核实原申请，不能以新账号绕过未知费用。收费意图的公开字段不包含 Cookie 或私有定位 URL；eh_archive_intent_id 只是不可推导的定位标识。
+
+P8 / 037：`POST /api/v1/works/{id}/convert` 可传 `{"input_artifact_id":"<uuid>"}` 固定原档版本；空请求体或 `{}` 仍选择当前已完成的原档。ID 必须是非空字符串并属于该作品的原档；新下载尚未完成且未明确选择旧版时返回 `ARCHIVE_NOT_READY`，已有不同输入/不同类型的活动打包返回 `PACK_INPUT_CONFLICT`。显式输入保存在任务与 attempt 的 details_json，重试不临时选择另一版。最终 v2/CAS/幂等收口按 P10。
+
+`GET /api/v1/tasks/{task_id}` 增加 `pack_intent`（pack_requested、input_artifact_id、pack_task_id、status），`artifacts`（版本 ID、类型、生产 attempt、路径/摘要/大小/页数），以及安全摘要 `publications` 和 `relocations`。打包意图状态为 WAITING/READY/QUEUED/CANCELLED；发布和移动状态为 PREPARED/COMMITTED/ROLLED_BACK/RECOVERY_REQUIRED。历史产物的 producer_attempt_id 为 null，不伪造生产者；移动摘要不含内部恢复副本路径。`PUBLICATION_RECOVERY_REQUIRED` 需先核实文件，不自动覆盖或清理未知内容。下载完成与打包通知仍复用现有事件，持久意图负责补偿丢失通知。

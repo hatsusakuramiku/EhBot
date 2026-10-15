@@ -225,6 +225,9 @@ def build_torrent_service(
     auto_pack: bool = False,
     exhentai: httpx.MockTransport | None = None,
 ) -> TorrentService:
+    with database.connection() as connection:
+        connection.execute("INSERT INTO archive_settings(key, value) VALUES('torrent_auto_pack', ?) "
+                           "ON CONFLICT(key) DO UPDATE SET value = excluded.value", ('1' if auto_pack else '0',))
     config = TorrentClientConfig(
         base_url="http://qb.example:8080" if configured else "",
         username="admin",

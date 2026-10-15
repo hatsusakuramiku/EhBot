@@ -168,6 +168,15 @@ class QueueControl:
                         (operation["candidate_id"], key, provider),
                     )
                 if action in {"retry", "restart", "switch-source"}:
+                    params = json.loads(operation["params_json"])
+                    previous = connection.execute("SELECT pack_requested FROM queue_pack_intents WHERE task_id = ?",
+                                                  (operation["task_id"],)).fetchone()
+                    requested = params.get("pack_requested", bool(previous[0]) if previous else False)
+                    successor_id = operation["legacy_job_id"] if action != "switch-source" else connection.execute(
+                        "SELECT id FROM download_jobs WHERE idempotency_key = ?", (key,)).fetchone()[0]
+                    connection.execute("UPDATE queue_pack_intents SET pack_requested = ? WHERE task_id = "
+                        "(SELECT task_id FROM download_jobs WHERE id = ?)", (int(bool(requested)), successor_id))
+                if action in {"retry", "restart", "switch-source"}:
                     connection.execute(
                         "UPDATE candidates SET status = 'APPROVED', filter_reason = '', updated_at = CURRENT_TIMESTAMP "
                         "WHERE id = ? AND status IN ('FAILED', 'PROCESSING', 'NEEDS_INFO')",
@@ -197,6 +206,18 @@ class QueueControl:
                 "FROM queue_removals r, json_each(r.task_ids_json) ids WHERE ids.value = ?",
                 (task_id,),
             )]
+            intent = connection.execute("SELECT pack_requested, input_artifact_id, pack_task_id, status "
+                                        "FROM queue_pack_intents WHERE task_id = ?", (task_id,)).fetchone()
+            result['pack_intent'] = dict(intent) if intent else None
+            result['artifacts'] = [dict(row) for row in connection.execute(
+                "SELECT artifact_id, artifact_type, producer_attempt_id, path, sha256, size_bytes, page_count "
+                "FROM artifact_versions WHERE task_id = ? ORDER BY rowid", (task_id,))]
+            result['publications'] = [dict(row) for row in connection.execute(
+                "SELECT publication_id, input_artifact_id, status, error_code FROM queue_publications WHERE task_id = ?",
+                (task_id,))]
+            result['relocations'] = [dict(row) for row in connection.execute(
+                "SELECT relocation_id, input_artifact_id, status FROM queue_relocations WHERE task_id = ?",
+                (task_id,))]
             return result
 
     async def command(self, job_id: int, action: str, *, task_id: str,
@@ -338,6 +359,8 @@ class QueueControl:
             connection.execute("UPDATE download_jobs SET priority = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                                (priority, job_id))
         elif action in {"pause", "resume", "retry", "restart"}:
+            previous_pack = connection.execute("SELECT pack_requested FROM queue_pack_intents WHERE task_id = ?",
+                                               (current["task_id"],)).fetchone()
             if action == "pause":
                 if state not in {"PENDING", "CONVERSION_PENDING"}:
                     raise DownloadError("JOB_NOT_PAUSABLE", "只有排队中的任务可以暂停")
@@ -388,6 +411,12 @@ class QueueControl:
                 "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (target, details_json, job_id),
             )
+            if action in {"retry", "restart"} and target != "STOPPING" and provider != "CONVERSION":
+                connection.execute(
+                    "UPDATE queue_pack_intents SET pack_requested = ? WHERE task_id = "
+                    "(SELECT task_id FROM download_jobs WHERE id = ?)",
+                    (int(bool(params.get("pack_requested", bool(previous_pack[0]) if previous_pack else False))), job_id),
+                )
             if action in {"retry", "restart"} and target != "STOPPING" and provider != "CONVERSION":
                 connection.execute(
                     "UPDATE candidates SET status = 'APPROVED', filter_reason = '', updated_at = CURRENT_TIMESTAMP "

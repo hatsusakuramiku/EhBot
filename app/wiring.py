@@ -46,6 +46,7 @@ from app.bootstrap import (
 from app.auto_approval.sweeper import AutoApprovalSweeper
 from app.candidates.admission import CandidateAdmissionService
 from app.candidates.ingestor import CandidateIngestor
+from app.candidates.manual import enqueue_manual_candidate
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.accounts import AccountRegistry
 from app.connections.runtime import current_account_context
@@ -497,13 +498,16 @@ def build_lifespan(
                     auto_pack=(
                         lambda candidate_id: (
                             application.state.conversion_service
-                            .enqueue_for_candidate(candidate_id)
+                            .dispatch_pending_packs(candidate_id)
                         )
                     ),
                 )
             download_service = DownloadService(
                 database,
                 app_settings.work_path,
+                manual_enqueue=lambda candidate_id: enqueue_manual_candidate(candidate_id,
+                    database=database, orchestrator=application.state.review_orchestrator,
+                    download_service=application.state.download_service),
                 telegram_client_factory=(
                     lambda: _telegram_context(connection_manager, telegram_client)
                 ),
@@ -572,7 +576,7 @@ def build_lifespan(
                 auto_pack=(
                     lambda candidate_id: (
                         application.state.conversion_service
-                        .enqueue_for_candidate(candidate_id)
+                        .dispatch_pending_packs(candidate_id)
                     )
                 ),
                 auto_pack_enabled=(

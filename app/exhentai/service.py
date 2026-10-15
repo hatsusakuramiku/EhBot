@@ -176,6 +176,7 @@ class ExHentaiService:
                 self._write_cover(connection, candidate_id, gallery)
             # Manual publication starts APPROVED; source metadata rules do not
             # undo that explicit approval (the normal reevaluator skips it).
+            connection.execute("INSERT INTO manual_download_intents(candidate_id) VALUES(?)", (candidate_id,))
             return candidate_id
 
     async def enrich_candidates_for_review(self, candidates: list) -> int:
@@ -576,6 +577,8 @@ class ExHentaiService:
                     int(size),
                 ),
             )
+            connection.execute("UPDATE download_jobs SET state = 'COMPLETED', lease_owner = NULL, "
+                               "lease_expires_at = NULL, error_code = NULL, error_message = NULL WHERE id = ?", (job_id,))
 
 
 class _HttpClientContext:

@@ -20,6 +20,8 @@ from app.downloads.models import PROVIDER_TELEGRAPH
 from app.downloads.service import DownloadService
 from app.main import create_app
 from app.telegraph.service import TelegraphService
+from app.connections.runtime import current_account_context
+from tests.telegram_accounts import with_fixture_bot, bot_transport
 
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 512
@@ -73,6 +75,7 @@ def build_transport(page_count: int, *, served: int | None = None):
     return httpx.MockTransport(handler)
 
 
+@with_fixture_bot
 async def seed_preview_candidate(
     database: Database,
     *,
@@ -87,6 +90,7 @@ async def seed_preview_candidate(
     """
     await database.initialize()
     await database.configure_telegram_source(
+        account_id=current_account_context.get().account_id,
         source_type="CHANNEL",
         chat_id=-100999,
         display_name="Preview Channel",
@@ -313,6 +317,7 @@ def test_an_oversized_attachment_routes_to_the_preview_page(
 
     app = create_app(
         settings,
+        telegram_transport=bot_transport(),
         telegraph_transport=build_transport(1),
         telegraph_resolver=public_resolver,
     )
@@ -344,6 +349,7 @@ def test_a_small_attachment_still_wins_over_the_preview_page(
 
     app = create_app(
         settings,
+        telegram_transport=bot_transport(),
         telegraph_transport=build_transport(1),
         telegraph_resolver=public_resolver,
     )
@@ -372,6 +378,7 @@ def test_the_manual_preview_button_refuses_a_second_active_source(tmp_path: Path
 
     app = create_app(
         settings,
+        telegram_transport=bot_transport(),
         telegraph_transport=build_transport(1),
         telegraph_resolver=public_resolver,
     )

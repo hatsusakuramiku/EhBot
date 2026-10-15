@@ -33,6 +33,13 @@ class Execution:
 current_execution: ContextVar[Execution | None] = ContextVar("download_execution", default=None)
 
 
+def check_thread_cancelled() -> None:
+    """Cooperatively stop bounded I/O chunks without a database read per chunk."""
+    execution = current_execution.get()
+    if execution is not None and execution.stop_requested.is_set():
+        raise sqlite3.IntegrityError("QUEUE_STALE_EXECUTION")
+
+
 @contextmanager
 def execution_scope(database_path: Path, job: dict):
     """Bind a claimed identity; to_thread copies this context to provider writes."""

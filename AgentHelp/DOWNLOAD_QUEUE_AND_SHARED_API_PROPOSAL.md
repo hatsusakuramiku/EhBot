@@ -766,3 +766,5 @@ P6 / R93 独立验收：rc9/035；来源命令、专属订阅迁移、可靠监�
 
 
 P7 / R94 验收记录：036 随阶段提交冻结。MetadataAccountPool 负责只读元数据，DownloadAccountPool 只为既有队列选择确切账号；收费动作独立 ArchiveRequests 意图，未知结果仅原账号 GET 核实，READY 定位符在重试中复用。GP/认证明确拒绝的归档和认证种子在物理退出后新建 queue attempt；取消/停用优先，新账号不扩展本轮。详细合同和实际验证见 R94_COMPLETION_AUDIT。P8 文件发布与 P9 会话/预算按原阶段继续。
+
+P8 / R95 验收记录：037 随阶段提交冻结。artifacts 保留当前投影，artifact_versions 记录固定版本/生产者，历史 producer 未知不补造。queue_pack_intents 固定本次原档与入队设置，manual_download_intents 保存入库后下载意图；现有 worker 恢复，无第二套调度器。Publications 保存准备/旧副本/确认/清理，queue_relocations 保存改名/refile 的可逆移动；昂贵哈希在写锁外，路径钉/产物/refile 结果原子提交。真实退出合同与最新 590 个不同相关用例通过，2687 collect-only，见 R95_COMPLETION_AUDIT。普通移动跨挂载点仍明确失败并保旧，打包在目标卷 staging；P9 会话/心跳/预算与 P10–P12 继续。

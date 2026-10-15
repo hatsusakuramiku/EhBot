@@ -34,6 +34,7 @@ from app.archive.quality import (
     reencode_page,
 )
 from app.archive.safety import page_file_names, validate_manifest
+from app.archive.processes import check_execution
 
 
 LOGGER = logging.getLogger(__name__)
@@ -247,6 +248,7 @@ class ArchiveProcessor:
                     )
                 written = backend.pack_cbz(staged, partial, comicinfo)
             destination.parent.mkdir(parents=True, exist_ok=True)
+            check_execution()
             partial.replace(destination)
         except BaseException:
             partial.unlink(missing_ok=True)
@@ -284,6 +286,7 @@ class ArchiveProcessor:
         rewritten = 0
         result: list[tuple[str, Path]] = []
         for page_name, path in staged:
+            check_execution()
             outcome = reencode_page(page_name, path, profile, staging)
             if outcome.rewritten:
                 rewritten += 1

@@ -193,6 +193,7 @@ async def enqueue_manual_candidate(
         logging.getLogger(__name__).info(
             "manual_add_no_source candidate=%d", candidate_id
         )
+        await run_sync(_defer_manual_download, database, candidate_id, "MANUAL_SOURCE_UNAVAILABLE")
         return
     try:
         if provider == PROVIDER_TELEGRAM:
@@ -206,8 +207,15 @@ async def enqueue_manual_candidate(
         else:
             await download_service.enqueue_exhentai_download(candidate_id)
     except DownloadError as exc:
+        await run_sync(_defer_manual_download, database, candidate_id, exc.code)
         logging.getLogger(__name__).warning(
             "manual_add_enqueue_failed candidate=%d error=%s",
             candidate_id,
             exc.public_message,
         )
+
+
+def _defer_manual_download(database, candidate_id, error_code):
+    with database.connection() as connection:
+        connection.execute("UPDATE manual_download_intents SET retry_at = datetime('now', '+60 seconds'), "
+                           "attempts = attempts + 1, error_code = ? WHERE candidate_id = ?", (error_code, candidate_id))

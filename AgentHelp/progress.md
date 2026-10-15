@@ -7587,3 +7587,29 @@ AccountService.use_account/use_kind 对同一 EH 账号增加本进程锁，覆�
 **交付。** rc10/036 仅本地源码，027–035 保持不变，036 随阶段提交冻结。README/USAGE/REALTIME_API、PHASES/计划/task_plan/findings/本日志与 R94 audit 同步；无环境变量/配置字段变化，.env.example 无需改。独立元数据操作崩溃诊断与收费意图已有持久记录/只读恢复，进程会话、快速重启调度、持续心跳和完整预算按 P9；原档→打包流水线/文件发布崩溃恢复接 P8。P10–P12 原范围保持，总目标 active。立即暂存本阶段代码、正式测试和文档并本地提交，核实 SHA 后才进 P8；不推送、发布或部署。
 
 **升级/回退与清理。** 036 未交付前仍有实验性结构变更，最终验证全部用新临时库；旧实验 036 不能重复 initialize 自动补表。正式升级沿 R92 完整离线快照/隔离副本步骤，036 冻结后不改写；回退恢复旧完整库/私有配置/配套源码，不能删版本记录。P6 TEMP 已核对无重解析点后删除 3865 文件，剩余 0，.scratch 不存在。本轮仅 ehbot-p7-download-20261015-a，报告留痕后、提交核验后删除；正式用例在 tests/。
+
+**P7 提交核实。** 本地提交 `31b5b0077709c1526f2f52da9471e99f2b8f9211`（单行标题、无正文）。40 个提交 blobs 与提交前内容逐 SHA256 相同，暂存区为空，027–036 与提交一致；未混入 `app/downloads/models.py` 既有 BOM 差异。P7 TEMP 共 1660 文件，所有测试已终态，核对绝对路径和无重解析点后清理；SHA/清理留痕随下一阶段提交，无推送/发布/部署。
+
+### P8 进行中接续（未验收，2026-10-15）
+
+037 未冻结，已实现 artifact_versions、入队快照/精确原档依赖、持久打包与手动下载意图、CBZ 替换 journal/恢复和协作取消。真实子进程退出覆盖 prepare/replace/confirm/cleanup；尚未最终定向验收，不提升 rc10。首次 regression 326 条有 13 个失败；修复种子专用入队默认值、缩窄旧无输入 claim gate、完成结果保留 input ID，并调整旧立即打包/日志夹具。两个 Telegraph 旧夹具在独立 P7 HEAD 同样失败，已修为注册 synthetic Bot 并注入受控传输。随后 fix 六文件 201/0；providers/contracts/boundaries 进程均 exit 0，精确计数最终从 XML 汇总，不累加重叠节点。
+
+当前缺口：ArchivedWorkService._relocate_sync 仍在 rename 后才提交数据库，硬退出可导致路径记录失配；refile 也需固定 CBZ 输入。因此继续完善移动恢复，不宣称 P8 完成。TEMP 仅 ehbot-p8-artifacts-20261015-a（含 P7 baseline 导出树），留到结果记录与提交核验后清理；正式测试放 tests/，不建 .scratch。每阶段验收立即本地提交、核实 SHA 后才进入下一阶段；P9–P12 未开始。
+
+### R95 / P8 — 精确产物、持久流水线与文件发布恢复（0.3.0rc11 / 037，2026-10-15）
+
+**范围。** artifacts 仍为当前投影，037 新增 immutable artifact_versions（精确生产 attempt，历史 producer 保持 null，内容/生产字段不可改，合并移归属、移除解除归属）。打包和 refile 在入队固定 ARCHIVE/CBZ UUID，worker 不临时选最新版；A 明确排队后 B 成功不换输入，新下载未完成则普通打包拒绝偷用 A。queue_pack_intents 保存入队自动设置及明确 repack 请求，原档/完成结果同事务提交；完成后由现有 worker materialize，通知丢失仍恢复。手动新增同时保存 manual_download_intents，入库后未 enqueue、暂时无来源/错误可继续恢复。retry/restart/switch-source 保留原请求，无第二调度器。
+
+**文件与取消。** Publications 保存 PREPARED、旧副本、新摘要、确切 attempt/代次和原档清理策略。昂贵哈希/备份在 DB 写锁外；短事务核实资格和文件 stat 后替换，产物/任务完成/COMMITTED 一起提交，最后清理恢复副本及不再被其他活动 pack 使用的原档。取消/删除先赢则恢复旧文件；未知外部字节保留 RECOVERY_REQUIRED，原文件/备份不被覆盖。启动先 recover 再 reclaim，worker finally/stop_attempt 在物理清理前恢复。builtin ZIP 每 I/O chunk 协作停止，processor 发布/逐页重编码检查身份，沿用 7-Zip 受管停止。
+
+**移动补漏。** 复核发现改名/refile 旧同步事务在 rename 后硬退出仍会丢路径。新增 queue_relocations：先保存输入 UUID/原目标路径/摘要，再短事务移动并一起写路径钉、产物和 worker refiling 完成结果。未提交的移动启动后逆向恢复旧路径；提交后的移动不再重跑。manual/worker 各三个真实进程退出断点通过。普通移动跨挂载点 rename 明确失败并保旧，打包采用目标卷 staging。重新归档固定 CBZ 输入，后续改名不悄悄换输入；不同类型或版本的活动打包明确冲突。未结束手动移动拒绝移除；worker 移动继续既有真实停止屏障。
+
+**接口与文档。** v1 convert 可指定 input_artifact_id，空 body 兼容；测试覆盖非字符串/空 ID 与其他作品产物拒绝。task 查询增加 pack_intent、产物版本与安全 publication/relocation 状态，不输出内部备份路径。最终 v2/全域 CAS/幂等仍按 P10。README/USAGE/REALTIME_API、方案/处理计划/PHASES/task_plan/findings/AGENTS 与 R95 audit 同步，移除 P8 尚未实现的旧事实；rc11 仅本地源码标识，无环境变量变更，.env.example 无需改。
+
+**首次失败与修复。** pipeline 初验 4 条中 2 fail：测试 factory 返回类型错误、完成 details 覆盖 input；修复后 4/0。regression 十四文件 326/13/0/0（164.000 秒）：种子专用自动打包未捕获 1、Telegraph 未登记来源 Bot 的旧夹具 2、旧无输入 claim gate 2、仍期待立即打包旧 A 的 archived_works 1、conversion_logging 旧输入夹具/gate 6、AI path claim-only 1。两项 Telegraph 在独立 P7 HEAD 导出树同样失败，修为已有 with_fixture_bot、真实 synthetic 来源账号及受控 bot_transport；没有放宽产品路由。修复后六文件 201/0（46.042 秒）；providers 九文件 159/0（23.748 秒）；contracts 四文件 23/0（7.738 秒）；boundaries 四文件 22/0（9.780 秒），均 0 error/skip。移动首轮四文件 76/15/0/0（10.160 秒），均为新模块 sqlite3.Row 遗漏导入；补入后五文件 85/0（18.760 秒）。接口补验 last=65/1（91.303 秒）、api-last=45/1（21.038 秒），是同一未知移动先报 FILE_MOVE_FAILED 的检查顺序缺陷；改为先协调未决移动，再读取源文件，最终下组通过。一次文档补丁 findings 锚点不匹配，整批未写入，读取实际末尾后重新精确应用。
+
+**最终实际验证。** relocate-final 九完整文件 211/0/0/0（23.947 秒）；final 十九完整文件 263/0/0/0（145.871 秒）；accept 五文件/类 107/0/0/0（28.341 秒）。含原始 ZIP/CBZ、受控供应商、实际应用启动与共享 API、旧 schema 036 升级、真实子进程 os._exit 的四个打包断点/六个移动断点。按 classname/name 取最新结果，27 个相关文件共 590 个不同用例最终通过，0 failure/error/skip；非一次整组或整库运行。2687 collected only（1.405 秒），compileall、CodeGraph sync 和标准 diff --check 通过。移动普通异常回滚也保留可能被外部重新占用的源路径，最后小组核验见接续补记。
+
+**交付与接手。** 027–036 不改写，037 随阶段提交冻结。升级/回退沿 R92 停服务与完整 SQLite/配置/文件快照，实际 036 升级只在临时库执行；不改真实库，不删版本记录降级。当前仅 TEMP/ehbot-p8-artifacts-20261015-a，含 P7 baseline 导出/原始报告，所有进程终态、报告留痕、提交逐 blob/SHA 核实后删除。.scratch 不存在，正式测试保留 tests/。立即精确暂存本阶段代码、测试和文档并本地单行标题提交，核实 SHA 后才进入 P9；models.py 既有纯 BOM 差异排除。P9 继续会话/心跳/周期恢复/预算，P10 全域 API、P11 剩余缺陷、P12 最终验收，总目标 active；无推送、发布、部署或真实供应商使用。
+
+**最后移动复验。** 普通 SQL/提交失败恢复旧路径前也检查源路径未被外部占用、目标 stat 仍是已移动文件；否则交给摘要恢复保留未知内容。relocation_recovery/refile_cancellation 两完整文件 **15/0/0/0（5.467 秒）**，未新增用例，最终 590 个不同用例通过数不变；所有测试会话已终态。037 与所有交付文档冻结于随后本地阶段提交。

@@ -719,8 +719,12 @@ async def convert_work(request: Request, candidate_id: int) -> dict:
             "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
         )
     service = deps.conversion_service(request)
+    payload = await _body(request) if await request.body() else {}
+    artifact_id = payload.get("input_artifact_id")
+    if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
+        raise ApiError("ARTIFACT_INVALID", "请提供有效的原档产物 ID")
     try:
-        job_id = await service.enqueue_for_candidate(candidate_id)
+        job_id = await service.enqueue_for_candidate(candidate_id, input_artifact_id=artifact_id)
     except ConversionError as exc:
         raise _translate(exc) from exc
     _publish(request, EVENT_DOWNLOAD, job_id=job_id)

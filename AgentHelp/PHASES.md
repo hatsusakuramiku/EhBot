@@ -9,9 +9,9 @@
 
 ## 当前改造入口
 
-- **P0–P7 / R94 已验收，P7 待本地阶段提交**：rc10/036；2661 collected only，363 个不同相关用例最终通过，未运行整库。027–036 随阶段提交冻结。
+- **P0–P8 / R95 已验收，P8 待本地阶段提交**：rc11/037；2687 collected only，590 个不同相关用例最终通过，未运行整库。[P8 核对](R95_COMPLETION_AUDIT.md)。最近已提交 P7=`31b5b00`；027–036 冻结，037 随 P8 提交冻结。
 - P5=`2ea49f2`，P6=`c61af7e`；[P5 核对](R92_REQUIREMENT_AUDIT.md)、[P6 核对](R93_COMPLETION_AUDIT.md)、[P7 核对](R94_COMPLETION_AUDIT.md)。阶段验收后立即暂存代码、测试及文档并本地提交，核对 SHA 再进入下一阶段。
-- 下一阶段 P8：artifact 生产者/精确打包依赖、发布崩溃恢复、流水线意图与打包取消；之后 P9 会话/心跳/预算、P10 全域协议、P11 其余缺陷、P12 最终验收。总目标 active，详 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md)。
+- P8 已覆盖精确原档/CBZ 依赖、持久流水线意图、打包发布与改名/refile 崩溃恢复、真实取消；立即本地提交并核实后才进入 P9 会话/心跳/预算。之后 P10 全域协议、P11 其余缺陷、P12 最终验收。总目标 active，详 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md)。
 
 ### 验收前接续记录（历史快照，当前状态以上述 P5 提交为准）
 
@@ -213,3 +213,5 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 | R93 / P6 | 0.3.0rc9 / 2026-10-15 | 多 TG 独立监听/来源 CAS 与串行账号接替，032–035 | 2596 collect / 419 distinct passed | `progress.md` R93；`R93_COMPLETION_AUDIT.md` |
 
 | R94 / P7 | 0.3.0rc10 / 2026-10-15 | EH 有限池、能力退避、收费核实及认证种子，036 | 2661 collect / 363 distinct passed | `progress.md` R94；`R94_COMPLETION_AUDIT.md` |
+
+| R95 / P8 | 0.3.0rc11 / 2026-10-15 | 精确产物依赖、持久流水线、可恢复 CBZ 发布及改名/refile，037 | 2687 collect / 590 distinct passed | `progress.md` R95；`R95_COMPLETION_AUDIT.md` |

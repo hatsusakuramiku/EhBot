@@ -19,6 +19,7 @@ from app.archive.models import (
     ArchiveMember,
 )
 from app.archive.safety import normalize_member_name
+from app.downloads.execution import check_thread_cancelled
 
 
 CHUNK_SIZE = 64 * 1024
@@ -201,6 +202,7 @@ class ZipfileBackend:
                     with archive.open(info, "r") as reader:
                         with target.open("wb") as writer:
                             while True:
+                                check_thread_cancelled()
                                 chunk = reader.read(CHUNK_SIZE)
                                 if not chunk:
                                     break
@@ -253,6 +255,7 @@ class ZipfileBackend:
                         with archive.open(info, "r") as reader:
                             with target.open(page_name, "w") as writer:
                                 while True:
+                                    check_thread_cancelled()
                                     chunk = reader.read(CHUNK_SIZE)
                                     if not chunk:
                                         break
@@ -287,6 +290,7 @@ class ZipfileBackend:
                     with path.open("rb") as reader:
                         with target.open(page_name, "w") as writer:
                             while True:
+                                check_thread_cancelled()
                                 chunk = reader.read(CHUNK_SIZE)
                                 if not chunk:
                                     break

@@ -829,6 +829,31 @@ class TestConvert:
         assert response.json()["error"]["code"] == "CSRF_INVALID"
 
 
+    def test_convert_binds_only_the_requested_works_artifact(self, tmp_path: Path) -> None:
+        settings = make_settings(tmp_path)
+        app = create_app(settings)
+        with TestClient(app) as client:
+            seed(settings, [(1, 'APPROVED', 'One'), (2, 'APPROVED', 'Two')])
+            own_job = seed_downloaded(settings, 1)
+            foreign_job = seed_downloaded(settings, 2)
+            log_in(client, settings)
+            headers = {CSRF_HEADER: csrf_token(client)}
+            with sqlite3.connect(settings.data_path / 'ehbot.db') as c:
+                own = c.execute('SELECT artifact_id FROM artifacts WHERE job_id = ?', (own_job,)).fetchone()[0]
+                foreign = c.execute('SELECT artifact_id FROM artifacts WHERE job_id = ?', (foreign_job,)).fetchone()[0]
+            for invalid in ('', True, 123, []):
+                result = client.post('/api/v1/works/1/convert', json={'input_artifact_id': invalid}, headers=headers)
+                assert result.status_code == 400
+                assert result.json()['error']['code'] == 'ARTIFACT_INVALID'
+            wrong = client.post('/api/v1/works/1/convert', json={'input_artifact_id': foreign}, headers=headers)
+            assert wrong.status_code == 400 and wrong.json()['error']['code'] == 'ARCHIVE_NOT_READY'
+            selected = client.post('/api/v1/works/1/convert', json={'input_artifact_id': own}, headers=headers)
+            assert selected.status_code == 200
+            with sqlite3.connect(settings.data_path / 'ehbot.db') as c:
+                assert c.execute("SELECT json_extract(details_json, '$.input_artifact_id') FROM download_jobs WHERE id = ?",
+                                 (selected.json()['job_id'],)).fetchone()[0] == own
+
+
 class TestFetchMetadata:
     """R71: 重获元数据 over JSON, on the call the page makes."""
 

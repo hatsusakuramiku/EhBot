@@ -55,8 +55,8 @@ async def _seed_pending_job(database: Database, tmp_path: Path) -> tuple[int, in
                 "(candidate_id, provider, state, priority, attempt_count, "
                 "idempotency_key, details_json, created_at, updated_at) "
                 "VALUES (?, 'CONVERSION', 'CONVERSION_PENDING', 100, 0, "
-                "?, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                (candidate_id, f"convert-{candidate_id}"),
+                "?, json_object('input_artifact_id', (SELECT artifact_id FROM artifacts WHERE job_id = ?)), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (candidate_id, f"convert-{candidate_id}", download_job_id),
             )
             return int(cur.lastrowid), candidate_id
     return await asyncio.to_thread(_seed)

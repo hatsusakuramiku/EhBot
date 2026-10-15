@@ -478,4 +478,11 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 ## R94 / P7 独立交付
 
 - [x] EH 有限池/健康/收费核实/认证种子及串行队列接替；2661 collect-only / 363 distinct passed。
-- [ ] 立即本地阶段提交并记录 SHA，然后接 P8–P12。
+- [x] 本地阶段提交 `31b5b00`，40 blobs/空暂存区/027–036 已核实；接 P8–P12。
+
+## R95 / P8 交付
+
+- [x] 037 产物版本、精确 ARCHIVE/CBZ 依赖、入队设置与持久打包/手动下载意图。
+- [x] CBZ 准备/替换/确认/清理与改名/refile 三断点恢复；真实进程退出、取消/删除/外部改动/输入竞争合同。
+- [x] 27 个相关文件按最新节点 590 个不同用例通过；2687 collect-only；README/USAGE/API/交接同步。
+- [ ] 立即精确暂存并本地阶段提交，核实 SHA 与 blobs；清理 ehbot-p8-artifacts-20261015-a 后才进入 P9。

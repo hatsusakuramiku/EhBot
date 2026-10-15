@@ -360,7 +360,11 @@ class TestRedownload:
         )
 
         assert result["repack"] is True
-        assert fixture.repacked == [candidate_id]
+        assert fixture.repacked == []
+        with fixture.database.connection() as connection:
+            assert connection.execute("SELECT p.pack_requested, p.input_artifact_id, p.status FROM queue_pack_intents p "
+                "JOIN download_jobs j ON j.task_id = p.task_id WHERE j.candidate_id = ? AND j.provider <> 'CONVERSION'",
+                (candidate_id,)).fetchone() == (1, None, 'WAITING')
 
     def test_a_work_already_downloading_is_not_queued_twice(
         self, fixture: Fixture

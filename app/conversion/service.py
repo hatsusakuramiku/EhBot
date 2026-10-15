@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
 from app.archive.errors import (
@@ -33,6 +34,8 @@ from app.archive.service import (
 )
 from app.conversion.comicinfo import build_from_metadata
 from app.conversion.convert import ConversionError
+from app.conversion.publication import Publications
+from app.conversion.relocation import Relocations
 from app.conversion.naming import (
     CBZ_SUFFIX,
     DEFAULT_LIBRARY_TEMPLATE,
@@ -140,6 +143,7 @@ class ConversionService:
         refile: Callable[[int, str], object] | None = None,
     ) -> None:
         self._database = database
+        self._publications = Publications(database)
         self._work_path = work_path
         self._library_path = library_path
         self._settings = settings_service or ArchiveSettingsService(
@@ -731,6 +735,7 @@ class ConversionService:
         *,
         refile: bool = False,
         refresh_ai_path: bool = False,
+        input_artifact_id: str | None = None,
     ) -> int:
         """Queue this work for packaging, or for a path-only re-file.
 
@@ -747,13 +752,14 @@ class ConversionService:
         free-form column: a new column for two booleans one branch reads would
         be a schema change for nothing.
         """
+        await run_sync(self._publications.retry_required, candidate_id)
         if not refile:
             # A repack whose series cannot be resolved is refused here, before a
             # task exists -- see the helper. A first pack is let through so the
             # job can park in 需干预 with the same reason.
             await self._refuse_series_before_enqueue(candidate_id)
         return await run_sync(
-            self._enqueue_sync, candidate_id, refile, refresh_ai_path
+            self._enqueue_sync, candidate_id, refile, refresh_ai_path, input_artifact_id
         )
 
     def _enqueue_sync(
@@ -761,15 +767,17 @@ class ConversionService:
         candidate_id: int,
         refile: bool = False,
         refresh_ai_path: bool = False,
+        input_artifact_id: str | None = None,
+        connection=None,
     ) -> int:
         details: dict[str, object] = {}
         if refile:
             details["refile"] = True
         if refresh_ai_path:
             details["refresh_ai_path"] = True
-        details_json = json.dumps(details, separators=(",", ":"))
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with (self._database.connection() if connection is None else nullcontext(connection)) as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             candidate_row = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -779,6 +787,10 @@ class ConversionService:
                     "CANDIDATE_NOT_FOUND",
                     "Candidate does not exist",
                 )
+            if connection.execute("SELECT 1 FROM queue_publications WHERE candidate_id = ? "
+                                  "AND status = 'RECOVERY_REQUIRED'", (candidate_id,)).fetchone():
+                raise ConversionError("PUBLICATION_RECOVERY_REQUIRED", "先核实文件发布冲突，再重试打包")
+            Relocations(self._database).check(candidate_id=candidate_id, connection=connection)
             # What packing actually requires is a downloaded archive, which the
             # next query establishes. The candidate's status is a *different*
             # question, and gating on it was wrong for a case that happens
@@ -812,25 +824,32 @@ class ConversionService:
             #   has no archive left.
             if refile:
                 packable = connection.execute(
-                    "SELECT a.path FROM download_jobs dj "
+                    "SELECT a.artifact_id FROM download_jobs dj "
                     "JOIN artifacts a ON a.job_id = dj.id "
                     "WHERE dj.candidate_id = ? AND a.artifact_type = 'CBZ' "
+                    "AND (? IS NULL OR a.artifact_id = ?) "
                     "ORDER BY a.id DESC LIMIT 1",
-                    (candidate_id,),
+                    (candidate_id, input_artifact_id, input_artifact_id),
                 ).fetchone()
                 if packable is None:
                     raise ConversionError(
                         "WORK_NOT_PACKAGED",
                         "该作品还没有打包产物，无法重算路径",
                     )
+                details["input_artifact_id"] = packable[0]
             else:
+                if input_artifact_id is None and connection.execute(
+                    "SELECT 1 FROM queue_tasks WHERE candidate_id = ? AND kind = 'DOWNLOAD' "
+                    "AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'REMOVED')",
+                    (candidate_id,),
+                ).fetchone():
+                    raise ConversionError("ARCHIVE_NOT_READY", "本次下载尚未完成，请等待本次原档后再打包")
                 artifact_row = connection.execute(
-                    "SELECT a.path FROM download_jobs dj "
-                    "JOIN artifacts a ON a.job_id = dj.id "
-                    "WHERE dj.candidate_id = ? AND dj.state = ? "
+                    "SELECT a.artifact_id FROM artifact_versions a JOIN queue_tasks t ON t.task_id = a.task_id "
+                    "WHERE a.candidate_id = ? AND t.status = ? "
                     "AND a.artifact_type = 'ARCHIVE' "
-                    "ORDER BY dj.id DESC LIMIT 1",
-                    (candidate_id, DOWNLOAD_STATE_COMPLETED),
+                    "AND (? IS NULL OR a.artifact_id = ?) ORDER BY a.rowid DESC LIMIT 1",
+                    (candidate_id, DOWNLOAD_STATE_COMPLETED, input_artifact_id, input_artifact_id),
                 ).fetchone()
                 if artifact_row is None:
                     # This is now the readiness gate, so the message has to be the
@@ -839,6 +858,8 @@ class ConversionService:
                         "ARCHIVE_NOT_READY",
                         "该作品还没有下载完成的压缩包，无法打包",
                     )
+                details["input_artifact_id"] = artifact_row[0]
+            details_json = json.dumps(details, separators=(",", ":"))
             before = connection.total_changes
             connection.execute(
                 "INSERT INTO download_jobs "
@@ -891,14 +912,60 @@ class ConversionService:
                     ),
                 )
             row = connection.execute(
-                "SELECT id FROM download_jobs WHERE idempotency_key = ?",
+                "SELECT id, details_json, state FROM download_jobs WHERE idempotency_key = ?",
                 (f"convert:{candidate_id}",),
             ).fetchone()
+            current_details = json.loads(row[1])
+            if (current_details.get("input_artifact_id") is None and row[2] == CONVERSION_STATE_PENDING
+                    and bool(current_details.get("refile")) == refile):
+                connection.execute("UPDATE download_jobs SET details_json = ? WHERE id = ?", (details_json, row[0]))
+                return int(row[0])
+            if (bool(current_details.get("refile")) != refile
+                    or current_details.get("input_artifact_id") != details.get("input_artifact_id")):
+                raise ConversionError("PACK_INPUT_CONFLICT", "已有打包任务绑定了另一版原档，请等待该任务结束")
             return int(row[0])
+
+    async def dispatch_pending_packs(self, candidate_id: int | None = None) -> int:
+        """Materialize durable download follow-ups; notifications may be lost."""
+        return await run_sync(self._dispatch_pending_packs_sync, candidate_id)
+
+    def _dispatch_pending_packs_sync(self, candidate_id):
+        count = 0
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT p.task_id, t.candidate_id, p.input_artifact_id FROM queue_pack_intents p "
+                "JOIN queue_tasks t ON t.task_id = p.task_id JOIN candidates c ON c.id = t.candidate_id "
+                "WHERE p.pack_requested = 1 AND p.status = 'READY' AND t.status = 'COMPLETED' "
+                "AND (? IS NULL OR t.candidate_id = ?) "
+                "AND NOT EXISTS(SELECT 1 FROM download_jobs j WHERE j.candidate_id = t.candidate_id "
+                "AND j.provider = 'CONVERSION' AND j.state IN ('CONVERSION_RUNNING', 'STOPPING', 'PAUSED')) "
+                "ORDER BY t.created_at, p.task_id LIMIT 100", (candidate_id, candidate_id),
+            ).fetchall()
+            for task_id, work_id, artifact_id in rows:
+                try:
+                    job_id = self._enqueue_sync(work_id, input_artifact_id=artifact_id, connection=connection)
+                except ConversionError:
+                    # The candidate/source is no longer packable. Keep the
+                    # durable intent for an explicit repair; never choose A.
+                    continue
+                pack_task_id = connection.execute("SELECT task_id FROM download_jobs WHERE id = ?", (job_id,)).fetchone()[0]
+                pack = connection.execute("SELECT state, json_extract(details_json, '$.input_artifact_id') "
+                    "FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
+                if pack[1] is None and pack[0] == CONVERSION_STATE_PENDING:
+                    connection.execute("UPDATE download_jobs SET details_json = json_set(details_json, '$.input_artifact_id', ?) "
+                        "WHERE id = ?", (artifact_id, job_id))
+                elif pack[1] != artifact_id:
+                    continue
+                connection.execute("UPDATE queue_pack_intents SET status = 'QUEUED', pack_task_id = ? WHERE task_id = ?",
+                                   (pack_task_id, task_id))
+                count += 1
+        return count
 
     async def start(self) -> None:
         if self._worker_task is not None:
             return
+        await run_sync(self._publications.recover)
         await self.reclaim_running_jobs()
         self._worker_task = asyncio.create_task(
             self._run_worker(), name="conversion-worker"
@@ -973,6 +1040,7 @@ class ConversionService:
                 await asyncio.sleep(1.0)
 
     async def _process_one(self) -> bool:
+        await self.dispatch_pending_packs()
         job = await run_sync(self._claim_pending_job_sync)
         if job is None:
             return False
@@ -995,6 +1063,7 @@ class ConversionService:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await run_sync(self._publications.recover, task_id)
 
     async def _execute_attempt(self, job: dict) -> bool:
         with execution_scope(self._database.path, job) as execution:
@@ -1006,6 +1075,14 @@ class ConversionService:
                 if str(exc) not in STALE_EXECUTION_ERRORS:
                     raise
                 return True
+            finally:
+                try:
+                    await run_sync(self._publications.recover, job["task_id"])
+                except ConversionError as exc:
+                    if exc.code != "PUBLICATION_RECOVERY_REQUIRED":
+                        raise
+                    logging.getLogger(__name__).warning("conversion_publication_needs_recovery",
+                        extra={"job_id": job["job_id"], "error_code": exc.code})
 
     async def _process_claimed_job(self, job: dict) -> bool:
         self._announce(job["job_id"], job["candidate_id"])
@@ -1028,6 +1105,10 @@ class ConversionService:
                 raise
             logger.info("conversion_attempt_commit_rejected", extra=job_context)
             return True
+        except ConversionError as exc:
+            if exc.code != "PUBLICATION_RECOVERY_REQUIRED":
+                raise
+            logger.warning("conversion_publication_needs_recovery", extra={**job_context, "error_code": exc.code})
         except Exception as exc:  # noqa: BLE001
             await run_sync(
                 self._mark_failed_sync, job["job_id"], "WORKER_EXCEPTION", str(exc)
@@ -1104,6 +1185,10 @@ class ConversionService:
                 "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
                 "AND candidate_id NOT IN (SELECT candidate_id FROM queue_blocked_candidates) "
+                "AND (coalesce(json_extract(details_json, '$.refile'), 0) = 1 "
+                "OR json_extract(details_json, '$.input_artifact_id') IS NOT NULL "
+                "OR NOT EXISTS(SELECT 1 FROM queue_tasks t WHERE t.candidate_id = download_jobs.candidate_id "
+                "AND t.kind = 'DOWNLOAD' AND t.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'REMOVED'))) "
                 # Same ordering as the download claim: a promoted packaging job
                 # runs first, and within one priority the queue stays FIFO. The
                 # two queues are separate but an operator adjusts priority the
@@ -1135,6 +1220,7 @@ class ConversionService:
                 # `refresh_ai_path` tells the AI branch to ignore its cache.
                 "refile": bool(details.get("refile")),
                 "refresh_ai_path": bool(details.get("refresh_ai_path")),
+                "input_artifact_id": details.get("input_artifact_id"),
             }
 
     async def _handle_job(self, job: dict) -> None:
@@ -1152,8 +1238,15 @@ class ConversionService:
             # legitimately be gone.
             await self._handle_refile_job(job)
             return
+        if job.get("input_artifact_id") is None:
+            def bound_input():
+                with self._database.connection() as connection:
+                    row = connection.execute("SELECT json_extract(details_json, '$.input_artifact_id') "
+                                             "FROM download_jobs WHERE id = ?", (job["job_id"],)).fetchone()
+                    return row[0] if row else None
+            job["input_artifact_id"] = await run_sync(bound_input)
         source_artifact = await run_sync(
-            self._fetch_source_artifact_sync, job["candidate_id"]
+            self._fetch_source_artifact_sync, job["candidate_id"], job.get("input_artifact_id")
         )
         if source_artifact is None:
             await run_sync(
@@ -1172,6 +1265,13 @@ class ConversionService:
                 "Archive file was removed before conversion",
             )
             return
+        if source_artifact["producer_attempt_id"] and source_artifact["sha256"]:
+            def source_matches():
+                with source_path.open("rb") as source:
+                    return hashlib.file_digest(source, "sha256").hexdigest() == source_artifact["sha256"]
+            if not await run_sync(source_matches):
+                await run_sync(self._mark_failed_sync, job["job_id"], "ARTIFACT_CHANGED", "本次原档内容与已登记的产物版本不一致")
+                return
 
         # Metadata first, always. Everything below this line is derived from it:
         # the library path the template renders, the filename, and the whole of
@@ -1340,8 +1440,19 @@ class ConversionService:
             return
         if result.password_id is not None:
             await self._settings.mark_password_success(result.password_id)
-        if staged_target != library_target:
-            await run_sync(self._publish_attempt_sync, Path(result.cbz_path), library_target)
+        completion = {
+            **result.snapshot.as_dict(),
+            "page_count": result.page_count,
+            "volume_count": result.volume_count,
+            "skipped_members": list(result.skipped_members),
+            "password_entry_id": result.password_id,
+            "image_quality": result.image_quality,
+            "rewritten_pages": result.rewritten_pages,
+        }
+        if current_execution.get() is not None:
+            await run_sync(self._publications.publish, job, Path(result.cbz_path), library_target,
+                result.page_count, library_path, completion, source_path, await self._settings.keep_original())
+            return
         await run_sync(
             self._record_cbz_artifact_sync,
             job["job_id"],
@@ -1352,25 +1463,10 @@ class ConversionService:
         await run_sync(
             self._mark_completed_sync,
             job["job_id"],
-            {
-                **result.snapshot.as_dict(),
-                "page_count": result.page_count,
-                "volume_count": result.volume_count,
-                "skipped_members": list(result.skipped_members),
-                "password_entry_id": result.password_id,
-                "image_quality": result.image_quality,
-                "rewritten_pages": result.rewritten_pages,
-            },
+            completion,
         )
         if not await self._settings.keep_original():
             await run_sync(self._remove_original_sync, source_path)
-
-    def _publish_attempt_sync(self, staged: Path, destination: Path) -> None:
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current_execution.get().check(connection)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            staged.replace(destination)
 
     async def _handle_refile_job(self, job: dict) -> None:
         """Recompute one published book's path and move the file there.
@@ -1434,6 +1530,8 @@ class ConversionService:
             await run_sync(
                 self._mark_failed_sync, job["job_id"], code, message
             )
+            return
+        if result.get("committed"):
             return
         await run_sync(
             self._mark_completed_sync,
@@ -1520,18 +1618,15 @@ class ConversionService:
             )
 
     def _fetch_source_artifact_sync(
-        self, candidate_id: int
+        self, candidate_id: int, input_artifact_id: str | None = None
     ) -> dict | None:
         with self._database.connection() as connection:
             row = connection.execute(
-                "SELECT a.path FROM download_jobs dj "
-                "JOIN artifacts a ON a.job_id = dj.id "
-                "WHERE dj.candidate_id = ? AND dj.state = ? "
-                "AND a.artifact_type = 'ARCHIVE' "
-                "ORDER BY dj.id DESC LIMIT 1",
-                (candidate_id, DOWNLOAD_STATE_COMPLETED),
+                "SELECT path, sha256, producer_attempt_id FROM artifact_versions WHERE candidate_id = ? "
+                "AND artifact_id = ? AND artifact_type = 'ARCHIVE'",
+                (candidate_id, input_artifact_id),
             ).fetchone()
-            return {"path": str(row[0])} if row else None
+            return {"path": str(row[0]), "sha256": row[1], "producer_attempt_id": row[2]} if row else None
 
     def _fetch_metadata_sync(self, candidate_id: int) -> list:
         """This work's metadata rows, best first.
@@ -1621,7 +1716,7 @@ class ConversionService:
         with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
-                "error_message = NULL, details_json = ?, "
+                "error_message = NULL, details_json = json_patch(details_json, ?), "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (
                     CONVERSION_STATE_COMPLETED,
@@ -1642,7 +1737,7 @@ class ConversionService:
         with self._database.connection() as connection:
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = ?, "
-                "error_message = ?, details_json = ?, "
+                "error_message = ?, details_json = json_patch(details_json, ?), "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (
                     state,

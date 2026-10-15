@@ -209,7 +209,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
         }
 
-    assert migration_count == 36
+    assert migration_count == 37
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns

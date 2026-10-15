@@ -30,6 +30,7 @@ import json
 import logging
 import sqlite3
 import zipfile
+from contextlib import closing
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -51,6 +52,9 @@ from app.conversion.comicinfo import (
     DERIVED_ELEMENTS, EDITABLE_ELEMENTS, build_from_metadata, field_writes_archive,
 )
 from app.conversion.service import _PACK_FORBIDDEN_STATUSES
+from app.conversion.convert import ConversionError
+from app.conversion.publication import _inspect, _stamp
+from app.conversion.relocation import Relocations
 from app.db.database import Database, METADATA_SOURCE_RANK_SQL
 from app.downloads.queue import QueueControl, DownloadError
 from app.downloads.execution import current_execution, run_sync
@@ -187,7 +191,6 @@ class ArchivedWorkService:
         # Injected rather than imported so re-download can optionally chain into
         # packaging without this module importing the conversion service, and so
         # a test can observe the chaining without running a packer.
-        self._conversion_enqueue = conversion_enqueue
         self._notify = notify
         self._removal_lock = asyncio.Lock()
 
@@ -494,6 +497,7 @@ class ArchivedWorkService:
         return await self._remove(candidate_id, delete_files, operator_name, purge=True)
 
     async def _remove(self, candidate_id, delete_files, operator_name, *, purge):
+        await run_sync(Relocations(self._database).recover, required_only=True)
         library, work_root = await self._roots()
         work = await self._database.downloaded_work(candidate_id)
         result = await run_sync(self._begin_removal_sync, candidate_id, bool(delete_files),
@@ -516,6 +520,12 @@ class ArchivedWorkService:
                             library, work_root, work):
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            # Running refile uses the existing physical-stop barrier. A manual
+            # rename has no worker, so wait for its short publication to end.
+            if connection.execute("SELECT 1 FROM queue_relocations WHERE candidate_id = ? "
+                                  "AND status IN ('PREPARED', 'RECOVERY_REQUIRED') AND task_id IS NULL",
+                                  (candidate_id,)).fetchone():
+                raise ArchivedWorkError("PUBLICATION_RECOVERY_REQUIRED", "文件移动尚未结束或需要核实，请稍后移除")
             candidate = connection.execute(
                 "SELECT ex_gid, CASE WHEN magnet_url IS NOT NULL THEN torrent_hash END "
                 "FROM candidates WHERE id = ?", (candidate_id,),
@@ -732,8 +742,9 @@ class ArchivedWorkService:
 
         `repack` chains packaging afterwards, per the requirements document's
         「下载后替换掉旧文件并重新打包（可选是否重新打包）」. It is off by default
-        because the download has to finish first -- the flag is recorded and the
-        worker's existing auto-pack path is what acts on it.
+        because the download has to finish first. The restart and explicit pack
+        intent commit together; the conversion worker binds the newly committed
+        artifact even when the global auto-pack setting is off.
         """
         work = await self._require_work(candidate_id)
         if work.state in OPEN_DOWNLOAD_STATES:
@@ -746,13 +757,7 @@ class ArchivedWorkService:
                 "WORK_PACK_RUNNING",
                 "该作品正在打包，请等待打包结束再重新下载",
             )
-        await asyncio.to_thread(self._reset_job_sync, work.job_id)
-        if repack and self._conversion_enqueue is not None:
-            # Recorded now so the packaging task exists and the page can show it
-            # queued behind the download. The conversion worker will not claim it
-            # before the archive lands: it reads the ARCHIVE artifact, and the
-            # download rewrites that row when it finishes.
-            await self._conversion_enqueue(candidate_id)
+        await asyncio.to_thread(self._reset_job_sync, work.job_id, repack)
         if self._notify is not None:
             self._notify(candidate_id)
         return {
@@ -762,9 +767,9 @@ class ArchivedWorkService:
             "repack": bool(repack),
         }
 
-    def _reset_job_sync(self, job_id: int) -> None:
+    def _reset_job_sync(self, job_id: int, repack: bool = False) -> None:
         try:
-            QueueControl(self._database).internal_command(job_id, "restart")
+            QueueControl(self._database).internal_command(job_id, "restart", pack_requested=repack)
         except DownloadError as exc:
             raise ArchivedWorkError(exc.code, exc.public_message) from exc
 
@@ -793,6 +798,7 @@ class ArchivedWorkService:
         re-deriving one from the layout template, which would silently undo the
         rename.
         """
+        await run_sync(self._reconcile_moves_sync, candidate_id)
         work = await self._require_work(candidate_id)
         if not work.cbz_path:
             raise ArchivedWorkError(
@@ -866,6 +872,14 @@ class ArchivedWorkService:
             operator_name=operator_name,
         )
 
+    def _reconcile_moves_sync(self, candidate_id):
+        moves = Relocations(self._database)
+        moves.recover(required_only=True)
+        try:
+            moves.check(candidate_id=candidate_id)
+        except ConversionError as exc:
+            raise ArchivedWorkError(exc.code, exc.public_message) from exc
+
     async def _relocate(
         self,
         work: DownloadedWork,
@@ -911,33 +925,63 @@ class ArchivedWorkService:
         override_manual: bool,
         operator_name: str,
     ) -> dict:
-        """Fence the move and its records against cancellation under one writer lock."""
+        """Journal before rename; commit the path, pin and refile result together."""
+        source = _resolve_inside(library_root, source)
+        target = _resolve_inside(library_root, target)
+        digest, stamp = _inspect(source)
+        if digest is None:
+            raise ArchivedWorkError("FILE_MOVE_FAILED", "原文件不存在，无法移动")
+        relocation_id = uuid4().hex
+        execution = current_execution.get()
+
+        def validate(connection):
+            if execution is not None:
+                execution.check(connection)
+                if execution.stop_requested.is_set():
+                    raise sqlite3.IntegrityError("QUEUE_STALE_EXECUTION")
+            row = connection.execute(
+                "SELECT a.path, j.state, a.artifact_id FROM artifacts a JOIN download_jobs j ON j.id = a.job_id "
+                "WHERE j.id = ? AND j.candidate_id = ? AND a.artifact_type = 'CBZ'",
+                (work.pack_job_id, work.candidate_id),
+            ).fetchone()
+            if row is None or Path(row[0]).resolve() != source or _stamp(source) != stamp:
+                raise ArchivedWorkError("WORK_PATH_CHANGED", "作品路径或文件已改变，请刷新后重试")
+            if execution is None and row[1] in {CONVERSION_STATE_RUNNING, "STOPPING"}:
+                raise ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在执行或停止，请等待收尾后修改路径")
+            if execution is not None:
+                bound = connection.execute("SELECT json_extract(details_json, '$.input_artifact_id') "
+                    "FROM queue_tasks WHERE task_id = ?", (execution.task_id,)).fetchone()
+                if bound and bound[0] is not None and bound[0] != row[2]:
+                    raise ArchivedWorkError("PACK_INPUT_CONFLICT", "入队时的 CBZ 版本已改变，请重新入队")
+            return row[2]
+
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                Relocations(self._database).check(candidate_id=work.candidate_id, connection=connection)
+            except ConversionError as exc:
+                raise ArchivedWorkError(exc.code, exc.public_message) from exc
+            artifact_id = validate(connection)
+            try:
+                resolved = unique_library_target(target, reserved=frozenset({str(source)}))
+            except LibraryTemplateError as exc:
+                raise ArchivedWorkError(exc.code, exc.public_message) from exc
+            relative = resolved.relative_to(library_root.resolve()).as_posix()
+            if resolved != source:
+                connection.execute("INSERT INTO queue_relocations(relocation_id, candidate_id, task_id, attempt_id, "
+                    "input_artifact_id, source_path, destination, sha256) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (relocation_id, work.candidate_id, execution.task_id if execution else None,
+                     execution.attempt_id if execution else None, artifact_id, str(source), str(resolved), digest))
         moved = False
-        resolved = source
         try:
             with self._database.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                execution = current_execution.get()
-                if execution is not None:
-                    execution.check(connection)
-                row = connection.execute(
-                    "SELECT a.path, j.state FROM artifacts a JOIN download_jobs j ON j.id = a.job_id "
-                    "WHERE j.id = ? AND j.candidate_id = ? AND a.artifact_type = 'CBZ'",
-                    (work.pack_job_id, work.candidate_id),
-                ).fetchone()
-                source = _resolve_inside(library_root, source)
-                target = _resolve_inside(library_root, target)
-                if row is None or Path(row[0]).resolve() != source:
-                    raise ArchivedWorkError("WORK_PATH_CHANGED", "作品路径或记录已改变，请刷新后重试")
-                if execution is None and row[1] in {CONVERSION_STATE_RUNNING, "STOPPING"}:
-                    raise ArchivedWorkError("WORK_PACK_RUNNING", "该作品正在执行或停止，请等待收尾后修改路径")
-                try:
-                    resolved = unique_library_target(target, reserved=frozenset({str(source)}))
-                except LibraryTemplateError as exc:
-                    raise ArchivedWorkError(exc.code, exc.public_message) from exc
-                relative = resolved.relative_to(library_root.resolve()).as_posix()
+                if validate(connection) != artifact_id:
+                    raise ArchivedWorkError("WORK_PATH_CHANGED", "作品版本已改变，请刷新后重试")
                 try:
                     if resolved != source:
+                        if resolved.exists():
+                            raise ArchivedWorkError("WORK_PATH_CHANGED", "目标路径已被占用，请重试")
                         resolved.parent.mkdir(parents=True, exist_ok=True)
                         try:
                             source.replace(resolved)
@@ -953,23 +997,33 @@ class ArchivedWorkService:
                         connection, work.candidate_id, relative, is_manual, operator_name,
                         override_manual=override_manual,
                     )
+                    connection.execute("UPDATE queue_relocations SET status = 'COMMITTED' WHERE relocation_id = ?",
+                                       (relocation_id,))
+                    if execution is not None:
+                        connection.execute("UPDATE download_jobs SET state = 'CONVERSION_COMPLETED', error_code = NULL, "
+                            "error_message = NULL, details_json = json_patch(details_json, ?) WHERE task_id = ?",
+                            (json.dumps({'refiled': True, 'moved': moved, 'relative_path': relative}), execution.task_id))
                 except BaseException:
                     # Restore on SQL failure before another writer can observe
                     # the rolled-back path and start removal/republication.
-                    if moved:
+                    if moved and not source.exists() and _stamp(resolved) == stamp:
                         resolved.replace(source)
                         moved = False
                     raise
         except BaseException:
-            # Ordinary write/commit failures restore the previously published
-            # bytes. Crash recovery for publication is completed in P8.
             if moved:
-                resolved.replace(source)
+                Relocations(self._database).recover(relocation_id=relocation_id)
+            elif resolved != source:
+                # This live caller knows it either never renamed or restored
+                # its rename. A newly occupied target belongs to someone else.
+                with closing(self._database._connect()) as connection, connection:
+                    connection.execute("UPDATE queue_relocations SET status = 'ROLLED_BACK' "
+                        "WHERE relocation_id = ? AND status = 'PREPARED'", (relocation_id,))
             raise
         if moved:
             _prune_empty_parents(source, library_root)
         return {"candidate_id": work.candidate_id, "path": str(resolved),
-                "relative_path": relative, "moved": moved}
+                "relative_path": relative, "moved": moved, "committed": execution is not None}
 
     async def clear_path_pin(self, candidate_id: int) -> None:
         """Drop where this book was told to land, so the current mode decides.
@@ -1020,6 +1074,7 @@ class ArchivedWorkService:
         flight -- would refuse the very job that owns the row. Every other caller
         leaves it False.
         """
+        await run_sync(self._reconcile_moves_sync, candidate_id)
         work = await self._require_work(candidate_id)
         if not work.cbz_path:
             raise ArchivedWorkError(
