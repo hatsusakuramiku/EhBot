@@ -118,7 +118,10 @@ class TestMetaEndpoint:
             "conversion",
             "provider",
             "connection",
+            "ingest_operation",
         }
+        assert statuses['ingest_operation']['PENDING']['live'] is True
+        assert statuses['ingest_operation']['FAILED']['label'] == '变更失败'
         # The interface renders labels from this table, so a state cannot show
         # up as Chinese in one place and a raw enum in another.
         assert statuses["download"]["WAITING_TORRENT"]["label"] == "等待做种"

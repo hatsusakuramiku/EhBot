@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from app.auto_approval.models import (
     AutoApprovalDryRun,
     AutoApprovalDryRunHit,
@@ -32,10 +33,19 @@ class AutomaticApprovalService:
     async def matching_rule(
         self, candidate_id: int
     ) -> AutoApprovalMatch | None:
-        candidate = await self._database.get_candidate(candidate_id)
-        if candidate is None or candidate.status != STATUS_PENDING_REVIEW:
+        return await asyncio.to_thread(self._matching_rule_sync, candidate_id)
+
+    def _matching_rule_sync(self, candidate_id):
+        with self._database.connection() as connection:
+            connection.execute('BEGIN')
+            return self.matching_rule_in_transaction(connection, candidate_id)
+
+    def matching_rule_in_transaction(self, connection, candidate_id) -> AutoApprovalMatch | None:
+        """Evaluate one coherent snapshot, also used inside the final write lock."""
+        candidate = connection.execute('SELECT status, ex_gid FROM candidates WHERE id = ?', (candidate_id,)).fetchone()
+        if candidate is None or candidate[0] != STATUS_PENDING_REVIEW:
             return None
-        if candidate.ex_gid is None:
+        if candidate[1] is None:
             # A work with no gallery id cannot be recognised again, so a rule
             # that decides it is a decision the operator can never audit
             # against anything: the same book re-posted tomorrow is a new
@@ -43,8 +53,8 @@ class AutomaticApprovalService:
             # (R59), and a no-id candidate waits for a human who has been told
             # why.
             return None
-        metadata = await self._database.effective_metadata(candidate_id)
-        for rule in await self._database.list_auto_approval_rules(enabled_only=True):
+        metadata = self._database._effective_metadata_sync(candidate_id, connection)
+        for rule in self._database._list_auto_approval_rules_sync(True, connection):
             try:
                 result = evaluate_rule(
                     rule.condition, metadata, case_sensitive=rule.case_sensitive
@@ -56,6 +66,13 @@ class AutomaticApprovalService:
                     rule=rule,
                     metadata=metadata,
                     conditions=result.conditions,
+                    gallery_id=candidate[1],
+                    # Integer candidate ids can be reused after purge. A late
+                    # decision must still belong to the captured generation.
+                    ingest_identity=tuple(connection.execute(
+                        'SELECT id, generation, revision FROM ingest_entries WHERE candidate_id = ? ORDER BY id',
+                        (candidate_id,),
+                    ).fetchall()),
                 )
         return None
 

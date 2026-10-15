@@ -315,10 +315,15 @@ async def test_manual_ingest_keeps_account_lease_through_caller_commit(service, 
     account = await configured(service)
     database = service.registry._database
     entered, release = asyncio.Event(), asyncio.Event()
-    gallery_service = ExHentaiService(database, tmp_path, tmp_path, lambda: None, account_scope=service.use_kind)
+    async def credentials():
+        return service._eh_credentials(current_account_context.get().values)
+    gallery_service = ExHentaiService(database, tmp_path, tmp_path, credentials, account_scope=service.use_kind)
     async def fetch(gid, token):
+        # This stub represents the authenticated HTML fallback. Public gdata
+        # deliberately holds no account through manual publication.
+        await credentials()
         return {}, None
-    async def persist(*args):
+    async def publish(*args, **kwargs):
         assert current_account_context.get().account_id == account["account_id"]
         entered.set()
         try:
@@ -326,7 +331,7 @@ async def test_manual_ingest_keeps_account_lease_through_caller_commit(service, 
         finally:
             await release.wait()
     monkeypatch.setattr(gallery_service, "fetch_metadata_for_gallery", fetch)
-    monkeypatch.setattr(gallery_service, "persist_gallery_metadata", persist)
+    monkeypatch.setattr(gallery_service, "publish_manual_gallery", publish)
     ingest = asyncio.create_task(ingest_manual_link("https://exhentai.org/g/1234/token/", database=database,
         exhentai_service=gallery_service, orchestrator=None, download_service=None))
     await asyncio.wait_for(entered.wait(), 3)

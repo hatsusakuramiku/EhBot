@@ -1,6 +1,7 @@
 .git
 .venv
 .pytest_cache
+.scratch
 __pycache__
 *.py[cod]
 .env

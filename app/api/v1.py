@@ -21,6 +21,7 @@ from app.api.candidates import router as candidates_router
 from app.api.downloaded import router as downloaded_router
 from app.api.events import EventBus
 from app.api.logs import router as logs_router
+from app.api.ingestion import router as ingestion_router
 from app.api.settings import router as settings_router
 from app.api.summary import router as summary_router
 from app.api.thumbnails import router as thumbnails_router
@@ -30,6 +31,7 @@ from app.api.status import (
     CONNECTION_STATUS,
     CONVERSION_STATUS,
     DOWNLOAD_STATUS,
+    INGEST_OPERATION_STATUS,
     PROVIDER_STATUS,
 )
 
@@ -43,6 +45,7 @@ router = APIRouter(prefix="/api/v1", tags=["api"])
 # and the login/refresh pair deliberately requires no session.
 router.include_router(auth_router)
 router.include_router(accounts_router)
+router.include_router(ingestion_router)
 router.include_router(summary_router)
 router.include_router(candidates_router)
 router.include_router(works_router)
@@ -75,6 +78,9 @@ async def api_meta(request: Request) -> dict:
     system = await request.app.state.system_settings_service.snapshot()
     return {
         "statuses": {
+            "ingest_operation": {
+                code: view.to_payload() for code, view in INGEST_OPERATION_STATUS.items()
+            },
             "candidate": {
                 code: view.to_payload()
                 for code, view in CANDIDATE_STATUS.items()

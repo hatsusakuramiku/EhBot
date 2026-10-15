@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -189,6 +189,8 @@ PERMANENT_DOWNLOAD_ERRORS: frozenset[str] = frozenset(
     {
         "TELEGRAM_FILE_TOO_BIG",
         "ATTACHMENT_INVALID",
+        "TELEGRAM_SOURCE_CHANGED",
+        "TELEGRAM_SOURCE_ACCOUNT_REQUIRED",
         "PROVIDER_UNSUPPORTED",
         "CANDIDATE_NOT_DOWNLOADABLE",
         "TELEGRAPH_NO_IMAGES",

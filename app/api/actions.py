@@ -38,6 +38,7 @@ from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import METADATA_FIELDS, editable_metadata_field
 from app.conversion.comicinfo import EDITABLE_ELEMENTS
 from app.review.service import ReviewError, ReviewService
+from app.review.orchestration import select_telegram_attachment
 
 
 router = APIRouter(tags=["actions"])
@@ -797,11 +798,11 @@ async def pull_work_source(
     try:
         if target == PROVIDER_TELEGRAM:
             result = await service.enqueue_telegram_download(
-                candidate_id, _archive_attachment(candidate), redownload=True
+                candidate_id, _archive_attachment(candidate, target), redownload=True
             )
         elif target == PROVIDER_TELEGRAM_USER:
             result = await service.enqueue_telegram_user_download(
-                candidate_id, _archive_attachment(candidate), redownload=True
+                candidate_id, _archive_attachment(candidate, target), redownload=True
             )
         elif target == PROVIDER_TELEGRAPH:
             # Presence check before the enqueue, exactly as the page does it: a
@@ -832,17 +833,18 @@ async def pull_work_source(
     }
 
 
-def _archive_attachment(candidate: Any) -> dict:
+def _archive_attachment(candidate: Any, provider: str = PROVIDER_TELEGRAM) -> dict:
     """The first archive attachment on a candidate, or the page's refusal.
 
     Same guard and same sentence as `/candidates/{id}/download`: a Bot API pull
     has to name the attachment it is fetching, and a candidate that carries none
     is the operator on the wrong work rather than a broken server.
     """
-    for message in candidate.messages:
-        for attachment in message.attachments:
-            if attachment.get("type") == "archive":
-                return dict(attachment)
+    archives = [attachment for message in candidate.messages for attachment in message.attachments
+                if attachment.get("type") == "archive"]
+    selected = select_telegram_attachment(archives, provider)
+    if selected is not None:
+        return dict(selected)
     raise ApiError("ARCHIVE_ATTACHMENT_MISSING", "该候选没有可下载的压缩附件")
 
 

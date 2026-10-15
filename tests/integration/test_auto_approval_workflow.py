@@ -1,6 +1,8 @@
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +15,8 @@ from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.models import REVIEW_APPROVE, REVIEW_REJECT
 from tests.ingest_admission import permit_all_message_types
+from tests.telegram_accounts import with_fixture_bot, bot_transport
+from app.connections.runtime import current_account_context
 
 
 def _settings(root: Path) -> Settings:
@@ -25,10 +29,12 @@ def _settings(root: Path) -> Settings:
     )
 
 
+@with_fixture_bot
 async def _seed_candidate(database: Database) -> int:
     await database.initialize()
     await permit_all_message_types(database)
     await database.configure_telegram_source(
+        account_id=current_account_context.get().account_id,
         source_type="CHANNEL",
         chat_id=-100987,
         display_name="Automatic Approval",
@@ -97,6 +103,19 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
     client.post("/change-password", data={"expected_revision": client.get("/api/v1/auth/profile").json()["revision"], "current_password": password, "new_password": "new-password-with-12-characters", "confirmation": "new-password-with-12-characters", "csrf_token": change.context["csrf_token"]})
 
 
+@contextmanager
+def _manual_sweep_client(settings: Settings):
+    """Drive sweeps on the app loop without a competing startup sweep.
+
+    Startup recovery itself is exercised by test_ingest_followups. These cases
+    control the sweep explicitly and assert its count, so the scheduler must
+    not consume their candidates first.
+    """
+    with patch.object(AutoApprovalSweeper, "start", new=AsyncMock()):
+        with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
+            yield client
+
+
 def test_first_matching_auto_rule_approves_enqueues_and_audits(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
@@ -118,7 +137,7 @@ def test_first_matching_auto_rule_approves_enqueues_and_audits(tmp_path: Path) -
         dsl_snapshot='{Title} = "Automatic Title"',
     ))
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
         _authenticate(client, settings)
         response = client.get("/candidates")
         assert response.status_code == 200
@@ -165,10 +184,10 @@ def test_the_sweeper_approves_without_anybody_opening_the_page(
         )
     )
 
-    with TestClient(create_app(settings)) as client:
+    with _manual_sweep_client(settings) as client:
         sweeper = client.app.state.auto_approval_sweeper
         assert sweeper is not None
-        assert asyncio.run(sweeper.sweep_once()) == 1
+        assert client.portal.call(sweeper.sweep_once) == 1
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -183,8 +202,8 @@ def test_a_sweep_with_no_matching_rule_approves_nothing(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(_seed_candidate(database))
 
-    with TestClient(create_app(settings)) as client:
-        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 0
+    with _manual_sweep_client(settings) as client:
+        assert client.portal.call(client.app.state.auto_approval_sweeper.sweep_once) == 0
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -403,12 +422,12 @@ def test_the_running_app_wires_metadata_enrichment_into_the_sweep(
     silently never ran for a release.
     """
     settings = _settings(tmp_path)
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
         sweeper = client.app.state.auto_approval_sweeper
         assert sweeper._metadata_enricher is not None  # noqa: SLF001
         # No ExHentai reference on this candidate, so the enricher is reached and
         # answers「nothing to do」 without an HTTP call.
-        assert asyncio.run(sweeper._enrich_metadata((1,))) is None  # noqa: SLF001
+        assert client.portal.call(sweeper._enrich_metadata, (1,)) is None  # noqa: SLF001
 
 
 def _matching_condition() -> dict:
@@ -442,9 +461,9 @@ def test_a_reject_rule_rejects_and_audits_the_rule(tmp_path: Path) -> None:
         )
     )
 
-    with TestClient(create_app(settings)) as client:
+    with _manual_sweep_client(settings) as client:
         sweeper = client.app.state.auto_approval_sweeper
-        assert asyncio.run(sweeper.sweep_once()) == 1
+        assert client.portal.call(sweeper.sweep_once) == 1
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -499,8 +518,8 @@ def test_priority_interleaves_approve_and_reject_rules(tmp_path: Path) -> None:
         )
     )
 
-    with TestClient(create_app(settings)) as client:
-        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 1
+    with _manual_sweep_client(settings) as client:
+        assert client.portal.call(client.app.state.auto_approval_sweeper.sweep_once) == 1
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -548,11 +567,11 @@ def test_an_approve_rule_outranks_a_reject_rule_when_it_is_first(
         )
     )
 
-    with TestClient(create_app(settings)) as client:
+    with _manual_sweep_client(settings) as client:
         # Assert the rule decision before an unconfigured download worker can
         # claim the queued fixture and mark it failed.
         client.portal.call(client.app.state.download_service.stop)
-        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 1
+        assert client.portal.call(client.app.state.auto_approval_sweeper.sweep_once) == 1
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -582,8 +601,8 @@ def test_a_disabled_reject_rule_never_fires(tmp_path: Path) -> None:
         )
     )
 
-    with TestClient(create_app(settings)) as client:
-        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 0
+    with _manual_sweep_client(settings) as client:
+        assert client.portal.call(client.app.state.auto_approval_sweeper.sweep_once) == 0
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None
@@ -675,8 +694,8 @@ def test_a_candidate_without_a_gallery_id_is_never_decided(tmp_path: Path) -> No
     assert asyncio.run(service.matching_rule(candidate_id)) is None
     assert asyncio.run(service.preview(rule)) == ()
 
-    with TestClient(create_app(settings)) as client:
-        assert asyncio.run(client.app.state.auto_approval_sweeper.sweep_once()) == 0
+    with _manual_sweep_client(settings) as client:
+        assert client.portal.call(client.app.state.auto_approval_sweeper.sweep_once) == 0
 
     detail = asyncio.run(database.get_candidate(candidate_id))
     assert detail is not None

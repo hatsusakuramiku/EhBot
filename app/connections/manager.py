@@ -516,25 +516,8 @@ class ConnectionManager:
             message = mtproto.parse_user_message(raw)
             if message is None:
                 continue
-            # The same gate the Bot API path runs: AI admission (when enabled),
-            # the parse rules, then the source's own filters. Sharing it is why
-            # the two ingest paths cannot disagree about what a candidate is.
-            decision = await self._candidate_ingestor.admit_message(
-                message, rules=rules
-            )
-            if decision.result == "IGNORE":
-                continue
-            message = replace(
-                message,
-                filter_result=decision.result,
-                filter_reason=decision.reason,
-            )
-            # `None` rather than an update id: this message did not arrive
-            # through `getUpdates`, so there is no row to mark -- the parameter
-            # exists for the bot path's bookkeeping, which this path has no use
-            # for.
-            if await self._database.save_candidate_message(None, message):
-                created += 1
+            was_created, _ = await self._candidate_ingestor.process_message(message, rules=rules)
+            created += int(was_created)
         if highest > cursor:
             await self._database.set_source_cursor(chat_id, highest)
         return created

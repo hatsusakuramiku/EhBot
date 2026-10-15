@@ -15,10 +15,10 @@ resource stays an explicit operator decision.
 from __future__ import annotations
 
 from collections.abc import Callable
+import asyncio
 from dataclasses import dataclass
 import logging
 
-from app.auto_approval.models import AutoApprovalMatch
 from app.auto_approval.service import AutomaticApprovalService
 from app.downloads.models import (
     AUTO_DOWNLOAD_PROVIDERS,
@@ -33,14 +33,20 @@ from app.review.models import (
     AUTO_OPERATOR,
     REVIEWABLE_STATUSES,
     REVIEW_APPROVE,
-    REVIEW_AUTO_APPROVE,
-    REVIEW_AUTO_REJECT,
     REVIEW_REJECT,
 )
 from app.review.service import ReviewError, ReviewService
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def select_telegram_attachment(archives: list[dict], provider: str) -> dict | None:
+    """Choose deterministically from persisted observations for all clients."""
+    if provider == PROVIDER_TELEGRAM:
+        return next((item for item in archives if item.get("file_id")
+                     and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT), None)
+    return next((item for item in archives if item.get("account_kind") == "TG_USER"), archives[0] if archives else None)
 
 #: Bot API `getFile` ceiling for a single attachment. Above this the Telegram
 #: route cannot serve the file at all, so routing skips it rather than
@@ -148,7 +154,10 @@ class ReviewOrchestrator:
                     return RoutedSource(PROVIDER_TELEGRAM, attachment)
             elif provider == PROVIDER_TELEGRAM_USER:
                 if archives and self._telegram_user_available():
-                    return RoutedSource(PROVIDER_TELEGRAM_USER, archives[0])
+                    # An observed user source is directly reachable by its own
+                    # account; a Bot source requires a separate access check.
+                    attachment = select_telegram_attachment(archives, PROVIDER_TELEGRAM_USER)
+                    return RoutedSource(PROVIDER_TELEGRAM_USER, attachment)
             elif provider == PROVIDER_EH_TORRENT:
                 if candidate.torrent_hash and self._torrent_available():
                     return RoutedSource(PROVIDER_EH_TORRENT)
@@ -166,15 +175,7 @@ class ReviewOrchestrator:
         attachments the Bot API itself reported, so an MTProto-only deployment
         can never route to a provider it does not have.
         """
-        return next(
-            (
-                item
-                for item in archives
-                if item.get("file_id")
-                and int(item.get("size_bytes") or 0) <= TELEGRAM_FILE_LIMIT
-            ),
-            None,
-        )
+        return select_telegram_attachment(archives, PROVIDER_TELEGRAM)
 
     async def _load_reviewable(self, candidate_id: int):
         """Fetch a candidate and assert it is in a reviewable state."""
@@ -224,22 +225,23 @@ class ReviewOrchestrator:
                 raise ReviewError(exc.code, exc.public_message) from exc
         return tuple(job_ids)
 
-    async def _enqueue(self, candidate_id: int, routed: RoutedSource) -> int:
+    async def _enqueue(self, candidate_id: int, routed: RoutedSource, automatic_match=None) -> int:
         service = self._download_service()
+        options = {'automatic_match': automatic_match} if automatic_match is not None else {}
         if routed.provider == PROVIDER_TELEGRAM:
             result = await service.enqueue_telegram_download(
-                candidate_id, routed.attachment or {}
+                candidate_id, routed.attachment or {}, **options
             )
         elif routed.provider == PROVIDER_TELEGRAM_USER:
             result = await service.enqueue_telegram_user_download(
-                candidate_id, routed.attachment or {}
+                candidate_id, routed.attachment or {}, **options
             )
         elif routed.provider == PROVIDER_EH_TORRENT:
-            result = await service.enqueue_torrent_download(candidate_id)
+            result = await service.enqueue_torrent_download(candidate_id, **options)
         elif routed.provider == PROVIDER_TELEGRAPH:
-            result = await service.enqueue_telegraph_download(candidate_id)
+            result = await service.enqueue_telegraph_download(candidate_id, **options)
         elif routed.provider == PROVIDER_EXHENTAI:
-            result = await service.enqueue_exhentai_download(candidate_id)
+            result = await service.enqueue_exhentai_download(candidate_id, **options)
         else:
             # Reached only if a provider is added to routing without a branch
             # here. Failing loudly beats silently enqueueing the wrong source.
@@ -287,79 +289,24 @@ class ReviewOrchestrator:
         )
         if match is None:
             return None
-        if match.rule.action == REVIEW_REJECT:
-            # The rule name goes on the candidate as its filter_reason, so the
-            # 「已驳回」 row says why it was rejected. Manual rejection passes no
-            # note and keeps its empty reason, exactly as before.
-            try:
-                await self.reject(
-                    [candidate_id],
-                    AUTO_OPERATOR,
-                    f"命中规则「{match.rule.name}」",
-                )
-            except ReviewError as exc:
-                LOGGER.info(
-                    "auto_reject_skipped candidate=%d error=%s",
-                    candidate_id,
-                    exc.public_message,
-                )
-                return None
-            await self._record_automatic_decision(
-                candidate_id,
-                REVIEW_AUTO_REJECT,
-                match,
-                download_job_ids=[],
-            )
-            return REVIEW_REJECT
         try:
-            job_ids = await self.approve_and_enqueue(
-                [candidate_id], AUTO_OPERATOR
-            )
-        except ReviewError as exc:
+            if match.rule.action == REVIEW_REJECT:
+                from app.auto_approval.commit import reject_automatically
+                await asyncio.to_thread(reject_automatically, self._database, candidate_id, match)
+                return REVIEW_REJECT
+            candidate = await self._load_reviewable(candidate_id)
+            routed = self.route_source(candidate)
+            if not routed.is_downloadable:
+                return None
+            await self._enqueue(candidate_id, routed, match)
+        except (ReviewError, DownloadError) as exc:
             LOGGER.info(
                 "auto_approval_skipped candidate=%d error=%s",
                 candidate_id,
                 exc.public_message,
             )
             return None
-        await self._record_automatic_decision(
-            candidate_id,
-            REVIEW_AUTO_APPROVE,
-            match,
-            download_job_ids=list(job_ids),
-        )
         return REVIEW_APPROVE
-
-    async def _record_automatic_decision(
-        self,
-        candidate_id: int,
-        action: str,
-        match: AutoApprovalMatch,
-        *,
-        download_job_ids: list[int],
-    ) -> None:
-        """Record one rule-driven decision against the rule as it was.
-
-        The full rule snapshot is stored so a later dispute can be settled
-        against the rule at the version that fired, not as it has since been
-        edited. Both actions write the same keys; a rejection's job list is
-        empty because there is nothing to download.
-        """
-        await self._database.record_review_action(
-            candidate_id,
-            action,
-            AUTO_OPERATOR,
-            {
-                "rule_id": match.rule.rule_id,
-                "rule_name": match.rule.name,
-                "rule_version": match.rule.version,
-                "dsl_snapshot": match.rule.dsl_snapshot,
-                "condition": match.rule.condition,
-                "conditions": match.conditions,
-                "metadata": match.metadata,
-                "download_job_ids": download_job_ids,
-            },
-        )
 
 
 __all__ = [

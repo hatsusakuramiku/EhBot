@@ -209,7 +209,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
         }
 
-    assert migration_count == 30
+    assert migration_count == 31
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns
@@ -799,44 +799,35 @@ async def test_candidate_id_for_gallery_matches_the_id_not_the_token(
 
 
 @pytest.mark.asyncio
-async def test_duplicate_gallery_groups_lists_only_shared_ids(
+async def test_gallery_identity_is_unique_after_ingestion_migration(
     tmp_path: Path,
 ) -> None:
-    """Three rows on one gallery, one alone, one with no id at all."""
+    """New writes cannot recreate the historical duplicate-gallery state."""
     path = tmp_path / "ehbot.db"
     database = Database(path)
     await database.initialize()
 
     with sqlite3.connect(path) as connection:
-        ids = [
-            int(
-                connection.execute(
-                    "INSERT INTO candidates (status, ex_gid) VALUES (?, ?)",
-                    (status, ex_gid),
-                ).lastrowid
-            )
-            for status, ex_gid in (
-                ("PENDING_REVIEW", 700),
+        first = connection.execute(
+            "INSERT INTO candidates (status, ex_gid) VALUES (?, ?)",
+            ("PENDING_REVIEW", 700),
+        ).lastrowid
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO candidates (status, ex_gid) VALUES (?, ?)",
                 ("DOWNLOADED", 700),
-                ("REJECTED", 700),
-                ("DOWNLOADED", 800),
-                ("PENDING_REVIEW", None),
             )
-        ]
+        connection.execute(
+            "INSERT INTO candidates (status, ex_gid) VALUES (?, ?)",
+            ("DOWNLOADED", 800),
+        )
+        connection.execute(
+            "INSERT INTO candidates (status) VALUES (?)", ("PENDING_REVIEW",)
+        )
 
     rows = await database.duplicate_gallery_groups()
 
-    # Ordered by gallery then id, so the oldest member of each group comes
-    # first, and the lone id and the gallery-less row are absent.
-    assert [row["candidate_id"] for row in rows] == ids[:3]
-    assert [row["ex_gid"] for row in rows] == [700, 700, 700]
-    assert [row["status"] for row in rows] == [
-        "PENDING_REVIEW",
-        "DOWNLOADED",
-        "REJECTED",
-    ]
-    assert all(row["packaged"] is False for row in rows)
-    assert all(row["page_count"] is None for row in rows)
+    assert rows == []
 
 
 @pytest.mark.asyncio

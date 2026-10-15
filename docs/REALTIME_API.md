@@ -193,3 +193,11 @@ DOM 行为：在临时目录安装 `jsdom` 后运行 `node tests/web/realtime.cj
 账号表单另外运行 `node tests/web/accounts.cjs <jsdom 绝对路径>`，验证捕获阶段不重复提交、丢失回复重试、保留节点只绑定一次、CSRF 更新、掩码/草稿/登录挑战及停止完成后的固定版本结果。临时依赖和测试产物验证后清理。
 该测试使用真实 HTMX/Alpine 和 WebUI 脚本，验证 Tag 左/右键、固定 URL、输入/勾选/焦点保留、按钮禁用、多值表单、断线不重发、HTTP 降级、序列/旧响应校正、日志快照及代理前缀。
 DOM 测试与真实浏览器/移动设备联调分别记录，不能互相替代。
+
+
+P5 身份/来源操作查询与重试（031 已冻结）：
+
+- `GET /api/v1/ingest-operations/{operation_id}`：公开 ID 为 `reference:<uuid>` 或 `observation:<source_message_id>`。返回 `revision`、`kind`、`candidate_id`、`original_candidate_id`、`status`（PENDING/COMPLETED/FAILED）、`result_candidate_id`、`error_code`、`retryable`、`updated_at` 及统一中文 `state/label/error_message`。不返回消息原始 JSON、附件句柄、画廊 Token 或账号凭据。原候选合并/移除后仍可按操作 ID 查询；合并通知同时覆盖原作品与保留作品，原 Web 详情地址转向仍存在的保留作品。
+- `GET /api/v1/works/{candidate_id}` 的 `ingest_operations` 使用同一投影，合并后的保留作品包含完成结果；PENDING 纳入 `live`。来源再次编辑会增加操作版本，不能把旧 revision 当作新输入重试。
+- `POST /api/v1/ingest-operations/{operation_id}/retry`：JSON 为 `{"expected_revision":2,"idempotency_key":"client-generated-key"}`，成功受理返回 202，实际执行沿已有停止处理循环推进。只允许 FAILED 且身份/来源仍有效的操作；缺前置条件 428，陈旧版本/重复键异内容/已完成/来源变化 409，不存在 404。同 key 同内容在校验当前状态前返回原回执，Cookie/Bearer 共用管理员作用域；网络断开后应重发原 key，再 GET 最终状态。
+- Cookie 写操作要求 `X-CSRF-Token`，Bearer 免 CSRF；成功查询/受理响应 `Cache-Control: no-store`。WS 命令 `api.api_ingest_operation` / `api.api_ingest_retry` 转发相同 JSON 路由；异步完成和失败沿已有事件通道通知客户端重读。Web 表单是同一命令的薄适配，不另做冲突裁决。

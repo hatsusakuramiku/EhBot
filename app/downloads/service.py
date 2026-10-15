@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+from contextlib import nullcontext
 from pathlib import Path
 import time
 from uuid import uuid4
@@ -119,6 +120,7 @@ class DownloadService:
         attachment: dict,
         *,
         redownload: bool = False,
+        automatic_match=None,
     ) -> DownloadEnqueueResult:
         file_id = str(attachment.get("file_id") or "")
         if not file_id:
@@ -134,13 +136,17 @@ class DownloadService:
             "file_id": file_id,
             "file_name": attachment.get("file_name"),
             "file_unique_id": attachment.get("file_unique_id"),
+            **self._source_binding(attachment),
         }
+        if self._account_scope is not None:
+            await run_sync(self._validate_telegram_source_sync, candidate_id, details, "TG_BOT")
         return await self._enqueue(
             candidate_id,
             PROVIDER_TELEGRAM,
             idempotency_key,
             json.dumps(details, separators=(",", ":")),
             redownload=redownload,
+            automatic_match=automatic_match,
         )
 
     async def enqueue_telegram_user_download(
@@ -149,6 +155,7 @@ class DownloadService:
         attachment: dict,
         *,
         redownload: bool = False,
+        automatic_match=None,
     ) -> DownloadEnqueueResult:
         """Queue the MTProto route for one attachment.
 
@@ -180,17 +187,56 @@ class DownloadService:
             "file_name": attachment.get("file_name"),
             "file_unique_id": attachment.get("file_unique_id"),
             "size_bytes": int(attachment.get("size_bytes") or 0),
+            **self._source_binding(attachment),
         }
+        if self._account_scope is not None:
+            await run_sync(self._validate_telegram_source_sync, candidate_id, details, None)
         return await self._enqueue(
             candidate_id,
             PROVIDER_TELEGRAM_USER,
             f"telegram-user:{candidate_id}:{file_unique_id or message_id}",
             json.dumps(details, separators=(",", ":")),
             redownload=redownload,
+            automatic_match=automatic_match,
         )
 
+    @staticmethod
+    def _source_binding(attachment: dict) -> dict:
+        """Freeze source identity separately from a verified download account."""
+        return {"observation_id": attachment.get("observation_id"),
+                "observation_revision": attachment.get("observation_revision"),
+                "origin_account_id": attachment.get("account_id"),
+                "origin_account_kind": attachment.get("account_kind"), "peer_type": attachment.get("peer_type"),
+                "account_id": attachment.get("account_id")}
+
+    def _validate_telegram_source_sync(self, candidate_id: int, details: dict, kind: str | None, connection=None) -> None:
+        """Reject stale or foreign observations before contacting a provider."""
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            row = connection.execute(
+                "SELECT sm.observation_revision, ta.external_account_id, ea.kind, sm.attachment_json, "
+                "sm.chat_id, sm.message_id FROM source_messages sm "
+                "JOIN candidate_messages cm ON cm.source_message_id = sm.id "
+                "JOIN telegram_accounts ta ON ta.id = sm.account_id "
+                "LEFT JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
+                "WHERE sm.id = ? AND cm.candidate_id = ? AND sm.message_state = 'ACTIVE'",
+                (details.get("observation_id"), candidate_id),
+            ).fetchone()
+            if row is None or row[0] != details.get("observation_revision"):
+                raise DownloadError("TELEGRAM_SOURCE_CHANGED", "所选来源已编辑、移除或不属于该作品")
+            if not row[1] or row[1] != details.get("origin_account_id"):
+                raise DownloadError("TELEGRAM_SOURCE_ACCOUNT_REQUIRED", "来源账号归属未知或不匹配，请选择已确认的消息来源")
+            if kind is not None and (row[2] != kind or
+                    (details.get("download_observation_id") is None and details.get("account_id") != row[1])):
+                raise DownloadError("ACCOUNT_KIND_INVALID", "所选来源账号不支持该下载方式")
+            attachments = json.loads(row[3])
+            if not any(item.get("type") == "archive" and item.get("file_unique_id") == details.get("file_unique_id")
+                       and (kind != "TG_BOT" or item.get("file_id") == details.get("file_id")) for item in attachments):
+                raise DownloadError("ATTACHMENT_INVALID", "所选附件与保存的来源不匹配")
+            if kind != "TG_BOT" and (row[4], row[5]) != (details.get("chat_id"), details.get("message_id")):
+                raise DownloadError("ATTACHMENT_INVALID", "所选附件的源消息位置不匹配")
+
     async def enqueue_exhentai_download(
-        self, candidate_id: int, *, redownload: bool = False
+        self, candidate_id: int, *, redownload: bool = False, automatic_match=None
     ) -> DownloadEnqueueResult:
         return await self._enqueue(
             candidate_id,
@@ -198,10 +244,11 @@ class DownloadService:
             f"exhentai:{candidate_id}",
             "{}",
             redownload=redownload,
+            automatic_match=automatic_match,
         )
 
     async def enqueue_telegraph_download(
-        self, candidate_id: int, *, redownload: bool = False
+        self, candidate_id: int, *, redownload: bool = False, automatic_match=None
     ) -> DownloadEnqueueResult:
         """Queue the preview-page fallback for a candidate.
 
@@ -214,10 +261,11 @@ class DownloadService:
             f"telegraph:{candidate_id}",
             "{}",
             redownload=redownload,
+            automatic_match=automatic_match,
         )
 
     async def enqueue_torrent_download(
-        self, candidate_id: int, *, redownload: bool = False
+        self, candidate_id: int, *, redownload: bool = False, automatic_match=None
     ) -> DownloadEnqueueResult:
         """Queue the EH torrent route, the preferred original-quality source.
 
@@ -230,6 +278,7 @@ class DownloadService:
             f"torrent:{candidate_id}",
             "{}",
             redownload=redownload,
+            automatic_match=automatic_match,
         )
 
     async def _enqueue(
@@ -240,6 +289,7 @@ class DownloadService:
         details_json: str,
         *,
         redownload: bool = False,
+        automatic_match=None,
     ) -> DownloadEnqueueResult:
         return await run_sync(
             self._enqueue_sync,
@@ -248,6 +298,7 @@ class DownloadService:
             idempotency_key,
             details_json,
             redownload,
+            automatic_match,
         )
 
     def _enqueue_sync(
@@ -257,11 +308,18 @@ class DownloadService:
         idempotency_key: str,
         details_json: str,
         redownload: bool = False,
+        automatic_match=None,
     ) -> DownloadEnqueueResult:
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self._account_scope is not None and provider in {PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER}:
+                self._validate_telegram_source_sync(candidate_id, json.loads(details_json),
+                    "TG_BOT" if provider == PROVIDER_TELEGRAM else None, connection)
             if connection.execute("SELECT 1 FROM candidates WHERE id = ?", (candidate_id,)).fetchone() is None:
                 raise DownloadError("CANDIDATE_NOT_FOUND", "Candidate does not exist")
+            if automatic_match is not None:
+                from app.auto_approval.commit import begin_decision
+                begin_decision(self._database, connection, candidate_id, automatic_match)
             if connection.execute("SELECT 1 FROM candidate_approvals WHERE candidate_id = ?", (candidate_id,)).fetchone() is None:
                 raise DownloadError("CANDIDATE_NOT_DOWNLOADABLE", "该候选没有有效审批事实，不能进入下载队列")
             slot = connection.execute(
@@ -300,6 +358,9 @@ class DownloadService:
                         (DOWNLOAD_STATE_PENDING, details_json, job_id),
                     )
             snapshot = task_snapshot(connection, job_id)
+            if automatic_match is not None:
+                from app.auto_approval.commit import record_decision
+                record_decision(connection, candidate_id, automatic_match, [job_id])
             return DownloadEnqueueResult(job_id=job_id, created=existing is None, state=snapshot["state"],
                                          task_id=snapshot["task_id"], revision=snapshot["revision"])
 
@@ -618,9 +679,9 @@ class DownloadService:
         task = self._active_attempts.get(task_id)
         if task is None:
             return
-        if not task.done():
+        if not task.done() and not task.cancelling():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.shield(asyncio.gather(task, return_exceptions=True))
 
     async def process_operations(self) -> int:
         """Execute durable stop intentions; unconfirmed resources keep their slot."""
@@ -649,7 +710,17 @@ class DownloadService:
                 self._announce(operation["legacy_job_id"], operation["candidate_id"])
             if self._cleanup_removals is not None:
                 await self._cleanup_removals()
+            from app.candidates.references import process_reference_changes
+            for result in await run_sync(process_reference_changes, self._database):
+                self._announce(None, result['result_candidate_id'] or result['candidate_id'])
+                if result['result_candidate_id'] and result['result_candidate_id'] != result['candidate_id']:
+                    self._announce(None, result['candidate_id'])
+            from app.candidates.changes import process_observation_changes
+            for candidate_id in await run_sync(process_observation_changes, self._database):
+                self._announce(None, candidate_id)
         return completed
+
+
 
     async def _run_operations(self) -> None:
         while True:
@@ -686,8 +757,20 @@ class DownloadService:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+                # Shutdown can race an operator/account stop. Do not inject a
+                # second cancellation into producer cleanup or drop its handle
+                # while a later shutdown cancellation interrupts this waiter.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not task.cancelled():
+                    task.exception()
                 raise
             # A stop operation cancelled the child, not the worker itself.
             return True
@@ -870,11 +953,20 @@ class DownloadService:
         if kind is None:
             return await self._handle_job_unscoped(job)
         try:
+            details = self._safe_details(job["details_json"])
+            scope_params = {"required": job["provider"] != PROVIDER_EH_TORRENT}
+            if job["provider"] in {PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER}:
+                await run_sync(self._validate_telegram_source_sync, job["candidate_id"], details,
+                               "TG_BOT" if job["provider"] == PROVIDER_TELEGRAM else None)
+                if not details.get("account_id"):
+                    raise DownloadError("TELEGRAM_SOURCE_ACCOUNT_REQUIRED", "任务没有确定的下载账号，请重新选择来源")
+                if job["provider"] != PROVIDER_TELEGRAM_USER or details.get("origin_account_kind") == "TG_USER":
+                    scope_params["account_id"] = details["account_id"]
             # Magnets may not need an EH account; .torrent fetch still rejects
             # missing credentials through its existing named provider error.
-            async with self._account_scope(kind, required=job["provider"] != PROVIDER_EH_TORRENT):
+            async with self._account_scope(kind, **scope_params):
                 return await self._handle_job_unscoped(job)
-        except ProviderConnectionError as exc:
+        except (ProviderConnectionError, DownloadError) as exc:
             await run_sync(self._mark_job_failed_sync, job["job_id"], exc.code, exc.public_message)
             return None
 
@@ -1165,6 +1257,8 @@ class DownloadService:
 
     def _mark_job_completed_sync(self, job_id: int) -> None:
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._check_job_source_sync(connection, job_id)
             connection.execute(
                 "UPDATE download_jobs SET state = ?, error_code = NULL, "
                 "error_message = NULL, lease_owner = NULL, "
@@ -1195,6 +1289,8 @@ class DownloadService:
                     break
                 sha256.update(chunk)
         with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._check_job_source_sync(connection, job_id)
             connection.execute(
                 "INSERT INTO artifacts "
                 "(job_id, artifact_type, path, sha256, size_bytes) "
@@ -1209,6 +1305,15 @@ class DownloadService:
                     int(size),
                 ),
             )
+
+    def _check_job_source_sync(self, connection, job_id: int) -> None:
+        """A source edit cannot publish bytes fetched under an older revision."""
+        if self._account_scope is None:
+            return
+        row = connection.execute("SELECT candidate_id, provider, details_json FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is not None and row[1] in {PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER}:
+            self._validate_telegram_source_sync(row[0], self._safe_details(row[2]),
+                "TG_BOT" if row[1] == PROVIDER_TELEGRAM else None, connection)
 
     def _mark_job_failed_sync(
         self, job_id: int, code: str, message: str

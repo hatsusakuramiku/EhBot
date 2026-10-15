@@ -79,16 +79,9 @@ def _stub_gallery_fetch(
     metadata: dict | None = None,
     error: Exception | None = None,
 ) -> list[tuple[int, str]]:
-    """Stub the two halves of a scrape the route drives.
-
-    `fetch_metadata_for_gallery` validates, `persist_gallery_metadata` writes;
-    the route calls them in that order with nothing in between but the insert,
-    which is exactly what these fakes let a test observe: the fetched gallery is
-    the one persisted, and no second request is made.
-    """
+    """Stub the supplier read; use the real atomic candidate/metadata publisher."""
     service = client.app.state.exhentai_service
     fetched: list[tuple[int, str]] = []
-    persisted: list[int] = []
 
     async def fake_fetch(gid: int, token: str):
         if error is not None:
@@ -96,17 +89,7 @@ def _stub_gallery_fetch(
         fetched.append((gid, token))
         return (metadata or {}, None)
 
-    async def fake_persist(candidate_id: int, meta, gallery) -> None:
-        persisted.append(candidate_id)
-        if metadata:
-            await Database(
-                client.app.state.settings.data_path / "ehbot.db"
-            ).set_candidate_metadata_value(
-                candidate_id, "Title", metadata["Title"], "EXHENTAI", 0.6
-            )
-
     monkeypatch.setattr(service, "fetch_metadata_for_gallery", fake_fetch)
-    monkeypatch.setattr(service, "persist_gallery_metadata", fake_persist)
     return fetched
 
 

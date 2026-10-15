@@ -20,6 +20,8 @@ from app.downloads.models import (
 from app.downloads.service import DownloadError, DownloadService
 from app.main import create_app
 from tests.ingest_admission import permit_all_message_types
+from tests.telegram_accounts import with_fixture_bot, bot_transport
+from app.connections.runtime import current_account_context
 
 
 def make_settings(root: Path) -> Settings:
@@ -33,10 +35,12 @@ def make_settings(root: Path) -> Settings:
     )
 
 
+@with_fixture_bot
 async def seed_archive(database: Database, *, file_name: str) -> int:
     await database.initialize()
     await permit_all_message_types(database)
     await database.configure_telegram_source(
+        account_id=current_account_context.get().account_id,
         source_type="CHANNEL",
         chat_id=-100123,
         display_name="Archive Channel",
@@ -373,22 +377,8 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
             },
         )
-        # Connect Telegram bot
-        page = client.get("/settings/connections")
-        headers = {"X-CSRF-Token": page.context["csrf_token"]}
-        created = client.post("/api/v1/accounts/commands", headers=headers, json={
-            "action": "create", "kind": "TG_BOT", "label": "Download Bot",
-            "fields": {"bot_token": "test"}, "idempotency_key": "download-create-bot",
-        })
-        assert created.status_code == 200
-        account = created.json()["result"]
-        for action in ("test", "enable"):
-            response = client.post("/api/v1/accounts/commands", headers=headers, json={
-                "action": action, "account_id": account["account_id"],
-                "expected_revision": account["revision"], "idempotency_key": f"download-{action}-bot",
-            })
-            assert response.status_code == 200
-            account = response.json()["result"]
+        # Startup restored the same synthetic Bot that received the fixture.
+        assert client.app.state.connection_manager.telegram_available()
         # Trigger download
         page = client.get(f"/works/{candidate_id}")
         response = client.post(
@@ -426,7 +416,7 @@ def test_downloads_dashboard_renders(tmp_path: Path) -> None:
 
     asyncio.run(seed())
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
         bootstrap = (
             settings.data_path / "bootstrap_admin_password"
         ).read_text(encoding="utf-8")

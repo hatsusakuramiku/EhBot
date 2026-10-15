@@ -38,6 +38,8 @@ class AutoApprovalMatch:
     rule: AutoApprovalRule
     metadata: dict[str, str]
     conditions: tuple[dict, ...]
+    gallery_id: int | None = None
+    ingest_identity: tuple[tuple[int, int, int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

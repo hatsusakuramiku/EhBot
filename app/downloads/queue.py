@@ -91,6 +91,13 @@ class QueueControl:
             if current["task_id"] != operation["task_id"]:
                 raise DownloadError("TASK_SUPERSEDED", "停止操作对应的旧任务已被替换")
             action = operation["action"]
+            if action in {'retry', 'restart', 'switch-source'} and connection.execute(
+                "SELECT 1 FROM ingest_reference_changes WHERE candidate_id = ? AND status = 'PENDING' "
+                "UNION ALL SELECT 1 FROM ingest_observation_changes c, json_each(c.task_ids_json) tasks "
+                "WHERE c.status = 'PENDING' AND tasks.value = ? LIMIT 1",
+                (operation['candidate_id'], operation['task_id']),
+            ).fetchone() is not None:
+                action = 'cancel'
             if action == "stop-seeding":
                 connection.execute(
                     "UPDATE download_jobs SET details_json = json_set(details_json, '$.seeding', json('false')), "

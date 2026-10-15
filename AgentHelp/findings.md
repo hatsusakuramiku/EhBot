@@ -293,3 +293,12 @@
 - 按 attempt/account/credential_revision 绑定，停止查询不能仅 inner join download_jobs：已移除业务行的 queue_operations、已有 switch/retry 意图与已完成受管做种仍需等待。复用 QueueControl._apply 和 DownloadService.process_operations，不另造物理停止逻辑。
 - AccountRuntime.use 覆盖完整请求生命周期，按账号/版本跟踪 lease，停止 await lease 退出；HTTP 替身和真实阻塞线程证明等待实际清理。重复处理不能再次 cancel 正在 finally 的任务。非队列元数据/摄取也通过 AccountExecution 与 Database.connection 短事务检查拒绝迟到写入；该 ContextVar 随 to_thread 传播。
 - AccountService 已成为生产 wiring；旧 ConnectionManager 仅由账号 listener 复用摄取逻辑，旧配置/断开入口无账号身份或版本时拒绝。已接 startup/provider/API/UI，但 P4 仍需阶段最终回归和提交；不包含真实供应商或正式部署验收。
+
+
+## 2026-10-15 P5 独立交付边界
+
+P4 MTProto 原来先 admission 后 save，提取 P5 时必须改走 process_message，确保付费判定前先取得持久身份。旧共享白名单在 P6 迁移前只对同类型唯一启用账号保留兼容，新观察保留接收账号，历史不重标。rule_source_id 固定订阅引用并在发布前重查；低层旧输入为空时仍按其账号/Chat 查回。来源变更还须压过已受理的 retry/switch，否则停止后会错误启动旧后继。
+
+**P5 下载合同补验与同阶段修正。** 初次本地提交后补跑真实 create_app→worker→Telegram 产物链路，download-first 为 9/1/0/0（5.394 秒），复现 AccountService.use_kind 不接受来源 account_id。为单账号 P5 补显式账号类型/可用性校验与整个 scope 的凭据租约；Bot 来源转用户下载时不把 Bot ID 当用户账号。不引入 P6 备用账号池。download-fixed 为 66/1/0/0（44.915 秒），产品已修，剩余断言误把异常 code 当显示消息；改为检查 exc.code 后，最终五文件 66/0/0/0（44.229 秒）：ingest_legacy_runtime、downloads、account_service、account_runtime、review_actions。与此前 final/cross/backlog-fixed 按节点取最新，共 447 个不同用例通过，0 failure/error/skip；2465 collected，仅收集。同一 P5 本地提交使用 amend 修正，未推送；不能把首次 299d54a 当最终交付 SHA。提交快照共 74 文件，精确暂存并逐 blob SHA256 核验；最终 SHA 记录在工作区接手入口。
+
+**清理。** 所有测试会话已终态，结果在本日志留痕；提交哈希核验后删除本轮确切 TEMP 根目录 ehbot-p5-split-20261015-a 及前述四个 P7 archive 报告目录，不重建 .scratch。

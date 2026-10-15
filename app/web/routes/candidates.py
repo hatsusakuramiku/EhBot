@@ -34,6 +34,7 @@ from app.api.contracts import (
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.api.serializers import candidate_summary
 from app.api.status import candidate_tab_view
+from app.review.orchestration import select_telegram_attachment
 from app.conversion.service import ConversionError
 from app.db.database import CANDIDATE_SORT_ORDERS, SORT_DIRECTIONS, sort_direction
 from app.downloads.service import DownloadError
@@ -704,7 +705,7 @@ async def download_candidate(
     try:
         await deps.download_service(request).enqueue_telegram_download(
             candidate_id,
-            archive_attachments[0],
+            select_telegram_attachment(archive_attachments, "TELEGRAM") or {},
             redownload=True,
         )
     except DownloadError as exc:
@@ -753,7 +754,7 @@ async def download_candidate_with_user(
     try:
         await deps.download_service(request).enqueue_telegram_user_download(
             candidate_id,
-            archive_attachments[0],
+            select_telegram_attachment(archive_attachments, "TELEGRAM_USER") or {},
             redownload=True,
         )
     except DownloadError as exc:

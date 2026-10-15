@@ -63,6 +63,18 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         return None
 
     ex_gid = gallery_ref[0] if gallery_ref is not None else None
+    peer = getattr(message, "peer_id", None)
+    peer_type = (
+        "channel" if getattr(peer, "channel_id", None) is not None else
+        "group" if getattr(peer, "chat_id", None) is not None else
+        "private" if getattr(peer, "user_id", None) is not None else None
+    )
+    forward = getattr(message, "fwd_from", None)
+    origin_peer = getattr(forward, "from_id", None)
+    origin_channel_id = _int(getattr(origin_peer, "channel_id", None))
+    origin_message_id = _int(getattr(forward, "channel_post", None))
+    if origin_channel_id is None or origin_message_id is None:
+        origin_channel_id = origin_message_id = None
 
     chat_title = _chat_title(message, chat_id)
     file_unique_id = (
@@ -102,6 +114,10 @@ def parse_user_message(message: Any) -> ParsedSourceMessage | None:
         ex_gallery_token=gallery_ref[1] if gallery_ref is not None else None,
         preview_urls=page_urls,
         gallery_from_preview=gallery_ref_from_preview,
+        peer_type=peer_type,
+        origin_channel_id=origin_channel_id,
+        origin_message_id=origin_message_id,
+        is_forwarded=forward is not None,
     )
 
 

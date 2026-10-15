@@ -265,13 +265,8 @@ async def _enrich_candidate_metadata(app, candidate_ids) -> int:
 async def _on_candidates_ingested(app) -> None:
     """React to a freshly ingested batch: read the galleries, then judge them.
 
-    Two workers, in this order. The scrape (R62) is what gives a candidate its
-    name -- ingestion no longer parses one -- and the sweep right after it is
-    what lets a rule that reads `{Title}` decide on the candidate that just
-    arrived rather than at the next timer tick. Both are woken through
-    `getattr` guards, because this callback is bound before either worker is
-    built (they need the download worker to exist first) and a batch that
-    arrives in that window is left to the interval loops.
+    Both workers recover from persisted state even if this notification is lost.
+    The callback only reduces latency; it does not own the follow-up intention.
     """
     app.state.event_bus.publish(EVENT_CANDIDATE)
     scrape_worker = getattr(app.state, "metadata_scrape_worker", None)
@@ -280,7 +275,8 @@ async def _on_candidates_ingested(app) -> None:
     sweeper = getattr(app.state, "auto_approval_sweeper", None)
     if sweeper is None:
         return
-    await sweeper.sweep_once()
+    sweeper.wake()
+    await sweeper.process_ingest_followups()
 
 
 def build_lifespan(

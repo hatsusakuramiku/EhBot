@@ -6,7 +6,7 @@ import sqlite3
 import secrets
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,7 +23,6 @@ from app.ai.models import (
 )
 from app.archive.models import ArchivePasswordEntry, ArchivePathRule, ToolProfile
 from app.auto_approval.models import AutoApprovalRule, RULE_ACTION_APPROVE
-from app.candidates.links import GALLERY_URL_PATTERN, find_preview_gallery_ref
 from app.candidates.models import (
     CandidateDetail,
     CandidateListItem,
@@ -52,7 +51,7 @@ from app.downloads.models import (
     DownloadedWork,
     ReArchiveCandidate,
 )
-from app.downloads.execution import current_execution
+from app.downloads.execution import current_execution, run_sync
 
 from app.review.models import (
     MetadataEntry,
@@ -706,6 +705,8 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.initialized = False
+        from app.candidates.execution import IngestProcessors
+        self.ingest_processors = IngestProcessors()
 
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
@@ -764,6 +765,28 @@ class Database:
                 "WHERE session_path = 'bot-api://configured'"
             ).fetchone()[0]
         )
+
+    @staticmethod
+    def _ensure_telegram_account(connection: sqlite3.Connection, external_account_id: str | None) -> int:
+        """Return the legacy Bot row or the proven external Telegram row."""
+        if external_account_id is None:
+            return Database._ensure_bot_account(connection)
+        row = connection.execute(
+            "SELECT kind, label FROM external_accounts WHERE account_id = ? AND deleted_at IS NULL",
+            (external_account_id,),
+        ).fetchone()
+        if row is None or row[0] not in {"TG_BOT", "TG_USER"}:
+            raise ValueError("unknown Telegram account")
+        connection.execute(
+            "INSERT OR IGNORE INTO telegram_accounts(account_type, display_name, session_path, external_account_id) "
+            "VALUES (?, ?, ?, ?)",
+            ("BOT" if row[0] == "TG_BOT" else "USER", row[1],
+             f"account://{external_account_id}", external_account_id),
+        )
+        return int(connection.execute(
+            "SELECT id FROM telegram_accounts WHERE external_account_id = ?",
+            (external_account_id,),
+        ).fetchone()[0])
 
     @staticmethod
     def _parse_tag_list(value) -> tuple[str, ...]:
@@ -849,6 +872,10 @@ class Database:
             allowed_languages=allowed_languages,
             allowed_categories=allowed_categories,
             min_rating=min_rating,
+            account_id=row[6] if len(row) > 6 else None,
+            account_label=row[7] if len(row) > 7 else None,
+            account_kind=row[8] if len(row) > 8 else None,
+            revision=int(row[9]) if len(row) > 9 else 1,
         )
 
     @staticmethod
@@ -919,6 +946,7 @@ class Database:
         allowed_languages: tuple[str, ...] = (),
         allowed_categories: tuple[str, ...] = (),
         min_rating: float | None = None,
+        account_id: str | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._configure_telegram_source_sync,
@@ -933,6 +961,7 @@ class Database:
             allowed_languages,
             allowed_categories,
             min_rating,
+            account_id,
         )
 
     def _configure_telegram_source_sync(
@@ -948,6 +977,7 @@ class Database:
         allowed_languages: tuple[str, ...] = (),
         allowed_categories: tuple[str, ...] = (),
         min_rating: float | None = None,
+        account_id: str | None = None,
     ) -> None:
         rules_payload = {
             "allowed_archive_formats": list(allowed_archive_formats),
@@ -960,7 +990,7 @@ class Database:
         }
         rules_json = json.dumps(rules_payload, separators=(",", ":"))
         with self.connection() as connection:
-            account_id = self._ensure_bot_account(connection)
+            telegram_account_id = self._ensure_telegram_account(connection, account_id)
             connection.execute(
                 "INSERT INTO telegram_sources "
                 "(account_id, source_type, chat_id, display_name, enabled, "
@@ -970,7 +1000,7 @@ class Database:
                 "display_name = excluded.display_name, enabled = excluded.enabled, "
                 "rules_json = excluded.rules_json, dismissed = 0",
                 (
-                    account_id,
+                    telegram_account_id,
                     source_type,
                     chat_id,
                     display_name,
@@ -980,7 +1010,7 @@ class Database:
             )
 
     async def add_telegram_sources_bulk(
-        self, entries: list[dict]
+        self, entries: list[dict], external_account_id: str | None = None
     ) -> int:
         """Create many sources at once, disabled, without disturbing existing ones.
 
@@ -992,13 +1022,13 @@ class Database:
         the picker is the same intent as saving it alone, so its tombstone is
         lifted while its rules stay untouched.
         """
-        return await asyncio.to_thread(self._add_telegram_sources_bulk_sync, entries)
+        return await asyncio.to_thread(self._add_telegram_sources_bulk_sync, entries, external_account_id)
 
-    def _add_telegram_sources_bulk_sync(self, entries: list[dict]) -> int:
+    def _add_telegram_sources_bulk_sync(self, entries: list[dict], external_account_id: str | None = None) -> int:
         if not entries:
             return 0
         with self.connection() as connection:
-            account_id = self._ensure_bot_account(connection)
+            account_id = self._ensure_telegram_account(connection, external_account_id)
             before = connection.total_changes
             connection.executemany(
                 "INSERT INTO telegram_sources "
@@ -1106,15 +1136,16 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
-                "ts.enabled, ts.rules_json FROM telegram_sources ts "
+                "ts.enabled, ts.rules_json, ta.external_account_id, ea.label, ea.kind "
+                "FROM telegram_sources ts "
                 "JOIN telegram_accounts ta ON ta.id = ts.account_id "
-                "WHERE ta.session_path = 'bot-api://configured' "
-                "AND ts.dismissed = 0 "
+                "LEFT JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
+                "WHERE ts.dismissed = 0 "
                 "ORDER BY ts.enabled DESC, ts.id DESC"
             ).fetchall()
         return [self._source_from_row(row) for row in rows]
 
-    async def telegram_ingest_targets(self) -> list[dict]:
+    async def telegram_ingest_targets(self, external_account_id: str | None = None) -> list[dict]:
         """The enabled sources the MTProto ingester should read, with cursors.
 
         One row per source, each carrying the id to resume after: the greater of
@@ -1128,49 +1159,51 @@ class Database:
         caller resolves by seeding the cursor at the newest message rather than
         walking the archive.
         """
-        return await asyncio.to_thread(self._telegram_ingest_targets_sync)
+        return await asyncio.to_thread(self._telegram_ingest_targets_sync, external_account_id)
 
-    def _telegram_ingest_targets_sync(self) -> list[dict]:
+    def _telegram_ingest_targets_sync(self, external_account_id: str | None = None) -> list[dict]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT ts.chat_id, ts.display_name, "
+                "SELECT ts.chat_id, ts.display_name, ta.external_account_id, "
                 "MAX(COALESCE(ts.last_message_id, 0), "
                 "    COALESCE((SELECT MAX(sm.message_id) FROM source_messages sm "
                 "              WHERE sm.account_id = ts.account_id "
                 "              AND sm.chat_id = ts.chat_id), 0)) "
                 "FROM telegram_sources ts "
                 "JOIN telegram_accounts ta ON ta.id = ts.account_id "
-                "WHERE ta.session_path = 'bot-api://configured' "
+                "WHERE ((? IS NULL AND ta.session_path = 'bot-api://configured') OR ta.external_account_id = ?) "
                 "AND ts.enabled = 1 "
-                "ORDER BY ts.id"
+                "ORDER BY ts.id",
+                (external_account_id, external_account_id),
             ).fetchall()
         return [
             {
                 "chat_id": int(row[0]),
                 "display_name": str(row[1]),
-                "cursor": int(row[2] or 0),
+                "account_id": row[2],
+                "cursor": int(row[3] or 0),
             }
             for row in rows
         ]
 
-    async def set_source_cursor(self, chat_id: int, message_id: int) -> None:
+    async def set_source_cursor(self, chat_id: int, message_id: int, external_account_id: str | None = None) -> None:
         """Remember how far the MTProto ingester has read one chat.
 
-        Written after a batch, never per message: a poll that failed halfway
-        must re-read the messages it never got to, and the unique key on
-        `source_messages` is what keeps the re-read from duplicating anything.
+        Used to seed a new subscription at its latest message. Received batches
+        advance the cursor after processing in this single-account phase.
         """
-        await asyncio.to_thread(
-            self._set_source_cursor_sync, chat_id, message_id
+        await run_sync(
+            self._set_source_cursor_sync, chat_id, message_id, external_account_id
         )
 
-    def _set_source_cursor_sync(self, chat_id: int, message_id: int) -> None:
+    def _set_source_cursor_sync(self, chat_id: int, message_id: int, external_account_id: str | None = None) -> None:
         with self.connection() as connection:
             connection.execute(
                 "UPDATE telegram_sources "
                 "SET last_message_id = MAX(COALESCE(last_message_id, 0), ?) "
-                "WHERE chat_id = ? AND COALESCE(last_message_id, 0) < ?",
-                (int(message_id), int(chat_id), int(message_id)),
+                "WHERE chat_id = ? AND COALESCE(last_message_id, 0) < ? AND account_id = ?",
+                (int(message_id), int(chat_id), int(message_id),
+                 self._ensure_telegram_account(connection, external_account_id)),
             )
 
     async def discover_telegram_source(
@@ -1182,7 +1215,21 @@ class Database:
         self, message: ParsedSourceMessage
     ) -> TelegramSourceConfig:
         with self.connection() as connection:
-            account_id = self._ensure_bot_account(connection)
+            account_id = self._ensure_telegram_account(connection, message.account_id)
+            if message.account_id is not None:
+                shared = connection.execute(
+                    "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, ts.enabled, ts.rules_json "
+                    "FROM telegram_sources ts JOIN telegram_accounts ta ON ta.id = ts.account_id "
+                    "WHERE ta.session_path = 'bot-api://configured' AND ta.external_account_id IS NULL "
+                    "AND ts.chat_id = ? AND NOT EXISTS (SELECT 1 FROM telegram_sources own "
+                    "WHERE own.account_id = ? AND own.chat_id = ts.chat_id) "
+                    "AND EXISTS(SELECT 1 FROM external_accounts ea WHERE ea.account_id = ? AND ea.enabled = 1 "
+                    "AND (SELECT count(*) FROM external_accounts other WHERE other.kind = ea.kind "
+                    "AND other.enabled = 1 AND other.deleted_at IS NULL) = 1)",
+                    (message.chat_id, account_id, message.account_id),
+                ).fetchone()
+                if shared is not None:
+                    return self._source_from_row(shared)
             connection.execute(
                 "INSERT INTO telegram_sources "
                 "(account_id, source_type, chat_id, display_name, enabled) "
@@ -1221,13 +1268,18 @@ class Database:
                 if version in applied:
                     continue
                 migration_sql = migration.read_text(encoding="utf-8")
-                connection.executescript(
-                    "BEGIN IMMEDIATE;\n"
-                    f"{migration_sql}\n"
-                    "INSERT INTO schema_migrations (version, applied_at) "
-                    f"VALUES ({version}, CURRENT_TIMESTAMP);\n"
-                    "COMMIT;"
+                # executescript commits a pending transaction before it starts.
+                # Run the Python identity backfill after DDL, without a second
+                # executescript, so failures roll back the entire migration.
+                connection.executescript("BEGIN IMMEDIATE;\n" + migration_sql)
+                if version == 31:
+                    from app.candidates.migration import backfill_ingestion
+                    backfill_ingestion(connection)
+                connection.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, CURRENT_TIMESTAMP)",
+                    (version,),
                 )
+                connection.commit()
 
     async def check_writable(self) -> bool:
         if not self.initialized:
@@ -1647,16 +1699,26 @@ class Database:
             return int(cursor.rowcount)
 
     async def save_telegram_updates(self, updates: list[dict]) -> int:
-        return await asyncio.to_thread(self._save_telegram_updates_sync, updates)
+        return await run_sync(self._save_telegram_updates_sync, updates)
+
+    @staticmethod
+    def _telegram_update_scope() -> tuple[str, str | None]:
+        from app.connections.runtime import current_account_context
+        context = current_account_context.get()
+        if context is not None and context.kind == "TG_BOT":
+            return context.account_id, context.account_id
+        return "legacy", None
 
     def _save_telegram_updates_sync(self, updates: list[dict]) -> int:
+        scope, external_account_id = self._telegram_update_scope()
         with self.connection() as connection:
             changes_before = connection.total_changes
             connection.executemany(
                 "INSERT OR IGNORE INTO telegram_bot_updates "
-                "(update_id, payload_json) VALUES (?, ?)",
+                "(account_scope, external_account_id, update_id, payload_json) VALUES (?, ?, ?, ?)",
                 [
                     (
+                        scope, external_account_id,
                         int(update["update_id"]),
                         json.dumps(update, ensure_ascii=False, separators=(",", ":")),
                     )
@@ -1671,7 +1733,8 @@ class Database:
     def _latest_telegram_update_id_sync(self) -> int | None:
         with self.connection() as connection:
             value = connection.execute(
-                "SELECT MAX(update_id) FROM telegram_bot_updates"
+                "SELECT MAX(update_id) FROM telegram_bot_updates WHERE account_scope = ?",
+                (self._telegram_update_scope()[0],),
             ).fetchone()[0]
         return int(value) if value is not None else None
 
@@ -1684,8 +1747,12 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT update_id, payload_json FROM telegram_bot_updates "
-                "WHERE processed_at IS NULL ORDER BY update_id LIMIT ?",
-                (limit,),
+                "WHERE processed_at IS NULL AND account_scope = ? "
+                "ORDER BY ROW_NUMBER() OVER (PARTITION BY COALESCE("
+                "json_extract(payload_json, '$.channel_post.chat.id'), json_extract(payload_json, '$.message.chat.id'), "
+                "json_extract(payload_json, '$.edited_channel_post.chat.id'), json_extract(payload_json, '$.edited_message.chat.id')) "
+                "ORDER BY update_id), update_id LIMIT ?",
+                (self._telegram_update_scope()[0], limit),
             ).fetchall()
         return [(int(row[0]), json.loads(row[1])) for row in rows]
 
@@ -1706,139 +1773,29 @@ class Database:
             connection.execute(
                 "UPDATE telegram_bot_updates SET processed_at = CURRENT_TIMESTAMP, "
                 "processing_result = ?, processing_reason = ? "
-                "WHERE update_id = ?",
-                (result, reason, update_id),
+                "WHERE update_id = ? AND account_scope = ?",
+                (result, reason, update_id, self._telegram_update_scope()[0]),
             )
 
-    async def deactivate_candidate_message(self, chat_id: int, message_id: int) -> None:
+    async def deactivate_candidate_message(self, chat_id: int, message_id: int, *, account_id: str | None = None) -> None:
         await asyncio.to_thread(
-            self._deactivate_candidate_message_sync, chat_id, message_id
+            self._deactivate_candidate_message_sync, chat_id, message_id, account_id
         )
 
     def _deactivate_candidate_message_sync(
-        self, chat_id: int, message_id: int
+        self, chat_id: int, message_id: int, account_id: str | None = None
     ) -> None:
+        from app.candidates.persistence import deactivate_observation
+        from app.connections.runtime import current_account_context
+        context = current_account_context.get()
+        if account_id is None and context is not None and context.kind in {"TG_BOT", "TG_USER"}:
+            account_id = context.account_id
         with self.connection() as connection:
-            row = connection.execute(
-                "SELECT sm.id FROM source_messages sm "
-                "JOIN telegram_accounts ta ON ta.id = sm.account_id "
-                "WHERE ta.session_path = 'bot-api://configured' "
-                "AND sm.chat_id = ? AND sm.message_id = ?",
-                (chat_id, message_id),
-            ).fetchone()
-            if row is None:
+            connection.execute("BEGIN IMMEDIATE")
+            from app.candidates.changes import defer_deactivation
+            if defer_deactivation(connection, self, chat_id, message_id, account_id):
                 return
-            source_message_id = int(row[0])
-            candidate_ids = [
-                int(candidate_row[0])
-                for candidate_row in connection.execute(
-                    "SELECT candidate_id FROM candidate_messages "
-                    "WHERE source_message_id = ?",
-                    (source_message_id,),
-                ).fetchall()
-            ]
-            connection.execute(
-                "UPDATE source_messages SET message_state = 'INACTIVE', "
-                "message_text = '', attachment_json = '[]', "
-                "file_unique_id = NULL, preview_urls_json = '[]' "
-                "WHERE id = ?",
-                (source_message_id,),
-            )
-            connection.execute(
-                "DELETE FROM candidate_messages WHERE source_message_id = ?",
-                (source_message_id,),
-            )
-            for candidate_id in candidate_ids:
-                remaining_messages = connection.execute(
-                    "SELECT sm.message_text, sm.attachment_json, "
-                    "sm.preview_urls_json "
-                    "FROM candidate_messages cm JOIN source_messages sm "
-                    "ON sm.id = cm.source_message_id WHERE cm.candidate_id = ? "
-                    "ORDER BY sm.message_date DESC, sm.id DESC",
-                    (candidate_id,),
-                ).fetchall()
-                if not remaining_messages:
-                    connection.execute(
-                        "DELETE FROM candidates WHERE id = ?", (candidate_id,)
-                    )
-                    continue
-                ex_gid = None
-                ex_gallery_token = None
-                preview_url = None
-                filter_reason = "包含候选内容"
-                for (
-                    message_text,
-                    attachment_json,
-                    preview_urls_json,
-                ) in remaining_messages:
-                    text = str(message_text or "").strip()
-                    previews = json.loads(preview_urls_json or "[]")
-                    gallery_match = GALLERY_URL_PATTERN.search(text)
-                    gid: int | None = None
-                    token: str | None = None
-                    gid_from_preview = False
-                    if gallery_match is not None:
-                        gid = int(gallery_match.group(1))
-                        token = gallery_match.group(2)
-                    else:
-                        # The message linked no gallery, but its preview page's
-                        # slug may still name one (R60); read it back so an
-                        # edit that retires the original message does not drop
-                        # the identity the parser had found.
-                        preview_ref = find_preview_gallery_ref(
-                            tuple(str(item) for item in previews)
-                        )
-                        if preview_ref is not None:
-                            gid, token = preview_ref
-                            gid_from_preview = True
-                    if gid is not None and ex_gid is None:
-                        ex_gid = gid
-                        ex_gallery_token = token
-                    if preview_url is None and previews:
-                        preview_url = str(previews[0])
-                    attachments = json.loads(attachment_json)
-                    archive = next(
-                        (
-                            attachment
-                            for attachment in attachments
-                            if attachment.get("type") == "archive"
-                        ),
-                        None,
-                    )
-                    if any(item.get("type") == "photo" for item in attachments):
-                        filter_reason = "包含图片预览"
-                    elif archive is not None and filter_reason != "包含图片预览":
-                        filter_reason = "包含压缩包附件"
-                    elif gid_from_preview and filter_reason == "包含候选内容":
-                        filter_reason = "由预览页链接识别 ExHentai 画廊"
-                    elif gid is not None and filter_reason == "包含候选内容":
-                        filter_reason = "包含 ExHentai 画廊链接"
-                    elif preview_url is not None and filter_reason == "包含候选内容":
-                        filter_reason = "包含预览页链接"
-                connection.execute(
-                    "UPDATE candidates SET ex_gid = NULL, ex_gallery_token = NULL, "
-                    "filter_reason = ?, preview_url = ?, "
-                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (filter_reason, preview_url, candidate_id),
-                )
-                connection.execute(
-                    "DELETE FROM metadata_values WHERE candidate_id = ? "
-                    "AND is_manual = 0",
-                    (candidate_id,),
-                )
-                connection.execute(
-                    "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ? "
-                    "WHERE id = ?",
-                    (ex_gid, ex_gallery_token, candidate_id),
-                )
-                # No title is rebuilt from the remaining messages (R62): the
-                # caption is not a title source any more, and
-                # `_update_candidate_filter_state` below sends a candidate that
-                # has none back to 待补充, where the next scrape or the operator
-                # supplies one.
-                self._update_candidate_filter_state(
-                    connection, candidate_id, filter_reason
-                )
+            deactivate_observation(connection, chat_id, message_id, account_id)
 
     async def save_candidate_message(
         self, update_id: int | None, message: ParsedSourceMessage
@@ -1850,353 +1807,8 @@ class Database:
     def _save_candidate_message_sync(
         self, update_id: int | None, message: ParsedSourceMessage
     ) -> bool:
-        with self.connection() as connection:
-            account_id = self._ensure_bot_account(connection)
-            connection.execute(
-                "INSERT INTO telegram_sources "
-                "(account_id, source_type, chat_id, display_name, enabled) "
-                "VALUES (?, ?, ?, ?, 0) ON CONFLICT(account_id, chat_id) "
-                "DO NOTHING",
-                (
-                    account_id,
-                    "CHANNEL" if message.chat_id < 0 else "PRIVATE_CHAT",
-                    message.chat_id,
-                    message.chat_title,
-                ),
-            )
-            cursor = connection.execute(
-                "INSERT OR IGNORE INTO source_messages "
-                "(account_id, chat_id, message_id, sender_id, "
-                "reply_to_message_id, media_group_id, message_text, "
-                "attachment_json, file_unique_id, message_date, filter_result, "
-                "filter_reason, preview_urls_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    account_id,
-                    message.chat_id,
-                    message.message_id,
-                    message.sender_id,
-                    message.reply_to_message_id,
-                    message.media_group_id,
-                    message.message_text,
-                    json.dumps(
-                        message.attachments,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    message.file_unique_id,
-                    message.message_date,
-                    message.filter_result,
-                    message.filter_reason,
-                    json.dumps(
-                        list(message.preview_urls),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                ),
-            )
-            created_message = cursor.rowcount == 1
-            if not created_message and message.is_edit:
-                connection.execute(
-                    "UPDATE source_messages SET sender_id = ?, "
-                    "reply_to_message_id = ?, message_text = ?, "
-                    "attachment_json = ?, file_unique_id = ?, "
-                    "filter_result = ?, filter_reason = ?, "
-                    "preview_urls_json = ?, "
-                    "message_state = 'ACTIVE' WHERE account_id = ? "
-                    "AND chat_id = ? AND message_id = ?",
-                    (
-                        message.sender_id,
-                        message.reply_to_message_id,
-                        message.message_text,
-                        json.dumps(
-                            message.attachments,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        message.file_unique_id,
-                        message.filter_result,
-                        message.filter_reason,
-                        json.dumps(
-                            list(message.preview_urls),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        account_id,
-                        message.chat_id,
-                        message.message_id,
-                    ),
-                )
-            source_message_id = int(
-                connection.execute(
-                    "SELECT id FROM source_messages "
-                    "WHERE account_id = ? AND chat_id = ? AND message_id = ?",
-                    (account_id, message.chat_id, message.message_id),
-                ).fetchone()[0]
-            )
-            created_candidate = False
-            if created_message or message.is_edit:
-                preview_url = (
-                    message.preview_urls[0] if message.preview_urls else None
-                )
-                candidate_id = None
-                existing_candidate_id = None
-                if message.is_edit and not created_message:
-                    row = connection.execute(
-                        "SELECT candidate_id FROM candidate_messages "
-                        "WHERE source_message_id = ? LIMIT 1",
-                        (source_message_id,),
-                    ).fetchone()
-                    existing_candidate_id = (
-                        int(row[0]) if row is not None else None
-                    )
-                    candidate_id = existing_candidate_id
-                if candidate_id is None and message.media_group_id is not None:
-                    row = connection.execute(
-                        "SELECT cm.candidate_id FROM candidate_messages cm "
-                        "JOIN source_messages sm ON sm.id = cm.source_message_id "
-                        "WHERE sm.account_id = ? AND sm.chat_id = ? "
-                        "AND sm.media_group_id = ? LIMIT 1",
-                        (account_id, message.chat_id, message.media_group_id),
-                    ).fetchone()
-                    candidate_id = int(row[0]) if row is not None else None
-                if candidate_id is None and message.reply_to_message_id is not None:
-                    row = connection.execute(
-                        "SELECT cm.candidate_id FROM candidate_messages cm "
-                        "JOIN source_messages sm ON sm.id = cm.source_message_id "
-                        "WHERE sm.account_id = ? AND sm.chat_id = ? "
-                        "AND sm.message_id = ? LIMIT 1",
-                        (
-                            account_id,
-                            message.chat_id,
-                            message.reply_to_message_id,
-                        ),
-                    ).fetchone()
-                    candidate_id = int(row[0]) if row is not None else None
-                if candidate_id is None and message.attachments:
-                    # A photo posted next to the archive it belongs to is the
-                    # same upload. The caption's title used to be the evidence
-                    # that they belong together; since R62 there is no parsed
-                    # title, so what is left is the pair itself -- adjacent,
-                    # from one sender, complementary in kind -- and it is only
-                    # believed when exactly one candidate answers, so an
-                    # ambiguous neighbourhood is not merged on a guess.
-                    current_type = str(message.attachments[0].get("type", ""))
-                    rows = connection.execute(
-                        "SELECT cm.candidate_id, sm.attachment_json "
-                        "FROM candidate_messages cm "
-                        "JOIN source_messages sm ON sm.id = cm.source_message_id "
-                        "WHERE sm.account_id = ? AND sm.chat_id = ? "
-                        "AND sm.sender_id IS ? AND ABS(strftime('%s', sm.message_date) "
-                        "- strftime('%s', ?)) <= 180 "
-                        "AND ABS(sm.message_id - ?) = 1 ORDER BY sm.message_date DESC "
-                        "LIMIT 10",
-                        (
-                            account_id,
-                            message.chat_id,
-                            message.sender_id,
-                            message.message_date,
-                            message.message_id,
-                        ),
-                    ).fetchall()
-                    matching_candidate_ids = set()
-                    for adjacent_row in rows:
-                        adjacent_attachments = json.loads(adjacent_row[1])
-                        adjacent_type = (
-                            str(adjacent_attachments[0].get("type", ""))
-                            if adjacent_attachments
-                            else ""
-                        )
-                        if {current_type, adjacent_type} == {"photo", "archive"}:
-                            matching_candidate_ids.add(int(adjacent_row[0]))
-                    if len(matching_candidate_ids) == 1:
-                        candidate_id = matching_candidate_ids.pop()
-                ex_candidate_id = None
-                if message.ex_gid is not None:
-                    row = connection.execute(
-                        "SELECT id FROM candidates WHERE ex_gid = ? "
-                        "AND ex_gallery_token = ? LIMIT 1",
-                        (message.ex_gid, message.ex_gallery_token),
-                    ).fetchone()
-                    ex_candidate_id = int(row[0]) if row is not None else None
-                if candidate_id is None and ex_candidate_id is not None:
-                    # A message that carries a gallery id which already has a
-                    # candidate is a re-post of a work this deployment already
-                    # tracks. It is ignored rather than attached: one gallery is
-                    # one candidate (R59), and attaching would let a re-post
-                    # rewrite the metadata and review trail of a work that may
-                    # already be downloaded. `CandidateIngestor.admit_message`
-                    # reaches this decision first; this is the arbiter for the
-                    # two ingestion channels racing each other, and for the
-                    # direct `save_candidate_message` callers that bypass the
-                    # gate.
-                    connection.execute(
-                        "UPDATE telegram_bot_updates SET "
-                        "processed_at = CURRENT_TIMESTAMP, "
-                        "processing_result = ?, processing_reason = ? "
-                        "WHERE update_id = ?",
-                        ("IGNORE", "该画廊已有候选", update_id),
-                    )
-                    return False
-                if (
-                    candidate_id is not None
-                    and ex_candidate_id is not None
-                    and ex_candidate_id != candidate_id
-                ):
-                    connection.execute(
-                        "INSERT OR IGNORE INTO candidate_messages "
-                        "(candidate_id, source_message_id) SELECT ?, "
-                        "source_message_id FROM candidate_messages "
-                        "WHERE candidate_id = ?",
-                        (candidate_id, ex_candidate_id),
-                    )
-                    connection.execute(
-                        "DELETE FROM candidate_messages WHERE candidate_id = ?",
-                        (ex_candidate_id,),
-                    )
-                    connection.execute(
-                        "INSERT OR IGNORE INTO metadata_values "
-                        "(candidate_id, field_name, field_value, value_source, "
-                        "confidence, is_manual, created_at) SELECT ?, field_name, "
-                        "field_value, value_source, confidence, is_manual, created_at "
-                        "FROM metadata_values WHERE candidate_id = ?",
-                        (candidate_id, ex_candidate_id),
-                    )
-                    connection.execute(
-                        "DELETE FROM metadata_values WHERE candidate_id = ?",
-                        (ex_candidate_id,),
-                    )
-                    # The AI path cache is keyed by candidate too. Moving it
-                    # keeps a generation that was already paid for when the
-                    # survivor has none of its own; the stored fingerprint is
-                    # what tells a later read whether that suggestion still
-                    # matches the merged metadata, so a stale one is regenerated
-                    # rather than trusted.
-                    connection.execute(
-                        "INSERT OR IGNORE INTO ai_path_suggestions "
-                        "(candidate_id, fingerprint, prompt_hash, relative_path, "
-                        "directory, filename, provider_id, model_name, attempts, "
-                        "created_at, updated_at) "
-                        "SELECT ?, fingerprint, prompt_hash, relative_path, "
-                        "directory, filename, provider_id, model_name, attempts, "
-                        "created_at, updated_at FROM ai_path_suggestions "
-                        "WHERE candidate_id = ?",
-                        (candidate_id, ex_candidate_id),
-                    )
-                    connection.execute(
-                        "DELETE FROM ai_path_suggestions WHERE candidate_id = ?",
-                        (ex_candidate_id,),
-                    )
-                    connection.execute(
-                        "UPDATE review_actions SET candidate_id = ? "
-                        "WHERE candidate_id = ?",
-                        (candidate_id, ex_candidate_id),
-                    )
-                    connection.execute(
-                        "UPDATE download_jobs SET candidate_id = ? "
-                        "WHERE candidate_id = ?",
-                        (candidate_id, ex_candidate_id),
-                    )
-                    connection.execute(
-                        "DELETE FROM candidates WHERE id = ?", (ex_candidate_id,)
-                    )
-                if candidate_id is None:
-                    candidate_status = (
-                        "NEEDS_INFO"
-                        if message.filter_result == "NEEDS_INFO"
-                        else "PENDING_REVIEW"
-                    )
-                    candidate_cursor = connection.execute(
-                        "INSERT INTO candidates "
-                        "(status, ex_gid, ex_gallery_token, filter_result, "
-                        "filter_reason, preview_url) VALUES (?, ?, ?, ?, ?, ?)",
-                        (
-                            candidate_status,
-                            message.ex_gid,
-                            message.ex_gallery_token,
-                            message.filter_result,
-                            message.filter_reason,
-                            preview_url,
-                        ),
-                    )
-                    candidate_id = int(candidate_cursor.lastrowid)
-                    created_candidate = True
-                elif message.is_edit and existing_candidate_id is not None:
-                    # An edit can point the candidate at a different gallery.
-                    # The scrape of the old one would then answer for a work it
-                    # never read, and because the enrichment only re-reads a
-                    # candidate with *no* EXHENTAI rows (R62), dropping them is
-                    # also what makes it re-read at all.
-                    previous = connection.execute(
-                        "SELECT ex_gid FROM candidates WHERE id = ?",
-                        (candidate_id,),
-                    ).fetchone()
-                    if previous is not None and previous[0] != message.ex_gid:
-                        connection.execute(
-                            "DELETE FROM metadata_values WHERE candidate_id = ? "
-                            "AND value_source = 'EXHENTAI'",
-                            (candidate_id,),
-                        )
-                    connection.execute(
-                        "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
-                        "preview_url = ?, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (
-                            message.ex_gid,
-                            message.ex_gallery_token,
-                            preview_url,
-                            candidate_id,
-                        ),
-                    )
-                else:
-                    if message.ex_gid is not None:
-                        connection.execute(
-                            "UPDATE candidates SET ex_gid = ?, "
-                            "ex_gallery_token = ?, "
-                            "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
-                            "AND ex_gid IS NULL",
-                            (
-                                message.ex_gid,
-                                message.ex_gallery_token,
-                                candidate_id,
-                            ),
-                        )
-                    if preview_url is not None:
-                        # A later message in the same group may carry the
-                        # preview link the first one lacked; the first link
-                        # seen wins so a re-post cannot silently replace it.
-                        connection.execute(
-                            "UPDATE candidates SET preview_url = ?, "
-                            "updated_at = CURRENT_TIMESTAMP WHERE id = ? "
-                            "AND preview_url IS NULL",
-                            (preview_url, candidate_id),
-                        )
-                connection.execute(
-                    "INSERT OR IGNORE INTO candidate_messages "
-                    "(candidate_id, source_message_id) VALUES (?, ?)",
-                    (candidate_id, source_message_id),
-                )
-                if message.is_edit:
-                    connection.execute(
-                        "DELETE FROM candidate_messages WHERE source_message_id = ? "
-                        "AND candidate_id != ?",
-                        (source_message_id, candidate_id),
-                    )
-                # Nothing is read off the message into `Title` any more (R62).
-                # The row that used to be dropped here so a re-derivation could
-                # replace it was the *caption's* guess; deleting it now would
-                # delete the gallery's own title, which is the only automatic
-                # source of a name there is.
-                self._update_candidate_filter_state(
-                    connection, candidate_id, message.filter_reason
-                )
-            connection.execute(
-                "UPDATE telegram_bot_updates SET processed_at = CURRENT_TIMESTAMP, "
-                "processing_result = ?, processing_reason = ? "
-                "WHERE update_id = ?",
-                (message.filter_result, message.filter_reason, update_id),
-            )
-            return created_candidate
+        from app.candidates.persistence import save_decided_message
+        return save_decided_message(self, update_id, message)
 
     async def list_candidates(
         self, *, status: str = "PENDING_REVIEW", limit: int = 100
@@ -3046,15 +2658,9 @@ class Database:
 
     async def set_candidate_eh_ref(
         self, candidate_id: int, ex_gid: int, ex_gallery_token: str | None
-    ) -> None:
-        """Re-point a work at a different ExHentai gallery, by id, for metadata.
-
-        The gallery reference is what the metadata scraper and every derived
-        fact (torrent, cover, archive path) read from, so an operator relinking
-        a work may do so by id; whatever upstream says about the *new* gallery
-        is fetched on the next enrich instead of trusting guesses here.
-        """
-        await asyncio.to_thread(
+    ) -> dict:
+        """Correct the unified identity after old executions are confirmed stopped."""
+        return await asyncio.to_thread(
             self._set_candidate_eh_ref_sync,
             candidate_id,
             ex_gid,
@@ -3063,14 +2669,9 @@ class Database:
 
     def _set_candidate_eh_ref_sync(
         self, candidate_id: int, ex_gid: int, ex_gallery_token: str | None
-    ) -> None:
-        with self.connection() as connection:
-            connection.execute(
-                "UPDATE candidates SET ex_gid = ?, ex_gallery_token = ?, "
-                "torrent_count = NULL, torrent_hash = NULL, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (ex_gid, ex_gallery_token, candidate_id),
-            )
+    ) -> dict:
+        from app.candidates.references import request_reference
+        return request_reference(self, candidate_id, ex_gid, ex_gallery_token)
 
     async def set_candidate_preview_url(
         self, candidate_id: int, preview_url: str | None
@@ -3146,11 +2747,14 @@ class Database:
             message_rows = connection.execute(
                 "SELECT COALESCE(ts.display_name, CAST(sm.chat_id AS TEXT)), "
                 "sm.message_id, sm.message_text, sm.attachment_json, "
-                "sm.message_date FROM candidate_messages cm "
+                "sm.message_date, sm.id, sm.observation_revision, ta.external_account_id, ea.kind, "
+                "sm.chat_id, sm.peer_type FROM candidate_messages cm "
                 "JOIN source_messages sm ON sm.id = cm.source_message_id "
-                "LEFT JOIN telegram_sources ts ON ts.account_id = sm.account_id "
-                "AND ts.chat_id = sm.chat_id WHERE cm.candidate_id = ? "
-                "ORDER BY sm.message_date, sm.message_id",
+                "JOIN telegram_accounts ta ON ta.id = sm.account_id "
+                "LEFT JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
+                "LEFT JOIN telegram_sources ts ON ts.id = sm.rule_source_id "
+                "WHERE cm.candidate_id = ? AND sm.message_state = 'ACTIVE' "
+                "ORDER BY sm.id",
                 (candidate_id,),
             ).fetchall()
         messages = tuple(
@@ -3158,8 +2762,14 @@ class Database:
                 chat_title=str(message_row[0]),
                 message_id=int(message_row[1]),
                 message_text=str(message_row[2] or ""),
-                attachments=tuple(json.loads(message_row[3])),
+                attachments=tuple({**attachment, "observation_id": int(message_row[5]),
+                    "observation_revision": int(message_row[6]), "account_id": message_row[7],
+                    "account_kind": message_row[8], "chat_id": int(message_row[9]),
+                    "message_id": int(message_row[1]), "peer_type": message_row[10]}
+                    for attachment in json.loads(message_row[3])),
                 message_date=str(message_row[4]),
+                observation_id=int(message_row[5]), observation_revision=int(message_row[6]),
+                account_id=message_row[7], account_kind=message_row[8], chat_id=int(message_row[9]),
             )
             for message_row in message_rows
         )
@@ -3226,6 +2836,7 @@ class Database:
         ex_gallery_token: str | None = None,
         magnet_url: str | None = None,
         torrent_hash: str | None = None,
+        ingest_claim=None,
     ) -> int:
         """Create an already-approved candidate from an operator's manual link.
 
@@ -3244,6 +2855,7 @@ class Database:
             ex_gallery_token,
             magnet_url,
             torrent_hash,
+            ingest_claim,
         )
 
     @staticmethod
@@ -3297,46 +2909,53 @@ class Database:
         ex_gallery_token: str | None,
         magnet_url: str | None,
         torrent_hash: str | None,
+        ingest_claim=None,
     ) -> int:
         with self.connection() as connection:
-            # A manual add is the third way into `candidates`, and the only one
-            # that does not pass the ingestion gate, so it carries the R59
-            # invariant itself: one gallery is one work (keyed on the id alone
-            # -- the token is a spelling of the URL), and one infohash is one
-            # magnet. Checking and inserting in one transaction is what makes
-            # the check an arbiter instead of a race.
-            duplicate = self._manual_duplicate_sync(connection, ex_gid, torrent_hash)
-            if duplicate is not None:
-                raise duplicate
-            try:
-                cursor = connection.execute(
-                    "INSERT INTO candidates "
-                    "(status, ex_gid, ex_gallery_token, filter_result, "
-                    "filter_reason, magnet_url, torrent_hash) "
-                    "VALUES ('APPROVED', ?, ?, 'ACCEPT', ?, ?, ?)",
-                    (
-                        ex_gid,
-                        ex_gallery_token,
-                        filter_reason,
-                        magnet_url,
-                        torrent_hash,
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                # The check above cannot see a row another writer commits in
-                # the window between it and the INSERT; the unique index is the
-                # arbiter for that. Re-read and report a duplicate only when the
-                # row is really there -- any other constraint failure is a real
-                # fault and must not be read as "duplicate".
-                existing = (
-                    self._gallery_candidate_id_sync(connection, ex_gid)
-                    if ex_gid is not None
-                    else None
-                )
-                if existing is not None:
-                    raise DuplicateGalleryCandidate(existing) from None
-                raise
-            candidate_id = int(cursor.lastrowid)
+            connection.execute("BEGIN IMMEDIATE")
+            return self.insert_manual_candidate(
+                connection, filter_reason=filter_reason, ex_gid=ex_gid, ex_gallery_token=ex_gallery_token,
+                magnet_url=magnet_url, torrent_hash=torrent_hash, ingest_claim=ingest_claim,
+            )
+
+    def insert_manual_candidate(self, connection, *, filter_reason: str, ex_gid: int | None,
+                                ex_gallery_token: str | None, magnet_url=None, torrent_hash=None,
+                                ingest_claim=None) -> int:
+        """Insert and finish ownership inside the caller's BEGIN IMMEDIATE transaction.
+
+        The validated manual publisher also writes metadata before committing.
+        No candidate or LINKED entry is visible if any part of that write fails.
+        """
+        if not connection.in_transaction:
+            raise ValueError("Manual publication requires a write transaction")
+        if ex_gid is not None:
+            from app.candidates.entries import check_claim, claim_manual_gallery
+            if ingest_claim is None:
+                ingest_claim = claim_manual_gallery(connection, ex_gid, owner=secrets.token_hex(16))
+            else:
+                entry = check_claim(connection, ingest_claim)
+                from app.candidates.identity import ingest_key
+                if entry["unique_key"] != ingest_key(gallery_id=ex_gid):
+                    raise ValueError("Manual claim does not match gallery")
+        duplicate = self._manual_duplicate_sync(connection, ex_gid, torrent_hash)
+        if duplicate is not None:
+            raise duplicate
+        try:
+            cursor = connection.execute(
+                "INSERT INTO candidates "
+                "(status, ex_gid, ex_gallery_token, filter_result, filter_reason, magnet_url, torrent_hash) "
+                "VALUES ('APPROVED', ?, ?, 'ACCEPT', ?, ?, ?)",
+                (ex_gid, ex_gallery_token, filter_reason, magnet_url, torrent_hash),
+            )
+        except sqlite3.IntegrityError:
+            existing = self._gallery_candidate_id_sync(connection, ex_gid) if ex_gid is not None else None
+            if existing is not None:
+                raise DuplicateGalleryCandidate(existing) from None
+            raise
+        candidate_id = int(cursor.lastrowid)
+        if ingest_claim is not None:
+            from app.candidates.entries import finish_claim
+            finish_claim(connection, ingest_claim, candidate_id=candidate_id)
         return candidate_id
 
     async def set_candidate_metadata_value(
@@ -3401,12 +3020,13 @@ class Database:
         action: str,
         new_status: str,
         note: str | None,
+        connection=None,
     ) -> None:
         details = {"status": new_status}
         if note:
             details["note"] = note
         details_json = json.dumps(details, separators=(",", ":"))
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             cursor = connection.execute(
                 "SELECT status FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -3555,8 +3175,8 @@ class Database:
             self._effective_metadata_sync, candidate_id
         )
 
-    def _effective_metadata_sync(self, candidate_id: int) -> dict[str, str]:
-        with self.connection() as connection:
+    def _effective_metadata_sync(self, candidate_id: int, connection=None) -> dict[str, str]:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             rows = connection.execute(
                 # The same trust order the list queries use (R62): the
                 # gallery's own record first, a caption line last. This is what
@@ -3696,10 +3316,10 @@ class Database:
         )
 
     def _list_auto_approval_rules_sync(
-        self, enabled_only: bool
+        self, enabled_only: bool, connection=None
     ) -> tuple[AutoApprovalRule, ...]:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
                 "dsl_snapshot, created_at, updated_at, case_sensitive, action "
@@ -4098,12 +3718,10 @@ class Database:
             source_row = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
                 "ts.enabled, ts.rules_json FROM telegram_sources ts "
-                "JOIN telegram_accounts ta ON ta.id = ts.account_id "
-                "JOIN source_messages sm ON sm.account_id = ts.account_id "
-                "AND sm.chat_id = ts.chat_id "
+                "JOIN source_messages sm ON sm.rule_source_id = ts.id "
                 "JOIN candidate_messages cm ON cm.source_message_id = sm.id "
                 "WHERE cm.candidate_id = ? "
-                "AND ta.session_path = 'bot-api://configured' "
+                "AND sm.message_state = 'ACTIVE' "
                 "ORDER BY sm.id LIMIT 1",
                 (candidate_id,),
             ).fetchone()

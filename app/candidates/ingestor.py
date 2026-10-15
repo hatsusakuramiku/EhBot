@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from app.candidates import links
+from app.candidates.entries import IngestError, fail_claim, load_message, renew_claim, resolve_message_identity
+from app.candidates.persistence import prepare_observation, publish_candidate
 from app.candidates.models import (
     IngestSummary,
     ParsedSourceMessage,
@@ -17,16 +21,15 @@ from app.candidates.parse_rules import (
 )
 from app.candidates.rules import evaluate_source_rules
 from app.db.database import Database
+from app.downloads.execution import run_sync
 
 
 class CandidateIngestor:
     """Turn incoming messages into candidates, or decide not to.
 
-    One pipeline for both ingest paths -- the Bot API updates and the MTProto
-    user-account read. `admit_message` is the shared half: the AI gate (when the
-    operator turned it on), the parse rules, the source's own filters and the
-    title requirement, in that order. A second copy of any of these is how the
-    two paths would start disagreeing about what a candidate is.
+    Both Telegram transports use process_message: local source checks, durable
+    identity registration/claim, optional AI, then guarded candidate publication.
+    Duplicate receivers supplement one record before expensive work starts.
     """
 
     def __init__(
@@ -39,6 +42,8 @@ class CandidateIngestor:
         self._database = database
         self._settings = settings_service
         self._admission = admission
+        self._processor_runtime = database.ingest_processors
+        self._processors = self._processor_runtime.tasks
 
     def set_admission(self, admission: object | None) -> None:
         """Wire the AI gate after startup.
@@ -70,42 +75,19 @@ class CandidateIngestor:
         """
         if rules is None:
             rules = await self.parse_rules()
+        source = await self._database.discover_telegram_source(message)
+        decision = evaluate_source_rules(source, message)
+        if decision.result == "IGNORE":
+            return decision
         gate = await self._gate(message, rules)
         if gate.result == "IGNORE":
             return gate
-        source = await self._database.discover_telegram_source(message)
-        decision = evaluate_source_rules(source, message)
-        if decision.result != "ACCEPT":
-            return decision
         return decision
 
     async def _gate(
         self, message: ParsedSourceMessage, rules: dict
     ) -> RuleDecision:
-        """The three pre-source gates: the gallery dedup, AI admission, then the
-        parse scheme.
-
-        The gallery gate runs first because it is one indexed read and it can
-        save everything behind it: a message that re-posts a gallery this
-        deployment already tracks must not spend a model call on admission or
-        reach the enrichment queue (R59). It is keyed on the gallery id alone --
-        the token is a spelling of the URL, not part of the work's identity --
-        and it deliberately does not apply to edits: an edit of a message that
-        already belongs to a candidate is an update of that work, not a new
-        arrival.
-
-        The AI gate runs next (an operator decision recorded in the proposal):
-        it is the expensive, semantic judgement, and when the operator lets it
-        override the parse scheme a message can be admitted on the model's word
-        alone. With the override off, the two are an AND -- the model's `accept`
-        still has to survive the structural rules.
-        """
-        if message.ex_gid is not None and not message.is_edit:
-            existing = await self._database.candidate_id_for_gallery(
-                int(message.ex_gid)
-            )
-            if existing is not None:
-                return RuleDecision("IGNORE", "该画廊已有候选")
+        """AI admission and structural rules, after durable ownership was acquired."""
         if self._admission is not None:
             admission = await self._admission.decide(message)  # type: ignore[attr-defined]
             if admission.verdict == "reject":
@@ -117,67 +99,266 @@ class CandidateIngestor:
             return RuleDecision("IGNORE", reason)
         return RuleDecision("ACCEPT", reason)
 
+    async def process_message(self, message: ParsedSourceMessage, *, rules: dict | None = None,
+                              update_id: int | None = None) -> tuple[bool, RuleDecision]:
+        """Persist one observing account's input; only the identity owner runs AI."""
+        from app.connections.runtime import current_account_context
+        context = current_account_context.get()
+        if context is not None and context.kind in {"TG_BOT", "TG_USER"}:
+            if message.account_id is not None and message.account_id != context.account_id:
+                raise IngestError("INGEST_ACCOUNT_MISMATCH")
+            message = replace(message, account_id=context.account_id)
+        if message.account_id is not None:
+            message = replace(message, attachments=tuple(
+                {**attachment, "account_id": message.account_id} for attachment in message.attachments
+            ))
+        message = await run_sync(self._resolve_message, message)
+        rules = await self.parse_rules() if rules is None else rules
+        if message.is_edit:
+            await self._stop_previous_processor(message.chat_id, message.message_id, message.account_id)
+        source = await self._database.discover_telegram_source(message)
+        local = evaluate_source_rules(source, message)
+        qualified, reason = message_qualifies(rules, message)
+        if local.result == "IGNORE" or (self._admission is None and not qualified):
+            decision = local if local.result == "IGNORE" else RuleDecision("IGNORE", reason)
+            if message.is_edit:
+                await self._database.deactivate_candidate_message(message.chat_id, message.message_id, account_id=message.account_id)
+            if update_id is not None:
+                await self._database.mark_telegram_update_result(update_id, decision.result, decision.reason)
+            return False, decision
+        message = replace(message, filter_result=local.result, filter_reason=local.reason, rule_source_id=source.source_id)
+        try:
+            async with self._processor_runtime.lock:
+                entry, claim, fixed_input = await run_sync(self._prepare_message, message, qualified)
+                if claim is not None:
+                    task = asyncio.create_task(self._execute_claim(claim, fixed_input, rules, update_id))
+                    self._processors[claim.entry_id] = task
+        except IngestError as exc:
+            if exc.code != "INGEST_SOURCE_UNQUALIFIED":
+                raise
+            decision = RuleDecision("IGNORE", reason)
+            if update_id is not None:
+                await self._database.mark_telegram_update_result(update_id, decision.result, decision.reason)
+            return False, decision
+        if claim is None:
+            decision = RuleDecision(
+                "IGNORE" if entry["state"] in {"IGNORED", "REMOVED", "MERGED", "BLOCKED"} else local.result,
+                "已保存备用来源" if entry["state"] == "LINKED" else "已登记，复用现有处理记录",
+            )
+            if update_id is not None:
+                await self._database.mark_telegram_update_result(update_id, decision.result, decision.reason)
+            return False, decision
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled() and not asyncio.current_task().cancelling():
+                decision = RuleDecision("IGNORE", "输入已更新，旧处理已撤销")
+                if update_id is not None:
+                    await self._database.mark_telegram_update_result(update_id, decision.result, decision.reason)
+                return False, decision
+            await self._drain_processor(task)
+            raise
+        finally:
+            if self._processors.get(claim.entry_id) is task:
+                del self._processors[claim.entry_id]
+
+    async def _execute_claim(self, claim, fixed_input, rules, update_id):
+        finished = asyncio.Event()
+        try:
+            async with asyncio.TaskGroup() as group:
+                group.create_task(self._heartbeat(claim, finished))
+                try:
+                    decision = await self.admit_message(fixed_input, rules=rules)
+                finally:
+                    finished.set()
+            decided = replace(fixed_input, filter_result=decision.result, filter_reason=decision.reason)
+            created = await run_sync(self._publish_message, claim, decided, update_id)
+            return created, decision
+        except BaseException:
+            await run_sync(self._processing_failed, claim)
+            raise
+
+    async def _stop_previous_processor(self, chat_id, message_id, account_id):
+        entry_id = await run_sync(self._message_entry_id, chat_id, message_id, account_id)
+        task = self._processors.get(entry_id)
+        if task is not None and not task.done():
+            await self._drain_processor(task)
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
+
+    async def _drain_processor(self, task):
+        """Cancel once and await actual cleanup even if the waiting listener is cancelled again."""
+        await self._processor_runtime.drain(task)
+
+    def _message_entry_id(self, chat_id, message_id, account_id):
+        with self._database.connection() as connection:
+            row = connection.execute(
+                "SELECT sm.ingest_entry_id FROM source_messages sm JOIN telegram_accounts ta ON ta.id = sm.account_id "
+                "WHERE sm.chat_id = ? AND sm.message_id = ? AND "
+                "((? IS NULL AND ta.session_path = 'bot-api://configured') OR ta.external_account_id = ?)",
+                (chat_id, message_id, account_id, account_id),
+            ).fetchone()
+            return row[0] if row is not None else None
+
+    async def process_pending_entries(self) -> int:
+        """Recover persisted due inputs even after their transport event was acknowledged."""
+        async with self._processor_runtime.lock:
+            messages = await run_sync(self._due_inputs)
+        created = 0
+        rules = await self.parse_rules()
+        for message in messages:
+            was_created, _ = await self.process_message(message, rules=rules)
+            created += int(was_created)
+        return created
+
+    def _due_inputs(self):
+        from app.connections.runtime import current_account_context
+        context = current_account_context.get()
+        account = context.account_id if context is not None else None
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "WITH due AS (SELECT e.id, ROW_NUMBER() OVER "
+                "(PARTITION BY sm.account_id, sm.chat_id ORDER BY e.id) AS source_position "
+                "FROM ingest_entries e JOIN source_messages sm ON sm.id = e.input_source_message_id "
+                "JOIN telegram_accounts ta ON ta.id = sm.account_id WHERE "
+                "((e.processing_state = 'PENDING' AND (e.retry_at IS NULL OR e.retry_at <= unixepoch())) "
+                "OR (e.processing_state = 'PROCESSING' AND e.lease_until <= unixepoch())) "
+                "AND (((? IS NULL AND ta.external_account_id IS NULL) OR ta.external_account_id = ?) "
+                "OR EXISTS(SELECT 1 FROM source_messages other "
+                "JOIN telegram_accounts observer ON observer.id = other.account_id "
+                "WHERE other.ingest_entry_id = e.id AND other.ingest_generation = e.generation "
+                "AND other.message_state = 'ACTIVE' AND "
+                "((? IS NULL AND observer.external_account_id IS NULL) OR observer.external_account_id = ?))) "
+                "), ordered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY source_position, id) AS scan_position FROM due) "
+                "SELECT id FROM ordered ORDER BY (scan_position <= COALESCE( "
+                "(SELECT scan_position FROM ordered WHERE id = ?), 0)), scan_position LIMIT 100",
+                (account, account, account, account, self._processor_runtime.recovery_cursors.get(account)),
+            ).fetchall()
+            if rows:
+                self._processor_runtime.recovery_cursors[account] = rows[-1][0]
+            from app.candidates.persistence import reselect_pending_input
+            messages = []
+            for (entry_id,) in rows:
+                if entry_id in self._processor_runtime.active_ids():
+                    continue
+                reselect_pending_input(connection, entry_id)
+                source_id = connection.execute("SELECT input_source_message_id FROM ingest_entries WHERE id = ?", (entry_id,)).fetchone()[0]
+                message = load_message(connection, source_id)
+                if message.account_id == account:
+                    messages.append(message)
+            return messages
+
+    def _prepare_message(self, message, qualified):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if message.is_edit:
+                from app.candidates.changes import defer_observation_change
+                if defer_observation_change(connection, self._database, message):
+                    return {'state': 'STOPPING'}, None, None
+            entry, claim = prepare_observation(connection, message, owner=uuid4().hex, qualified=qualified,
+                                               active_entry_ids=self._processor_runtime.active_ids())
+            fixed_input = load_message(connection, claim.source_message_id) if claim is not None else None
+            return entry, claim, fixed_input
+
+    def _resolve_message(self, message):
+        with self._database.connection() as connection:
+            return resolve_message_identity(connection, message)
+
+    def _publish_message(self, claim, message, update_id):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            from app.candidates.persistence import source_still_eligible, reselect_pending_input
+            if not source_still_eligible(connection, claim.source_message_id):
+                # Subscription changes during AI invalidate that input, not all
+                # other observing accounts. Keep recovery durable without paying
+                # for another attempt on the now-disabled source.
+                fail_claim(connection, claim, error_code="INGEST_SOURCE_CHANGED", retry_seconds=0)
+                reselect_pending_input(connection, claim.entry_id)
+                return False
+            _, created = publish_candidate(connection, self._database, claim, message)
+            connection.execute(
+                "UPDATE telegram_bot_updates SET processed_at = CURRENT_TIMESTAMP, processing_result = ?, "
+                "processing_reason = ? WHERE update_id = ? AND account_scope = ?",
+                (message.filter_result, message.filter_reason, update_id, self._database._telegram_update_scope()[0]),
+            )
+            return created
+
+    async def _heartbeat(self, claim, finished):
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=30)
+            except TimeoutError:
+                await run_sync(self._renew, claim)
+
+    def _renew(self, claim):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            renew_claim(connection, claim)
+
+    def _processing_failed(self, claim):
+        # Cleanup revokes only this processor. It must still work after its
+        # credential lease was stopped; candidate writes remain guarded.
+        from app.connections.execution import current_account_executions
+        token = current_account_executions.set(())
+        try:
+            with self._database.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    fail_claim(connection, claim, error_code="INGEST_PROCESSING_FAILED")
+                except IngestError as exc:
+                    if exc.code != "INGEST_STALE_PROCESSOR":
+                        raise
+        finally:
+            current_account_executions.reset(token)
+
     # ----------------------------------------------------------------- batch
+
 
     async def process_pending_updates(self) -> IngestSummary:
         processed = 0
-        created = 0
+        created = await self.process_pending_entries()
         ignored = 0
         failed = 0
         # Read once per batch rather than per message: the scheme is one settings
         # row and a poll may carry a hundred updates.
         rules = await self.parse_rules()
-        while updates := await self._database.pending_telegram_updates(limit=100):
-            for update_id, update in updates:
-                try:
-                    message = self._parse_message(update)
-                except (KeyError, OverflowError, TypeError, ValueError):
-                    await self._database.mark_telegram_update_result(
-                        update_id, "ERROR", "Telegram Update 字段无效"
-                    )
-                    processed += 1
-                    failed += 1
-                    continue
-                if message is None:
-                    edited_identity = self._edited_message_identity(update)
-                    if edited_identity is not None:
-                        await self._database.deactivate_candidate_message(
-                            *edited_identity
-                        )
-                    await self._database.mark_telegram_update_result(
-                        update_id,
-                        "IGNORE",
-                        (
-                            "编辑后不再包含候选内容"
-                            if edited_identity is not None
-                            else "未包含图片预览、ExHentai 链接、预览页链接或压缩包附件"
-                        ),
-                    )
-                    processed += 1
-                    ignored += 1
-                    continue
-                decision = await self.admit_message(message, rules=rules)
-                if decision.result == "IGNORE":
-                    if message.is_edit:
-                        await self._database.deactivate_candidate_message(
-                            message.chat_id, message.message_id
-                        )
-                    await self._database.mark_telegram_update_result(
-                        update_id, decision.result, decision.reason
-                    )
-                    processed += 1
-                    ignored += 1
-                    continue
-                message = replace(
-                    message,
-                    filter_result=decision.result,
-                    filter_reason=decision.reason,
-                )
-                was_created = await self._database.save_candidate_message(
-                    update_id, message
+        updates = await self._database.pending_telegram_updates(limit=100)
+        for update_id, update in updates:
+            try:
+                message = self._parse_message(update)
+            except (KeyError, OverflowError, TypeError, ValueError):
+                await self._database.mark_telegram_update_result(
+                    update_id, "ERROR", "Telegram Update 字段无效"
                 )
                 processed += 1
-                created += int(was_created)
+                failed += 1
+                continue
+            if message is None:
+                edited_identity = self._edited_message_identity(update)
+                if edited_identity is not None:
+                    from app.connections.runtime import current_account_context
+                    context = current_account_context.get()
+                    await self._stop_previous_processor(*edited_identity, context.account_id if context is not None else None)
+                    await self._database.deactivate_candidate_message(
+                        *edited_identity
+                    )
+                await self._database.mark_telegram_update_result(
+                    update_id,
+                    "IGNORE",
+                    (
+                        "编辑后不再包含候选内容"
+                        if edited_identity is not None
+                        else "未包含图片预览、ExHentai 链接、预览页链接或压缩包附件"
+                    ),
+                )
+                processed += 1
+                ignored += 1
+                continue
+            was_created, decision = await self.process_message(message, rules=rules, update_id=update_id)
+            processed += 1
+            created += int(was_created)
+            ignored += int(decision.result == "IGNORE")
         return IngestSummary(processed, created, ignored, failed)
 
     @staticmethod
@@ -229,6 +410,23 @@ class CandidateIngestor:
             return None
         ex_gid = gallery_ref[0] if gallery_ref is not None else None
         chat = message.get("chat") or {}
+        peer_type = chat.get("type")
+        if peer_type not in {"channel", "supergroup", "group", "private"}:
+            # Old fixtures/events may omit type; only a channel-post envelope
+            # with a real marked channel id proves a shared message box.
+            peer_type = (
+                "channel" if ("channel_post" in update or "edited_channel_post" in update)
+                and int(chat["id"]) < -1000000000000 else None
+            )
+        origin = message.get("forward_origin")
+        if not isinstance(origin, dict) or origin.get("type") != "channel":
+            origin = {}
+        origin_chat = origin.get("chat")
+        origin_channel_id = (
+            int(origin_chat["id"]) if isinstance(origin_chat, dict) and origin_chat.get("type") == "channel"
+            and origin.get("message_id") is not None else None
+        )
+        origin_message_id = int(origin["message_id"]) if origin_channel_id is not None else None
         attachments = ()
         file_unique_id = None
         if photo is not None:
@@ -307,4 +505,8 @@ class CandidateIngestor:
             ),
             preview_urls=page_urls,
             gallery_from_preview=gallery_ref_from_preview,
+            is_forwarded=bool(message.get("forward_origin") or message.get("forward_date") or message.get("forward_from_chat")),
+            peer_type=peer_type,
+            origin_channel_id=origin_channel_id,
+            origin_message_id=origin_message_id,
         )

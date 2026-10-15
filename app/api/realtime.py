@@ -35,7 +35,7 @@ MAX_FRAME_BYTES = 262144
 
 def command_catalogue() -> dict[str, dict]:
     """Publish only finite JSON/HTML routes; exclude auth, streams and files."""
-    from app.api import accounts, actions, activity, candidates, downloaded, logs, settings, summary, works
+    from app.api import accounts, actions, activity, candidates, downloaded, ingestion, logs, settings, summary, works
     from app.web.routes import (
         activity as web_activity, auto_approval, candidates as web_candidates,
         connections, dashboard, downloaded as web_downloaded, logs as web_logs,
@@ -43,7 +43,7 @@ def command_catalogue() -> dict[str, dict]:
     )
     catalogue = {}
     groups = (
-        ("api", "/api/v1", [accounts, actions, activity, candidates, downloaded, logs, settings, summary, works]),
+        ("api", "/api/v1", [accounts, actions, activity, candidates, downloaded, ingestion, logs, settings, summary, works]),
         ("web", "", [web_activity, auto_approval, web_candidates, connections, dashboard,
                      web_downloaded, web_logs, manual_add, settings_pages, web_works]),
     )

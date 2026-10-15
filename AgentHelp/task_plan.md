@@ -1,4 +1,4 @@
-﻿# Task Plan: EhBot Development Plan
+# Task Plan: EhBot Development Plan
 
 ## Goal
 Produce an implementation-ready development plan for a Docker-deployed Telegram and ExHentai comic ingestion, review, download, and CBZ conversion service.
@@ -448,3 +448,13 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [ ] P10：全域共享 API、版本/幂等、WS/冲突 UI
 - [ ] P11：审批饥饿、ComicInfo 写锁、缩略图竞态
 - [ ] P12：合同与本地验收、升级/恢复、最终交接
+
+
+## 2026-10-15 P5 / R92 交付
+
+- [x] 统一键/观察/领取/发布、031 回填和唯一 gid。
+- [x] 来源与画廊变更真实停止、操作 API/Web/WS、移除代次。
+- [x] 手动元数据原子发布、持久 followup 和自动审批事务。
+- [x] 独立树与真实单账号监听兼容验证。
+- P5 摄取组 23 文件 323/0/0/0（163.742 秒），补充六文件 79/0/0/0（74.998 秒），启动/关闭四文件 50/0/0/0（14.812 秒），最后含真实下载五文件 66/0/0/0（44.229 秒）；按节点取最新共 447 个通过，非一次整组运行；2465 collected，仅收集。
+- [ ] 本轮核实 P5 本地提交 SHA；P6–P12 按计划继续，每阶段立即提交。

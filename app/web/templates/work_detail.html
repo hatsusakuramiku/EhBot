@@ -102,6 +102,29 @@
      data-csrf="{{ csrf_token }}" data-live="{{ 'true' if work.live else 'false' }}"
      data-timeline="{{ work.timeline | length }}">
   <div class="ui-detail-main">
+    {% if work.ingest_operations %}
+    <section class="ui-panel" data-ingest-operations>
+      <h2 class="ui-section-title">来源与画廊变更</h2>
+      {% for operation in work.ingest_operations %}
+      <div class="ui-stack" data-ingest-operation="{{ operation.operation_id }}">
+        <p>{{ operation.label }} {{ ui.badge(operation.state) }}</p>
+        {% if operation.error_message %}<p class="ui-hint" role="alert">{{ operation.error_message }}</p>{% endif %}
+        {% if operation.result_candidate_id and operation.result_candidate_id != work.candidate_id %}
+        <a href="{{ root_path }}/works/{{ operation.result_candidate_id }}">查看保留的作品 #{{ operation.result_candidate_id }}</a>
+        {% endif %}
+        {% if operation.retryable %}
+        <form method="post" action="{{ root_path }}/works/{{ work.candidate_id }}/ingest-operations/{{ operation.operation_id }}/retry"
+              hx-post="{{ root_path }}/works/{{ work.candidate_id }}/ingest-operations/{{ operation.operation_id }}/retry">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_revision" value="{{ operation.revision }}">
+          <input type="hidden" name="idempotency_key" value="{{ new_command_key() }}">
+          <button class="ui-btn" data-size="sm" type="submit">重试变更</button>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
     <section class="ui-panel">
       <h2 class="ui-section-title">概览</h2>
       {#- `torrent_count` of `None` means gdata has not answered yet, which is a

@@ -30,9 +30,9 @@ sweep stops happening.
 The interval is re-read from the settings service on every pass rather than
 captured at construction: it is operator-editable on the 系统 tab, and a value
 captured at startup would mean a saved interval did nothing until the container
-was restarted. Zero means 「不要自动跑」, and it is honoured by sleeping the poll
-interval and re-checking rather than by exiting the loop, so turning the sweep
-back on also takes effect without a restart.
+was restarted. Zero disables full-queue scans. Durable ingestion follow-ups are
+still reconciled at startup and on every pass, so a lost callback cannot strand
+a committed candidate. The wake event only lowers that reconciliation latency.
 """
 
 from __future__ import annotations
@@ -90,6 +90,12 @@ class AutoApprovalSweeper:
         self._metadata_enricher = metadata_enricher
         self._notify = notify
         self._task: asyncio.Task[None] | None = None
+        self._wake = asyncio.Event()
+        self._sweep_lock = asyncio.Lock()
+
+    def wake(self) -> None:
+        """Promptly reconcile durable ingestion intents; no work lives in this event."""
+        self._wake.set()
 
     async def start(self) -> None:
         if self._task is not None:
@@ -106,30 +112,21 @@ class AutoApprovalSweeper:
         self._task = None
 
     async def _run(self) -> None:
-        """Sweep, sleep, repeat -- with the interval re-read each time.
-
-        The first sweep waits one interval rather than running at startup. A
-        deployment that has just come up is the least likely moment for the
-        queue to have changed, and sweeping immediately would mean every
-        container restart re-scans the whole pending queue.
-        """
+        """Recover ingestion immediately; interval zero disables only full scans."""
+        interval = None
+        next_sweep = None
         while True:
             try:
+                await self.process_ingest_followups()
                 minutes = await self._settings.auto_approval_interval_minutes()
-            except Exception:  # noqa: BLE001 - defensive scheduler loop
-                # A settings read that fails must not kill the sweeper: the
-                # default cadence is a better answer than never running again.
-                LOGGER.exception(
-                    "auto_approval_interval_unreadable",
-                    extra={"error_code": "AUTO_APPROVAL_INTERVAL_UNREADABLE"},
-                )
-                minutes = 0
-            if minutes <= 0:
-                await asyncio.sleep(DISABLED_RECHECK_SECONDS)
-                continue
-            await asyncio.sleep(minutes * 60)
-            try:
-                await self.sweep_once()
+                now = asyncio.get_running_loop().time()
+                if minutes != interval:
+                    next_sweep = now + minutes * 60 if minutes > 0 else None
+                    interval = minutes
+                if next_sweep is not None and now >= next_sweep:
+                    await self.sweep_once()
+                    next_sweep = asyncio.get_running_loop().time() + minutes * 60
+                delay = min(DISABLED_RECHECK_SECONDS, max(0, next_sweep - now)) if next_sweep is not None else DISABLED_RECHECK_SECONDS
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - defensive scheduler loop
@@ -137,8 +134,49 @@ class AutoApprovalSweeper:
                     "auto_approval_sweep_failed",
                     extra={"error_code": "AUTO_APPROVAL_SWEEP_FAILED"},
                 )
+                delay = DISABLED_RECHECK_SECONDS
+            try:
+                await asyncio.wait_for(self._wake.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+            self._wake.clear()
+
+    async def process_ingest_followups(self) -> int:
+        """Drain persisted publication intents, also with periodic scans disabled."""
+        from app.candidates.followups import due_followups, finish_followup, followup_ready
+        async with self._sweep_lock:
+            identities = await asyncio.to_thread(due_followups, self._database, SWEEP_BATCH_SIZE)
+            if not identities:
+                return 0
+            await self._enrich_metadata(tuple(dict.fromkeys(row[3] for row in identities)))
+            decided = 0
+            for identity in identities:
+                candidate_id = identity[3]
+                try:
+                    decision = await self._orchestrator.apply_automatic_decision(candidate_id)
+                    completed = await asyncio.to_thread(followup_ready, self._database, candidate_id)
+                    if completed and decision is None:
+                        from app.auto_approval.service import AutomaticApprovalService
+                        # A still-matching rule declined because its source or
+                        # identity changed; keep the intention for a later pass.
+                        completed = await AutomaticApprovalService(self._database).matching_rule(candidate_id) is None
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - retain this identity's intent
+                    LOGGER.exception('ingest_followup_failed', extra={'candidate_id': candidate_id, 'error_code': 'INGEST_FOLLOWUP_FAILED'})
+                    completed, decision = False, None
+                await asyncio.to_thread(finish_followup, self._database, identity, completed)
+                if decision in {REVIEW_APPROVE, REVIEW_REJECT}:
+                    decided += 1
+                    if self._notify is not None:
+                        self._notify(candidate_id=candidate_id)
+            return decided
 
     async def sweep_once(self) -> int:
+        async with self._sweep_lock:
+            return await self._sweep_once()
+
+    async def _sweep_once(self) -> int:
         """Apply rules to the pending queue once, returning how many were decided.
 
         The return value counts both outcomes -- approved plus rejected -- because

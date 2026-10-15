@@ -584,6 +584,10 @@ def telegram_source(source: Any) -> dict[str, Any]:
     """
     return {
         "source_id": source.source_id,
+        "revision": source.revision,
+        "account_id": source.account_id,
+        "account_label": source.account_label,
+        "account_kind": source.account_kind,
         "source_type": source.source_type,
         "chat_id": source.chat_id,
         "display_name": source.display_name,

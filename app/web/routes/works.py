@@ -8,6 +8,7 @@ appearing beside it.
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote_plus, urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Request
@@ -16,6 +17,7 @@ from fastapi.responses import RedirectResponse
 from app.api.events import EVENT_DOWNLOAD
 from app.api.actions import apply_metadata_patch
 from app.api.contracts import ApiError
+from app.api.ingestion import retry_ingest_operation
 from app.api.works import (
     configured_sources,
     effective_library_path,
@@ -26,10 +28,34 @@ from app.candidates.links import (
     find_magnet_ref,
     normalize_preview_url,
 )
+from app.candidates.entries import IngestError
+from app.candidates.operations import list_operations
 from app.review.models import METADATA_FIELDS, field_label
 from app.web import deps
 
 router = APIRouter()
+
+
+@router.post('/works/{candidate_id}/ingest-operations/{operation_id}/retry')
+async def retry_work_ingest(request: Request, candidate_id: int, operation_id: str):
+    """Thin form adapter to the shared ingestion command."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get('csrf_token', '')))
+    try:
+        revision = int(str(form.get('expected_revision', '')))
+    except ValueError:
+        revision = None
+    try:
+        await retry_ingest_operation(request, operation_id, {
+            'expected_revision': revision, 'idempotency_key': form.get('idempotency_key'),
+        })
+    except ApiError as exc:
+        return await render_review_error(request, candidate_id, exc.message)
+    return RedirectResponse(request.url_for('work_detail', candidate_id=candidate_id).path
+                            + '?message=' + quote_plus('重试已受理，完成结果将在此处更新。'), status_code=303)
 
 
 @router.post("/works/{candidate_id}/metadata")
@@ -257,6 +283,12 @@ async def render_work(
         archived=deps.optional_service(request, "archived_work_service"),
     )
     if snapshot is None:
+        operations = await asyncio.to_thread(list_operations, deps.database(request), candidate_id)
+        for operation in operations:
+            result_id = operation['result_candidate_id']
+            if (operation['status'] == 'COMPLETED' and result_id and result_id != candidate_id
+                    and await deps.database(request).get_candidate(result_id) is not None):
+                return RedirectResponse(request.url_for('work_detail', candidate_id=result_id).path, status_code=303)
         raise HTTPException(status_code=404, detail="Candidate not found")
     prev_id, next_id = await deps.database(request).adjacent_candidate_ids(
         candidate_id
@@ -409,10 +441,18 @@ async def set_work_eh_ref(
         )
     gid, token = int(match.group(1)), match.group(2)
 
-    await deps.database(request).set_candidate_eh_ref(
-        candidate_id, gid, token
-    )
-    notice = f"已切换画廊编号为 {gid}"
+    try:
+        result = await deps.database(request).set_candidate_eh_ref(candidate_id, gid, token)
+    except IngestError as exc:
+        message = {
+            'INGEST_IDENTITY_CHANGING': '已有画廊修改正在等待停止确认，请稍后核对。',
+            'INGEST_MANUAL_METADATA_CONFLICT': '两个候选的人工或锁定字段不同，请先核对这些字段。',
+            'INGEST_MANUAL_PATH_CONFLICT': '两个候选的人工归档路径不同，请先核对路径。',
+            'INGEST_REVIEW_CONFLICT': '两个候选的审核决定冲突，请先核对审核结果。',
+        }.get(exc.code, '画廊关联未修改，请刷新并核对当前作品。')
+        return await render_review_error(request, candidate_id, message)
+    notice = f"已切换画廊编号为 {gid}" if result['status'] == 'COMPLETED' else "已登记画廊修改，等待旧执行停止确认"
+    candidate_id = result['result_candidate_id'] or candidate_id
     return RedirectResponse(
         f"/works/{candidate_id}?message={quote_plus(notice)}",
         status_code=303,

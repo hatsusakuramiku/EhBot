@@ -49,6 +49,15 @@ class ParsedSourceMessage:
     #: explicit EH link (R60). Kept so the filter reason can say which, without
     #: the qualification rules having to re-parse the message.
     gallery_from_preview: bool = False
+    #: Known observing external account UUID; None preserves legacy unknown identity.
+    account_id: str | None = None
+    #: Only explicitly known channel/supergroup peers have shared message coordinates.
+    peer_type: str | None = None
+    origin_channel_id: int | None = None
+    origin_message_id: int | None = None
+    #: Configuration row used for admission; separate from the observing account identity.
+    rule_source_id: int | None = None
+    is_forwarded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +95,11 @@ class CandidateMessage:
     message_text: str
     attachments: tuple[dict, ...]
     message_date: str
+    observation_id: int | None = None
+    observation_revision: int | None = None
+    account_id: str | None = None
+    account_kind: str | None = None
+    chat_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +146,10 @@ class TelegramSourceConfig:
     allowed_languages: tuple[str, ...] = ()
     allowed_categories: tuple[str, ...] = ()
     min_rating: float | None = None
+    account_id: str | None = None
+    account_label: str | None = None
+    account_kind: str | None = None
+    revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)

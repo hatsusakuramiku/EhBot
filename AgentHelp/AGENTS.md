@@ -49,6 +49,12 @@ prompt alone:
    and tests and `progress.md` / `PHASES.md` / `README.md` / `docs/USAGE.md`
    together. A proposal that ends up as `*_PROPOSAL.md` stays beside the code it
    describes.
+   After each phase passes its acceptance checks, stage only that phase's changes
+   and immediately create its local commit before starting the next phase. Review
+   the staged diff first; record the resulting SHA in the handoff. Staging alone
+   does not complete delivery. If the commit fails, record the reason and keep
+   the phase marked as awaiting commit. Local phase commits are authorized by the
+   operator (2026-10-15); pushing, releasing and deploying remain separate actions.
 
 This applies to the agent docs too: a change to these notes is itself a small
 proposal-and-review step when it is not part of an approved phase.
@@ -111,6 +117,12 @@ permissions. `git status --short` works but prints a harmless
 repo root fails partway. Scope recursive listings to `app`, `tests`, etc.
 
 ## Tests
+
+**Temporary artifacts:** do not recreate `.scratch/`. Keep permanent regression
+tests in `tests/`; put disposable reports and fixtures in task-specific system
+TEMP directories. After the process exits, record results in `progress.md`, then
+remove only those exact directories. Git and Docker ignore `.scratch/` as a
+fallback; ignoring a directory is not a reason to retain unnecessary files.
 
 **Run only what the change touches.** A full sweep is ~20 minutes on Linux
 (1500+ cases, almost all of it argon2 password hashing), which is far too slow
@@ -198,6 +210,9 @@ not to follow the redirect.
 zone name round-trips is fine; one that asks `ZoneInfo` to resolve it is not.
 Timezone validation is by shape for the same reason a slim container has the same
 gap.
+
+
+**Completed P5 / R92 (supersedes historical snapshots):** rc8/031, 2465 collected only; P5 摄取组 23 文件 323/0/0/0（163.742 秒），补充六文件 79/0/0/0（74.998 秒），启动/关闭四文件 50/0/0/0（14.812 秒），最后含真实下载五文件 66/0/0/0（44.229 秒）；按节点取最新共 447 个通过，非一次整组运行；2465 collected，仅收集。 031 is frozen. The standalone commit excludes 032-036 and all unfinished P6/P7 changes. Bot/MTProto and manual ingestion share one key/claim; legacy singleton subscriptions remain compatible without relabeling historical observations. P6-P12 remain unfinished. No full-suite run, real suppliers, push, release or deployment. See R92_REQUIREMENT_AUDIT and the latest progress entry.
 
 ## Architecture rules
 

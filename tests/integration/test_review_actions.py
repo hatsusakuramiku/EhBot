@@ -12,6 +12,8 @@ from app.downloads.service import DownloadService
 from app.main import create_app
 from app.review.service import ReviewError, ReviewService
 from tests.ingest_admission import permit_all_message_types
+from tests.telegram_accounts import with_fixture_bot, bot_transport
+from app.connections.runtime import current_account_context
 
 
 def make_settings(root: Path) -> Settings:
@@ -50,6 +52,7 @@ def authenticate(client: TestClient, settings: Settings) -> None:
     )
 
 
+@with_fixture_bot
 async def seed_candidate(
     database: Database,
     *,
@@ -61,6 +64,7 @@ async def seed_candidate(
     await database.initialize()
     await permit_all_message_types(database)
     await database.configure_telegram_source(
+        account_id=current_account_context.get().account_id,
         source_type="CHANNEL",
         chat_id=-100456,
         display_name="Review Channel",
@@ -153,7 +157,7 @@ def test_approve_automatically_enqueues_download(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         assert detail.status_code == 200
@@ -177,7 +181,7 @@ def test_reject_does_not_require_reason(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -200,7 +204,7 @@ def test_approve_without_download_source_keeps_candidate_pending(
     candidate_id = asyncio.run(seed_candidate(database))
     replace_candidate_with_photo(database, candidate_id)
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
@@ -241,7 +245,7 @@ def test_a_gallery_with_a_torrent_routes_to_the_torrent(
             ("4acbd66e5d0518977ece30c343eb75c4ca92b031", candidate_id),
         )
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
@@ -282,7 +286,7 @@ def test_archive_download_is_never_an_automatic_route(
             (candidate_id,),
         )
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
@@ -305,7 +309,7 @@ def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -333,7 +337,7 @@ def test_metadata_edit_rejects_invalid_field(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -353,7 +357,7 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_candidate(database))
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         csrf = detail.context["csrf_token"]
@@ -425,7 +429,7 @@ def test_the_work_page_offers_requeue_on_a_failed_candidate(
             (candidate_id,),
         )
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         assert detail.status_code == 200
@@ -536,7 +540,7 @@ def test_batch_review_approves_and_rejects_multiple_candidates(
         for index in range(2)
     ]
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         queue = client.get("/candidates")
         csrf = queue.context["csrf_token"]
@@ -637,7 +641,7 @@ def test_review_views_show_original_and_chinese_tag_rows(tmp_path: Path) -> None
     candidate_id = asyncio.run(seed_candidate(database))
     persist_bilingual_tags(database, candidate_id)
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
         authenticate(client, settings)
         queue = client.get("/candidates")
         assert queue.status_code == 200
@@ -699,7 +703,7 @@ def test_processing_and_failed_dashboard_queues_filter_candidates(
             (failed_id,),
         )
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport())) as client:
         authenticate(client, settings)
         dashboard = client.get("/")
         # PROCESSING lives under 「已通过」: the tab covers everything the

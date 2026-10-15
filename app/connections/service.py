@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -34,6 +35,21 @@ class AccountService:
     Disabling/editing/deleting uses durable operations and confirmed cleanup.
     """
 
+    async def _run_legacy_backlog(self):
+        """Recover unknown historical inputs without blocking account startup."""
+        listener = self._listener("startup-backlog")
+        while True:
+            try:
+                await listener._ingest_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "telegram_legacy_ingest_failed", extra={"error_code": "TELEGRAM_INGEST_FAILED"},
+                )
+                self._notify()
+            await asyncio.sleep(1)
+
     def __init__(self, registry: AccountRegistry, *, telegram_client, exhentai_client,
                  candidate_ingestor=None, user_client_factory=None, on_candidates_ingested=None,
                  on_state_changed=None, process_queue_operations=None):
@@ -53,6 +69,7 @@ class AccountService:
         self._logins: dict[str, _PendingLogin] = {}
         self._login_locks: dict[str, asyncio.Lock] = {}
         self._activation_lock = asyncio.Lock()
+        self._backlog_task = None
         self._operation_task = None
 
     def _notify(self):
@@ -312,8 +329,7 @@ class AccountService:
             self._kinds[account["account_id"]] = account["kind"]
             self._states[account["account_id"]] = ProviderStatus("not_configured", True)
         if self._candidate_ingestor is not None:
-            await self._listener("startup-backlog")._ingest_pending()
-            del self._listeners["startup-backlog"]
+            self._backlog_task = asyncio.create_task(self._run_legacy_backlog(), name="telegram-legacy-backlog")
         for account in accounts:
             with self.registry._database.connection() as connection:
                 requested = connection.execute("SELECT activation_requested FROM external_accounts WHERE account_id = ?", (account["account_id"],)).fetchone()[0]
@@ -329,6 +345,10 @@ class AccountService:
         self._operation_task = asyncio.create_task(self._run_operations(), name="account-operations")
 
     async def stop(self):
+        if self._backlog_task is not None:
+            self._backlog_task.cancel()
+            await asyncio.gather(self._backlog_task, return_exceptions=True)
+            self._backlog_task = None
         if self._operation_task is not None:
             self._operation_task.cancel()
             await asyncio.gather(self._operation_task, return_exceptions=True)
@@ -348,7 +368,16 @@ class AccountService:
         return None
 
     @asynccontextmanager
-    async def use_kind(self, kind: str, *, required: bool = True):
+    async def use_kind(self, kind: str, *, required: bool = True, account_id: str | None = None):
+        if account_id is not None:
+            account = await self.registry.get(account_id)
+            if account["kind"] != kind:
+                raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
+            if self.account_status(account_id)["state"] != "connected":
+                raise AccountError("ACCOUNT_UNAVAILABLE", "来源账号已停用或无法连接，请选择其他来源")
+            async with self.runtime.use(account_id) as context:
+                yield context
+            return
         existing = current_account_context.get()
         if existing is not None and existing.kind == kind:
             yield existing

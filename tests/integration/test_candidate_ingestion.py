@@ -248,7 +248,7 @@ async def test_unrelated_text_update_is_ignored_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_exhentai_gallery_reference_in_another_chat_is_ignored(
+async def test_same_exhentai_gallery_reference_in_another_chat_adds_a_source(
     tmp_path: Path,
 ) -> None:
     """One gallery id is one candidate, whichever chat re-posts it (R59).
@@ -299,26 +299,25 @@ async def test_same_exhentai_gallery_reference_in_another_chat_is_ignored(
     candidates = await database.list_candidates(status="NEEDS_INFO")
 
     assert result.created_candidates == 1
-    assert result.ignored_updates == 1
+    assert result.ignored_updates == 0
     assert len(candidates) == 1
-    # Only the first message: the re-post is ignored, not attached.
-    assert candidates[0].message_count == 1
+    # P5 retains alternate observations while processing the gallery once.
+    assert candidates[0].message_count == 2
     assert candidates[0].ex_gid == 67890
     assert candidates[0].title is None
     assert candidates[0].display_title == "#67890"
-    # The update row says why it was dropped, which is what makes「这条消息去哪了」
-    # answerable without reading the log.
+    # The second update records supplementation instead of an ignored repost.
     with database.connection() as connection:
         row = connection.execute(
             "SELECT processing_result, processing_reason FROM telegram_bot_updates "
             "WHERE update_id = 206"
         ).fetchone()
-    assert row[0] == "IGNORE"
-    assert row[1] == "该画廊已有候选"
+    assert row[0] == "NEEDS_INFO"
+    assert row[1] == "已保存备用来源"
 
 
 @pytest.mark.asyncio
-async def test_merging_candidates_carries_the_ai_path_suggestion_over(
+async def test_edit_moves_source_to_existing_gallery_and_keeps_its_ai_cache(
     tmp_path: Path,
 ) -> None:
     """The merge deletes the absorbed candidate -- and must not fall over.
@@ -393,11 +392,8 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
             model_name="m",
         )
     )
-    # An edit of the first candidate's own message that now carries the
-    # second's gallery id is what makes the two merge into one. It has to be an
-    # edit: a *new* message naming an existing gallery is ignored outright by
-    # the ingestion gate (R59), so the merge is now reachable only when an
-    # already-linked message changes which gallery it points at.
+    # Move only the edited source. The target gallery keeps its identity/cache;
+    # an empty unreviewed source candidate can be retired.
     await database.save_telegram_updates(
         [
             {
@@ -423,7 +419,8 @@ async def test_merging_candidates_carries_the_ai_path_suggestion_over(
     suggestion = await database.get_ai_path_suggestion(survivor)
     assert suggestion is not None
     assert suggestion.relative_path == "series/book.cbz"
-    assert await database.get_ai_path_suggestion(absorbed) is None
+    assert survivor == absorbed
+    assert (await database.get_ai_path_suggestion(absorbed)).relative_path == "series/book.cbz"
 
 
 @pytest.mark.asyncio
@@ -1167,17 +1164,10 @@ async def test_an_edit_that_drops_the_preview_link_clears_it(
 
 
 @pytest.mark.asyncio
-async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
+async def test_the_db_arbiter_supplements_a_repost_without_duplicate_candidate(
     tmp_path: Path,
 ) -> None:
-    """The gate decides first; this is the arbiter behind it (R59).
-
-    The two ingestion channels can both read the same gallery before either has
-    written it, and `save_candidate_message` is also a public entry point. Both
-    reach the same conclusion here rather than creating a second candidate --
-    which the `(ex_gid, ex_gallery_token)` unique key would otherwise turn into
-    an `IntegrityError`.
-    """
+    """The legacy save entry uses P5's same key and adds alternate observations."""
     database = Database(tmp_path / "ehbot.db")
     await database.initialize()
     await permit_all_message_types(database)
@@ -1225,9 +1215,7 @@ async def test_the_db_arbiter_ignores_a_repost_that_slipped_past_the_gate(
     candidates = await database.list_candidates(status="NEEDS_INFO")
     assert len(candidates) == 1
     assert candidates[0].candidate_id == candidate_id
-    # The re-post is not attached to the existing candidate either: one gallery
-    # is one work, and the message that introduced it is the one that counts.
-    assert candidates[0].message_count == 1
+    assert candidates[0].message_count == 2
 
 
 @pytest.mark.asyncio
@@ -1252,8 +1240,7 @@ async def test_a_preview_slug_gives_a_message_its_gallery_id(
                     ),
                 },
             },
-            # The same gallery again: with the id read from the slug the R59
-            # gate now recognises the re-post and ignores it.
+            # The same gallery again: the unified key retains a second source.
             {
                 "update_id": 701,
                 "channel_post": {
@@ -1273,7 +1260,7 @@ async def test_a_preview_slug_gives_a_message_its_gallery_id(
     candidate = await database.get_candidate(1)
 
     assert result.created_candidates == 1
-    assert result.ignored_updates == 1
+    assert result.ignored_updates == 0
     assert candidate is not None
     assert candidate.ex_gid == 4137423
     assert candidate.ex_gallery_token == "9ce70ddc26"

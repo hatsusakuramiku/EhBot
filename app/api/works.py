@@ -24,6 +24,7 @@ Three things are computed here rather than left to whoever renders it:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -444,6 +445,11 @@ async def work_snapshot(
     if candidate is None:
         return None
 
+    from app.candidates.operations import list_operations
+    from app.api.status import ingest_operation_payload
+    ingest_operations = [ingest_operation_payload(operation) for operation in
+                         await asyncio.to_thread(list_operations, database, candidate_id)]
+
     entries = await database.list_metadata(candidate_id)
     # Translated values and upstream originals are split server-side using the
     # same helper the old page used, so the two never interleave into a list
@@ -517,6 +523,7 @@ async def work_snapshot(
         "archive_metadata": await archived.archive_metadata(candidate_id) if archived else None,
         "metadata_editor": await archived.metadata_editor(candidate_id) if archived else None,
         "timeline": work_timeline(actions, jobs),
+        "ingest_operations": ingest_operations,
         "jobs": [job_summary(job) for job in jobs],
         # The packaged output, promoted out of the job list: it is what the work
         # became, and a page should not have to scan tasks to find the book.
@@ -541,7 +548,8 @@ async def work_snapshot(
         # for the same reason the queue does: the candidate's own status lags a
         # task by one transition.
         "live": is_live(candidate.status)
-        or any(is_live(job.state) for job in jobs),
+        or any(is_live(job.state) for job in jobs)
+        or any(operation['state']['live'] for operation in ingest_operations),
     }
 
 

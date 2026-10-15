@@ -63,6 +63,63 @@ class ExHentaiService:
         self._work_path_provider = work_path_provider
         self._account_scope = account_scope
 
+    @staticmethod
+    def _write_cover(connection, candidate_id, gallery):
+        thumb_url = (gallery.thumb or "").strip()
+        if not thumb_url:
+            return
+        digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
+        connection.execute(
+            "UPDATE candidates SET thumb_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (thumb_url, candidate_id),
+        )
+        connection.execute(
+            "INSERT INTO thumbnails(hash, kind, variant, source_url, state) VALUES (?, ?, ?, ?, 'PENDING') "
+            "ON CONFLICT(hash) DO NOTHING", (digest, THUMBNAIL_KIND_CANDIDATE_COVER, THUMBNAIL_VARIANT_CARD, thumb_url),
+        )
+
+    @staticmethod
+    def _write_torrents(connection, candidate_id, gallery):
+        best = gallery.best_torrent
+        connection.execute(
+            "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (gallery.torrent_count, best.hash if best is not None else None, candidate_id),
+        )
+
+    @staticmethod
+    def _write_metadata(connection, candidate_id, metadata):
+        for field_name, value in metadata.items():
+            if value is None or value == "":
+                continue
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, confidence, is_manual) "
+                "VALUES (?, ?, ?, 'EXHENTAI', 0.6, 0) "
+                "ON CONFLICT(candidate_id, field_name, value_source) "
+                "DO UPDATE SET field_value = excluded.field_value, confidence = excluded.confidence, "
+                "is_manual = 0, created_at = CURRENT_TIMESTAMP "
+                "WHERE metadata_values.is_manual = 0 AND metadata_values.is_locked = 0",
+                (candidate_id, field_name, str(value)),
+            )
+
+    def _publish_manual_gallery_sync(self, gid, token, metadata, gallery, ingest_claim):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidate_id = self._database.insert_manual_candidate(
+                connection, filter_reason="手动添加：ExHentai 画廊链接", ex_gid=gid,
+                ex_gallery_token=token, ingest_claim=ingest_claim,
+            )
+            self._write_metadata(connection, candidate_id, metadata)
+            if gallery is not None:
+                self._write_torrents(connection, candidate_id, gallery)
+                self._write_cover(connection, candidate_id, gallery)
+            # Manual publication starts APPROVED; source metadata rules do not
+            # undo that explicit approval (the normal reevaluator skips it).
+            return candidate_id
+
+    async def publish_manual_gallery(self, gid, token, metadata, gallery, *, ingest_claim) -> int:
+        """Commit the validated candidate, metadata, routing facts and ownership together."""
+        return await run_sync(self._publish_manual_gallery_sync, gid, token, metadata, gallery, ingest_claim)
+
     @asynccontextmanager
     async def account_request(self):
         """Hold the selected account through a request and its caller's writes."""
@@ -371,23 +428,7 @@ class ExHentaiService:
         scrape, which would otherwise be free to replace it.
         """
         with self._database.connection() as connection:
-            for field_name, value in metadata.items():
-                if value is None or value == "":
-                    continue
-                confidence = 0.6
-                connection.execute(
-                    "INSERT INTO metadata_values "
-                    "(candidate_id, field_name, field_value, value_source, "
-                    "confidence, is_manual) "
-                    "VALUES (?, ?, ?, 'EXHENTAI', ?, 0) "
-                    "ON CONFLICT(candidate_id, field_name, value_source) "
-                    "DO UPDATE SET field_value = excluded.field_value, "
-                    "confidence = excluded.confidence, "
-                    "is_manual = 0, created_at = CURRENT_TIMESTAMP "
-                    "WHERE metadata_values.is_manual = 0 "
-                    "AND metadata_values.is_locked = 0",
-                    (candidate_id, field_name, str(value), confidence),
-                )
+            self._write_metadata(connection, candidate_id, metadata)
 
     def _persist_torrents_sync(
         self, candidate_id: int, gallery: GalleryData
@@ -399,17 +440,8 @@ class ExHentaiService:
         to parse strings out of a metadata table. ``torrent_count`` stays NULL
         until gdata answers, so 「未查询」 and 「确认无种」 stay distinguishable.
         """
-        best = gallery.best_torrent
         with self._database.connection() as connection:
-            connection.execute(
-                "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (
-                    gallery.torrent_count,
-                    best.hash if best is not None else None,
-                    candidate_id,
-                ),
-            )
+            self._write_torrents(connection, candidate_id, gallery)
 
     def _persist_cover_sync(
         self, candidate_id: int, gallery: GalleryData
@@ -426,28 +458,8 @@ class ExHentaiService:
         gallery with an unreachable cover never slows down enrichment. The
         first request for the digest does the work.
         """
-        thumb_url = (gallery.thumb or "").strip()
-        if not thumb_url:
-            return
-        digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
         with self._database.connection() as connection:
-            connection.execute(
-                "UPDATE candidates SET thumb_url = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (thumb_url, candidate_id),
-            )
-            connection.execute(
-                "INSERT INTO thumbnails "
-                "(hash, kind, variant, source_url, state) "
-                "VALUES (?, ?, ?, ?, 'PENDING') "
-                "ON CONFLICT(hash) DO NOTHING",
-                (
-                    digest,
-                    THUMBNAIL_KIND_CANDIDATE_COVER,
-                    THUMBNAIL_VARIANT_CARD,
-                    thumb_url,
-                ),
-            )
+            self._write_cover(connection, candidate_id, gallery)
 
     def _record_artifact_sync(
         self,

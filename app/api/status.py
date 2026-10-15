@@ -74,6 +74,43 @@ def _view(code: str, label: str, tone: str, live: bool = False) -> StatusView:
 
 
 #: Candidate lifecycle (`candidates.status`).
+INGEST_OPERATION_STATUS: dict[str, StatusView] = {
+    'PENDING': StatusView('PENDING', '等待停止并应用变更', TONE_WAITING, live=True),
+    'COMPLETED': StatusView('COMPLETED', '变更已完成', TONE_SUCCESS),
+    'FAILED': StatusView('FAILED', '变更失败', TONE_DANGER),
+}
+
+INGEST_OPERATION_KIND = {'reference': '画廊关联', 'observation': '消息来源变更'}
+
+INGEST_OPERATION_ERRORS = {
+    'INGEST_MANUAL_METADATA_CONFLICT': '两份作品的人工或锁定字段冲突，请核对并修改后重试。',
+    'INGEST_MANUAL_PATH_CONFLICT': '两份作品的指定归档路径冲突，请核对后重试。',
+    'INGEST_REVIEW_CONFLICT': '两份作品的审核结论冲突，请核对后重试。',
+    'INGEST_GALLERY_CONFLICT': '画廊身份冲突，请核对关联。',
+    'INGEST_REFERENCE_CHANGED': '画廊关联已有新变更，请刷新后核对。',
+    'INGEST_OBSERVATION_CHANGED': '消息来源已有新变更，请刷新后核对。',
+    'INGEST_TARGET_REMOVED': '目标作品已移除，请核对后重新操作。',
+    'INGEST_CANDIDATE_NOT_FOUND': '原作品已移除或合并。',
+    'INGEST_CANDIDATE_REMOVING': '作品正在移除，不能重试变更。',
+    'INGEST_MERGE_NEEDS_STOP': '相关执行尚未确认停止，请稍后核对。',
+    'INGEST_IDENTITY_CHANGING': '另一项关联变更正在处理，请稍后核对。',
+    'INGEST_OPERATION_NOT_FOUND': '找不到该变更操作。',
+    'INGEST_OPERATION_NOT_FAILED': '只有失败且来源未变化的操作可以重试。',
+    'REVISION_CONFLICT': '操作已被另一端修改，请刷新后核对。',
+    'IDEMPOTENCY_CONFLICT': '请求标识已用于另一条命令，请刷新后重试。',
+    'PRECONDITION_REQUIRED': '请提交已读取的操作版本。',
+    'IDEMPOTENCY_KEY_REQUIRED': '请提交有效的请求标识。',
+}
+
+
+def ingest_operation_payload(operation: dict) -> dict:
+    """One vocabulary for API and HTML, excluding raw supplier exceptions."""
+    return {**operation, 'state': INGEST_OPERATION_STATUS[operation['status']].to_payload(),
+            'label': INGEST_OPERATION_KIND[operation['kind']],
+            'error_message': (INGEST_OPERATION_ERRORS.get(operation['error_code'], '变更未能完成，请核对作品后重试。')
+                              if operation['error_code'] else None)}
+
+
 CANDIDATE_STATUS: dict[str, StatusView] = {
     "DISCOVERED": _view("DISCOVERED", "已发现", TONE_MUTED),
     "PENDING_REVIEW": _view("PENDING_REVIEW", "待审核", TONE_WAITING),
