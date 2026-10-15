@@ -631,10 +631,12 @@ async def test_the_queue_is_fifo_within_one_priority(tmp_path: Path) -> None:
         other_id = connection.execute("INSERT INTO candidates(status, filter_result) VALUES('APPROVED', 'ACCEPT')").lastrowid
     second = enqueue_raw(database, other_id, "b", 100)
 
-    claimed = [
-        service._claim_pending_job_sync()["job_id"]  # noqa: SLF001
-        for _ in range(2)
-    ]
+    claimed = []
+    for _ in range(2):
+        job = service._claim_pending_job_sync()
+        claimed.append(job['job_id'])
+        # The next turn starts after the current transfer releases its slot.
+        service._mark_job_failed_sync(job['job_id'], 'FIXTURE_FINISHED', 'fixture')
 
     assert claimed == [first, second]
 
@@ -657,10 +659,12 @@ async def test_a_lower_priority_value_is_claimed_first(tmp_path: Path) -> None:
     later = enqueue_raw(database, later_id, "b", 100)
     urgent = enqueue_raw(database, urgent_id, "c", 10)
 
-    claimed = [
-        service._claim_pending_job_sync()["job_id"]  # noqa: SLF001
-        for _ in range(3)
-    ]
+    claimed = []
+    for _ in range(3):
+        job = service._claim_pending_job_sync()
+        claimed.append(job['job_id'])
+        # The next turn starts after the current transfer releases its slot.
+        service._mark_job_failed_sync(job['job_id'], 'FIXTURE_FINISHED', 'fixture')
 
     assert claimed == [urgent, normal, later]
     assert service._claim_pending_job_sync() is None  # noqa: SLF001

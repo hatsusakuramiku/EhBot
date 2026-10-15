@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from time import monotonic
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, replace
 from uuid import uuid4
@@ -60,6 +61,7 @@ class AccountService:
         self._eh_locks: dict[str, asyncio.Lock] = {}
         self._operation_task = None
         self._backlog_task = None
+        self._cooling_restarts = {}
 
     def _notify(self):
         if self._on_state_changed is not None:
@@ -317,6 +319,7 @@ class AccountService:
         while True:
             try:
                 await self.process_operations()
+                await self._resume_cooling_accounts()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -341,11 +344,37 @@ class AccountService:
             try:
                 verified = await self.test_account(account["account_id"], expected_revision=account["revision"])
                 await self.enable_account(account["account_id"], expected_revision=verified["revision"])
-            except (ProviderConnectionError, AccountError):
+            except (ProviderConnectionError, AccountError) as exc:
                 # Saved configuration survives transient failures; no secret
                 # or upstream exception is written into a public error/log.
+                if exc.code in {'TELEGRAM_RATE_LIMITED', 'TELEGRAM_USER_RATE_LIMITED'}:
+                    self._cooling_restarts[account['account_id']] = monotonic() + max(1, exc.retry_after or 60)
                 continue
         self._operation_task = asyncio.create_task(self._run_operations(), name="account-operations")
+
+    async def _resume_cooling_accounts(self):
+        """Retry requested startup activation after the persisted wait expires."""
+        for account_id, due in sorted(self._cooling_restarts.items(), key=lambda item: item[1])[:8]:
+            if due > monotonic():
+                break
+            try:
+                account = await self.registry.get(account_id)
+            except AccountError:
+                self._cooling_restarts.pop(account_id, None)
+                continue
+            with self.registry._database.connection() as connection:
+                requested = connection.execute('SELECT activation_requested FROM external_accounts WHERE account_id = ?',
+                                               (account_id,)).fetchone()[0]
+            if not requested or account['stop_operation_id'] is not None:
+                self._cooling_restarts.pop(account_id, None)
+                continue
+            try:
+                verified = await self.test_account(account_id, expected_revision=account['revision'])
+                await self.enable_account(account_id, expected_revision=verified['revision'])
+            except ProviderConnectionError as exc:
+                self._cooling_restarts[account_id] = monotonic() + max(1, exc.retry_after or 60)
+            else:
+                self._cooling_restarts.pop(account_id, None)
 
     async def _run_legacy_backlog(self):
         """Recover unknown historical inputs without blocking account startup."""
@@ -580,6 +609,13 @@ class AccountService:
     def account_status(self, account_id):
         """Expose runtime health separately from persistent activation intent."""
         state = self._states.get(account_id, ProviderStatus("not_configured", True))
+        if self._kinds.get(account_id) in {'TG_BOT', 'TG_USER'}:
+            with self.registry._database.connection() as connection:
+                cooling = connection.execute('SELECT retry_at, error_code FROM telegram_cooldowns '
+                    'WHERE account_id = ? AND retry_at > CURRENT_TIMESTAMP', (account_id,)).fetchone()
+            if cooling is not None:
+                return {'state': 'error', 'error': 'Telegram 账号仍在限流冷却，请稍后重试',
+                        'retry_at': cooling[0], 'error_code': cooling[1]}
         if self._kinds.get(account_id) == "EH" and state.state == "connected":
             with self.registry._database.connection() as connection:
                 row = connection.execute("SELECT credential_revision FROM external_accounts WHERE account_id = ?", (account_id,)).fetchone()

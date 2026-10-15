@@ -6,17 +6,17 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| 当前阶段 | P8 / R95 已验收、待本地阶段提交；最近已提交 P7=31b5b00；见 R95_COMPLETION_AUDIT |
+| 当前阶段 | P9 / R96 已验收待立即本地提交；rc12/038，454 distinct passed / 2710 collect-only；SHA 核验后进入 P10 |
 | 已完成 | P0–P8；P5=2ea49f2，P6=c61af7e，P7=31b5b00；P8 精确产物/持久流水线/发布和移动恢复已验收 |
-| 下一动作 | 立即精确暂存 P8 代码、正式测试及文档，逐 blob 核验并本地提交；核实 SHA 后清理确切 TEMP，再进 P9 worker_session/心跳/周期恢复与预算 |
-| 工作区 | R88=cfa649d；R89=6b728ba；R90=5be84e1；R91=15dd3bb；R92=2ea49f2；R93=c61af7e；R94=31b5b00；R95 待提交，排除 models.py 既有 BOM |
-| 版本/schema | P8 验收 rc11/037；027–036 不改写，037 随本次提交冻结；仅临时库验证，无发布/真实库升级 |
-| 验证基线 | rc11/037：2687 collect-only；九文件 211/0，十九文件 263/0，最后五文件/类 107/0；27 个相关文件按最新节点共 590 passed；非整库 |
+| 下一动作 | 精确暂存 P9 代码/正式测试/同步文档，排除 models.py BOM；检查并本地提交、核实 SHA 后清理具名 TEMP，再审计 P10 全域 API/CAS/幂等/草稿 |
+| 工作区 | R88=cfa649d；R89=6b728ba；R90=5be84e1；R91=15dd3bb；R92=2ea49f2；R93=c61af7e；R94=31b5b00；R95=89ef4b9；models.py 既有 BOM 排除 |
+| 版本/schema | rc12/038；027–037 不改写，038 随 P9 提交冻结；仅临时库验证，无发布/真实库升级 |
+| 验证基线 | P9：2710 collect-only；按各节点最新结果 454 个不同用例通过，0 failure/error/skip；非整库。Linux guardian 尚未实跑，P12 单列 |
 | 环境 | Windows PowerShell；本 checkout 无 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout |
 | 边界 | 不读真实 data/private；临时数据库/文件测试；真实供应商、其他客户端仓库与部署另记未验证 |
 | 现场问题 | rg 不可用，用 CodeGraph/Select-String；git ignore 权限告警不影响查询，.git 写入需工具审批 |
 
-037 在本阶段验收前经历实验性结构扩展，测试使用新临时库和实际 036 升级副本；旧实验 037 不能靠重复 initialize 自动补表。不手改 schema_migrations、不运行真实库升级。当前仅 TEMP/ehbot-p8-artifacts-20261015-a，留痕与提交核验后清理，.scratch 不存在。
+037 已随 P8 提交冻结；038 正在实验性扩展，测试须用新临时库和实际 037 升级副本，旧实验 038 不能靠重复 initialize 自动补表。不手改 schema_migrations、不运行真实库升级。P8 TEMP 已清理、剩余 0；当前仅 TEMP/ehbot-p9-recovery-20261015-a，留痕与提交核验后清理，.scratch 不存在。
 
 接手先读 PHASES，再读本表、当前阶段和 progress 最新 R 条目。task_plan 是清单，本文件是完整执行边界，findings 是调查证据，progress 是实际验证日志。先核对 git status，不能把进行中工作重新从空白实现。
 
@@ -36,8 +36,8 @@
 | P5 / R92 | complete | ingest_entries 统一身份、历史回填与单账号摄取/发布 | 2ea49f2，rc8/031；447 个不同用例最新通过。MTProto 可靠收件箱/来源专属迁移及下载接替按原计划 P6 |
 | P6 / R93 | complete | 多 TG 独立监听/游标/来源 CAS 与有限串行下载接替 | rc9/035，419 distinct passed + DOM root/proxy；本地提交 c61af7e，58 blobs 已核对；详 R93 audit |
 | P7 / R94 | complete | EH 公平有限池/能力退避/收费未知核实/认证种子 | 31b5b00，rc10/036，363 distinct passed；详 R94 audit |
-| P8 / R95 | complete | artifact 生产者/精确打包与 refiling 依赖、发布/移动恢复、受管取消、流水线意图 | rc11/037；590 distinct passed / 2687 collect-only；待阶段本地提交，见 R95 audit |
-| P9 | pending | worker_session/心跳、周期 reconcile、停止/清理恢复、账号/全局/远端预算 | 依赖 P6–P8；快速重启恢复，长任务不误回收，STOPPING 不假释放槽，费用不重复 |
+| P8 / R95 | complete | artifact 生产者/精确打包与 refiling 依赖、发布/移动恢复、受管取消、流水线意图 | 89ef4b9，rc11/037；590 distinct passed / 2687 collect-only；37 blobs 已核实，见 R95 audit |
+| P9 / R96 | accepted_awaiting_commit | worker_session/心跳、周期恢复/隔离/轮转、有界中断恢复、账号/全局/远端预算及 TG 持久冷却 | rc12/038；454 distinct passed / 2710 collect-only；见 R96 audit；SHA 核验前不进入 P10 |
 | P10 | pending | 全域 revision/幂等/批量结果、v2 与旧映射、Web 共享 JSON、WS/草稿冲突 | 前置切片随交付自带保护；此阶段逐域收口，无无条件写旁路，不自动覆盖草稿 |
 | P11 | pending | 审阅其余缺陷：审批 LIMIT 饥饿、ComicInfo 写锁、缩略图 PENDING 竞态 | 与前述机制共用修复；复现原触发条件，不另造平行机制 |
 | P12 | pending | 合同验收、真实本地 HTTP/WS/CBZ、迁移/恢复断点、最终交接 | 定向回归与 collect 检查；性能须实测，其他客户端/真实供应商/发布部署分开记 |

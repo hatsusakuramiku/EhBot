@@ -366,6 +366,16 @@ gap.
 **P5 / R92 completed, current handoff (2026-10-15):** P5 / R92 已独立验收并本地提交 **2ea49f2**，版本 **0.3.0rc8 / schema 031**，027–031 冻结。23 文件 323/0、六文件 79/0，启动/关闭四文件 50/0，最后真实下载等五文件 66/0；按节点取最新 **447 个不同用例通过**，非一次整组运行；**2465 collected，仅收集**。提交的 74 个文件与隔离验证版本逐 blob SHA256 相同；P6/P7 仍是未验收工作区，032–036 未冻结。
 P6 从当前工作区提取 032–035、来源命令/旧订阅迁移/可靠监听/有限 TG 下载账号接替，排除 EH 轮询、health、metadata pool、archive 与 036；完整验收后立即本地阶段提交。P7 已有受控 HTTP 归档意图 173/0，尚缺 EH 独立队列 attempt、认证种子与未知费用核实/崩溃收口。P8–P12 范围保持，总目标 active。
 
+**Latest accepted P9 / R96:** rc12/038; 2710 collected only, 454 distinct
+related cases finally passed (latest result per node, not a whole-suite run).
+Single-backend OS ownership, session-bound claims and account requests, heartbeat,
+bounded periodic recovery, separate queue/request budgets and durable TG cooldown
+are integrated. 027–037 unchanged; 038 freezes with the immediate local phase
+commit. Verify its SHA before P10. Windows process contracts ran; the new Linux
+guardian is statically checked only and needs live validation in P12. No real
+supplier/database upgrade, push, release or deployment. Exclude the pre-existing
+models.py BOM difference. See R96_COMPLETION_AUDIT and the plan's current table.
+
 ## Architecture rules
 
 **Where code goes.** `app/main.py` (120 lines) builds the app, mounts static

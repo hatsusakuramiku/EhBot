@@ -396,7 +396,10 @@ async def test_explicit_retry_resets_pool_and_prefers_recovered_origin(environme
     receipt = await service.command(result.job_id, action, task_id=result.task_id,
         expected_revision=old["revision"], idempotency_key="fresh-retry")
     assert receipt["task_id"] != result.task_id
-    assert await service.get_task(result.task_id) == old
+    after = await service.get_task(result.task_id)
+    # A retry supersedes the old downstream intent; execution history stays fixed.
+    expected = {**old, "pack_intent": {**old["pack_intent"], "status": "CANCELLED"}}
+    assert after == expected
     assert json.loads((await service.get_task(result.task_id))["details_json"])["account_id"] == b
     with db.connection() as connection:
         details = json.loads(connection.execute("SELECT details_json FROM download_jobs WHERE id = ?", (result.job_id,)).fetchone()[0])
@@ -406,7 +409,7 @@ async def test_explicit_retry_resets_pool_and_prefers_recovered_origin(environme
     assert await service._process_one()
     assert seen == [(a, 111), (b, 222), (a, 111)]
     assert (await service.get_task(receipt["task_id"]))["status"] == "COMPLETED"
-    assert await service.get_task(result.task_id) == old
+    assert await service.get_task(result.task_id) == expected
     assert [attempt["status"] for attempt in (await service.get_task(result.task_id))["attempts"]] == ["FAILED", "FAILED"]
 
 

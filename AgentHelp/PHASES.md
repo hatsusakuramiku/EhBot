@@ -9,9 +9,9 @@
 
 ## 当前改造入口
 
-- **P0–P8 / R95 已验收，P8 待本地阶段提交**：rc11/037；2687 collected only，590 个不同相关用例最终通过，未运行整库。[P8 核对](R95_COMPLETION_AUDIT.md)。最近已提交 P7=`31b5b00`；027–036 冻结，037 随 P8 提交冻结。
+- **P0–P8 / R95 已验收并本地提交 `89ef4b9`**：rc11/037；2687 collected only，590 个不同相关用例最终通过，未运行整库。37 blobs/空暂存区/027–037 已核实；[P8 核对](R95_COMPLETION_AUDIT.md)。
 - P5=`2ea49f2`，P6=`c61af7e`；[P5 核对](R92_REQUIREMENT_AUDIT.md)、[P6 核对](R93_COMPLETION_AUDIT.md)、[P7 核对](R94_COMPLETION_AUDIT.md)。阶段验收后立即暂存代码、测试及文档并本地提交，核对 SHA 再进入下一阶段。
-- P8 已覆盖精确原档/CBZ 依赖、持久流水线意图、打包发布与改名/refile 崩溃恢复、真实取消；立即本地提交并核实后才进入 P9 会话/心跳/预算。之后 P10 全域协议、P11 其余缺陷、P12 最终验收。总目标 active，详 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md)。
+- **P9 / R96 已验收，待立即本地提交**：rc12/038，2710 collected only / 454 个不同相关用例通过；会话/心跳、周期恢复、恢复上限、独立预算与 TG 持久冷却。Linux guardian 尚未实跑，留 P12 验证；[P9 核对](R96_COMPLETION_AUDIT.md)。提交核验后进入 P10–P12，总目标 active。
 
 ### 验收前接续记录（历史快照，当前状态以上述 P5 提交为准）
 

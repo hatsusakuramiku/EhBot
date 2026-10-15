@@ -45,6 +45,8 @@ from app.downloads.models import (
 
 from app.downloads.queue import DownloadError, QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
 from app.downloads.execution import attempt_path, execution_scope, failure_transaction, run_sync
+from app.downloads.worker import bind_claim, track_execution
+from app.downloads.budgets import local_available, remote_available, record_interruption
 from app.exhentai.errors import ExHentaiDownloadError
 
 
@@ -74,6 +76,7 @@ class DownloadService:
         telegram_bot_source=None,
         exhentai_source=None,
         manual_enqueue=None,
+        reclaim_pack=None,
     ) -> None:
         self._database = database
         self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
@@ -104,6 +107,8 @@ class DownloadService:
         self._telegram_bot_source = telegram_bot_source
         self._exhentai_source = exhentai_source
         self._manual_enqueue = manual_enqueue
+        self._reclaim_pack = reclaim_pack
+        self._last_reconcile = 0.0
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -626,29 +631,13 @@ class DownloadService:
         self._operation_task = asyncio.create_task(self._run_operations(), name="queue-operations")
 
     async def reclaim_expired_leases(self) -> int:
-        """Return jobs whose lease outlived the process that held it.
+        """Recover bounded orphan claims without stealing actual executions.
 
-        The lease columns were written and never read. `_claim_pending_job_sync`
-        stamps `lease_expires_at` five minutes out, but nothing ever compared it
-        to the clock, so a container killed mid-transfer left the row in
-        `DOWNLOADING` and the candidate in `PROCESSING` -- and every route back
-        was closed: the claim query only looks at `PENDING`, `retry_job` refuses
-        anything that is not FAILED / PAUSED / CANCELLED, `redownload_work`
-        refuses an open state, and `_enqueue` only revives FAILED / CANCELLED.
-        The book had no button anywhere that could move it, which is the same
-        dead end a failed download used to be.
-
-        Called from `start`, which is once per process and before the worker
-        claims anything: two workers cannot race here because there is one
-        worker per process and its own lease is not expired yet. The expiry is
-        what makes this safe rather than a blanket reset -- a live lease is left
-        alone, so this can never take a job away from a running transfer.
-
-        The candidate goes back to `APPROVED` rather than to `PENDING_REVIEW`:
-        it *was* approved, nobody withdrew that, and the only thing that failed
-        was the process. `attempt_count` is deliberately not decremented -- the
-        attempt happened, and a book that has been interrupted four times should
-        read as such.
+        Production holds the database's OS lock and tracks actual attempts.
+        Previous sessions are dead, while a current dispatch lease protects the
+        gap before task startup. Standalone callers retain the expiry fallback.
+        Candidate approval and immutable attempt history survive interruption;
+        unresolved remote pushes first enter the durable stop/restart barrier.
         """
         reclaimed = await run_sync(self._reclaim_expired_leases_sync)
         if reclaimed:
@@ -667,12 +656,24 @@ class DownloadService:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 "SELECT id, candidate_id, provider, details_json FROM download_jobs "
-                "WHERE state = ? AND lease_expires_at IS NOT NULL "
-                "AND lease_expires_at < datetime('now')",
-                (DOWNLOAD_STATE_DOWNLOADING,),
+                "WHERE state = ? AND (? = 1 OR (lease_expires_at IS NOT NULL "
+                "AND lease_expires_at < datetime('now'))) "
+                "ORDER BY (id <= ?), id LIMIT 100",
+                (DOWNLOAD_STATE_DOWNLOADING, int(getattr(self._database, 'worker_session', None) is not None),
+                 getattr(self, '_reclaim_cursor', 0)),
             ).fetchall()
+            if rows:
+                self._reclaim_cursor = rows[-1][0]
+            reclaimed = 0
             for job_id, candidate_id, provider, details_json in rows:
                 current = task_snapshot(connection, job_id)
+                session = getattr(self._database, 'worker_session', None)
+                if session is not None and not session.reclaimable(connection, job_id, current['attempt_id']):
+                    continue
+                connection.execute("UPDATE queue_attempts SET status = 'INTERRUPTED', error_code = 'WORKER_SESSION_LOST', "
+                    "finished_at = CURRENT_TIMESTAMP WHERE attempt_id = ? AND finished_at IS NULL", (current['attempt_id'],))
+                reclaimed += 1
+                exhausted = record_interruption(connection, job_id)
                 if provider == PROVIDER_EH_TORRENT and (
                     self._safe_details(details_json).get("hash") or connection.execute(
                         "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED'",
@@ -681,7 +682,7 @@ class DownloadService:
                 ):
                     # A process may die after remote acceptance but before park.
                     # Never push a second transfer while its saved intent is unresolved.
-                    self._queue_control._operation(connection, job_id, "restart", current, {})
+                    self._queue_control._operation(connection, job_id, "restart", current, {'recovery_exhausted': exhausted})
                     connection.execute(
                         "UPDATE download_jobs SET state = 'STOPPING', lease_owner = NULL, lease_expires_at = NULL, "
                         "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,),
@@ -691,7 +692,7 @@ class DownloadService:
                     "UPDATE download_jobs SET state = ?, lease_owner = NULL, "
                     "lease_expires_at = NULL, retry_at = NULL, "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (DOWNLOAD_STATE_PENDING, int(job_id)),
+                    (DOWNLOAD_STATE_FAILED if exhausted else DOWNLOAD_STATE_PENDING, int(job_id)),
                 )
                 # Guarded by status so a candidate an operator has since moved
                 # on -- rejected it, or approved another source -- is not
@@ -702,7 +703,11 @@ class DownloadService:
                     "WHERE id = ? AND status = 'PROCESSING'",
                     (int(candidate_id),),
                 )
-        return len(rows)
+                if exhausted:
+                    connection.execute("UPDATE download_jobs SET error_code = 'WORKER_RECOVERY_EXHAUSTED', "
+                        "error_message = '任务多次执行中断，请核对原因后手动重试' WHERE id = ?", (job_id,))
+                    connection.execute("UPDATE candidates SET status = 'FAILED' WHERE id = ? AND status = 'APPROVED'", (candidate_id,))
+        return reclaimed
 
     async def stop(self) -> None:
         tasks = [task for task in (self._worker_task, self._operation_task) if task is not None]
@@ -834,6 +839,14 @@ class DownloadService:
     async def _run_operations(self) -> None:
         while True:
             try:
+                if getattr(self._database, 'worker_session', None) is not None and time.monotonic() - self._last_reconcile >= 15:
+                    self._last_reconcile = time.monotonic()
+                    await self.reclaim_expired_leases()
+                    if self._reclaim_pack is not None:
+                        try:
+                            await self._reclaim_pack()
+                        except Exception:
+                            logging.getLogger(__name__).exception('pack_reconcile_error')
                 await self.process_operations()
             except asyncio.CancelledError:
                 raise
@@ -894,7 +907,7 @@ class DownloadService:
             self._active_attempts.pop(job["task_id"], None)
 
     async def _execute_attempt(self, job: dict) -> bool:
-        with execution_scope(self._database.path, job) as execution:
+        with execution_scope(self._database.path, job) as execution, track_execution(self._database, job):
             try:
                 await run_sync(self._check_execution_sync, execution)
                 return await self._process_claimed_job(job)
@@ -1024,14 +1037,18 @@ class DownloadService:
         """
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if not local_available(self._database, connection, 'DOWNLOAD'):
+                return None
+            remote_slot = remote_available(connection)
             row = connection.execute(
                 "SELECT id, candidate_id, provider, idempotency_key, "
                 "details_json, attempt_count FROM download_jobs "
                 "WHERE state = ? AND provider IN ("
                 + ",".join("?" for _ in SUPPORTED_PROVIDERS)
-                + ") AND candidate_id NOT IN (SELECT candidate_id FROM queue_blocked_candidates) "
+                + ") AND (? = 1 OR provider <> 'EH_TORRENT') "
+                "AND candidate_id NOT IN (SELECT candidate_id FROM queue_blocked_candidates) "
                 "ORDER BY priority, id LIMIT 1",
-                (DOWNLOAD_STATE_PENDING, *SUPPORTED_PROVIDERS),
+                (DOWNLOAD_STATE_PENDING, *SUPPORTED_PROVIDERS, int(remote_slot)),
             ).fetchone()
             if row is None:
                 return None
@@ -1049,8 +1066,9 @@ class DownloadService:
                 "WHERE id = ?",
                 (int(row[1]),),
             )
+            snapshot = bind_claim(self._database, connection, int(row[0]), task_snapshot(connection, int(row[0])))
             return {
-                **task_snapshot(connection, int(row[0])),
+                **snapshot,
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
                 "provider": str(row[2]),

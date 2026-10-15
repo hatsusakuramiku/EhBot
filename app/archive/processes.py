@@ -3,9 +3,11 @@ from contextlib import contextmanager
 import ctypes
 from ctypes import wintypes
 import os
+from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import sys
 import time
 
 from app.downloads.execution import current_execution
@@ -129,11 +131,21 @@ def managed_process(arguments, **kwargs):
     check_execution()
     kernel, job = _windows_job() if os.name == "nt" else (None, None)
     process = None
+    read_fd = write_fd = None
     try:
         # CREATE_SUSPENDED prevents a fast wrapper from spawning descendants
         # before it has been assigned to the owned Job.
         options = {"creationflags": subprocess.CREATE_NO_WINDOW | 0x00000004} if os.name == "nt" else {"start_new_session": True}
+        if sys.platform == 'linux':
+            read_fd, write_fd = os.pipe()
+            execution = current_execution.get()
+            inherited = (execution.worker_lock_fd,) if execution is not None and execution.worker_lock_fd is not None else ()
+            options['pass_fds'] = (read_fd, *inherited)
+            arguments = [sys.executable, str(Path(__file__).with_name('_supervisor.py')), str(read_fd), *arguments]
         process = subprocess.Popen(arguments, shell=False, **options, **kwargs)
+        if read_fd is not None:
+            os.close(read_fd)
+            read_fd = None
         if kernel is not None and not kernel.AssignProcessToJobObject(job, int(process._handle)):
             raise ctypes.WinError(ctypes.get_last_error())
         if kernel is not None:
@@ -152,6 +164,10 @@ def managed_process(arguments, **kwargs):
                 except ProcessLookupError:
                     pass
         finally:
+            if read_fd is not None:
+                os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
             if process is not None:
                 if process.poll() is None:
                     process.kill()

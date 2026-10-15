@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 
 from app.connections.accounts import AccountContext, AccountError, AccountRegistry
 from app.connections.execution import AccountExecution, current_account_executions
 from app.connections.lifecycle import AccountLifecycle
+from app.connections.requests import AccountRequests, current_requests
 from app.downloads.execution import current_execution, run_sync
 
 
@@ -33,6 +34,7 @@ class AccountRuntime:
         self._registry = registry
         self._lifecycle = lifecycle
         self._leases: dict[tuple[str, int], set[_Lease]] = {}
+        self.requests = AccountRequests(registry._database)
 
     @asynccontextmanager
     async def use(self, account_id: str, *, for_verification: bool = False):
@@ -48,6 +50,7 @@ class AccountRuntime:
         self._leases.setdefault(key, set()).add(lease)
         token = None
         context_token = None
+        requests_token = None
         try:
             # Register before the DB check. A stop racing this check either
             # sees and cancels the lease, or the check rejects its intention.
@@ -55,12 +58,18 @@ class AccountRuntime:
             execution = current_execution.get()
             if execution is not None and not for_verification:
                 await self._lifecycle.bind_execution(context, execution)
+            session = getattr(self._registry._database, 'worker_session', None)
             token = current_account_executions.set((*current_account_executions.get(), AccountExecution(
                 self._registry._database.path, context.account_id, context.credential_revision, not for_verification,
+                session.session_id if session is not None else None,
             )))
             context_token = current_account_context.set(context)
-            yield context
+            requests_token = current_requests.set((self.requests, context))
+            async with self.requests.use(context) if context.kind == 'EH' else nullcontext():
+                yield context
         finally:
+            if requests_token is not None:
+                current_requests.reset(requests_token)
             if context_token is not None:
                 current_account_context.reset(context_token)
             if token is not None:
@@ -72,6 +81,9 @@ class AccountRuntime:
             lease.exited.set_result(None)
 
     def _validate_sync(self, context, for_verification):
+        session = getattr(self._registry._database, 'worker_session', None)
+        if session is not None and session.stopping:
+            raise AccountError('ACCOUNT_UNAVAILABLE', '后台正在停止，暂不接受新的账号请求')
         with self._registry._database.connection() as connection:
             row = self._registry._row(connection, context.account_id)
             if (row["stop_operation_id"] is not None

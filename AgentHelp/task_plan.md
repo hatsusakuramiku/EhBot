@@ -485,4 +485,13 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] 037 产物版本、精确 ARCHIVE/CBZ 依赖、入队设置与持久打包/手动下载意图。
 - [x] CBZ 准备/替换/确认/清理与改名/refile 三断点恢复；真实进程退出、取消/删除/外部改动/输入竞争合同。
 - [x] 27 个相关文件按最新节点 590 个不同用例通过；2687 collect-only；README/USAGE/API/交接同步。
-- [ ] 立即精确暂存并本地阶段提交，核实 SHA 与 blobs；清理 ehbot-p8-artifacts-20261015-a 后才进入 P9。
+- [x] 本地阶段提交 89ef4b9；37 blobs、空暂存区、027–037 已核实；接 P9–P12。
+
+## R96 / P9 已验收，待立即提交（rc12/038）
+
+- [x] OS 文件锁先于迁移；worker_session/心跳/真实活动与 dispatch 窗口保护；第二后台启动失败，取消启动释放锁。
+- [x] 周期恢复逐项隔离、游标轮转，未知文件失败保留 journal；自动中断恢复最多 3 次，显式重试重新开始。
+- [x] 本地下载/打包/远端占用分开，远端未知/STOPPING 保留；账号请求与监听分别有全局/单账号限制，等待后复核停止/版本。
+- [x] TG 限流持久化，重启不绕过；到期恢复启动监听；停机先阻止领取/新请求。
+- [x] 迁移/进程树/账号/供应商/摄取等 454 个不同相关用例最终通过，2710 collect-only；文档与 R96 audit 同步。Linux 新守护路径尚未实跑，P12 单独验证。
+- [ ] rc12/038 随本次提交冻结；立即本地提交/核验 SHA，再进入 P10；models.py 既有 BOM 排除。

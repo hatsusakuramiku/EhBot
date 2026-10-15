@@ -11,6 +11,7 @@ class AccountExecution:
     account_id: str
     credential_revision: int
     require_enabled: bool
+    worker_session_id: str | None = None
 
     def check(self, connection: sqlite3.Connection) -> None:
         """Reject old metadata/ingestion writes inside their committing transaction."""
@@ -21,6 +22,11 @@ class AccountExecution:
             (self.account_id, self.credential_revision, int(self.require_enabled)),
         ).fetchone()
         if row is None:
+            raise sqlite3.IntegrityError("ACCOUNT_STALE_EXECUTION")
+        if self.worker_session_id is not None and connection.execute(
+            "SELECT 1 FROM worker_sessions WHERE session_id = ? AND status = 'LIVE'",
+            (self.worker_session_id,),
+        ).fetchone() is None:
             raise sqlite3.IntegrityError("ACCOUNT_STALE_EXECUTION")
 
 

@@ -17,6 +17,8 @@ class Execution:
     attempt_id: str
     generation: int
     stop_requested: Event = field(default_factory=Event, compare=False)
+    worker_session_id: str | None = None
+    worker_lock_fd: int | None = field(default=None, repr=False)
 
     def check(self, connection: sqlite3.Connection) -> None:
         """Validate the producing attempt inside its write transaction."""
@@ -27,6 +29,11 @@ class Execution:
             (self.task_id, self.attempt_id, self.generation),
         ).fetchone()
         if row is None:
+            raise sqlite3.IntegrityError("QUEUE_STALE_EXECUTION")
+        if self.worker_session_id is not None and connection.execute(
+            "SELECT 1 FROM worker_sessions WHERE session_id = ? AND status = 'LIVE'",
+            (self.worker_session_id,),
+        ).fetchone() is None:
             raise sqlite3.IntegrityError("QUEUE_STALE_EXECUTION")
 
 
@@ -43,7 +50,8 @@ def check_thread_cancelled() -> None:
 @contextmanager
 def execution_scope(database_path: Path, job: dict):
     """Bind a claimed identity; to_thread copies this context to provider writes."""
-    execution = Execution(database_path, job["task_id"], job["attempt_id"], job["generation"])
+    execution = Execution(database_path, job["task_id"], job["attempt_id"], job["generation"],
+                          worker_session_id=job.get("worker_session_id"), worker_lock_fd=job.get('_worker_lock_fd'))
     token = current_execution.set(execution)
     try:
         yield execution

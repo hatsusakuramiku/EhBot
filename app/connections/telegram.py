@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 
 from app.connections.models import ProviderConnectionError, TelegramBotIdentity
+from app.connections.requests import account_request
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class TelegramBotApi:
         self._token = token
         self._client = client
 
+    @account_request('bot')
     async def _request(self, method: str, **params) -> dict:
         try:
             response = await self._client.get(
@@ -139,6 +141,7 @@ class TelegramBotApi:
             ),
         )
 
+    @account_request('transfer')
     async def download_file(
         self, file_path: str, destination: Path
     ) -> int:
@@ -155,6 +158,13 @@ class TelegramBotApi:
             async with self._client.stream(
                 "GET", url, follow_redirects=True
             ) as response:
+                if response.status_code == 429:
+                    await response.aread()
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = {}
+                    raise self._error_for(429, payload if isinstance(payload, dict) else {})
                 response.raise_for_status()
                 with partial.open("wb") as target:
                     copied = 0

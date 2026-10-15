@@ -24,6 +24,7 @@ import httpx
 from app.db.database import Database
 from app.downloads.execution import attempt_path, current_execution, execution_scope, failure_transaction, run_sync
 from app.downloads.queue import QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
+from app.downloads.budgets import remote_available
 from app.torrent.client import QBittorrentClient
 from app.torrent.delivery import resolve_content_path, take_delivery
 from app.torrent.fetcher import TorrentFileFetcher
@@ -247,7 +248,10 @@ class TorrentService:
         try:
             with self._database.connection() as connection:
                 if status == "INTENDED":
+                    connection.execute('BEGIN IMMEDIATE')
                     execution.check(connection)
+                    if not remote_available(connection, execution.task_id):
+                        raise TorrentError('REMOTE_BUDGET_FULL', '远端下载槽已占用，请等待现有任务完成或停止确认')
                 job_id = connection.execute("SELECT legacy_job_id FROM queue_tasks WHERE task_id = ?",
                                             (execution.task_id,)).fetchone()[0]
                 connection.execute(
@@ -420,6 +424,9 @@ class TorrentService:
         the database each pass, so a process that comes back up re-attaches to
         whatever the client is still working on.
         """
+        session = getattr(self._database, 'worker_session', None)
+        if session is not None and session.stopping:
+            return 0
         jobs = await run_sync(self._waiting_jobs_sync)
         if jobs:
             logging.getLogger(__name__).info(
@@ -816,6 +823,8 @@ class TorrentService:
                     job_id,
                 ),
             )
+            connection.execute('UPDATE queue_remote_resources SET download_finished = 1 WHERE task_id = '
+                '(SELECT task_id FROM download_jobs WHERE id = ?)', (job_id,))
             connection.execute(
                 "INSERT INTO artifacts "
                 "(job_id, artifact_type, path, sha256, size_bytes) "

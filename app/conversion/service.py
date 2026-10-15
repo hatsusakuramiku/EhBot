@@ -50,6 +50,8 @@ from app.conversion.naming import (
 )
 from app.downloads.queue import STALE_EXECUTION_ERRORS, task_snapshot
 from app.downloads.execution import attempt_path, current_execution, execution_scope, run_sync
+from app.downloads.worker import bind_claim, track_execution
+from app.downloads.budgets import local_available, record_interruption
 from app.db.database import METADATA_SOURCE_RANK_SQL, Database
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -965,55 +967,95 @@ class ConversionService:
     async def start(self) -> None:
         if self._worker_task is not None:
             return
-        await run_sync(self._publications.recover)
         await self.reclaim_running_jobs()
         self._worker_task = asyncio.create_task(
             self._run_worker(), name="conversion-worker"
         )
 
     async def reclaim_running_jobs(self) -> int:
-        """Return packaging jobs a dead process left mid-run to the queue.
+        """Recover a rotating bounded batch, isolating each file conflict.
 
-        The download queue answers this question with `lease_expires_at`; this
-        one has no lease column to read, because `_claim_pending_job_sync` here
-        never wrote one. What stands in for it is the single fact that makes the
-        lease unnecessary: there is one conversion worker per process, and this
-        runs inside `start`, before that worker has claimed anything. A
-        `CONVERSION_RUNNING` row at this moment therefore cannot belong to
-        anybody -- it is always the residue of a process that died holding it.
-
-        Without this the row stayed `CONVERSION_RUNNING` forever, and every
-        operator action on the work refused with 「该作品正在打包」: remove,
-        redownload, rename and re-path all guard on that state, so an
-        interrupted pack locked the book out of its own detail page.
-
-        Re-queued rather than failed. Packing is idempotent -- it reads the
-        archive artifact and republishes -- so the honest outcome of 「我们不知道
-        它做完了没有」 is to do it again, where marking it failed would ask an
-        operator to press retry for a failure that never happened.
+        Actual executions and valid dispatch leases retain ownership even when
+        their progress stalls. Only orphan attempts may recover their journal
+        and return to pending; an unresolved file never loses its reservation.
         """
-        reclaimed = await run_sync(self._reclaim_running_jobs_sync)
+        await self.recover_files()
+        def orphan_tasks():
+            session = getattr(self._database, 'worker_session', None)
+            with self._database.connection() as connection:
+                rows = connection.execute("SELECT id, task_id FROM download_jobs WHERE state = ? "
+                    "AND provider = ? ORDER BY (id <= ?), id LIMIT 100",
+                    (CONVERSION_STATE_RUNNING, PROVIDER_CONVERSION, getattr(self, '_reclaim_cursor', 0))).fetchall()
+                if rows:
+                    self._reclaim_cursor = rows[-1][0]
+                return [row[1] for row in rows if session is None or session.reclaimable(
+                    connection, row[0], task_snapshot(connection, row[0])['attempt_id'])]
+        reclaimed = 0
+        for task_id in await run_sync(orphan_tasks):
+            try:
+                await run_sync(self._publications.recover, task_id)
+                reclaimed += await run_sync(self._reclaim_running_job_sync, task_id)
+            except (ConversionError, OSError, sqlite3.Error) as exc:
+                logging.getLogger(__name__).warning('conversion_recovery_pending task=%s code=%s',
+                    task_id, getattr(exc, 'code', 'FILE_RECOVERY_PENDING'))
+                if isinstance(exc, ConversionError) and exc.code == 'PUBLICATION_RECOVERY_REQUIRED':
+                    reclaimed += await run_sync(self._reclaim_running_job_sync, task_id, exc.code)
         if reclaimed:
-            logging.getLogger(__name__).warning(
-                "conversion_jobs_reclaimed jobs=%d",
-                reclaimed,
-                extra={"error_code": "CONVERSION_JOB_RECLAIMED"},
-            )
+            logging.getLogger(__name__).warning('conversion_jobs_reclaimed jobs=%d', reclaimed,
+                extra={'error_code': 'CONVERSION_JOB_RECLAIMED'})
         return reclaimed
 
-    def _reclaim_running_jobs_sync(self) -> int:
+    async def recover_files(self):
+        """Retry bounded file journals without touching live attempts/manual moves."""
+        from app.conversion.relocation import Relocations
+        session = getattr(self._database, 'worker_session', None)
+        def pending():
+            with self._database.connection() as connection:
+                return connection.execute("SELECT * FROM ("
+                    "SELECT 'p:' || publication_id AS key, attempt_id, NULL AS owner, status "
+                    "FROM queue_publications WHERE status IN ('PREPARED', 'RECOVERY_REQUIRED') "
+                    "OR (status IN ('COMMITTED', 'ROLLED_BACK') AND cleanup_complete = 0) "
+                    "UNION ALL SELECT 'm:' || relocation_id, attempt_id, worker_session_id, status "
+                    "FROM queue_relocations WHERE status IN ('PREPARED', 'RECOVERY_REQUIRED')) "
+                    'ORDER BY (key <= ?), key LIMIT 100', (getattr(self, '_journal_cursor', ''),)).fetchall()
+        rows = await run_sync(pending)
+        if rows:
+            self._journal_cursor = rows[-1][0]
+        for key, attempt_id, owner, status in rows:
+            if session is not None and (session.active(attempt_id) or
+                    (key.startswith('m:') and owner == session.session_id and status == 'PREPARED')):
+                continue
+            try:
+                if key.startswith('p:'):
+                    await run_sync(self._publications.recover, publication_id=key[2:])
+                else:
+                    await run_sync(Relocations(self._database).recover, relocation_id=key[2:])
+            except (ConversionError, OSError, sqlite3.Error) as exc:
+                logging.getLogger(__name__).warning('file_recovery_pending journal=%s code=%s',
+                    key, getattr(exc, 'code', 'FILE_RECOVERY_PENDING'))
+
+    def _reclaim_running_job_sync(self, task_id, error_code=None) -> int:
         with self._database.connection() as connection:
-            cursor = connection.execute(
-                "UPDATE download_jobs SET state = ?, "
-                "updated_at = CURRENT_TIMESTAMP "
-                "WHERE state = ? AND provider = ?",
-                (
-                    CONVERSION_STATE_PENDING,
-                    CONVERSION_STATE_RUNNING,
-                    PROVIDER_CONVERSION,
-                ),
-            )
-            return int(cursor.rowcount or 0)
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute("SELECT j.id, t.current_attempt_id FROM download_jobs j "
+                "JOIN queue_tasks t ON t.task_id = j.task_id WHERE j.state = ? AND j.provider = ? AND j.task_id = ?",
+                (CONVERSION_STATE_RUNNING, PROVIDER_CONVERSION, task_id)).fetchone()
+            if row is None:
+                return 0
+            job_id, attempt_id = row
+            session = getattr(self._database, 'worker_session', None)
+            if session is not None and not session.reclaimable(connection, job_id, attempt_id):
+                return 0
+            connection.execute("UPDATE queue_attempts SET status = 'INTERRUPTED', error_code = 'WORKER_SESSION_LOST', "
+                "finished_at = CURRENT_TIMESTAMP WHERE attempt_id = ? AND finished_at IS NULL", (attempt_id,))
+            if record_interruption(connection, job_id) and error_code is None:
+                error_code = 'WORKER_RECOVERY_EXHAUSTED'
+            connection.execute("UPDATE download_jobs SET state = ?, lease_owner = NULL, lease_expires_at = NULL, "
+                'error_code = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (CONVERSION_STATE_FAILED if error_code else CONVERSION_STATE_PENDING, error_code,
+                 ('任务多次执行中断，请核对原因后手动重试' if error_code == 'WORKER_RECOVERY_EXHAUSTED'
+                  else '文件发布需要核实，请保留恢复副本并核对文件') if error_code else None, job_id))
+            return 1
 
     async def stop(self) -> None:
         if self._worker_task is None:
@@ -1066,7 +1108,7 @@ class ConversionService:
         await run_sync(self._publications.recover, task_id)
 
     async def _execute_attempt(self, job: dict) -> bool:
-        with execution_scope(self._database.path, job) as execution:
+        with execution_scope(self._database.path, job) as execution, track_execution(self._database, job):
             try:
                 with self._database.connection() as connection:
                     execution.check(connection)
@@ -1181,6 +1223,8 @@ class ConversionService:
     def _claim_pending_job_sync(self) -> dict | None:
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if not local_available(self._database, connection, 'PACK'):
+                return None
             row = connection.execute(
                 "SELECT id, candidate_id, details_json FROM download_jobs "
                 "WHERE state = ? AND provider = ? "
@@ -1212,8 +1256,9 @@ class ConversionService:
                     parsed = None
                 if isinstance(parsed, dict):
                     details = parsed
+            snapshot = bind_claim(self._database, connection, int(row[0]), task_snapshot(connection, int(row[0])))
             return {
-                **task_snapshot(connection, int(row[0])),
+                **snapshot,
                 "job_id": int(row[0]),
                 "candidate_id": int(row[1]),
                 # `refile` sends the job down the path-only branch below;

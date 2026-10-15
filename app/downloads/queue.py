@@ -144,11 +144,22 @@ class QueueControl:
             else:
                 if current["state"] != "STOPPING":
                     raise DownloadError("STOP_STATE_CHANGED", "停止意图的状态已改变，不能启动新来源")
+                recovery_exhausted = bool(json.loads(operation['params_json']).get('recovery_exhausted')) and action == 'restart'
+                if recovery_exhausted:
+                    connection.execute("UPDATE queue_operations SET status = 'COMPLETED' WHERE operation_id = ?",
+                                       (operation['operation_id'],))
                 connection.execute(
-                    "UPDATE download_jobs SET state = 'CANCELLED', lease_owner = NULL, lease_expires_at = NULL, "
-                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (operation["legacy_job_id"],),
+                    "UPDATE download_jobs SET state = ?, lease_owner = NULL, lease_expires_at = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    ('FAILED' if recovery_exhausted else 'CANCELLED', operation["legacy_job_id"]),
                 )
-                if action in {"retry", "restart"}:
+                if recovery_exhausted:
+                    connection.execute("UPDATE download_jobs SET "
+                        "error_code = 'WORKER_RECOVERY_EXHAUSTED', error_message = '任务多次执行中断，请核对原因后手动重试' "
+                        "WHERE id = ?", (operation['legacy_job_id'],))
+                    connection.execute("UPDATE candidates SET status = 'FAILED' WHERE id = ? AND status = 'PROCESSING'",
+                                       (operation['candidate_id'],))
+                elif action in {"retry", "restart"}:
                     connection.execute(
                         "UPDATE download_jobs SET state = 'PENDING', details_json = '{}', error_code = NULL, "
                         "error_message = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -167,7 +178,7 @@ class QueueControl:
                         "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP",
                         (operation["candidate_id"], key, provider),
                     )
-                if action in {"retry", "restart", "switch-source"}:
+                if action in {"retry", "restart", "switch-source"} and not recovery_exhausted:
                     params = json.loads(operation["params_json"])
                     previous = connection.execute("SELECT pack_requested FROM queue_pack_intents WHERE task_id = ?",
                                                   (operation["task_id"],)).fetchone()
@@ -176,7 +187,7 @@ class QueueControl:
                         "SELECT id FROM download_jobs WHERE idempotency_key = ?", (key,)).fetchone()[0]
                     connection.execute("UPDATE queue_pack_intents SET pack_requested = ? WHERE task_id = "
                         "(SELECT task_id FROM download_jobs WHERE id = ?)", (int(bool(requested)), successor_id))
-                if action in {"retry", "restart", "switch-source"}:
+                if action in {"retry", "restart", "switch-source"} and not recovery_exhausted:
                     connection.execute(
                         "UPDATE candidates SET status = 'APPROVED', filter_reason = '', updated_at = CURRENT_TIMESTAMP "
                         "WHERE id = ? AND status IN ('FAILED', 'PROCESSING', 'NEEDS_INFO')",
@@ -406,6 +417,8 @@ class QueueControl:
                     details_json = json.dumps({key: value for key, value in details.items()
                         if key not in {"account_pool", "account_versions", "attempted_accounts", "account_id", "credential_revision"}},
                         separators=(",", ":"))
+            if action in {'retry', 'restart'}:
+                connection.execute('UPDATE download_jobs SET recovery_count = 0 WHERE id = ?', (job_id,))
             connection.execute(
                 "UPDATE download_jobs SET state = ?, details_json = ?, error_code = NULL, error_message = NULL, "
                 "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",

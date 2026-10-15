@@ -54,6 +54,8 @@ from app.connections.service import AccountService
 from app.conversion.service import ConversionService
 from app.downloads.archived import ArchivedWorkService
 from app.downloads.service import DownloadService
+from app.downloads.worker import WorkerAlreadyRunning, WorkerSession
+from app.downloads.execution import run_sync
 from app.exhentai.scrape_worker import MetadataScrapeWorker
 from app.exhentai.service import ExHentaiService
 from app.exhentai.accounts import DownloadAccountPool, MetadataAccountPool
@@ -320,6 +322,44 @@ def build_lifespan(
         torrent_client: httpx.AsyncClient | None = None
         thumbnail_client: httpx.AsyncClient | None = None
         ai_client: httpx.AsyncClient | None = None
+        worker_session = None
+        async def close_services():
+            if worker_session is not None:
+                worker_session.stopping = True
+            if connection_manager is not None:
+                await connection_manager.stop()
+            download_service = application.state.download_service
+            if download_service is not None:
+                await download_service.stop()
+            conversion_service = application.state.conversion_service
+            if conversion_service is not None:
+                await conversion_service.stop()
+            sweeper = application.state.auto_approval_sweeper
+            if sweeper is not None:
+                await sweeper.stop()
+            scrape_worker = application.state.metadata_scrape_worker
+            if scrape_worker is not None:
+                await scrape_worker.stop()
+            torrent_service_instance = application.state.torrent_service
+            if torrent_service_instance is not None:
+                await torrent_service_instance.stop()
+            if telegram_client is not None:
+                await telegram_client.aclose()
+            if exhentai_client is not None:
+                await exhentai_client.aclose()
+            if tagdb_client is not None:
+                await tagdb_client.aclose()
+            if telegraph_client is not None:
+                await telegraph_client.aclose()
+            if torrent_client is not None:
+                await torrent_client.aclose()
+            if thumbnail_client is not None:
+                await thumbnail_client.aclose()
+            if ai_client is not None:
+                await ai_client.aclose()
+            if worker_session is not None:
+                await worker_session.stop()
+
         try:
             for path in (
                 app_settings.data_path,
@@ -327,7 +367,10 @@ def build_lifespan(
                 app_settings.work_path,
             ):
                 ensure_writable_directory(path)
+            worker_session = WorkerSession(database)
+            await run_sync(worker_session._acquire)
             await database.initialize()
+            await worker_session.start()
             # One-time repair of the titles written before R62, when the
             # message parser still guessed one from a caption's first line (see
             # `Database.maintain_titles`). Guarded on its own: a repair that
@@ -505,6 +548,7 @@ def build_lifespan(
             download_service = DownloadService(
                 database,
                 app_settings.work_path,
+                reclaim_pack=lambda: application.state.conversion_service.reclaim_running_jobs(),
                 manual_enqueue=lambda candidate_id: enqueue_manual_candidate(candidate_id,
                     database=database, orchestrator=application.state.review_orchestrator,
                     download_service=application.state.download_service),
@@ -794,6 +838,8 @@ def build_lifespan(
                 # also re-attaches to whatever the client kept working on
                 # while EhBot was down.
                 await application.state.torrent_service.start()
+        except WorkerAlreadyRunning:
+            raise
         except (OSError, ValueError, sqlite3.Error) as exc:
             application.state.startup_errors.append(str(exc))
             # `exception` rather than `error`: the message on `app.state`
@@ -803,40 +849,13 @@ def build_lifespan(
             logging.getLogger(__name__).exception(
                 "application_startup_failed", extra={"error_code": "STARTUP_FAILED"}
             )
+        except BaseException:
+            await close_services()
+            raise
         try:
             yield
         finally:
-            if connection_manager is not None:
-                await connection_manager.stop()
-            download_service = application.state.download_service
-            if download_service is not None:
-                await download_service.stop()
-            conversion_service = application.state.conversion_service
-            if conversion_service is not None:
-                await conversion_service.stop()
-            sweeper = application.state.auto_approval_sweeper
-            if sweeper is not None:
-                await sweeper.stop()
-            scrape_worker = application.state.metadata_scrape_worker
-            if scrape_worker is not None:
-                await scrape_worker.stop()
-            torrent_service_instance = application.state.torrent_service
-            if torrent_service_instance is not None:
-                await torrent_service_instance.stop()
-            if telegram_client is not None:
-                await telegram_client.aclose()
-            if exhentai_client is not None:
-                await exhentai_client.aclose()
-            if tagdb_client is not None:
-                await tagdb_client.aclose()
-            if telegraph_client is not None:
-                await telegraph_client.aclose()
-            if torrent_client is not None:
-                await torrent_client.aclose()
-            if thumbnail_client is not None:
-                await thumbnail_client.aclose()
-            if ai_client is not None:
-                await ai_client.aclose()
+            await close_services()
     return lifespan
 
 

@@ -227,3 +227,5 @@ P7 / 036 已冻结：归档/认证种子复用任务命令和操作查询，不�
 P8 / 037：`POST /api/v1/works/{id}/convert` 可传 `{"input_artifact_id":"<uuid>"}` 固定原档版本；空请求体或 `{}` 仍选择当前已完成的原档。ID 必须是非空字符串并属于该作品的原档；新下载尚未完成且未明确选择旧版时返回 `ARCHIVE_NOT_READY`，已有不同输入/不同类型的活动打包返回 `PACK_INPUT_CONFLICT`。显式输入保存在任务与 attempt 的 details_json，重试不临时选择另一版。最终 v2/CAS/幂等收口按 P10。
 
 `GET /api/v1/tasks/{task_id}` 增加 `pack_intent`（pack_requested、input_artifact_id、pack_task_id、status），`artifacts`（版本 ID、类型、生产 attempt、路径/摘要/大小/页数），以及安全摘要 `publications` 和 `relocations`。打包意图状态为 WAITING/READY/QUEUED/CANCELLED；发布和移动状态为 PREPARED/COMMITTED/ROLLED_BACK/RECOVERY_REQUIRED。历史产物的 producer_attempt_id 为 null，不伪造生产者；移动摘要不含内部恢复副本路径。`PUBLICATION_RECOVERY_REQUIRED` 需先核实文件，不自动覆盖或清理未知内容。下载完成与打包通知仍复用现有事件，持久意图负责补偿丢失通知。
+
+P9 / 038（本地定向验收通过，未发布）：attempt 的 lease_owner 为后台 session UUID；心跳续约不推进任务编辑 revision，旧 session 的完成写入被拒绝。历史 attempt 的 INTERRUPTED / WORKER_SESSION_LOST 表示进程或派发失联，自动恢复最多 3 次；WORKER_RECOVERY_EXHAUSTED 需核对原因后显式重试。停止和远端确认仍复用 operation，不因后台重启返回虚假的完成状态。TG 账号 runtime health 在冷却中返回 error 状态、固定脱敏说明、error_code 和 retry_at（UTC）；凭据与会话不进入该响应。客户端按权威快照刷新，不能用定时进度覆盖编辑草稿。

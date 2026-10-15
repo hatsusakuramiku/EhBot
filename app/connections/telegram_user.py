@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.connections.models import ProviderConnectionError
+from app.connections.requests import account_request
 
 
 #: Telethon's own default. Named here because it is the number that makes this
@@ -333,6 +334,7 @@ class TelegramUserClient:
         except Exception:  # noqa: BLE001 - teardown is best-effort
             pass
 
+    @account_request('request')
     async def send_code(self, phone: str) -> LoginChallenge:
         """Ask Telegram to send a login code to `phone`."""
         cleaned = (phone or "").strip().replace(" ", "")
@@ -358,6 +360,7 @@ class TelegramUserClient:
             session=session,
         )
 
+    @account_request('request')
     async def sign_in(
         self,
         challenge: LoginChallenge,
@@ -394,6 +397,7 @@ class TelegramUserClient:
             await self._close(client)
         return str(session), identity
 
+    @account_request('receive')
     async def fetch_channel_messages(
         self, chat_id: int, *, after_id: int, limit: int
     ) -> list[Any]:
@@ -424,6 +428,7 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    @account_request('receive')
     async def latest_message_id(self, chat_id: int) -> int | None:
         """The newest message id in one chat, or None for an empty one.
 
@@ -442,6 +447,7 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    @account_request('receive')
     async def load_dialogs(self) -> dict[int, Any]:
         """Read the account's whole dialog list once, filling the entity cache.
 
@@ -495,6 +501,7 @@ class TelegramUserClient:
         self._entities.store(chat_id, entity)
         return entity
 
+    @account_request('request')
     async def verify(self) -> TelegramUserIdentity:
         """Confirm the stored session still authorises the account."""
         client = await self._connect()
@@ -512,6 +519,7 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    @account_request('request')
     async def inspect_message_media(self, chat_id: int, message_id: int) -> dict:
         """Resolve an archive through this user's own entity cache and session."""
         from app.candidates.mtproto import _attachments
@@ -532,6 +540,7 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    @account_request('transfer')
     async def download_message_media(
         self,
         chat_id: int,

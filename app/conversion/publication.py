@@ -209,15 +209,17 @@ class Publications:
                 Path(row['source_path']).unlink(missing_ok=True)
         return True
 
-    def recover(self, task_id=None):
+    def recover(self, task_id=None, *, publication_id=None):
         """Resolve prepared records before reclaim or physical removal cleanup."""
         from app.conversion.relocation import Relocations
-        Relocations(self._database).recover(task_id)
+        if publication_id is None:
+            Relocations(self._database).recover(task_id)
         with closing(self._database._connect()) as connection:
             ids = [row[0] for row in connection.execute(
                 "SELECT publication_id FROM queue_publications WHERE (status IN ('PREPARED', 'RECOVERY_REQUIRED') "
                 "OR (status IN ('COMMITTED', 'ROLLED_BACK') AND cleanup_complete = 0)) "
-                'AND (? IS NULL OR task_id = ?)', (task_id, task_id))]
+                'AND (? IS NULL OR task_id = ?) AND (? IS NULL OR publication_id = ?)',
+                (task_id, task_id, publication_id, publication_id))]
         for publication_id in ids:
             row = self._read(publication_id)
             if row['status'] == 'RECOVERY_REQUIRED':

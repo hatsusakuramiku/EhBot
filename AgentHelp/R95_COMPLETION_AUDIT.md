@@ -23,3 +23,5 @@ rc11 / schema 037。2687 collected only；27 个相关文件的多组定向验�
 升级/回退沿 R92：先停服务，备份完整 SQLite/私有配置/配套文件，在隔离副本通过 Database.initialize 升级；回退恢复完整旧快照与配套源码，不删迁移记录降级。不能在实验性旧 037 上重复 initialize 期待补表。README/USAGE/REALTIME_API/方案/计划/PHASES/task_plan/findings/progress/AGENTS 同步；无环境变量变化。
 
 验收后立即精确暂存本阶段代码、正式测试与文档，检查暂存差异、逐 blob SHA256 与已冻结迁移，再本地单行标题提交并核实 SHA。P8 提交前不进 P9；不推送、发布或部署。既有 models.py BOM 差异排除。
+
+本地提交 **89ef4b938464f7eb92715bd21107d80f5fa850e0**（单行标题、无正文）；37 个提交 blobs 与提交前规范化内容逐 SHA256 相同，暂存为空，027–037 与提交一致；037 已冻结。提交留痕随下一阶段纳入，不另拆文档提交。
