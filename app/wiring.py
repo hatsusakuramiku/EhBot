@@ -560,6 +560,8 @@ def build_lifespan(
                 stop_pack=(lambda task_id: application.state.conversion_service.stop_attempt(task_id)),
                 cleanup_removals=(lambda: application.state.archived_work_service.process_removals()),
                 account_scope=connection_manager.use_kind,
+                telegram_user_source=connection_manager.resolve_telegram_user_source,
+                telegram_bot_source=connection_manager.resolve_telegram_bot_source,
                 # Auto-pack a finished download into a CBZ. The idempotent
                 # conversion insert makes the torrent route's own auto-pack a
                 # no-op here, so a single conversion job is created per

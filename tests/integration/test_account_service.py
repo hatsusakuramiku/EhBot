@@ -79,14 +79,23 @@ async def test_legacy_import_startup_repeats_without_writing_old_private_files(s
     originals = {"telegram_bot_token": "legacy-test-token", "exhentai_cookies": json.dumps({"ipb_member_id": "1234", "ipb_pass_hash": "test-cookie", "igneous": "test-igneous"})}
     for name, value in originals.items():
         service.registry._secrets.write(name, value)
+    await service.registry._database.configure_telegram_source(
+        source_type="CHANNEL", chat_id=-1000000000600, display_name="Legacy startup feed",
+        enabled=True, allowed_archive_formats=("zip",), max_attachment_size_mb=128,
+    )
     await service.start()
     accounts = await service.registry.list_accounts()
     assert len(accounts) == 2 and all(account["enabled"] for account in accounts)
     assert service.snapshot().telegram.state == "connected" and service.snapshot().exhentai.state == "connected"
+    sources = await service.registry._database.list_telegram_sources()
+    bot = next(account for account in accounts if account["kind"] == "TG_BOT")
+    assert len(sources) == 1 and sources[0].account_id == bot["account_id"]
+    assert (await service.registry._database.telegram_ingest_targets(bot["account_id"]))[0]["chat_id"] == -1000000000600
     await service.stop()
     await service.start()
     assert {row["account_id"] for row in await service.registry.list_accounts()} == {row["account_id"] for row in accounts}
     assert all(service.registry._secrets.read(name) == value for name, value in originals.items())
+    assert await service.registry._database.list_telegram_sources() == sources
 
 
 @pytest.mark.asyncio

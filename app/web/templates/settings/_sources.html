@@ -3,8 +3,8 @@
 
   A source is a whitelist entry, not a subscription: a message from a chat that
   is not here is never read. Both the add form and each stored row post to the
-  same `configure_source` endpoint, keyed by `(source_type, chat_id)` -- which is
-  why the row form carries those two as hidden fields and does not let them be
+  same `configure_source` endpoint, keyed by `(account_id, chat_id)` -- which is
+  why the row form carries that identity as hidden fields and does not let it be
   edited. Changing a chat id would mean creating a different source, and doing it
   through an「更新」button would silently orphan the old one.
 
@@ -31,6 +31,27 @@
   list. Without that, a source the bot has never seen a message in could not be
   configured at all until one arrived.
 #}
+{% set batch_draft = source_draft if source_draft and source_draft.expected_revisions is defined else {} %}
+{% if source_draft %}
+  <section class="ui-panel" data-source-draft>
+    <h2 class="ui-section-title">未保存草稿</h2>
+    <p class="ui-hint">草稿和原版本已保留。请核对当前配置；页面刷新不会自动重试或覆盖。</p>
+    <pre>{{ source_draft | tojson(indent=2) }}</pre>
+    {% if source_conflict %}
+      <p>当前已保存配置：</p>
+      <pre>{{ source_conflict | tojson(indent=2) }}</pre>
+    {% endif %}
+  </section>
+{% endif %}
+{% if source_command %}
+  <section class="ui-panel" data-source-command>
+    <h2 class="ui-section-title">来源操作结果</h2>
+    {% for item in source_command['items'] %}
+      <p>#{{ item.source_id or item.chat_id }}：{% if item.error %}{{ item.error.message }}{% elif item.status == 'SKIPPED' %}已存在，保留原配置{% else %}已完成{% endif %}</p>
+      {% if item.error and item.error.details.current %}<pre>{{ item.error.details.current | tojson(indent=2) }}</pre>{% endif %}
+    {% endfor %}
+  </section>
+{% endif %}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
@@ -43,11 +64,20 @@
             action="{{ url_for('browse_telegram_dialogs') }}"
             style="margin-top: var(--s-3)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="ui-field">
+          <label for="dialog-account">读取会话的 TG 用户账号</label>
+          <select class="ui-select" id="dialog-account" name="account_id" required>
+            <option value="">请选择账号</option>
+            {% for account in source_accounts if account.kind == 'TG_USER' %}
+              <option value="{{ account.account_id }}" {% if not account.enabled %}disabled{% endif %}>{{ account.label }}{% if not account.enabled %}（已停用）{% endif %}</option>
+            {% endfor %}
+          </select>
+        </div>
         <div class="ui-form-actions">
           <button class="ui-btn" type="submit">读取我的频道与私聊</button>
         </div>
         <small class="ui-hint">
-          用「设置 → 外部连接」里登录的 Telegram 用户账户读一次会话列表，也就是该账户
+          用所选 TG 用户账号读一次会话列表，也就是该账号
           自己看到的频道、群组与私聊，连同它们的 Chat ID。读取只列出来，不写入任何来源。
         </small>
       </form>
@@ -57,8 +87,12 @@
             checkboxes: they carry `form="dialog-batch-add"`, which is what lets
             one submit carry several chats without wrapping (and therefore
             invalidating) the per-row 填入表单 forms. -#}
-        <form id="dialog-batch-add" method="post"
-              action="{{ url_for('add_sources_bulk') }}"></form>
+        <form id="dialog-batch-add" method="post" data-source-form="dialog-add"
+              action="{{ url_for('add_sources_bulk') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="account_id" value="{{ dialogs[0].account_id or '' }}">
+          <input type="hidden" name="idempotency_key" value="{{ source_command_key }}-add">
+        </form>
         <div style="max-height: 18rem; overflow: auto; margin-top: var(--s-4)">
           {% for dialog in dialogs %}
             {#- One form per row, so «填入表单» is a real submit and the page
@@ -72,11 +106,14 @@
                 <input type="hidden" name="source_type" value="{{ kind.source_type }}">
                 <input type="hidden" name="chat_id" value="{{ dialog.chat_id }}">
                 <input type="hidden" name="display_name" value="{{ dialog.title }}">
+                <input type="hidden" name="account_id" value="{{ dialog.account_id or '' }}">
                 <div class="ui-record-head">
                   <label class="ui-checkline">
                     <input class="ui-checkbox" type="checkbox" form="dialog-batch-add"
                            name="dialogs"
-                           value='{{ {"source_type": kind.source_type, "chat_id": dialog.chat_id, "display_name": dialog.title} | tojson }}'
+                           {% set version = namespace(value=0) %}
+                           {% for row in source_versions if row.account_id == dialog.account_id and row.chat_id == dialog.chat_id %}{% set version.value = row.revision %}{% endfor %}
+                           value='{{ {"source_type": kind.source_type, "chat_id": dialog.chat_id, "display_name": dialog.title, "expected_revision": version.value} | tojson }}'
                            aria-label="选择「{{ dialog.title }}」加入批量添加">
                   </label>
                   <span class="ui-record-title">{{ dialog.title }}</span>
@@ -101,9 +138,20 @@
         </small>
       {% endif %}
 
-      <form class="ui-form" method="post" action="{{ url_for('configure_source') }}"
+      <form class="ui-form" method="post" data-source-form="new" {% if source_draft and prefill %}data-dirty="true"{% endif %} action="{{ url_for('configure_source') }}"
             style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="expected_revision" value="{{ prefill.expected_revision if prefill and prefill.expected_revision is defined else 0 }}">
+        <input type="hidden" name="idempotency_key" value="{{ prefill.idempotency_key if prefill and prefill.idempotency_key is defined else source_command_key ~ '-save' }}">
+        <div class="ui-field">
+          <label for="source-account">监听账号</label>
+          <select class="ui-select" id="source-account" name="account_id" required>
+            <option value="">请选择账号</option>
+            {% for account in source_accounts %}
+              <option value="{{ account.account_id }}" {% if prefill and prefill.account_id == account.account_id %}selected{% endif %}>{{ account.label }}</option>
+            {% endfor %}
+          </select>
+        </div>
         <div class="ui-form-grid">
           <div class="ui-field">
             <label for="source-type">来源类型</label>
@@ -126,7 +174,7 @@
                  value="{{ prefill.display_name if prefill else '' }}">
         </div>
         <label class="ui-checkline">
-          <input class="ui-checkbox" name="enabled" type="checkbox">
+          <input class="ui-checkbox" name="enabled" type="checkbox" {% if prefill and prefill.enabled %}checked{% endif %}>
           <span>启用此来源</span>
         </label>
         <fieldset class="ui-fieldset">
@@ -135,7 +183,7 @@
             {% for format in archive_formats %}
               <label class="ui-checkline">
                 <input class="ui-checkbox" name="allowed_archive_formats" type="checkbox"
-                       value="{{ format }}" checked>
+                       value="{{ format }}" {% if not source_draft or (prefill and format in prefill.get('allowed_archive_formats', [])) %}checked{% endif %}>
                 <span>{{ format|upper }}</span>
               </label>
             {% endfor %}
@@ -144,38 +192,41 @@
         <div class="ui-field">
           <label for="new-size">附件上限（MB）</label>
           <input class="ui-input" id="new-size" name="max_attachment_size_mb"
-                 type="number" min="1" placeholder="不限">
+                 type="number" min="1" placeholder="不限" value="{{ prefill.max_attachment_size_mb if prefill else '' }}">
         </div>
         <details class="ui-fieldset">
           <summary>元数据过滤（可选）</summary>
           <div class="ui-field">
             <label for="new-req">必需 Tag</label>
             <input class="ui-input" id="new-req" name="required_tags" type="text"
-                   placeholder="language:chinese">
+                   placeholder="language:chinese" value="{{ prefill.required_tags if prefill else '' }}">
           </div>
           <div class="ui-field">
             <label for="new-forb">禁用 Tag</label>
             <input class="ui-input" id="new-forb" name="forbidden_tags" type="text"
-                   placeholder="male:only">
+                   placeholder="male:only" value="{{ prefill.forbidden_tags if prefill else '' }}">
           </div>
           <div class="ui-field">
             <label for="new-lang">允许语言</label>
             <input class="ui-input" id="new-lang" name="allowed_languages" type="text"
-                   placeholder="chinese, japanese">
+                   placeholder="chinese, japanese" value="{{ prefill.allowed_languages if prefill else '' }}">
           </div>
           <div class="ui-field">
             <label for="new-cat">允许类别</label>
             <input class="ui-input" id="new-cat" name="allowed_categories" type="text"
-                   placeholder="doujinshi, manga">
+                   placeholder="doujinshi, manga" value="{{ prefill.allowed_categories if prefill else '' }}">
           </div>
           <div class="ui-field">
             <label for="new-rating">最低评分</label>
             <input class="ui-input" id="new-rating" name="min_rating"
-                   type="number" step="0.1" min="0" max="5" placeholder="不限">
+                   type="number" step="0.1" min="0" max="5" placeholder="不限" value="{{ prefill.min_rating if prefill else '' }}">
           </div>
         </details>
         <div class="ui-form-actions">
           <button class="ui-btn" data-variant="primary" type="submit">保存来源</button>
+          {% if source_conflict %}
+            <button class="ui-btn" type="submit" name="confirmed_revision" value="{{ source_conflict.revision }}">已核对，基于当前版本提交草稿</button>
+          {% endif %}
         </div>
       </form>
     </section>
@@ -192,16 +243,20 @@
       {#- The batch form. Rendered once, above the rows; every row's checkbox
           points at it by id. Rule fields are shared by the 套用规则 action and
           are ignored by 启用/停用/删除. -#}
-      <form class="ui-form" id="sources-batch" method="post"
+      <form class="ui-form" id="sources-batch" method="post" data-source-form="batch" {% if batch_draft %}data-dirty="true"{% endif %}
             action="{{ url_for('sources_batch_action') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="idempotency_key" value="{{ source_command_key }}-batch">
+        {% set versions = namespace(value={}) %}
+        {% for row in sources %}{% set _ = versions.value.update({row.source_id|string: row.revision}) %}{% endfor %}
+        <input type="hidden" name="expected_revisions" value='{{ source_draft.expected_revisions if source_draft and source_draft.expected_revisions is defined else versions.value | tojson }}'>
         <div class="ui-form-actions">
           <button class="ui-btn" data-size="sm" type="submit"
                   name="action" value="enable">批量启用</button>
           <button class="ui-btn" data-size="sm" type="submit"
                   name="action" value="disable">批量停用</button>
           {{ ui.confirm("批量删除", "删除选中的来源",
-                        "来源会从列表隐藏并停用，规则一并清空。若之后收到该会话的消息，或再次保存同一来源，它会重新出现——删除是墓碑，不是抹除。",
+                        "来源会从列表隐藏并停用，规则一并清空。收到消息不会恢复；明确重新添加时才恢复。",
                         confirm_label="确认删除", form="sources-batch",
                         field="action", value="delete", size="sm") }}
         </div>
@@ -213,7 +268,7 @@
               {% for format in archive_formats %}
                 <label class="ui-checkline">
                   <input class="ui-checkbox" name="allowed_archive_formats"
-                         type="checkbox" value="{{ format }}">
+                         type="checkbox" value="{{ format }}" {% if format in batch_draft.get('allowed_archive_formats', []) %}checked{% endif %}>
                   <span>{{ format|upper }}</span>
                 </label>
               {% endfor %}
@@ -222,32 +277,32 @@
           <div class="ui-field">
             <label for="batch-size">附件上限（MB）</label>
             <input class="ui-input" id="batch-size" name="max_attachment_size_mb"
-                   type="number" min="0" placeholder="留空 = 不限">
+                   type="number" min="0" placeholder="留空 = 不限" value="{{ batch_draft.get('max_attachment_size_mb', '') }}">
           </div>
           <div class="ui-field">
             <label for="batch-req">必需 Tag</label>
             <input class="ui-input" id="batch-req" name="required_tags" type="text"
-                   placeholder="language:chinese">
+                   placeholder="language:chinese" value="{{ batch_draft.get('required_tags', '') }}">
           </div>
           <div class="ui-field">
             <label for="batch-forb">禁用 Tag</label>
             <input class="ui-input" id="batch-forb" name="forbidden_tags" type="text"
-                   placeholder="male:only">
+                   placeholder="male:only" value="{{ batch_draft.get('forbidden_tags', '') }}">
           </div>
           <div class="ui-field">
             <label for="batch-lang">允许语言</label>
             <input class="ui-input" id="batch-lang" name="allowed_languages" type="text"
-                   placeholder="chinese, japanese">
+                   placeholder="chinese, japanese" value="{{ batch_draft.get('allowed_languages', '') }}">
           </div>
           <div class="ui-field">
             <label for="batch-cat">允许类别</label>
             <input class="ui-input" id="batch-cat" name="allowed_categories" type="text"
-                   placeholder="doujinshi, manga">
+                   placeholder="doujinshi, manga" value="{{ batch_draft.get('allowed_categories', '') }}">
           </div>
           <div class="ui-field">
             <label for="batch-rating">最低评分</label>
             <input class="ui-input" id="batch-rating" name="min_rating"
-                   type="number" step="0.1" min="0" max="5" placeholder="留空 = 不限">
+                   type="number" step="0.1" min="0" max="5" placeholder="留空 = 不限" value="{{ batch_draft.get('min_rating', '') }}">
           </div>
           <div class="ui-form-actions">
             <button class="ui-btn" data-size="sm" type="submit"
@@ -258,20 +313,25 @@
       {% endif %}
 
       {% for source in sources %}
-        <form class="ui-record" method="post" action="{{ url_for('configure_source') }}"
+        <form class="ui-record" method="post" data-source-form="row-{{ source.source_id }}" action="{{ url_for('configure_source') }}"
               style="margin-top: var(--s-4)">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          {#- Identity, not editable: these two are the key the endpoint upserts on. -#}
+          <input type="hidden" name="expected_revision" value="{{ source.revision }}">
+          <input type="hidden" name="idempotency_key" value="{{ source_command_key }}-{{ source.source_id }}">
+          {#- Account and chat identity remain fixed when updating rules. -#}
           <input type="hidden" name="source_type" value="{{ source.source_type }}">
           <input type="hidden" name="chat_id" value="{{ source.chat_id }}">
+          <input type="hidden" name="account_id" value="{{ source.account_id or '' }}">
           <div class="ui-record-head">
             <label class="ui-checkline">
               <input class="ui-checkbox" type="checkbox" form="sources-batch"
                      name="source_ids" value="{{ source.source_id }}"
+                     {% if source.source_id|string in batch_draft.get('source_ids', []) %}checked{% endif %}
                      aria-label="选择来源「{{ source.display_name }}」">
             </label>
             <span class="ui-record-title">{{ source.display_name }}</span>
             <span class="ui-record-meta">{{ source.chat_id }}</span>
+            <span class="ui-record-meta">{{ source.account_label or '历史来源（账号未知）' }}</span>
             <div class="ui-record-badges">{{ ui.badge(source.enablement) }}</div>
           </div>
           <div class="ui-field">

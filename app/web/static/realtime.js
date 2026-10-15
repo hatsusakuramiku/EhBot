@@ -226,10 +226,14 @@
   /* Re-render with the same Jinja template. Untouched keyed rows are retained;
    * dirty forms survive through hx-preserve, and selections/focus/scroll are
    * restored after HTMX/Alpine finish adopting changed markup. */
-  function swap(html, submitted) {
+  function swap(html, submitted, writingResponse) {
     closeMenu();
     var main = document.getElementById("main");
     if (!main || !window.htmx) return;
+    if (!writingResponse && main.querySelector("[data-source-form][data-dirty]")) {
+      connectionStatus("来源配置有更新，未保存草稿已保留；提交时将校验原版本");
+      return;
+    }
     var parsed = new DOMParser().parseFromString(html, "text/html");
     var fragment = parsed.getElementById("main") || parsed.body;
     var checked = Array.from(main.querySelectorAll('input[name="candidate_ids"]:checked,input[name="job_ids"]:checked')).map(function (node) {
@@ -247,6 +251,7 @@
       freshDrawer.setAttribute("hx-preserve", "true");
     }
     function formKey(form) {
+      if (form.hasAttribute("data-source-form")) return "source:" + form.getAttribute("data-source-form");
       if (form.matches("[data-metadata-editor]") && form.id) return form.id;
       return [form.getAttribute("action"), form.getAttribute("method"), Array.from(form.querySelectorAll('input[type="hidden"]'))
         .filter(function (node) { return node.name !== "csrf_token" && node.name !== "return_to"; })
@@ -257,6 +262,10 @@
     forms.forEach(function (form, index) {
       var fresh = (freshByKey[formKey(form)] || []).shift();
       if (form === submitted) { delete form.dataset.dirty; return; }
+      if (!fresh && form.dataset.dirty && form.hasAttribute("data-source-form")) {
+        fresh = form.cloneNode(true);
+        fragment.appendChild(fresh);
+      }
       if (!form.dataset.dirty || !fresh) return;
       if (!form.id) form.id = "realtime-form-" + index;
       fresh.id = form.id;
@@ -374,7 +383,7 @@
       if (frame.format === "html" && frame.status < 500) {
         refreshAgain = frame.sequence < sequence;
         if (frame.type === "command.result") delete form.dataset.dirty;
-        swap(frame.data, frame.type === "command.result" ? form : null);
+        swap(frame.data, frame.type === "command.result" || form.hasAttribute("data-source-form") ? form : null, true);
       }
       if (frame.type === "command.error") {
         form.dataset.dirty = "true";

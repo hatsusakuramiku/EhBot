@@ -95,3 +95,42 @@ async def test_successor_enqueue_failure_rolls_back_slot_and_operation(database,
         assert c.execute("SELECT count(*) FROM download_jobs").fetchone()[0] == 1
         c.execute("DROP TRIGGER injected_queue_failure")
     assert await service.process_operations() == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_shutdown_cannot_cancel_already_running_producer_cleanup(database, tmp_path):
+    entered, cleaning, release, exited, interrupted = (asyncio.Event() for _ in range(5))
+
+    async def download(candidate_id):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted.set()
+                raise
+            exited.set()
+
+    service = DownloadService(database, tmp_path, exhentai_download=download)
+    job_id = pending(database, "EXHENTAI")
+    worker = asyncio.create_task(service._process_one())
+    operation = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await service.command(job_id, "cancel", **observed(database, job_id))
+        operation = asyncio.create_task(service.process_operations())
+        await asyncio.wait_for(cleaning.wait(), 3)
+        worker.cancel()
+        done, _ = await asyncio.wait({worker, operation}, timeout=0.05)
+        assert not done and not interrupted.is_set() and not exited.is_set()
+        assert service._active_attempts
+        with database.connection() as connection:
+            assert connection.execute("SELECT state FROM download_jobs WHERE id = ?", (job_id,)).fetchone() == ("STOPPING",)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(worker, *([operation] if operation else []), return_exceptions=True), 5)
+    assert worker.cancelled() and exited.is_set() and not interrupted.is_set()
+    assert operation.result() == 1 and service._active_attempts == {}

@@ -241,7 +241,7 @@ def source_still_eligible(connection, source_message_id):
     from app.candidates.rules import evaluate_source_rules
     row = connection.execute(
         "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, ts.enabled, ts.rules_json "
-        "FROM source_messages sm JOIN telegram_sources ts ON (ts.id = sm.rule_source_id OR (sm.rule_source_id IS NULL AND ts.account_id = sm.account_id)) AND ts.chat_id = sm.chat_id "
+        "FROM source_messages sm JOIN telegram_sources ts ON ts.account_id = sm.account_id AND ts.chat_id = sm.chat_id "
         "JOIN telegram_accounts ta ON ta.id = sm.account_id "
         "LEFT JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
         "WHERE sm.id = ? AND sm.message_state = 'ACTIVE' "

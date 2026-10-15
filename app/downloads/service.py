@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from app.connections.models import ProviderConnectionError, refusal_detail
 from app.connections.telegram import TelegramBotApi
+from app.connections.telegram_files import document_id
 from app.db.database import Database, title_subquery
 from app.downloads.models import (
     CONVERSION_STATE_COMPLETED,
@@ -68,6 +69,8 @@ class DownloadService:
         notify=None,
         exhentai_preflight=None,
         telegraph_preflight=None,
+        telegram_user_source=None,
+        telegram_bot_source=None,
     ) -> None:
         self._database = database
         self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
@@ -94,6 +97,8 @@ class DownloadService:
         self._stop_pack = stop_pack
         self._cleanup_removals = cleanup_removals
         self._account_scope = account_scope
+        self._telegram_user_source = telegram_user_source
+        self._telegram_bot_source = telegram_bot_source
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -191,6 +196,13 @@ class DownloadService:
         }
         if self._account_scope is not None:
             await run_sync(self._validate_telegram_source_sync, candidate_id, details, None)
+        if self._telegram_user_source is not None:
+            try:
+                details.update(await self._telegram_user_source({**attachment, "chat_id": int(chat_id), "message_id": int(message_id)}))
+            except ProviderConnectionError as exc:
+                raise DownloadError(exc.code, exc.public_message) from exc
+        elif attachment.get("account_kind") == "TG_USER":
+            details["download_file_unique_id"] = attachment.get("file_unique_id")
         return await self._enqueue(
             candidate_id,
             PROVIDER_TELEGRAM_USER,
@@ -234,6 +246,17 @@ class DownloadService:
                 raise DownloadError("ATTACHMENT_INVALID", "所选附件与保存的来源不匹配")
             if kind != "TG_BOT" and (row[4], row[5]) != (details.get("chat_id"), details.get("message_id")):
                 raise DownloadError("ATTACHMENT_INVALID", "所选附件的源消息位置不匹配")
+            if details.get("download_observation_id") is not None:
+                identity = document_id(details)
+                selected = {"observation_id": details["download_observation_id"],
+                            "observation_revision": details.get("download_observation_revision"),
+                            "origin_account_id": details.get("account_id"), "account_id": details.get("account_id"),
+                            "chat_id": details.get("download_chat_id"), "message_id": details.get("download_message_id"),
+                            "file_unique_id": details.get("download_file_unique_id"),
+                            "file_id": details.get("download_file_id")}
+                if identity is None or document_id(selected) != identity:
+                    raise DownloadError("ATTACHMENT_INVALID", "备用来源与原始附件不是同一文档")
+                self._validate_telegram_source_sync(candidate_id, selected, "TG_BOT" if kind == "TG_BOT" else "TG_USER", connection)
 
     async def enqueue_exhentai_download(
         self, candidate_id: int, *, redownload: bool = False, automatic_match=None
@@ -689,6 +712,21 @@ class DownloadService:
         async with self._operation_lock:
             for operation in await run_sync(self._queue_control.pending_operations):
                 try:
+                    if operation["action"] == "replace-account":
+                        # A failed request may still be leaving its account scope.
+                        # Let that exit naturally; repeated cancel must not cut
+                        # through the cleanup we are waiting to confirm.
+                        if json.loads(operation["params_json"]).get("stop_requested"):
+                            await self.stop_attempt(operation["task_id"])
+                        else:
+                            active = self._active_attempts.get(operation["task_id"])
+                            if active is not None:
+                                await asyncio.shield(asyncio.gather(active, return_exceptions=True))
+                        replacement = await self._prepare_account_replacement(operation)
+                        await run_sync(self._finish_account_replacement_sync, operation, replacement)
+                        completed += 1
+                        self._announce(operation["legacy_job_id"], operation["candidate_id"])
+                        continue
                     if operation["provider"] == PROVIDER_CONVERSION:
                         if self._stop_pack is None:
                             raise DownloadError("PACK_STOP_UNAVAILABLE", "打包停止服务尚未接通")
@@ -720,7 +758,45 @@ class DownloadService:
                 self._announce(None, candidate_id)
         return completed
 
+    async def _prepare_account_replacement(self, operation: dict) -> dict | None:
+        """Resolve one saved finite account pool after the failed attempt exits."""
+        details = {key: value for key, value in self._safe_details(operation["resource_json"]).items()
+                   if not key.startswith("download_")}
+        params = json.loads(operation["params_json"])
+        is_bot = operation["provider"] == PROVIDER_TELEGRAM
+        resolver = self._telegram_bot_source if is_bot else self._telegram_user_source
+        try:
+            origin = {**details, "account_id": details.get("origin_account_id")}
+            await run_sync(self._validate_telegram_source_sync, operation["candidate_id"], origin,
+                           "TG_BOT" if is_bot else None)
+            selected = await resolver(
+                {**details, "account_id": details.get("origin_account_id"),
+                 "account_kind": details.get("origin_account_kind")},
+                eligible_account_ids=params["account_pool"], excluded_account_ids=params["attempted_accounts"],
+            )
+        except (ProviderConnectionError, DownloadError):
+            return None
+        return {**details, **selected, "account_pool": params["account_pool"],
+                "attempted_accounts": params["attempted_accounts"]}
 
+    def _finish_account_replacement_sync(self, operation: dict, details: dict | None) -> None:
+        """Recheck source and selected account in the same transaction as resume."""
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if details is not None:
+                try:
+                    self._validate_telegram_source_sync(operation["candidate_id"], details,
+                        "TG_BOT" if operation["provider"] == PROVIDER_TELEGRAM else None, connection)
+                except DownloadError:
+                    details = None
+            if details is not None and connection.execute(
+                "SELECT 1 FROM external_accounts WHERE account_id = ? AND kind = ? AND enabled = 1 "
+                "AND deleted_at IS NULL AND stop_operation_id IS NULL "
+                "AND verified_credential_revision = credential_revision",
+                (details["account_id"], "TG_BOT" if operation["provider"] == PROVIDER_TELEGRAM else "TG_USER"),
+            ).fetchone() is None:
+                raise DownloadError("ACCOUNT_UNAVAILABLE", "备用账号在预检期间已改变")
+            self._queue_control.finish_operation(operation, replacement_details=details, connection=connection)
 
     async def _run_operations(self) -> None:
         while True:
@@ -960,8 +1036,7 @@ class DownloadService:
                                "TG_BOT" if job["provider"] == PROVIDER_TELEGRAM else None)
                 if not details.get("account_id"):
                     raise DownloadError("TELEGRAM_SOURCE_ACCOUNT_REQUIRED", "任务没有确定的下载账号，请重新选择来源")
-                if job["provider"] != PROVIDER_TELEGRAM_USER or details.get("origin_account_kind") == "TG_USER":
-                    scope_params["account_id"] = details["account_id"]
+                scope_params["account_id"] = details["account_id"]
             # Magnets may not need an EH account; .torrent fetch still rejects
             # missing credentials through its existing named provider error.
             async with self._account_scope(kind, **scope_params):
@@ -1013,7 +1088,7 @@ class DownloadService:
             return None
         try:
             details = json.loads(job["details_json"])
-            file_id = str(details["file_id"])
+            file_id = str(details.get("download_file_id", details["file_id"]))
             file_name = str(details.get("file_name") or f"{file_id}.bin")
             api = await self._telegram_api()
             if api is None:
@@ -1025,6 +1100,9 @@ class DownloadService:
                 )
                 return None
             file_info = await api.get_file(file_id)
+            expected_identity = document_id(details)
+            if expected_identity is not None and document_id({"file_unique_id": file_info.file_unique_id}) != expected_identity:
+                raise ProviderConnectionError("TELEGRAM_FILE_IDENTITY_CHANGED", "Bot 返回的附件身份与保存来源不一致")
             work_path = await self._effective_work_path()
             destination = (
                 work_path
@@ -1068,8 +1146,8 @@ class DownloadService:
         """
         try:
             details = json.loads(job["details_json"])
-            chat_id = int(details["chat_id"])
-            message_id = int(details["message_id"])
+            chat_id = int(details.get("download_chat_id", details["chat_id"]))
+            message_id = int(details.get("download_message_id", details["message_id"]))
             file_name = str(
                 details.get("file_name") or f"message-{message_id}.bin"
             )
@@ -1098,8 +1176,15 @@ class DownloadService:
         )
         destination = attempt_path(destination)
         try:
+            media_params = {}
+            expected = details.get("download_file_unique_id")
+            if (not expected and details.get("origin_account_kind") == "TG_USER"
+                    and details.get("account_id") == details.get("origin_account_id")):
+                expected = details.get("file_unique_id")
+            if expected and str(expected).startswith("mtproto:"):
+                media_params["expected_file_unique_id"] = expected
             size = await client.download_message_media(
-                chat_id, message_id, destination
+                chat_id, message_id, destination, **media_params
             )
         except ProviderConnectionError as exc:
             await run_sync(
@@ -1347,6 +1432,14 @@ class DownloadService:
             # A failed push/poll may still own an external transfer. Preserve
             # the FAILED attempt, but retain the active slot for its cleanup.
             current = task_snapshot(connection, job_id)
+            row = connection.execute("SELECT provider, details_json FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
+            resolver = self._telegram_bot_source if row[0] == PROVIDER_TELEGRAM else self._telegram_user_source
+            if (resolver is not None and self._account_scope is not None
+                    and row[0] in {PROVIDER_TELEGRAM_USER, PROVIDER_TELEGRAM}
+                    and (code.startswith("TELEGRAM_USER_") or code in {"ACCOUNT_UNAVAILABLE", "ACCOUNT_NOT_FOUND"}
+                         or (row[0] == PROVIDER_TELEGRAM and code.startswith("TELEGRAM_") and code not in PERMANENT_DOWNLOAD_ERRORS))):
+                self._queue_control.request_account_replacement(connection, job_id, current)
+                return
             if connection.execute(
                 "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED' "
                 "UNION ALL SELECT 1 FROM download_jobs WHERE id = ? AND provider = 'EH_TORRENT' "

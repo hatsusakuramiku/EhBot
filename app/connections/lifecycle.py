@@ -164,21 +164,34 @@ class AccountLifecycle:
 
     def _stop_bound_executions(self, connection, account_id, operation_id):
         rows = connection.execute(
-            "SELECT DISTINCT t.task_id, j.id, t.status, t.provider, j.details_json FROM account_execution_bindings b "
+            "SELECT DISTINCT t.task_id, j.id, t.status, t.provider, j.details_json, a.finished_at FROM account_execution_bindings b "
             "JOIN queue_attempts a ON a.attempt_id = b.attempt_id "
             "JOIN queue_tasks t ON t.task_id = a.task_id "
             "LEFT JOIN download_jobs j ON j.task_id = t.task_id "
             "WHERE b.account_id = ? AND t.current_attempt_id = b.attempt_id", (account_id,),
         ).fetchall()
-        for task_id, job_id, status, provider, details_json in rows:
+        for task_id, job_id, status, provider, details_json, finished_at in rows:
+            details = json.loads(details_json or "{}")
+            # The previous attempt remains current until its pending successor
+            # is claimed. Its historical binding must not revoke that successor.
+            if (provider in {"TELEGRAM", "TELEGRAM_USER"} and finished_at is not None
+                    and details.get("account_id") and details["account_id"] != account_id):
+                continue
             existing = connection.execute(
                 "SELECT operation_id FROM queue_operations WHERE task_id = ? AND status NOT IN ('COMPLETED', 'FAILED')",
                 (task_id,),
             ).fetchall()
             if not existing and job_id is not None and status not in TERMINAL:
-                result = self._queue._apply(connection, job_id, "cancel", task_snapshot(connection, job_id), {})
-                if "operation_id" in result:
-                    existing = [(result["operation_id"],)]
+                if provider in {"TELEGRAM", "TELEGRAM_USER"} and details.get("observation_id") and details.get("origin_account_id"):
+                    connection.execute("UPDATE download_jobs SET error_code = 'ACCOUNT_UNAVAILABLE', "
+                                       "error_message = '下载账号已停用或正在修改配置' WHERE id = ?", (job_id,))
+                    replacement_id = self._queue.request_account_replacement(
+                        connection, job_id, task_snapshot(connection, job_id), stop_requested=True)
+                    existing = [(replacement_id,)]
+                else:
+                    result = self._queue._apply(connection, job_id, "cancel", task_snapshot(connection, job_id), {})
+                    if "operation_id" in result:
+                        existing = [(result["operation_id"],)]
             elif (not existing and job_id is not None and status == "COMPLETED" and provider == "EH_TORRENT"
                     and json.loads(details_json or "{}").get("seeding")):
                 result = self._queue._apply(connection, job_id, "stop-seeding", task_snapshot(connection, job_id), {})

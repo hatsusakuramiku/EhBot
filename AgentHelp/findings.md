@@ -294,11 +294,162 @@
 - AccountRuntime.use 覆盖完整请求生命周期，按账号/版本跟踪 lease，停止 await lease 退出；HTTP 替身和真实阻塞线程证明等待实际清理。重复处理不能再次 cancel 正在 finally 的任务。非队列元数据/摄取也通过 AccountExecution 与 Database.connection 短事务检查拒绝迟到写入；该 ContextVar 随 to_thread 传播。
 - AccountService 已成为生产 wiring；旧 ConnectionManager 仅由账号 listener 复用摄取逻辑，旧配置/断开入口无账号身份或版本时拒绝。已接 startup/provider/API/UI，但 P4 仍需阶段最终回归和提交；不包含真实供应商或正式部署验收。
 
+## 2026-10-14 P5 统一身份与处理权调查
+
+- P4 实际已验收并本地提交 15dd3bb；上一节末行的“仍需最终回归”是历史调查状态，以 R91 audit/progress 为当前事实。
+- source_messages 当前唯一 (account_id, chat_id, message_id) 可继续保存完整观察，telegram_accounts 的新增可空 external_account_id 将新账号 UUID 映射到旧整数外键，无需另建观察实体表；历史固定 Bot 槽无法证明真实接收账号，不能回填为某个 Bot UUID。
+- 031 将引用增量写在 source_messages，extra_json 只记录固定键版本，避免并发读旧 JSON 整体覆盖导致丢来源/无界增长。登记与领取必须同短写事务，AI/HTTP 不占写锁，候选创建与 finish_claim 守卫必须同事务。
+- 真实 Bot/Telethon 完整转发坐标可以统一；普通群、私聊、隐藏发件人与缺原帖 id 都不足以跨账号认定相同消息。传输 parser 单元合同核对了这些边界。
+- 主摄取仍未接存储核心，历史回填/唯一 gid 与来源编辑/移除代次未完成；下一动作在实施计划快速接手表。031 可修改直到 P5 阶段验收，不改冻结 027–030。
+
+## 2026-10-15 P5 身份升级、来源停止与手动原子发布
+
+- 上节末行是历史调查快照；主摄取/回填/代次已接，当前实现与验收状态以 PHASES/处理计划/progress 最新条目为准。
+- `set_candidate_eh_ref` 的旧直接 UPDATE 会留下旧统一键；`publish_candidate` 通过回复/媒体关系补 gid 也有同类旁路。现共用 references 的短事务意图与 P3 停止循环，停止确认后再关联目标键/合并历史，旧 gallery 键不作为新 gallery 的别名。目标处理中 owner/revision 在最终关联时撤销，迟到结果不得发布。
+- `_has_persistent_work` 包含任何审批/审核/历史下载，不能当作“仍在执行”的判断。已停止候选复用 merging 合并历史与人工/锁定字段，活动来源则先以 changes 保存最新编辑和 task 集合、撤销 observation revision，等真实 finally/远端停止完成。只有补全未知作品身份才停止全部源任务，普通编辑只停止明确选中该观察的 TG 任务。
+- 旧 switch/retry 意图可能已在 STOPPING，身份变更必须等它完成物理停止但抑制其旧接替，不创建第二个来源。持久来源变更保留任务集合，进程重启可从同一 P3 loop 继续；停止期间再次编辑保存最新输入，不执行中间版本。
+- 手动添加先建候选再分别写元数据会暴露半件作品。`insert_manual_candidate` 允许 EH publisher 在同一 BEGIN IMMEDIATE 内完成候选、claim、元数据、种子、封面；公开写接口继续调用相同 helper。续租与发布使用同一局部锁，避免 LINKED 提交成功后并发 renew 误判 stale。故障注入与并发读取合同已转正式测试。
+
+## 2026-10-15 P5 操作版本与结果、目标键审计
+
+- observation 的 input revision 不能替代操作 revision。失败处理先回滚再开连接写 FAILED，两事务之间新编辑可提交；失败写回必须带捕获的操作版本，不能只凭 source_message_id/status。实际注入该交错，确认新输入保持 PENDING 并最终应用。
+- 复用现有两张变更表增加 revision/result/original candidate；不另造 scheduler。`candidates.operations` 提供白名单查询和同事务 CAS retry/receipt；同管理员 Cookie/Bearer 重放先读回执，旧版本和身份失效拒绝。
+- `changes` 为无 gid 作品补 gid 时，和 `references` 一样需要在受理事务预留 target_key 并撤销目标 PROCESSING owner；否则旧源尚未停止，目标可独立发布。claim_entry 同时检查两种持久意图，最终关联将目标已有合格观察一并挂载。新增测试先复现只挂一条观察，再以实际 SQL 修复。
+- 完成/失败都需要通知。合并通知覆盖原/目标作品，保留 original_candidate_id 支持原详情跳转与操作查询；页面和共享 API 用相同状态投影，不能只显示「已受理」。仍需核实交叉 reference/observation 命令和提交后 callback 丢失时的后续恢复，P5 未验收。
+
+## 2026-10-15 P5 后续意图、自动审批事务及真实来源字段
+
+- `wiring._on_candidates_ingested` 原本仅靠即时 callback；自动审批 interval=0 时丢 callback 会让入库候选长期没有后续。031 用 LINKED 发布 trigger 同事务登记 followup revision；现有审批 worker 启动与每轮恢复、持久退避，callback/event 只降低延迟，不另造调度器。同键追加观察不重复登记。
+- 原自动审批分开提交 approve、enqueue、AUTO_* 审计，任一步故障都可能留下半件结果。现在预检在事务外，最终 BEGIN IMMEDIATE 内重算规则与元数据、核对摄取身份，审批/任务/规则证据一起提交。真实 job/普通审计/规则审计故障注入确认全部回滚，提交后 ack 丢失也不重复执行。
+- 真实入队保存的是 `details_json.observation_id`；changes/operations/031 guard 和旧测试却使用 `source_observation_id`。把原停止合同改成实际 enqueue 接口后 4 条中 3 条复现未停止，统一真实字段后通过；不能用手工构造的错误字段证明生产路径安全。方案的逻辑 source_observation_id 在当前兼容投影对应 observation_id。
+- 仅比较 gid/规则/字段不足以防候选整数 ID 复用。真实 purge 后按同 gid 重加，旧自动驳回会误作用到新候选；匹配结果现包含 ingest entry id/generation/revision，写锁内重新对比，复现转为正式回归。
+- 两种 reference/observation 先后顺序、已知/未知初始 gid、来源改画廊/停用及运行 purge 共 12 条通过；媒体组/回复补全与已知冲突隔离另 4 条通过。真实下载 finally 退出前保留停止/移除句柄。运行 purge 的业务 job/candidate 立即删除，必须检查独立 queue_operations/queue_removals，而非误要求业务行仍为 STOPPING。
+- 本轮最终证据与失败记录见 progress；P5 尚待迁移/旧入口逐项核验，不能用这些合同替代 P6 来源管理和监听接替，或 P8/P9/P10 的完整发布/恢复/API 验收。
+- 补充旧 030 库的多 alias 场景：候选先有无 gid 的频道观察，后有带 gid 的关联观察，031 回填同时保留消息键与 gallery 键，各自登记意图。真实 worker 只作一次决策并确认两个 alias；再次 initialize/重启不重复决定，已纳入 followups 第 8 条合同。
+
+## 2026-10-15 P5 固定输入与 P6 来源管理接续
+
+- 历史 APPROVED 无任务不能区分旧入队失败和管理员主动移除。真实旧 030 库合同验证：重复 initialize 保留审批、不自动重下，显式 enqueue 可创建任务且不重复审批/审计；已关闭这项迁移调查，不再反复猜测历史意图。
+- `load_message` 把 chat_title 重建为 chat_id，首次 AI 输入已经丢失来源名称。把既有恢复合同扩展到比较 `(message_text, chat_title)` 后直接复现；未冻结 031 增加消息的接收时 chat_title，新增/编辑保存，重载读取固定值。历史记录只从已有来源别名回填、缺失则用 Chat ID，不猜账号。另测仅修改频道名后的重新判定/重放与历史回填幂等。
+- `_list_telegram_sources_sync` 仍只筛 legacy Bot 槽，账号专属来源虽已保存却在 API/UI 隐身。现列出所有未 dismiss 的来源并返回账号 UUID/别名/类型，账号快照仅提供选择所需公开字段。新建、预填、批量添加与逐行更新携带账号，避免同 Chat ID 写回历史槽。
+- 会话读取的共享服务现支持显式 TG 用户 UUID；多可用账号的旧省略调用拒绝歧义，不取第一项；新增 JSON/WS 命令与 Web picker 共用该服务。正式合同覆盖 HTTP/Cookie、Bearer、WS、账号缓存隔离、只读与后续添加归属、无效/停用账号、CSRF。
+- 来源写入仍为既有 upsert/bulk 接口，尚未全域接 revision/CAS/幂等；不得把此次账号选择切片当作已完成并发冲突防护。下一切片先收口这些共享写入口，再处理 legacy_slot 旧订阅复制（历史观察账号仍未知）、多监听公平/限流与停止后接替。P5 最终完成审计与 P6–P12 均不据局部通过自动验收。
+
+## 2026-10-15 P6 来源写入并发与 Web 草稿
+
+- 来源是独立配置记录，不使用全局配置版本。032 为 telegram_sources 增 revision 和只监听配置字段的 trigger，兼容内部旧写者；last_message_id 等运行游标不触发。027–030 不改，031 仍负责摄取身份，032 尚未冻结。
+- SourceCommands 的 BEGIN IMMEDIATE 事务先查同管理员回执，再校验来源版本、写配置和整批结果。旧创建版本 0 不得复活墓碑；明确读到墓碑版本后才恢复。批量逐项业务冲突保留其他成功项，但回执插入等系统故障整笔回滚。HTTP/API、原 Web 表单、WS 桥均调用同一核心，没有路由直接 upsert/bulk 的旁路。
+- 新增 source_versions 供会话 picker 记录看到的版本；创建 0、编辑正版本及幂等键均为必需。批量添加保留已有配置并返回 SKIPPED，不覆盖规则；API 可单独查询断线命令回执。重放只保证 command 恒定，旁边的当前来源快照可以更新。
+- 原 realtime.js 使用全部 hidden 字段拼表单身份，新增版本和请求键后每次刷新都匹配不到旧草稿。来源改用稳定表单身份；后台刷新遇来源草稿时保留页面并提示变化，其他表单提交时也保留已被远端删除的来源草稿。真实 HTMX/Alpine DOM root/proxy 验证输入节点、版本和请求键不被替换。
+- 来源冲突页面保存完整草稿和当前配置。只有管理员点击明确确认按钮才采用冲突快照版本；后台不更新旧版本。原始 rules_json 作为冲突信息，历史规则 JSON 已损坏时仍可按读取版本修复，不先 json.loads 阻断管理。
+- 正式测试为 source_commands（18 条）、既有来源/设置/迁移回归与扩展 DOM 脚本；结果见 progress，不能据此宣布 P5/P6 或全域 API 验收。
+
+## 2026-10-15 P6 旧共享订阅的一次性迁移
+
+- 旧共享来源放在 bot-api://configured 的 telegram_sources，旧 MTProto 的 set_source_cursor 写这里；这不能证明历史 source_messages 的真实接收账号。033 只复制配置给 external_accounts.legacy_slot 明确为 TG_BOT/TG_USER 的原导入账号，原消息行/接收账号/来源引用保持不变。
+- AccountRegistry.import_legacy 在配置导入后、runtime 启动前，以同一短事务复制各账号规则/墓碑、写一次性完成标记并退休原共享配置。专属来源已存在时不覆盖，后来新增账号不继承；旧 TG 用户保留其游标，Bot 不借用该轮询游标。旧共享配置保留原值，支持缺失的另一个原账号稍后导入，完成过的账号不再复制。
+- 只做 INSERT OR IGNORE 而不记完成标记，会在管理员删行或改规则后反复导入；只把原规则清空则后到原账号丢配置。现保留历史原值/退休位与每账号完成标记，管理 API 拒绝陈旧共享写入。退休变更推进原配置 revision，旧批量请求不能悄悄更新不可见配置。
+- 七个正式合同验证两类导入、用户游标、未知消息身份不变、重启/编辑/删除、已有专属配置、后到旧账号、并发导入和中途失败整体回滚；实际 AccountService.start 合同也验证迁移规则在账号启动后可读且重启保持。仅临时库/受控供应商，结果见 progress。
+
+## 2026-10-15 P6 多监听下一切片的源码边界（仅调查，未实现）
+
+- 每个 AccountListener 已拥有自己的任务、实体缓存和 runtime lease；不能为“公平”重新造一组重复监听器。Bot `_poll_telegram` 先持久化 raw updates，但随后 await 全部业务处理才拉下一批；`process_pending_updates` 的 while 会把当前账号待处理事件全部排空，慢 AI 或历史积压会阻塞该账号的继续接收与启动。
+- MTProto `_ingest_source` 每个来源先跑 process_pending_entries，再顺序 process_message（包含 AI），最后推进最高消息游标。当前顺序不因普通失败提前跨过未持久消息，但没有将接收持久化与昂贵判定分开；单个慢来源会拖延同账号其他来源。下一步须先定义有界每轮预算/轮转和可恢复接收边界，再接处理，不能用简单取消 AI 来伪装公平。
+- TelegramUserClient 已将 FloodWaitError.seconds 转为 ProviderConnectionError.retry_after；Bot 轮询会使用这个值，用户来源循环目前只记录错误然后继续其他来源并固定十秒重试，尚未实现账号独立的 FloodWait 冷却。P9 接完整持久冷却/预算，但 P6 不能在同账号已限流时继续发一轮其他来源请求。
+
+## 2026-10-15 P6 可靠监听切片（覆盖上面的未实现快照）
+
+- 两个原触发通过正式 test_listener_delivery 复现：AI 已进入后第二来源不再被访问；限流后仍访问第二来源。首次夹具用了不符合 TelegramUserCredentials 格式的短 api_hash，造成请求根本未开始；修正为合法测试格式后才取得上述有效失败证据，不能把首轮失败当产品复现。
+- 沿用 AccountListener 的接收任务与 runtime，另设每账号受管消费任务。Bot 原始事件持久化后即可拉下一批/推进 offset；MTProto 使用 034 与 TelegramUserInbox，在单个 BEGIN IMMEDIATE 中保存归一化输入和来源游标，再交原 CandidateIngestor.process_message 处理。没有第二套去重键/处理所有权；ACK 失败重放已发布输入不重复 AI。考虑过接收直接领取并转交 claim，会将接收进度绑住处理租约，现用独立持久投递隔离两者。
+- 用户每轮最多十个来源、每来源百条并轮转起点；Bot/MTProto 待处理事件和到期摄取输入按频道交错、保留同频道顺序，各自最多百条。未知旧事件改为持久后台恢复循环，不在 start 同步排空，也不会因限制每轮而留下无人处理的剩余事件。
+- FloodWait/retry_after 中断该用户的剩余来源，检查 dialogs 也生效；保存来源不清等待。网络故障也进行账号退避，会话失效/应用凭据无效则停止后续请求并保留配置。当前限流保存在运行时；P9 仍需持久冷却、全局/账号及跨监听/下载/会话读取预算，不能把本切片当完整预算交付。
+- 消费持有独立账号 lease，取消后沿用 ingestor 的实际 AI 清理等待；Bot raw 写入及首次游标写入改用已有 run_sync，取消时等待真实写线程退出。正式测试控制 AI finally 与真实线程的 release，确认 stop 尚未结束、lease 未先释放；关闭后输入可恢复。候选消费失败仍通过已有连接快照/账号运行状态报告，网络接收继续。
+- 最终 test_listener_delivery 十八个合同；十一文件 154/0、后续八文件 102/0、最终 listener/manager/database 三文件 59/0，分组重叠/时点不同不叠加。2506 collect-only；031–034 未冻结，P5/P6 未验收。下一步 P5 §8.G 最终/旧写入口审计及 TG 来源账号优先和实际停止后串行接替；不要重做本次已验证的接收分离。
+
+## 2026-10-15 P5 要求核对与固定输入恢复
+
+- 要求/入口映射见 R92_REQUIREMENT_AUDIT.md（进行中，非验收结论）。当前 Python 候选插入仅 publish_candidate 与 insert_manual_candidate；观察插入集中 register_observation，画廊更新集中 persistence/merging/references/migration。兼容 save_candidate_message 转同一核心，app 内没有产品调用者；不能仅凭搜索把这些函数的每个调用约束判定已验收。
+- 原固定输入失败后，订阅停用或允许格式收紧，另一个合格观察补入仍会拿旧输入跑 AI，之后把整键忽略。正式 pipeline 复现并修复：reselect_pending_input 只换待处理且原输入已不合格的记录，原输入仍合格则稳定；登记和后台恢复共用，备用观察已存也可跨重启恢复，不需要新事件。
+- AI 前先检查本地来源，发布事务再次重查。中途来源变更撤回 claim、保持可恢复 PENDING 并择合格输入，不把其他观察判忽略；不替换 PROCESSING owner。五条正式合同覆盖原订阅停用/格式变化/原输入不变、失败后已有备用恢复、AI 中途变化恢复。最新十文件 133/0，最后四文件 70/0，2511 collect-only，组间重叠不相加；具体失败/修正和时点见 progress。
+- 未完成审查：账号本身失效但订阅仍启用、过期 claim 的完整恢复；P6 旧请求真正结束后的合格备用账号/新 attempt；P8 新手动发布为 APPROVED 后 enqueue 前崩溃的持久流水线意图。后一项当前自动审批 followup 不覆盖，必须和历史 APPROVED/no-job 不猜意图区分。P5/P6 未验收，031–034 仍未冻结。
+
+## 2026-10-15 P5 账号状态、过期处理与扫描窗口（覆盖上述账号/claim 待核对项）
+
+- 真实 AccountRuntime 合同复现：A 首次失败，B 观察已保存；A 账号正在停止、停用、删除或完成换凭据而尚未验证，订阅仍启用时，B 的恢复均返回 0。另复现 A 仍合格时 B 新观察竟领取 A 的固定输入并在 B lease 内跑 AI。source_still_eligible 已在事务内核对注册账号状态，prepare_observation 限定固定输入的领取账号；原输入合格则只补 B 观察，不自动换输入。
+- 过期遗留 claim 在新/已保存 B 观察下都无法接替；取消清理完成但 claim 已过期时也无法恢复。reselect_pending_input 现先撤销遗留 owner/revision，再用原本的输入选择和有界 claim，不发明第二条处理链。旧结果仍由 revision 拒绝。
+- 仅加过期恢复会使仍在运行或清理的请求与新处理重叠，手动验证也必须纳入。Database 持有同一 IngestProcessors，原 ingestor 的 task 表/单次取消等待移入此处；TG 及手动短锁覆盖 DB 领取至本地任务登记的间隙。后台恢复和新投递均跳过活任务；不同 CandidateIngestor 实例仍共享该记录。锁不覆盖网络请求，只覆盖领取/登记和有界恢复读取。
+- 首个“百条挡路”用例只有一个 A 频道，原频道交错能让 B 自有输入提前，所以 1/0，不能算复现；改成 100 个有效 A 频道、每件均有 B 观察后，连续三轮都恢复不到 B 第 101 件，取得 1/1 的有效失败。现按原频道交错顺序生成扫描位置，沿账号上次位置轮转；游标在数据库运行实例共享，替换消费者不重置，进程重启仍从持久输入重新扫描。每轮仍限 100，不为“公平”无限排空。
+- 正式新增 account_recovery 十一条、manual 三条；pipeline 夹具改成真实已验证启用账号，不把产品账号约束放宽为未启用也可用。十一文件 146/0，十三扩展文件 180/0，最后手动/账号恢复两文件 21/0（含重复取消且真实 cleanup 等待），2525 collect-only；时点/失败明细见 progress。P5/P6 仍未验收，P6 下载 attempt 接替、P9 worker_session/持久预算和 P7–P12 不缩减。
+
+## 2026-10-15 P6 下载接替的下一入口（仅源码核对）
+
+- AccountService.resolve_telegram_user_source：来源本身为 TG_USER 时直接 use_account，账号不可用就抛错；其他账号循环只覆盖 Bot 来源转用户读取，且只检查文件名/大小与非空 MTProto 标识。后续需核对来源原账号优先、同一附件身份以及可证明的备用观察/共享消息，不能把相同画廊或名称/大小单独视为字节相同。
+- DownloadService._handle_job：TG 任务严格使用 details.account_id；绑定账号不可用时直接 _mark_job_failed_sync，没有串行换账号的新 attempt。_process_claimed_job 只结算/记录结果，目前未见 TG 自动备用接替入口。接续应先加真实失败/清理阻塞的下载合同，再沿 queue task/attempt/作品槽接入持久、有界接替；不在 provider_scope 内直接循环多个账号并冒充一个 attempt。
+- 上两项只是当前源码调查，不是新产品实现/已复现下载缺陷；上一节通过的是摄取恢复及本地排他，不能代替这些下载合同。P6 仍未验收。
+
+## 2026-10-15 P6 精确附件与持久下载接替（覆盖上节源码快照）
+
+- 官方依据：TDLib [FileManager.cpp](https://github.com/tdlib/td/blob/master/td/telegram/files/FileManager.cpp) 的 FileNode::get_unique_id 使用 base64url(zero_encode(serialize(location.as_unique())))；[FileLocation.hpp](https://github.com/tdlib/td/blob/master/td/telegram/files/FileLocation.hpp) 的 AsUnique::store 写入 int32 文件类别加一及 AsKey 的 int64 document id；[FileType.h](https://github.com/tdlib/td/blob/master/td/telegram/files/FileType.h) 定义 Photo=0、Document=1，所以文档标记为 2。app/connections/telegram_files.py 严格解析这 12 字节与现有 mtproto:<id>；不从文件名/大小、file_id/access_hash 猜身份。未知类别/照片/畸形/越界标识拒绝跨账号匹配，正式单元合同 19 条。
+- 用户来源仍合格时保持原账号；不可用时先取同作品同文档的有效 TG_USER 已保存观察，再验证共享频道原坐标。私聊/普通群必须使用目标账号自己的观察坐标。selected download_* 字段独立于 origin_account_id 与原 observation；两者在短提交事务和传输提交均复核。Bot 备用只能用自身 observation/file_id，getFile 返回的身份也要匹配，不把 A 的 file_id 交给 B。
+- 原始两条有效失败已修复；新增来源在预检/传输中被编辑、移除、换附件的六个交错合同。下载失败曾直接 FAILED 释放槽；三条正式合同复现。现借现有 queue_operations 保存 replace-account，冻结首次失败时的有限合格账号池，保存已失败账号集合；旧执行自然退出后才预检/恢复 PENDING，同一 task 下一次领取产生独立 attempt 和 staging。035 守卫只认可当前 attempt/generation 对应且已完成的内部操作，显式重试保留原来的新任务语义。
+- 取消等待接替复用原操作并更新版本；finish_operation 读取数据库最新动作，预检期间取消不会启动后继。失败 attempt 的原始错误冻结，提交回滚仍保持 STOPPING/槽/待处理意图；重启可恢复。直接旧 generation 晚完成被拒绝。
+- 十二相关文件 197/0，最终 failover 扩为 11/0，2569 collect-only。具体首次错误/失败/修复计数见 progress，不叠加重叠组。剩余：运行中账号停用/删除/凭据修改目前仍由生命周期发 cancel，需接入合格备用；显式 retry 需要重新选择原账号并重置本轮池，不能沿用旧 attempted_accounts；P5 最终审计及 P7–P12 继续。以上没有完成 P6 阶段验收。
+
+## 2026-10-15 P5 审计与 P6 生命周期收束（覆盖上节待修项）
+
+- 失败任务 retry/restart 的细节必须与状态恢复放在同一 UPDATE；单独 UPDATE details 会先触发 adapter 改写旧终态 task。两条恢复断言已复现修复，最终检查整个旧任务快照不变。
+- 生命周期停止按真实 TG 观察创建持久接替，管理员 cancel 优先；原观察在备用预检前校验。不能用缩窄所有 provider 状态来保护 pending B，应只排除已结束 A 的旧绑定；非 TG queued/paused 合同保留。
+- worker 关闭与操作取消可以对同一 producer 重复 cancel，实际打断 finally 并提前释放槽，已直接复现修复。账号/queue coordinator 的 shield 不能替代 worker 自己等待真实清理。
+- 来源停止匹配需要原始 observation_id 和实际备用 download_observation_id；原实现只挡备用晚提交而不停止流。真实编辑/移除及失败操作重试三条复现已修复，原观察不连带修改。
+- R92_REQUIREMENT_AUDIT 已补实际旧写入口及 030 升级/快照回退边界；最新节点 445 个不同用例通过，2593 collect-only，详见 progress。P5/P6/P7 尚未验收，031–036 未冻结。
+- P7 036 的 persistent sequence 轮询已有五条合同；selected_account 查询不推进，use_kind 无嵌套账号时才选择。当前 ExHentaiService.account_request 在公共 gdata 前已借账号，尚不满足“匿名一次成功不消耗池”的完整方案，须在认证 fallback/调用者发布上下文中一起改，不能只给同一匿名请求换账号标签。
+- request_archive_url 含 POST，通用 EXHENTAI_UNREACHABLE 无法判定申请是否被接受。下一步需持久操作意图和只读结果核实，未知返回 EH_ARCHIVE_RESULT_UNKNOWN；不能机械跨账号重复 POST。P7 尚无元数据持久有限尝试、能力/冷却管理或共享预算。
+- P10 另需核对 AccountService.command 对敏感 params 的裸 SHA256，按已批准方案改成服务端私有密钥 HMAC；此处记录真实源码偏差，不在本轮宣称解决。
+
+## 2026-10-15 P7 匿名请求与认证元数据池（覆盖上节元数据待实现项）
+
+- 原 account_request 在公共 gdata 前借用 EH，空 enrichment 也推进轮询；批量未返回画廊后又调用 _fetch_metadata，逐条重复同一个匿名请求。新正式七例先复现六个失败；现以任务内惰性 AsyncExitStack 保留认证成功后的租约，公共请求不借账号，批量未命中直接 HTML。显式空 Cookie 加拒绝重定向，避免共享 HTTP 客户端 Cookie 自动附回匿名请求。
+- MetadataAccountPool 只负责只读认证元数据，036 保存候选账号/凭据版本、操作和各次结果；共享 selector 支持 captured candidate_versions，不纳入途中新增或换凭据的账号。正常起点公平，剩余顺序固定，不被其他操作推进全局轮询改变。失败 scope 退出后才试下一账号，成功 scope 用同步 push_async_exit 转交外层写入 scope；手动发布继续受该凭据版本屏障保护。
+- AccountService.use_account/use_kind 为每个 EH 账号增加本进程锁，锁涵盖 runtime lease 的实际退出，TG 不使用此锁；等待期间仍需在借用时重查账号状态。不是持久预算，也没有替代 P9 worker_session。直接 verification 的请求预算仍须随统一预算核对。
+- 操作注册写线程被取消时，先排空线程，再原子记录取消；只对诊断表使用独立关闭连接，不绕过生产元数据/任务提交屏障。进程被杀产生的 RUNNING/STARTED 仍待 worker-session reconcile，不把正常取消合同冒充崩溃恢复。
+- 所有账号实际失败返回 EH_ALL_ACCOUNTS_FAILED；全停用/冷却/版本变化等不可借用返回 EH_NO_ACCOUNT_AVAILABLE，持久记录区分 FAILED/UNAVAILABLE。仅保存非敏感别名、账号/凭据版本、阶段和错误码，不存链接 token、Cookie 或供应商异常原文。
+- 仍须完成：HTML HTTP 200 错误页/授权/限流 fixture、Retry-After 与站点共享退避、凭据/能力分级健康及冷却。当前 HTTP 429 仍按通用 HTML HTTP 错误轮换，公共单条请求限流仍可进入认证回退，不能视为完整限流实现。批量 gdata 网络错误仍保留原有 best-effort 返回 0 行为；下一步需与共享退避一起核对。
+- 队列已绑定 EH 时，元数据仍沿用该账号，不在同一个 queue attempt 内私下轮换；下载接替必须由队列创建独立 attempt/staging。收费 POST 的持久意图/只读查回、未知费用、种子认证与跨进程预算按原 P7/P9 范围继续。
+- 本轮 P6 95/0、最终监听/来源 81/0，EH 等十七文件 215/0、后续六文件 82/0、最终租约两文件 21/0；最新节点 309 个通过、2610 collect-only，非整库。P5/P6/P7 未阶段验收，031–036 未冻结，详见 progress 最新记录。
+
+## 2026-10-15 P7 官方归档协议与收费意图（未验收）
+
+- 上轮只读研究确认 JHenTai 的 `lib/src/network/eh_request.dart:843` 及 EhViewer-NekoInverter 的 `EhEngine.kt:460` 使用 `dltype=org`、`dlcheck=Download Original Archive`；两者解析 `#continue > a`，JHenTai 再取下载页 `#db > p > a`。对应解析文件为 JHenTai `eh_spider_parser.dart`（blob a849c8cc73d74b910d9e6ed17997ccd8d80022f7）及 EhViewer `ArchiveParser.kt`（blob 34c5301191640be8051e2def494d78971feeb602）。这些公开客户端证明表单/DOM，不证明重复 POST 不重扣，也不证明只读 GET 总能查回。
+- 当前工作区 `archive.py` 在正常执行屏障内预存收费意图，一个 gid 仅允许一个 REQUESTED/UNKNOWN；仅初次 POST，异常/取消后只读核实，不能确认保留 UNKNOWN。记录固定账号/凭据版本；签名链接和画廊 token 保存在私有 SecretStore，不进入诊断表。外部下载节点显式不附 EH Cookie。
+- 已接实际 ExHentaiService 与 wiring，12 条新合同包含真队列领取/归档发布、并发同 gid、资金不足分级健康、POST 不明 503、取消及实际 finally 退出、取消撤销发布屏障后仍保存费用未知。下述 173/0 证据是受控 HTTP，不代表真实供应商联调。
+- 尚无 EH 下载有限账号池/串行独立 queue attempt、认证种子路径、费用未知人工核实 API 与崩溃 reconcile。P7 未完成；P5/P6 独立提交前不继续堆积 P7。032–036 与未验收 031 均未冻结，已提交基线仍 rc7/030。
+
 
 ## 2026-10-15 P5 独立交付边界
 
 P4 MTProto 原来先 admission 后 save，提取 P5 时必须改走 process_message，确保付费判定前先取得持久身份。旧共享白名单在 P6 迁移前只对同类型唯一启用账号保留兼容，新观察保留接收账号，历史不重标。rule_source_id 固定订阅引用并在发布前重查；低层旧输入为空时仍按其账号/Chat 查回。来源变更还须压过已受理的 retry/switch，否则停止后会错误启动旧后继。
 
-**P5 下载合同补验与同阶段修正。** 初次本地提交后补跑真实 create_app→worker→Telegram 产物链路，download-first 为 9/1/0/0（5.394 秒），复现 AccountService.use_kind 不接受来源 account_id。为单账号 P5 补显式账号类型/可用性校验与整个 scope 的凭据租约；Bot 来源转用户下载时不把 Bot ID 当用户账号。不引入 P6 备用账号池。download-fixed 为 66/1/0/0（44.915 秒），产品已修，剩余断言误把异常 code 当显示消息；改为检查 exc.code 后，最终五文件 66/0/0/0（44.229 秒）：ingest_legacy_runtime、downloads、account_service、account_runtime、review_actions。与此前 final/cross/backlog-fixed 按节点取最新，共 447 个不同用例通过，0 failure/error/skip；2465 collected，仅收集。同一 P5 本地提交使用 amend 修正，未推送；不能把首次 299d54a 当最终交付 SHA。提交快照共 74 文件，精确暂存并逐 blob SHA256 核验；最终 SHA 记录在工作区接手入口。
+
+P5 本地提交 2ea49f2，只含 031；共 447 个不同用例最新通过。新增 205 条旧收件箱后台恢复合同；AccountService 的原有单次启动处理不足以覆盖全部旧数据，现采用现有有界恢复循环。P6 接续移除共享规则适配，使用其 033 显式迁移后的账号专属规则。
+
+**P5 下载合同补验与同阶段修正。** 初次本地提交后补跑真实 create_app→worker→Telegram 产物链路，download-first 为 9/1/0/0（5.394 秒），复现 AccountService.use_kind 不接受来源 account_id。为单账号 P5 补显式账号类型/可用性校验与整个 scope 的凭据租约；Bot 来源转用户下载时不把 Bot ID 当用户账号。不引入 P6 备用账号池。download-fixed 为 66/1/0/0（44.915 秒），产品已修，剩余断言误把异常 code 当显示消息；改为检查 exc.code 后，最终五文件 66/0/0/0（44.229 秒）：ingest_legacy_runtime、downloads、account_service、account_runtime、review_actions。与此前 final/cross/backlog-fixed 按节点取最新，共 447 个不同用例通过，0 failure/error/skip；2465 collected，仅收集。同一 P5 本地提交使用 amend 修正，未推送；首次 299d54a 已由最终 2ea49f2 替代。提交快照共 74 文件，精确暂存并逐 blob SHA256 核验；最终 SHA 记录在工作区接手入口。
 
 **清理。** 所有测试会话已终态，结果在本日志留痕；提交哈希核验后删除本轮确切 TEMP 根目录 ehbot-p5-split-20261015-a 及前述四个 P7 archive 报告目录，不重建 .scratch。
+
+### R93 / P6 — 多 TG 监听、来源命令与串行下载账号接替（0.3.0rc9 / 035，2026-10-15）
+
+**范围。** Bot/TG 用户各自启用，独立监听、游标、session、实体缓存和候选消费；共享 P5 统一键，不建第二套队列。032 来源配置版本/同事务幂等回执，JSON/Web/WS 共用核心并保留冲突草稿；033 将旧共享规则一次性复制到已证明的历史导入账号，保留墓碑、用户游标和未知历史观察。034 将 MTProto 消息与游标原子持久化，慢 AI 不阻塞接收，来源/频道有界轮转，FloodWait/失效仅影响该账号。
+
+**传输。** 用户来源优先原账号，Bot 使用自身 Token/file_id；备用必须证明同一个 Telegram document，私聊使用目标账号自己的观察。原始/实际观察版本在入队与发布重查。失败或账号生命周期变更登记持久 replace-account，旧请求及清理真实退出后才恢复同一 task、新 attempt/独立 staging。035 只为当前代次、已完成的内部接替开放 STOPPING→PENDING/FAILED；取消优先，有限账号池跨重启不扩展，显式重试开启新任务并保留旧历史。
+
+**独立提取与失败。** 从已提交 P5 `2ea49f2` 导出命名 TEMP 树，逐文件/方法提取 032–035，排除 036 与 EH health/轮询/metadata/archive。初次十二文件 222/2/0/0（83.135 秒）：两项是 P7 测试预期（EH 多启用、P7 私有凭据 helper）误带入，恢复 P5 单 EH 合同；P6 另加实际 Bot/用户的直接/命令多启用与独立监听合同。静态核对发现最后一个消费错误可掩盖健康账号，改为先读取实际监听状态再汇总；各账号错误仍可见。
+
+**补验过程。** 一次五文件从主混合树 cwd 执行，89/2/0/0（36.449 秒），不作为独立提交证据；新测试没注入 CandidateIngestor 导致 TG 用户无监听，已补真实摄取服务。独立树五文件初验 89/3/0/0（39.168 秒），除上述两项外，旧停止合同在接收完第二来源前就取消却断言已存两条，改为明确等待两来源持久保存后施加停止。最终独立五文件 89/0/0/0（32.992 秒），含 account_service、telegram_account_runtime、listener_delivery、source_account_downloads、telegram_download_failover。完整 HTTP/Web/WS/摄取/队列/下载/账号十一文件 193/0/0/0（207.123 秒）。独立 rc9/035 树 2596 collected（仅收集）；定向组按当前节点取最新 419 个不同用例通过，0 failure/error/skip，非一次整组或整库运行。 原始十二文件中被 P6 阶段边界替换掉的 EH 多启用节点不计入当前集合；重复组不累加。
+
+**UI/静态。** 真实 HTMX/Alpine + jsdom 的来源草稿/远端删除、实时与日志场景在根路径和 /ehbot 前缀均通过。离线 npm 缓存未命中后，仅在指定 TEMP 安装 39 个临时依赖，测试后清理；未改依赖清单。compileall 与 collect 通过，阶段提交前检查 diff --check 和逐 blob SHA256。版本仅是本地源码标识，不代表发布。
+
+**升级/回退与边界。** 027–031 不改写；032–035 随阶段提交冻结。033 拷贝和导入标记同事务，失败回滚；034 升级保留既有游标，035 升级/重启/旧完成屏障见正式回归。沿 R92 离线完整快照备份/恢复步骤，不能删迁移记录或只降源码。仅临时库，未读真实 private/请求供应商/升级真实库。EH 仍单启用，完整 EH 池由 P7 交付；持久冷却/共享预算属 P9，最终全域协议属 P10。
+
+**交接。** 代码、正式测试与同步文档验收后立即本地阶段提交，核实 SHA 再进 P7。P7 现有 036/health/metadata/archive 保留主工作区，未验收；仍需独立归档 attempt、认证种子、未知费用核实/崩溃恢复。P8–P12 原范围保持，总目标 active。无推送、发布、部署。
+
+**清理留痕。** P5 提交 `2ea49f2` 的 74 blobs 已逐 SHA256 核验，暂存为空、031 相同；P5 TEMP 3227 文件及四个 P7 archive 目录 1/99/100/365 文件均已核对绝对路径与无重解析点后删除，剩余 0，.scratch 不存在。本轮 ehbot-p6-split-20261015-a 留至本地提交逐 blob 核验后删除，所有测试进程终态后才清理。

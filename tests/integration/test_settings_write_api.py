@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from app.api.deps import CSRF_HEADER
 from app.main import create_app
+from tests.source_forms import batch_versions
 
 from tests.integration.test_settings_web import _authenticate, _settings
 
@@ -295,6 +297,7 @@ SOURCES = "/api/v1/settings/sources"
 
 def _channel(csrf: str, **overrides) -> dict:
     body = {
+        "expected_revision": 0, "idempotency_key": str(uuid4()),
         "source_type": "CHANNEL",
         "chat_id": -1001234567890,
         "display_name": "某个频道",
@@ -323,14 +326,15 @@ def test_a_source_is_created_and_read_back(tmp_path: Path) -> None:
     assert rows[0]["enabled"] is False
 
 
-def test_a_save_upserts_on_the_chat_id(tmp_path: Path) -> None:
+def test_an_edit_matches_chat_identity_and_observed_revision(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         client.post(SOURCES, json=_channel(csrf), headers={CSRF_HEADER: csrf})
         client.post(
             SOURCES,
-            json=_channel(csrf, display_name="改过的名字", enabled=True),
+            json=_channel(csrf, display_name="改过的名字", enabled=True,
+                          expected_revision=client.get(SOURCES).json()["sources"][0]["revision"]),
             headers={CSRF_HEADER: csrf},
         )
         rows = client.get(SOURCES).json()["sources"]
@@ -436,12 +440,12 @@ def test_the_batch_flips_the_flag(tmp_path: Path) -> None:
         source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
         enabled = client.put(
             f"{SOURCES}/batch",
-            json={"action": "enable", "source_ids": [source_id]},
+            json={"action": "enable", "source_ids": [source_id], **batch_versions(client)},
             headers={CSRF_HEADER: csrf},
         ).json()["sources"][0]["enabled"]
         disabled = client.put(
             f"{SOURCES}/batch",
-            json={"action": "disable", "source_ids": [source_id]},
+            json={"action": "disable", "source_ids": [source_id], **batch_versions(client)},
             headers={CSRF_HEADER: csrf},
         ).json()["sources"][0]["enabled"]
 
@@ -461,6 +465,7 @@ def test_the_batch_applies_a_rule_set(tmp_path: Path) -> None:
                 "action": "apply",
                 "source_ids": [source_id],
                 "required_tags": "ntr",
+                **batch_versions(client),
                 "min_rating": "4.5",
             },
             headers={CSRF_HEADER: csrf},
@@ -478,7 +483,7 @@ def test_the_batch_deletes_by_tombstone(tmp_path: Path) -> None:
         source_id = client.get(SOURCES).json()["sources"][0]["source_id"]
         client.put(
             f"{SOURCES}/batch",
-            json={"action": "delete", "source_ids": [source_id]},
+            json={"action": "delete", "source_ids": [source_id], **batch_versions(client)},
             headers={CSRF_HEADER: csrf},
         )
         rows = client.get(SOURCES).json()["sources"]

@@ -41,4 +41,4 @@
 
 整库 **2141 collected**（仅收集，原 2134 + 7），证据 `.scratch/r89-audit-collect.txt`；最近整库全绿仍 R81–R84 的 2014。compileall、diff --check 与 CodeGraph sync 为提交前检查。原 R89 提交 7b8b297 保留，本次修正以本地 `fix(queue): close R89 history and command arbitration gaps` 提交，最终 SHA 见 git log。源码仍为未发布 0.3.0rc5，schema 028；不读取真实 private、不迁移真实库、不调用真实供应商、不推送或部署。
 
-正式测试位于 tests；本地 XML/collect 证据位于已忽略的 .scratch，测试产生的临时数据库/文件目录在验收后清理。接手后继续 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md) 的 P3，无需重新审批或重复 R89。
+正式测试位于 tests；上述 .scratch 路径仅标识历史运行，原始 XML/collect 与临时数据库/文件已清理，结果保留在本文。.scratch 不再保留或重建。原验收后的接续入口为 [处理计划](DOWNLOAD_QUEUE_AND_SHARED_API_IMPLEMENTATION_PLAN.md) 的 P3；当前阶段以 PHASES.md 为准。

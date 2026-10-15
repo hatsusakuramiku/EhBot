@@ -1136,11 +1136,11 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
-                "ts.enabled, ts.rules_json, ta.external_account_id, ea.label, ea.kind "
+                "ts.enabled, ts.rules_json, ta.external_account_id, ea.label, ea.kind, ts.revision "
                 "FROM telegram_sources ts "
                 "JOIN telegram_accounts ta ON ta.id = ts.account_id "
                 "LEFT JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
-                "WHERE ts.dismissed = 0 "
+                "WHERE ts.dismissed = 0 AND ts.legacy_retired = 0 "
                 "ORDER BY ts.enabled DESC, ts.id DESC"
             ).fetchall()
         return [self._source_from_row(row) for row in rows]
@@ -1172,7 +1172,7 @@ class Database:
                 "FROM telegram_sources ts "
                 "JOIN telegram_accounts ta ON ta.id = ts.account_id "
                 "WHERE ((? IS NULL AND ta.session_path = 'bot-api://configured') OR ta.external_account_id = ?) "
-                "AND ts.enabled = 1 "
+                "AND ts.enabled = 1 AND ts.legacy_retired = 0 "
                 "ORDER BY ts.id",
                 (external_account_id, external_account_id),
             ).fetchall()
@@ -1190,7 +1190,7 @@ class Database:
         """Remember how far the MTProto ingester has read one chat.
 
         Used to seed a new subscription at its latest message. Received batches
-        advance the cursor after processing in this single-account phase.
+        advance the cursor atomically with TelegramUserInbox.save_batch.
         """
         await run_sync(
             self._set_source_cursor_sync, chat_id, message_id, external_account_id
@@ -1216,20 +1216,6 @@ class Database:
     ) -> TelegramSourceConfig:
         with self.connection() as connection:
             account_id = self._ensure_telegram_account(connection, message.account_id)
-            if message.account_id is not None:
-                shared = connection.execute(
-                    "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, ts.enabled, ts.rules_json "
-                    "FROM telegram_sources ts JOIN telegram_accounts ta ON ta.id = ts.account_id "
-                    "WHERE ta.session_path = 'bot-api://configured' AND ta.external_account_id IS NULL "
-                    "AND ts.chat_id = ? AND NOT EXISTS (SELECT 1 FROM telegram_sources own "
-                    "WHERE own.account_id = ? AND own.chat_id = ts.chat_id) "
-                    "AND EXISTS(SELECT 1 FROM external_accounts ea WHERE ea.account_id = ? AND ea.enabled = 1 "
-                    "AND (SELECT count(*) FROM external_accounts other WHERE other.kind = ea.kind "
-                    "AND other.enabled = 1 AND other.deleted_at IS NULL) = 1)",
-                    (message.chat_id, account_id, message.account_id),
-                ).fetchone()
-                if shared is not None:
-                    return self._source_from_row(shared)
             connection.execute(
                 "INSERT INTO telegram_sources "
                 "(account_id, source_type, chat_id, display_name, enabled) "

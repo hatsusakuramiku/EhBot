@@ -512,6 +512,26 @@ class TelegramUserClient:
         finally:
             await self._close(client)
 
+    async def inspect_message_media(self, chat_id: int, message_id: int) -> dict:
+        """Resolve an archive through this user's own entity cache and session."""
+        from app.candidates.mtproto import _attachments
+        client = await self._connect()
+        try:
+            if not await client.is_user_authorized():
+                raise TelegramUserError("TELEGRAM_USER_UNAUTHORIZED", "用户会话已失效，请重新登录")
+            entity = await self._chat_entity(client, chat_id)
+            message = await client.get_messages(entity, ids=message_id)
+            attachments = _attachments(message, chat_id, message_id) if message is not None else ()
+            if not attachments or attachments[0]["type"] != "archive":
+                raise TelegramUserError("TELEGRAM_USER_MESSAGE_GONE", "源消息不存在或不再包含归档附件")
+            return attachments[0]
+        except TelegramUserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider boundary
+            raise _translate(exc) from exc
+        finally:
+            await self._close(client)
+
     async def download_message_media(
         self,
         chat_id: int,
@@ -519,6 +539,7 @@ class TelegramUserClient:
         destination: Path,
         *,
         progress: Callable[[int, int], None] | None = None,
+        expected_file_unique_id: str | None = None,
     ) -> int:
         """Download the media on one message, by chat and message id.
 
@@ -551,6 +572,10 @@ class TelegramUserClient:
                     "TELEGRAM_USER_MESSAGE_GONE",
                     "源消息已被删除或不再包含附件，无法用用户账户下载",
                 )
+            if expected_file_unique_id is not None:
+                document_id = getattr(getattr(message, "document", None), "id", None)
+                if document_id is None or f"mtproto:{document_id}" != expected_file_unique_id:
+                    raise TelegramUserError("TELEGRAM_SOURCE_CHANGED", "源消息的附件已改变，请重新选择来源")
             destination.parent.mkdir(parents=True, exist_ok=True)
             partial.unlink(missing_ok=True)
             # Only `download_media` renews a file reference that expires

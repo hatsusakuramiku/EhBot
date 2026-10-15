@@ -34,8 +34,8 @@ class AccountListener(ConnectionManager):
     """Reuse ingestion only; account service owns verification/configuration.
 
     The store is read-only and contains no legacy files. Each account has its
-    own task, entity cache and capability state; simultaneous activation is
-    gated until P6's ingestion identity/deduplication is ready.
+    own task, entity cache and capability state. The account service owns
+    activation; durable ingestion identity is shared across these listeners.
     """
 
     def __init__(self, account_id: str, runtime: AccountRuntime, database, **kwargs):
@@ -50,7 +50,11 @@ class AccountListener(ConnectionManager):
 
     async def _ingest_with_user_account(self):
         async with self._runtime.use(self.account_id):
-            return await super()._ingest_with_user_account()
+            return await super()._receive_with_user_account()
+
+    async def _consume_pending(self):
+        async with self._runtime.use(self.account_id):
+            await super()._ingest_pending()
 
     async def list_telegram_user_dialogs(self):
         async with self._runtime.use(self.account_id):

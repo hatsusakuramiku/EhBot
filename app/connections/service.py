@@ -16,6 +16,7 @@ from app.connections.listeners import AccountListener
 from app.connections.models import ConnectionSnapshot, ProviderConnectionError, ProviderStatus, TelegramUserAccount
 from app.connections.runtime import AccountRuntime, current_account_context
 from app.connections.telegram import TelegramBotApi
+from app.connections.telegram_files import document_id
 from app.connections.telegram_user import LoginChallenge, TelegramUserClient, TelegramUserCredentials, TelegramUserError
 from app.downloads.execution import run_sync
 
@@ -30,25 +31,10 @@ class _PendingLogin:
 class AccountService:
     """Single-admin account control, with per-account runtime state.
 
-    P4 stores many configurations but activates at most one of each kind.
-    P6/P7 extend selection/listening after ingestion identity is migrated.
+    P4 stores many configurations; each verified Telegram account can run its
+    own listener. P7 extends the same selection model to EH requests.
     Disabling/editing/deleting uses durable operations and confirmed cleanup.
     """
-
-    async def _run_legacy_backlog(self):
-        """Recover unknown historical inputs without blocking account startup."""
-        listener = self._listener("startup-backlog")
-        while True:
-            try:
-                await listener._ingest_pending()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "telegram_legacy_ingest_failed", extra={"error_code": "TELEGRAM_INGEST_FAILED"},
-                )
-                self._notify()
-            await asyncio.sleep(1)
 
     def __init__(self, registry: AccountRegistry, *, telegram_client, exhentai_client,
                  candidate_ingestor=None, user_client_factory=None, on_candidates_ingested=None,
@@ -69,8 +55,8 @@ class AccountService:
         self._logins: dict[str, _PendingLogin] = {}
         self._login_locks: dict[str, asyncio.Lock] = {}
         self._activation_lock = asyncio.Lock()
-        self._backlog_task = None
         self._operation_task = None
+        self._backlog_task = None
 
     def _notify(self):
         if self._on_state_changed is not None:
@@ -134,15 +120,16 @@ class AccountService:
         self._notify()
         return result
 
+
     async def enable_account(self, account_id: str, *, expected_revision: int) -> dict:
         """Enable a verified saved account; no credential re-entry is needed."""
         async with self._activation_lock:
             account = await self.registry.get(account_id)
             if account["revision"] != expected_revision:
                 raise AccountError("REVISION_CONFLICT", "账号已被另一端修改，请刷新后核对")
-            for other in await self.registry.list_accounts():
-                if other["kind"] == account["kind"] and other["enabled"] and other["account_id"] != account_id:
-                    raise AccountError("ACCOUNT_RUNTIME_LIMIT", "当前阶段同类账号只能启用一个，请先停用原账号")
+            if account["kind"] == "EH" and any(other["kind"] == "EH" and other["enabled"] and other["account_id"] != account_id
+                    for other in await self.registry.list_accounts()):
+                raise AccountError("ACCOUNT_RUNTIME_LIMIT", "当前阶段 EH 账号只能启用一个")
             result = await self.registry.enable(account_id, expected_revision=expected_revision)
             await self._start_listener(result)
             self._notify()
@@ -265,9 +252,10 @@ class AccountService:
             async with self._activation_lock:
                 # Check private storage before accepting activation; the CAS
                 # transaction below still owns current-version arbitration.
+                account = await self.registry.get(account_id)
                 await self.registry.context(account_id)
                 response = await run_sync(self.registry._enable_sync, account_id, expected_revision,
-                                          command=db_command, exclusive_kind=True)
+                                          command=db_command, exclusive_kind=account["kind"] == "EH")
                 current = await self.registry.get(account_id)
                 if current["enabled"] and current["stop_operation_id"] is None:
                     await self._start_listener(current)
@@ -344,6 +332,21 @@ class AccountService:
                 continue
         self._operation_task = asyncio.create_task(self._run_operations(), name="account-operations")
 
+    async def _run_legacy_backlog(self):
+        """Recover unknown historical inputs without blocking account startup."""
+        listener = self._listener("startup-backlog")
+        while True:
+            try:
+                await listener._ingest_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "telegram_legacy_ingest_failed", extra={"error_code": "TELEGRAM_INGEST_FAILED"},
+                )
+                self._notify()
+            await asyncio.sleep(1)
+
     async def stop(self):
         if self._backlog_task is not None:
             self._backlog_task.cancel()
@@ -367,15 +370,29 @@ class AccountService:
                 return account
         return None
 
+
+    @asynccontextmanager
+    async def use_account(self, account_id: str, *, kind: str):
+        """Borrow the named source account through actual request cleanup."""
+        existing = current_account_context.get()
+        if existing is not None and existing.account_id == account_id:
+            if existing.kind != kind:
+                raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
+            yield existing
+            return
+        account = await self.registry.get(account_id)
+        if account["kind"] != kind:
+            raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
+        if (not account["enabled"] or account["stop_operation_id"] is not None
+                or self.account_status(account_id)["state"] != "connected"):
+            raise AccountError("ACCOUNT_UNAVAILABLE", "来源账号已停用或无法连接，请选择可用来源")
+        async with self.runtime.use(account_id) as context:
+            yield context
+
     @asynccontextmanager
     async def use_kind(self, kind: str, *, required: bool = True, account_id: str | None = None):
         if account_id is not None:
-            account = await self.registry.get(account_id)
-            if account["kind"] != kind:
-                raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
-            if self.account_status(account_id)["state"] != "connected":
-                raise AccountError("ACCOUNT_UNAVAILABLE", "来源账号已停用或无法连接，请选择其他来源")
-            async with self.runtime.use(account_id) as context:
+            async with self.use_account(account_id, kind=kind) as context:
                 yield context
             return
         existing = current_account_context.get()
@@ -388,7 +405,7 @@ class AccountService:
                 raise AccountError("ACCOUNT_NOT_ENABLED", "没有已启用的来源账号")
             yield None
             return
-        async with self.runtime.use(account["account_id"]) as context:
+        async with self.use_account(account["account_id"], kind=kind) as context:
             yield context
 
     async def start_login(self, account_id: str, *, expected_revision: int) -> dict:
@@ -466,13 +483,13 @@ class AccountService:
         by_kind = {}
         for account_id, state in self._states.items():
             kind = self._kinds.get(account_id)
+            if kind == "TG_BOT" and account_id in self._listeners and state.state == "connected":
+                state = self._listeners[account_id].snapshot().telegram
+            elif kind == "TG_USER" and account_id in self._listeners and state.state == "connected":
+                state = self._listeners[account_id].snapshot().telegram_user
+            if kind == "TG_USER" and not isinstance(state, TelegramUserAccount):
+                state = TelegramUserAccount(state.state, state.configured, identity=state.identity, error=state.error)
             if kind not in by_kind or state.state == "connected":
-                if kind == "TG_BOT" and account_id in self._listeners and state.state == "connected":
-                    state = self._listeners[account_id]._telegram_status
-                elif kind == "TG_USER" and account_id in self._listeners and state.state == "connected":
-                    state = self._listeners[account_id]._telegram_user
-                if kind == "TG_USER" and not isinstance(state, TelegramUserAccount):
-                    state = TelegramUserAccount(state.state, state.configured, identity=state.identity, error=state.error)
                 by_kind[kind] = state
         return ConnectionSnapshot(by_kind.get("TG_BOT", ProviderStatus("not_configured", False)),
                                   by_kind.get("EH", ProviderStatus("not_configured", False)),
@@ -485,9 +502,9 @@ class AccountService:
         if listener is not None and state.state == "connected":
             kind = self._kinds.get(account_id)
             if kind == "TG_BOT":
-                state = listener._telegram_status
+                state = listener.snapshot().telegram
             elif kind == "TG_USER":
-                state = listener._telegram_user
+                state = listener.snapshot().telegram_user
         return {"state": state.state, "error": state.error}
 
     def telegram_available(self):
@@ -496,17 +513,138 @@ class AccountService:
     def user_download_available(self):
         return self.snapshot().telegram_user.state == "connected"
 
-    async def list_telegram_user_dialogs(self):
-        account = await self.selected_account("TG_USER")
-        if account is None:
-            raise TelegramUserError("TELEGRAM_USER_NOT_CONFIGURED", "请先启用 TG 用户账号")
-        return await self._listener(account["account_id"]).list_telegram_user_dialogs()
+    async def list_telegram_user_dialogs(self, account_id: str | None = None):
+        """Read the named user's dialogs; ambiguous legacy calls must choose.
+
+        An omitted account is compatible only when exactly one connected user
+        is enabled. The listener borrows that account's immutable credentials
+        and owns its entity cache. Bot and EH accounts cannot read user dialogs.
+        """
+        if account_id is None:
+            accounts = [account for account in await self.registry.list_accounts()
+                        if account["kind"] == "TG_USER" and account["enabled"]
+                        and account["stop_operation_id"] is None
+                        and self.account_status(account["account_id"])["state"] == "connected"]
+            if len(accounts) > 1:
+                raise AccountError("ACCOUNT_SELECTION_REQUIRED", "请选择要读取会话的 TG 用户账号")
+            if not accounts:
+                raise TelegramUserError("TELEGRAM_USER_NOT_CONFIGURED", "请先启用 TG 用户账号")
+            account = accounts[0]
+        else:
+            account = await self.registry.get(account_id)
+            if account["kind"] != "TG_USER":
+                raise AccountError("ACCOUNT_KIND_INVALID", "只有 TG 用户账号支持读取会话")
+            if not account["enabled"] or account["stop_operation_id"] is not None:
+                raise AccountError("ACCOUNT_UNAVAILABLE", "请先启用所选 TG 用户账号并等待停止操作结束")
+        dialogs = await self._listener(account["account_id"]).list_telegram_user_dialogs()
+        return [{**dialog, "account_id": account["account_id"]} for dialog in dialogs]
 
     async def telegram_user_context(self):
         context = current_account_context.get()
         if context is None or context.kind != "TG_USER":
             raise AccountError("ACCOUNT_CONTEXT_REQUIRED", "TG 用户下载必须在账号请求上下文内执行")
         return self._user_client(context.account_id, context.values)
+
+    async def resolve_telegram_user_source(self, attachment: dict, *, eligible_account_ids=None, excluded_account_ids=()) -> dict:
+        """Prefer the observing user, then verify another user's exact document."""
+        original_account = attachment.get("account_id")
+        if (attachment.get("account_kind") == "TG_USER" and original_account
+                and original_account not in excluded_account_ids
+                and (eligible_account_ids is None or original_account in eligible_account_ids)):
+            try:
+                async with self.use_account(original_account, kind="TG_USER"):
+                    return {"account_id": original_account,
+                            "download_file_unique_id": attachment.get("file_unique_id")}
+            except AccountError:
+                pass
+        identity = document_id(attachment)
+        accounts = {account["account_id"]: account for account in await self.registry.list_accounts()
+                    if account["kind"] == "TG_USER" and account["enabled"]
+                    and account["stop_operation_id"] is None
+                    and account["account_id"] not in excluded_account_ids
+                    and (eligible_account_ids is None or account["account_id"] in eligible_account_ids)
+                    and self.account_status(account["account_id"])["state"] == "connected"}
+        # Saved observations can use private/account-local coordinates, but only
+        # when they prove the same document, not merely the same gallery.
+        if identity is not None:
+            observations = await run_sync(self._telegram_observations_sync, attachment, "TG_USER")
+            for observed in observations:
+                account_id = observed["account_id"]
+                if account_id not in accounts or account_id == original_account:
+                    continue
+                verified = await self._inspect_telegram_document(account_id, observed, identity)
+                if verified is not None:
+                    return {**verified, "download_chat_id": observed["chat_id"],
+                            "download_message_id": observed["message_id"],
+                            "download_observation_id": observed["observation_id"],
+                            "download_observation_revision": observed["observation_revision"]}
+        # Ordinary/private peers have account-local message ids. A raw id or
+        # an unknown legacy account does not prove another user sees this post.
+        if attachment.get("peer_type") not in {"channel", "supergroup"}:
+            raise AccountError("TELEGRAM_SOURCE_ACCOUNT_REQUIRED", "该来源无法跨账号确认，请选择 TG 用户实际接收的消息")
+        if identity is not None:
+            for account_id in accounts:
+                if account_id == original_account:
+                    continue
+                verified = await self._inspect_telegram_document(account_id, attachment, identity)
+                if verified is not None:
+                    return verified
+        raise AccountError("TELEGRAM_SOURCE_UNAVAILABLE", "没有 TG 用户账号能够读取所选消息的附件")
+
+    async def resolve_telegram_bot_source(self, attachment: dict, *, eligible_account_ids=None, excluded_account_ids=()) -> dict:
+        """Select a Bot's own saved file_id; never transplant another Bot's id."""
+        observations = await run_sync(self._telegram_observations_sync, attachment, "TG_BOT")
+        if document_id(attachment) is not None:
+            for observed in observations:
+                account_id = observed["account_id"]
+                if (account_id in excluded_account_ids or not observed.get("file_id")
+                        or (eligible_account_ids is not None and account_id not in eligible_account_ids)):
+                    continue
+                try:
+                    async with self.use_account(account_id, kind="TG_BOT"):
+                        return {"account_id": account_id, "download_file_id": observed["file_id"],
+                                "download_file_unique_id": observed["file_unique_id"],
+                                "download_chat_id": observed["chat_id"], "download_message_id": observed["message_id"],
+                                "download_observation_id": observed["observation_id"],
+                                "download_observation_revision": observed["observation_revision"]}
+                except AccountError:
+                    continue
+        raise AccountError("TELEGRAM_SOURCE_UNAVAILABLE", "没有 Bot 账号保存同一附件的可用下载来源")
+
+    def _telegram_observations_sync(self, attachment: dict, kind: str) -> list[dict]:
+        """Read alternative observations linked to the selected source's work."""
+        with self.registry._database.connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT sm.id, sm.observation_revision, ta.external_account_id, "
+                "sm.chat_id, sm.message_id, sm.attachment_json FROM candidate_messages original "
+                "JOIN candidate_messages cm ON cm.candidate_id = original.candidate_id "
+                "JOIN source_messages sm ON sm.id = cm.source_message_id "
+                "JOIN telegram_accounts ta ON ta.id = sm.account_id "
+                "JOIN external_accounts ea ON ea.account_id = ta.external_account_id "
+                "WHERE original.source_message_id = ? AND sm.message_state = 'ACTIVE' "
+                "AND ea.kind = ? ORDER BY sm.id",
+                (attachment.get("observation_id"), kind),
+            ).fetchall()
+        identity = document_id(attachment)
+        return [{**item, "observation_id": row[0], "observation_revision": row[1],
+                 "account_id": row[2], "chat_id": row[3], "message_id": row[4]}
+                for row in rows for item in json.loads(row[5])
+                if item.get("type") == "archive" and document_id(item) == identity]
+
+    async def _inspect_telegram_document(self, account_id: str, attachment: dict, identity: int) -> dict | None:
+        """Finish each scoped preflight before considering the next account."""
+        try:
+            async with self.use_account(account_id, kind="TG_USER"):
+                media = await (await self.telegram_user_context()).inspect_message_media(
+                    int(attachment["chat_id"]), int(attachment["message_id"]),
+                )
+                if (document_id(media) == identity
+                        and media.get("file_name") == attachment.get("file_name")
+                        and int(media.get("size_bytes") or 0) == int(attachment.get("size_bytes") or 0)):
+                    return {"account_id": account_id, "download_file_unique_id": media["file_unique_id"]}
+        except ProviderConnectionError:
+            pass
+        return None
 
     async def configure_telegram(self, token):
         raise AccountError("ACCOUNT_API_REQUIRED", "请通过账号管理保存、测试并启用配置")

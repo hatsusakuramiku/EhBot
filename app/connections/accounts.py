@@ -295,7 +295,42 @@ class AccountRegistry:
                     raise
                 if row[1] is None:
                     imported[kind] = row[0]
+        self._import_legacy_sources_sync()
         return imported
+
+    def _import_legacy_sources_sync(self):
+        """Copy shared rules once per proven legacy slot, never observations.
+
+        Retired originals retain their configuration for a legacy slot whose
+        credentials are imported later. The group marker prevents a restart
+        from undoing subsequent edits or resurrecting dismissed subscriptions.
+        """
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            accounts = connection.execute(
+                "SELECT account_id, kind FROM external_accounts "
+                "WHERE legacy_slot IN ('TG_BOT', 'TG_USER') AND deleted_at IS NULL "
+                "AND account_id NOT IN (SELECT account_id FROM legacy_telegram_source_imports) ORDER BY kind, account_id"
+            ).fetchall()
+            for external_id, kind in accounts:
+                account_id = self._database._ensure_telegram_account(connection, external_id)
+                connection.execute(
+                    "INSERT INTO telegram_sources(account_id, source_type, chat_id, display_name, enabled, "
+                    "rules_json, dismissed, last_message_id) "
+                    "SELECT ?, ts.source_type, ts.chat_id, ts.display_name, ts.enabled, ts.rules_json, ts.dismissed, "
+                    "CASE WHEN ? = 'TG_USER' THEN ts.last_message_id ELSE 0 END "
+                    "FROM telegram_sources ts JOIN telegram_accounts ta ON ta.id = ts.account_id "
+                    "WHERE ta.session_path = 'bot-api://configured' AND ta.external_account_id IS NULL "
+                    "ON CONFLICT(account_id, chat_id) DO NOTHING",
+                    (account_id, kind),
+                )
+                connection.execute("INSERT INTO legacy_telegram_source_imports(account_id) VALUES(?)", (external_id,))
+            if accounts:
+                connection.execute(
+                    "UPDATE telegram_sources SET legacy_retired = 1 WHERE legacy_retired = 0 "
+                    "AND account_id IN (SELECT id FROM telegram_accounts "
+                    "WHERE session_path = 'bot-api://configured' AND external_account_id IS NULL)"
+                )
 
     async def edit(self, account_id: str, *, expected_revision: int,
                    label: str | None = None, fields: dict | None = None, clear_fields=()) -> dict:

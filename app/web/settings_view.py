@@ -8,6 +8,8 @@ the renderer is what keeps those four from drifting into four settings pages.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 
@@ -49,6 +51,7 @@ async def render_settings(
             "csrf_token": request.session["csrf_token"],
             "error": error,
             "notice": notice,
+            "source_command_key": str(uuid4()),
         }
     )
     # A freshly generated API key is shown exactly once. It travels from the

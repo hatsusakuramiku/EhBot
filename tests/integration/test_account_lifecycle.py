@@ -41,6 +41,26 @@ async def no_queue_operations():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["PENDING", "PAUSED"])
+async def test_stopping_bound_account_still_cancels_queued_non_telegram_work(registry, tmp_path, state):
+    account, context = await active_account(registry)
+    lifecycle = AccountLifecycle(registry)
+    downloads = DownloadService(registry._database, tmp_path)
+    job_id = pending(registry._database, "EXHENTAI")
+    job = downloads._claim_pending_job_sync()
+    await lifecycle.bind_execution(context, Execution(
+        registry._database.path, job["task_id"], job["attempt_id"], job["generation"]))
+    with registry._database.connection() as connection:
+        connection.execute("UPDATE download_jobs SET state = ? WHERE id = ?", (state, job_id))
+    await lifecycle.request_stop(account["account_id"], "disable", expected_revision=account["revision"],
+                                 idempotency_key="stop-queued")
+    assert await lifecycle.process_operations(
+        stop_runtime=stop_runtime, process_queue_operations=downloads.process_operations) == 1
+    with registry._database.connection() as connection:
+        assert connection.execute("SELECT state FROM download_jobs WHERE id = ?", (job_id,)).fetchone() == ("CANCELLED",)
+
+
+@pytest.mark.asyncio
 async def test_enable_requires_verification_of_current_version_and_unique_identity(registry):
     first = await registry.create("TG_BOT", "First", {"bot_token": "first-test-token"})
     with pytest.raises(AccountError) as unverified:

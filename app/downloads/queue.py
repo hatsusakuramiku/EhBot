@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+from contextlib import nullcontext
 from uuid import uuid4
 
 from app.db.database import Database
@@ -63,12 +64,13 @@ class QueueControl:
                 (code, operation_id),
             )
 
-    def finish_operation(self, operation: dict) -> None:
+    def finish_operation(self, operation: dict, *, replacement_details=None, connection=None) -> None:
         """After physical stop, release the old slot and enqueue its successor atomically."""
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             saved = connection.execute(
-                "SELECT status FROM queue_operations WHERE operation_id = ?", (operation["operation_id"],),
+                "SELECT status, action FROM queue_operations WHERE operation_id = ?", (operation["operation_id"],),
             ).fetchone()
             if saved is None or saved[0] in {"COMPLETED", "FAILED"}:
                 return
@@ -90,14 +92,50 @@ class QueueControl:
             current = task_snapshot(connection, operation["legacy_job_id"])
             if current["task_id"] != operation["task_id"]:
                 raise DownloadError("TASK_SUPERSEDED", "停止操作对应的旧任务已被替换")
-            action = operation["action"]
-            if action in {'retry', 'restart', 'switch-source'} and connection.execute(
+            action = saved[1]
+            if action in {'retry', 'restart', 'switch-source', 'replace-account'} and connection.execute(
                 "SELECT 1 FROM ingest_reference_changes WHERE candidate_id = ? AND status = 'PENDING' "
                 "UNION ALL SELECT 1 FROM ingest_observation_changes c, json_each(c.task_ids_json) tasks "
                 "WHERE c.status = 'PENDING' AND tasks.value = ? LIMIT 1",
                 (operation['candidate_id'], operation['task_id']),
             ).fetchone() is not None:
                 action = 'cancel'
+            if action == "replace-account":
+                if (current["state"] != "STOPPING" or current["attempt_id"] != operation["attempt_id"]
+                        or current["generation"] != operation["generation"] + 1):
+                    raise DownloadError("STOP_STATE_CHANGED", "账号接替的原执行身份已改变")
+                if replacement_details is not None and connection.execute(
+                    "SELECT 1 FROM candidate_approvals WHERE candidate_id = ?", (operation["candidate_id"],),
+                ).fetchone() is None:
+                    replacement_details = None
+                # Account lifecycle revokes a running attempt before cancelling
+                # it physically. Close that history only after confirmed exit;
+                # a supplier failure already has its own frozen FAILED result.
+                connection.execute(
+                    "UPDATE queue_attempts SET status = 'CANCELLED', finished_at = CURRENT_TIMESTAMP "
+                    "WHERE attempt_id = ? AND finished_at IS NULL", (operation["attempt_id"],),
+                )
+                connection.execute(
+                    "UPDATE queue_operations SET status = 'COMPLETED', error_code = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE operation_id = ?", (operation["operation_id"],),
+                )
+                connection.execute(
+                    "UPDATE download_jobs SET state = ?, details_json = coalesce(?, details_json), "
+                    "error_code = CASE WHEN ? THEN NULL ELSE error_code END, "
+                    "error_message = CASE WHEN ? THEN NULL ELSE error_message END, "
+                    "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    ("PENDING" if replacement_details is not None else "FAILED",
+                     json.dumps(replacement_details, separators=(",", ":")) if replacement_details is not None else None,
+                     replacement_details is not None, replacement_details is not None, operation["legacy_job_id"]),
+                )
+                connection.execute(
+                    "UPDATE candidates SET status = ?, filter_reason = CASE WHEN ? THEN '' ELSE filter_reason END, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('PROCESSING', 'FAILED')",
+                    ("APPROVED" if replacement_details is not None else "FAILED",
+                     replacement_details is not None, operation["candidate_id"]),
+                )
+                return
             if action == "stop-seeding":
                 connection.execute(
                     "UPDATE download_jobs SET details_json = json_set(details_json, '$.seeding', json('false')), "
@@ -326,10 +364,21 @@ class QueueControl:
                 if provider == "EH_TORRENT" and details_json not in (None, "", "{}"):
                     operation_id = self._operation(connection, job_id, action, current, params)
                     target = "STOPPING"
+                if provider in {"TELEGRAM", "TELEGRAM_USER"}:
+                    details = json.loads(details_json or "{}")
+                    details = {key: value for key, value in details.items()
+                               if key not in {"account_pool", "attempted_accounts"}}
+                    # MTProto cannot borrow a Bot token. A Bot-origin user
+                    # download retains its verified user's own coordinates.
+                    if provider == "TELEGRAM" or details.get("origin_account_kind") == "TG_USER":
+                        details = {key: value for key, value in details.items() if not key.startswith("download_")}
+                        if details.get("origin_account_id"):
+                            details["account_id"] = details["origin_account_id"]
+                    details_json = json.dumps(details, separators=(",", ":"))
             connection.execute(
-                "UPDATE download_jobs SET state = ?, error_code = NULL, error_message = NULL, "
+                "UPDATE download_jobs SET state = ?, details_json = ?, error_code = NULL, error_message = NULL, "
                 "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (target, job_id),
+                (target, details_json, job_id),
             )
             if action in {"retry", "restart"} and target != "STOPPING" and provider != "CONVERSION":
                 connection.execute(
@@ -343,6 +392,17 @@ class QueueControl:
                 operation_id = self._operation(connection, job_id, action, current, params)
                 connection.execute("UPDATE queue_tasks SET revision = revision + 1 WHERE task_id = ?", (current["task_id"],))
             else:
+                if action == "cancel" and state == "STOPPING":
+                    replacement = connection.execute(
+                        "SELECT operation_id FROM queue_operations WHERE task_id = ? "
+                        "AND action = 'replace-account' AND status NOT IN ('COMPLETED', 'FAILED')",
+                        (current["task_id"],),
+                    ).fetchone()
+                    if replacement is not None:
+                        connection.execute("UPDATE queue_operations SET action = 'cancel', params_json = '{}' "
+                                           "WHERE operation_id = ?", replacement)
+                        connection.execute("UPDATE queue_tasks SET revision = revision + 1 WHERE task_id = ?", (current["task_id"],))
+                        return {"job_id": job_id, "action": action, **task_snapshot(connection, job_id), "operation_id": replacement[0]}
                 if state in {"COMPLETED", "CONVERSION_COMPLETED"}:
                     raise DownloadError("JOB_ALREADY_COMPLETED", "已完成的任务无法取消或切源")
                 if state in {"CANCELLED", "STOPPING"}:
@@ -366,6 +426,24 @@ class QueueControl:
         if action == "priority":
             result["priority"] = params["priority"]
         return result
+
+    @staticmethod
+    def request_account_replacement(connection, job_id, current, *, stop_requested=False):
+        """Persist a finite TG pool; True also requests active producer cancellation."""
+        provider, raw = connection.execute("SELECT provider, details_json FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
+        details = json.loads(raw or "{}")
+        pool = details.get("account_pool")
+        if pool is None:
+            pool = [row[0] for row in connection.execute(
+                "SELECT account_id FROM external_accounts WHERE kind = ? AND enabled = 1 "
+                "AND deleted_at IS NULL AND stop_operation_id IS NULL "
+                "AND verified_credential_revision = credential_revision ORDER BY created_at, account_id",
+                ("TG_BOT" if provider == "TELEGRAM" else "TG_USER",))]
+        attempted = list(dict.fromkeys([*details.get("attempted_accounts", []), details.get("account_id")]))
+        operation_id = QueueControl._operation(connection, job_id, "replace-account", current,
+            {"account_pool": pool, "attempted_accounts": attempted, "stop_requested": stop_requested})
+        connection.execute("UPDATE download_jobs SET state = 'STOPPING', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        return operation_id
 
     @staticmethod
     def _operation(connection, job_id, action, current, params):

@@ -181,6 +181,8 @@ P2 / schema 028（任务契约从 027 引入）：`api.job_action`、`api.set_pr
 回执保留七天，尚未结束的操作回执不清理；超出保留期先核对任务现状，再决定是否新发命令。
 任务详情的已结束 attempt 保留执行事实；后续远端核实的状态在 task/operation 中表达，不将旧失败改成 STOPPING 或抹掉旧错误。
 
+P6 / 工作区 035：TG 可接替的下载失败登记内部 `replace-account` operation；STOPPING 仍占槽，原请求退出后，合格备用恢复同一 task 的 PENDING，下次领取生成独立 attempt。有限账号池与已尝试集合跨重启保留，旧失败 attempt 不变。此时管理员仍可用现有版本/幂等任务 `cancel` 命令取消接替；返回 STOPPING 与原 operation_id，最终 CANCELLED，预检期间取消也不会启动后继。其他 STOPPING 操作仍遵循原限制。账号生命周期触发接替和显式重试后的账号重选尚待 P6 完整验收。
+
 STOPPING 保留作品槽。已验收 P3 / schema 029 接入本地请求/线程/进程树收束与远端推送查回/归属核实；确认停止后才完成 operation 并入队切源/重试目标。推送结果未知、失联或实例/归属改变时 operation 保持未完成并记录 error_code；新共享种子拒绝附着，轮询核对原实例和本 attempt 标签后才写进度/产物。运行移除立即删除业务行，返回 `removal_id`、`operation_ids`、`cleanup_status`，独立收尾继续保留。`GET /api/v1/removals/{removal_id}` 复用 Cookie/Bearer 鉴权，返回状态、关联任务、停止错误与 deleted_files/failed_files；业务候选已删除时仍可查。任务详情新增 `removals`，其 PENDING 表示独立作品预留尚未释放，不能用任务的 REMOVED 推断下载已停止。默认保留文件，同作品新任务排队等待停止和文件清理确认。完整发布崩溃恢复、心跳/预算按 P8/P9 接续。旧客户端缺少前置条件直接拒绝，不自动采用服务器最新版本。
 
 `switch-source` 先读取管理员作用域回执，再在数据库写事务外验证目标凭据/链接与页面可读性；不下载目标原档或图片。最终受理事务再次核对 task/revision 和目标引用，目标信息变化返回 `409 SOURCE_CHANGED`，拒绝时旧任务不撤销。相同命令已有回执时跳过预检，即使目标之后失效仍返回原结果；HTTP、Web 表单、批量与 WS 都走相同命令入口。预检通过不表示实际切换完成，仍按 operation 等待旧来源停止。
@@ -194,10 +196,27 @@ DOM 行为：在临时目录安装 `jsdom` 后运行 `node tests/web/realtime.cj
 该测试使用真实 HTMX/Alpine 和 WebUI 脚本，验证 Tag 左/右键、固定 URL、输入/勾选/焦点保留、按钮禁用、多值表单、断线不重发、HTTP 降级、序列/旧响应校正、日志快照及代理前缀。
 DOM 测试与真实浏览器/移动设备联调分别记录，不能互相替代。
 
-
-P5 身份/来源操作查询与重试（031 已冻结）：
+P5 身份/来源操作查询与重试（031 已冻结，已提交 2ea49f2）：
 
 - `GET /api/v1/ingest-operations/{operation_id}`：公开 ID 为 `reference:<uuid>` 或 `observation:<source_message_id>`。返回 `revision`、`kind`、`candidate_id`、`original_candidate_id`、`status`（PENDING/COMPLETED/FAILED）、`result_candidate_id`、`error_code`、`retryable`、`updated_at` 及统一中文 `state/label/error_message`。不返回消息原始 JSON、附件句柄、画廊 Token 或账号凭据。原候选合并/移除后仍可按操作 ID 查询；合并通知同时覆盖原作品与保留作品，原 Web 详情地址转向仍存在的保留作品。
 - `GET /api/v1/works/{candidate_id}` 的 `ingest_operations` 使用同一投影，合并后的保留作品包含完成结果；PENDING 纳入 `live`。来源再次编辑会增加操作版本，不能把旧 revision 当作新输入重试。
 - `POST /api/v1/ingest-operations/{operation_id}/retry`：JSON 为 `{"expected_revision":2,"idempotency_key":"client-generated-key"}`，成功受理返回 202，实际执行沿已有停止处理循环推进。只允许 FAILED 且身份/来源仍有效的操作；缺前置条件 428，陈旧版本/重复键异内容/已完成/来源变化 409，不存在 404。同 key 同内容在校验当前状态前返回原回执，Cookie/Bearer 共用管理员作用域；网络断开后应重发原 key，再 GET 最终状态。
 - Cookie 写操作要求 `X-CSRF-Token`，Bearer 免 CSRF；成功查询/受理响应 `Cache-Control: no-store`。WS 命令 `api.api_ingest_operation` / `api.api_ingest_retry` 转发相同 JSON 路由；异步完成和失败沿已有事件通道通知客户端重读。Web 表单是同一命令的薄适配，不另做冲突裁决。
+
+P6 工作区新增来源账号选择与会话读取（P6 已验收）：
+
+- `GET /api/v1/settings/sources` 的每条来源增加 `account_id`、`account_label`、`account_kind`、`revision`；历史账号未知时账号字段为 null。`source_accounts` 列出可配置的 TG Bot/用户，字段仅 account_id/kind/label/enabled，不含凭据或会话。不同账号的相同 Chat ID 分别列出。`source_versions` 列出 source_id/account_id/chat_id/revision/dismissed，含已隐藏的墓碑，供明确重新添加使用。
+- `POST /api/v1/settings/sources/dialogs` 请求 `{"account_id":"所选 TG 用户 UUID"}`，返回 `{"items":[...],"total":1}`。每条会话保留该 account_id，并沿用 chat_id/title/kind/username 字段。只读会话、不修改来源；账号不存在 404，类型不支持、停用或有歧义 400。省略账号仅兼容恰好一个已启用且连接正常的 TG 用户，多账号不静默取第一项。
+- Cookie 请求需要 `X-CSRF-Token`，Bearer 免 CSRF；WS `api.api_source_dialogs` 以 payload.body 转发同一接口。Web 来源页调用同一账号服务，预填与批量添加携带选定账号，更新来源保留账号归属。
+- P6 已支持多个 TG Bot/用户同时启用并完成来源/监听/下载接替验收；EH 单启用保留到 P7，全域协议核对在 P10。
+
+P6 来源命令（032 已冻结；Cookie/CSRF、Bearer 和 WS 共用同一核心）：
+
+- `POST /api/v1/settings/sources`：原身份/规则字段加 `expected_revision`、`idempotency_key`。新建版本为 0；更新或恢复墓碑必须提交该行已读取的版本。版本冲突 409 `REVISION_CONFLICT`，details.current 提供非敏感当前配置；缺版本/幂等键返回 428。原 `/sources` 表单不再无条件 upsert。
+- `PUT /api/v1/settings/sources/batch`：action/source_ids/规则字段加 `expected_revisions`（source_id 字符串到版本的映射）及 `idempotency_key`。逐项裁决，冲突项不影响其他项；不将已隐藏行悄悄恢复。
+- `POST /api/v1/settings/sources/batch-add`：`account_id`、`idempotency_key` 和 `entries` 数组；每项含 source_type/chat_id/display_name/expected_revision。不存在用 0，已存在须用其读取版本；可见行返回 SKIPPED 并保留配置，墓碑仅在版本匹配时恢复为停用。
+- 写响应继续包含当前来源快照，另含稳定的 `command`：command_id/idempotency_key/action/status/items；status 为 COMPLETED/PARTIAL/FAILED，逐项返回 source_id/chat_id/revision/status/created 或 error。批量业务失败以逐项结果返回；格式/前置条件错误仍是错误信封。当前快照可能已更新，重放保证的是同一 command 回执。
+- `GET /api/v1/settings/sources/commands/{key}` 可在断线后取回回执。相同管理员跨 Cookie/Bearer/WS 复用同键同内容得到同一回执，校验顺序先回执后当前版本；同键异内容 409 `IDEMPOTENCY_CONFLICT`。来源变更与整批回执在同一短事务提交；异常全部回滚。
+- 自动 WS 目录包含 api.post_source/api.put_sources_batch/api.api_add_sources_bulk/api.api_source_command_receipt；使用 payload.body 或 payload.params.key。Web 旧表单也要求原版本和幂等键，冲突不自动改版本重试。消息游标不推进配置 revision，不同来源互不制造版本冲突。
+- 033 已冻结：原单账号凭据导入后的来源规则一次性复制给对应 legacy_slot 的 TG_BOT/TG_USER，已有专属配置保留；完成标记与复制同事务提交，后续账号不自动继承，重启不覆盖编辑/删除。原共享配置保留历史引用并从 sources/source_versions 隐藏，历史 observation 身份不改。旧共享保存缺明确账号返回 ACCOUNT_SELECTION_REQUIRED；退休来源批量写按旧版本拒绝，已读到退休版本也返回 SOURCE_MIGRATED。客户端应重新读取来源并选择账号。
+- 034 已冻结：TG 用户接收消息和来源游标同事务持久化，候选消费从网络轮询分离；没有新增客户端命令。账号运行状态继续报告消费失败，接收不会因此停止；服务器恢复后继续消费，不要求客户端重发入库操作。FloodWait 仅暂停对应用户账号的监听请求，完整持久冷却/跨功能预算在 P9。来源配置 revision 不随接收游标变化。

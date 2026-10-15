@@ -314,6 +314,20 @@ class CandidateIngestor:
 
     # ----------------------------------------------------------------- batch
 
+    async def process_user_inbox(self) -> IngestSummary:
+        """Consume one bounded delivery pass through the shared identity owner."""
+        from app.candidates.inbox import TelegramUserInbox
+        inbox = TelegramUserInbox(self._database)
+        created = await self.process_pending_entries()
+        processed = ignored = 0
+        rules = await self.parse_rules()
+        for inbox_id, message in await run_sync(inbox.pending, limit=100):
+            was_created, decision = await self.process_message(message, rules=rules)
+            await run_sync(inbox.acknowledge, inbox_id)
+            processed += 1
+            created += int(was_created)
+            ignored += int(decision.result == "IGNORE")
+        return IngestSummary(processed, created, ignored, 0)
 
     async def process_pending_updates(self) -> IngestSummary:
         processed = 0

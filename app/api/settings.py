@@ -205,7 +205,9 @@ async def _connections_section(request: Request) -> dict[str, Any]:
 
 
 async def _sources_section(request: Request) -> dict[str, Any]:
+    from app.settings.source_commands import SourceCommands
     database = deps.database(request)
+    accounts = await deps.connection_manager(request).registry.list_accounts()
     return {
         "sources": [
             telegram_source(source)
@@ -214,6 +216,11 @@ async def _sources_section(request: Request) -> dict[str, Any]:
         "source_types": [dict(entry) for entry in SOURCE_TYPES],
         "dialog_kinds": [dict(entry) for entry in DIALOG_KINDS],
         "archive_formats": list(SOURCE_ARCHIVE_FORMATS),
+        "source_accounts": [
+            {key: account[key] for key in ("account_id", "kind", "label", "enabled")}
+            for account in accounts if account["kind"] in {"TG_BOT", "TG_USER"}
+        ],
+        "source_versions": await SourceCommands(database).versions(),
     }
 
 
@@ -1046,6 +1053,23 @@ SOURCE_BATCH_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+@router.post("/settings/sources/dialogs")
+async def api_source_dialogs(request: Request) -> dict:
+    """Read one TG user's chats without changing its configured sources."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    payload = await _json_body(request)
+    account_id = payload.get("account_id")
+    if account_id is not None and (not isinstance(account_id, str) or not account_id.strip()):
+        raise ApiError("ACCOUNT_SELECTION_REQUIRED", "请选择 TG 用户账号")
+    try:
+        dialogs = await deps.connection_manager(request).list_telegram_user_dialogs(account_id)
+    except ProviderConnectionError as exc:
+        raise ApiError(exc.code, exc.public_message,
+                       status_code=404 if exc.code == "ACCOUNT_NOT_FOUND" else 400) from None
+    return {"items": dialogs, "total": len(dialogs)}
+
+
 @router.post("/settings/sources")
 async def post_source(request: Request) -> dict:
     """Create or update one listening source (the tab's 保存来源, over JSON).
@@ -1055,9 +1079,8 @@ async def post_source(request: Request) -> dict:
     means, and how a comma-separated tag list is cleaned are decided in one
     place, so the form and this endpoint cannot accept different sources.
 
-    `configure_telegram_source` upserts on the chat id, which is what makes
-    「保存」 work for a new row and an edit alike without the client having to say
-    which one it is.
+    Creation uses expected_revision=0; edits acknowledge the version read.
+    The shared command records its receipt atomically with the mutation.
     """
     await deps.require_session(request)
     deps.require_csrf(request)
@@ -1069,12 +1092,39 @@ async def post_source(request: Request) -> dict:
             str(getattr(error, "public_message", "来源无效")),
             details={"field": "source"},
         )
-    await deps.database(request).configure_telegram_source(**values)
+    command = await _source_command(request, "save", payload)
     # The MTProto ingester reads its target list from these rows, so a save is
     # also 「再看一眼这个来源」: the row may be byte-identical while the account
     # was just added to the channel, and nothing stored would show it.
     deps.connection_manager(request).note_sources_changed()
-    return await settings_snapshot(request, "sources")
+    return {**await settings_snapshot(request, "sources"), "command": command}
+
+
+async def _source_command(request, action, payload):
+    from app.settings.source_commands import SourceCommands, SourceCommandError
+    try:
+        return await SourceCommands(deps.database(request)).execute(action, payload)
+    except SourceCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from None
+
+
+@router.get("/settings/sources/commands/{key}")
+async def api_source_command_receipt(request: Request, key: str):
+    from app.settings.source_commands import SourceCommands, SourceCommandError
+    await deps.require_session(request)
+    try:
+        return await SourceCommands(deps.database(request)).receipt(key)
+    except SourceCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from None
+
+
+@router.post("/settings/sources/batch-add")
+async def api_add_sources_bulk(request: Request):
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    command = await _source_command(request, "add", await _json_body(request))
+    deps.connection_manager(request).note_sources_changed()
+    return {**await settings_snapshot(request, "sources"), "command": command}
 
 
 @router.put("/settings/sources/batch")
@@ -1103,23 +1153,16 @@ async def put_sources_batch(request: Request) -> dict:
             "请至少选择一个来源",
             details={"field": "source_ids"},
         )
-    database = deps.database(request)
-    if action == "enable":
-        await database.update_telegram_sources_bulk(source_ids, enabled=True)
-    elif action == "disable":
-        await database.update_telegram_sources_bulk(source_ids, enabled=False)
-    elif action == "delete":
-        await database.dismiss_telegram_sources(source_ids)
-    else:  # apply
+    if action == "apply":
         rules, error = source_form.parse_source_rules(payload)
         if error is not None or rules is None:
             raise ApiError(
                 str(getattr(error, "code", "SOURCE_RULES_INVALID")),
                 str(getattr(error, "public_message", "来源规则无效")),
             )
-        await database.update_telegram_sources_bulk(source_ids, rules=rules)
+    command = await _source_command(request, action, payload)
     deps.connection_manager(request).note_sources_changed()
-    return await settings_snapshot(request, "sources")
+    return {**await settings_snapshot(request, "sources"), "command": command}
 
 
 @router.put("/settings/parse")

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -192,6 +193,22 @@ def make_client(fake: FakeClient, session: str | None = None) -> TelegramUserCli
         session,
         client_factory=lambda api_id, api_hash, session: fake,
     )
+
+
+@pytest.mark.asyncio
+async def test_source_inspection_and_download_recheck_same_document_before_writing(tmp_path):
+    media = SimpleNamespace(media="document", document=SimpleNamespace(id=42, size=4, mime_type="application/zip"),
+                            file=SimpleNamespace(name="book.zip"))
+    fake = FakeClient(message=media)
+    client = make_client(fake)
+    inspected = await client.inspect_message_media(-1000000000777, 7)
+    assert inspected["file_unique_id"] == "mtproto:42" and inspected["file_name"] == "book.zip"
+    media.document.id = 99
+    destination = tmp_path / "archive.zip"
+    with pytest.raises(TelegramUserError) as error:
+        await client.download_message_media(-1000000000777, 7, destination, expected_file_unique_id="mtproto:42")
+    assert error.value.code == "TELEGRAM_SOURCE_CHANGED"
+    assert not fake.download_calls and not destination.exists()
 
 
 class TestCredentials:

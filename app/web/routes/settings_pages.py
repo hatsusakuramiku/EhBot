@@ -53,6 +53,7 @@ from app.settings.sources import (
     parse_tags,
     selected_source_ids,
 )
+from app.settings.source_commands import SourceCommands, SourceCommandError
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
@@ -105,7 +106,12 @@ async def configure_source(request: Request):
     # The reading half is `app/settings/sources.py`'s, shared with
     # `POST /api/v1/settings/sources` (R74), so the two cannot disagree about
     # which chat ids are a channel or about what an empty box means.
-    payload, error = parse_source(form_values(form))
+    values = form_values(form)
+    # Only this explicit confirmation button adopts the conflict snapshot's
+    # version. Re-rendering alone must never advance the draft's version.
+    if "confirmed_revision" in values:
+        values["expected_revision"] = values.pop("confirmed_revision")
+    payload, error = parse_source(values)
     if error is not None or payload is None:
         return await render_settings(
             request,
@@ -113,8 +119,15 @@ async def configure_source(request: Request):
             error=(error or SourceFieldError("SOURCE_INVALID", "来源无效"))
             .public_message,
             status_code=400,
+            prefill=values, source_draft=values,
         )
-    await deps.database(request).configure_telegram_source(**payload)
+    try:
+        await SourceCommands(deps.database(request)).execute("save", values)
+    except SourceCommandError as exc:
+        return await render_settings(request, SETTINGS_SOURCES,
+                                     error=exc.public_message, status_code=exc.status_code,
+                                     prefill=values, source_draft=values,
+                                     source_conflict=exc.details.get("current"))
     # A save is the operator asking the MTProto ingester to look at this source
     # again: the row may be byte-identical, but the account may have just been
     # added to the channel, and nothing about the stored set would show it.
@@ -123,7 +136,7 @@ async def configure_source(request: Request):
 
 
 @router.post("/sources/dialogs")
-async def browse_telegram_dialogs(request: Request, csrf_token: str = Form()):
+async def browse_telegram_dialogs(request: Request, csrf_token: str = Form(), account_id: str = Form("")):
     """Read the account's own chats so an id can be picked, not waited for.
 
     The whitelist asks for a Telegram Chat ID, and until now the only way to
@@ -141,7 +154,7 @@ async def browse_telegram_dialogs(request: Request, csrf_token: str = Form()):
     try:
         dialogs = await deps.connection_manager(
             request
-        ).list_telegram_user_dialogs()
+        ).list_telegram_user_dialogs(account_id.strip() or None)
     except ProviderConnectionError as exc:
         return await render_settings(
             request,
@@ -172,6 +185,7 @@ async def select_telegram_dialog(
     source_type: str = Form(),
     chat_id: str = Form(),
     display_name: str = Form(),
+    account_id: str = Form(""),
 ):
     """Put one picked dialog into the 添加来源 form. Stores nothing.
 
@@ -199,6 +213,9 @@ async def select_telegram_dialog(
             error="来源类型、ID 或名称无效",
             status_code=400,
         )
+    versions = await SourceCommands(deps.database(request)).versions()
+    expected_revision = next((row["revision"] for row in versions
+                              if row["account_id"] == (account_id.strip() or None) and row["chat_id"] == number), 0)
     return await render_settings(
         request,
         SETTINGS_SOURCES,
@@ -207,6 +224,8 @@ async def select_telegram_dialog(
             "source_type": source_type,
             "chat_id": number,
             "display_name": name,
+            "account_id": account_id.strip() or None,
+            "expected_revision": expected_revision,
         },
     )
 
@@ -233,16 +252,10 @@ async def sources_batch_action(request: Request):
             SETTINGS_SOURCES,
             error="请至少选择一个来源",
             status_code=400,
+            source_draft=values,
         )
     action = str(form.get("action") or "")
-    database = deps.database(request)
-    if action == "enable":
-        await database.update_telegram_sources_bulk(source_ids, enabled=True)
-    elif action == "disable":
-        await database.update_telegram_sources_bulk(source_ids, enabled=False)
-    elif action == "delete":
-        await database.dismiss_telegram_sources(source_ids)
-    elif action == "apply":
+    if action == "apply":
         rules, error = parse_source_rules(values)
         if error is not None:
             return await render_settings(
@@ -250,17 +263,25 @@ async def sources_batch_action(request: Request):
                 SETTINGS_SOURCES,
                 error=error.public_message,
                 status_code=400,
+                source_draft=values,
             )
-        await database.update_telegram_sources_bulk(
-            source_ids, rules=rules
-        )
-    else:
+    elif action not in {"enable", "disable", "delete"}:
         return await render_settings(
             request,
             SETTINGS_SOURCES,
             error=f"未知的来源动作：{action}",
             status_code=400,
+            source_draft=values,
         )
+    try:
+        command = await SourceCommands(deps.database(request)).execute(action, values)
+    except SourceCommandError as exc:
+        return await render_settings(request, SETTINGS_SOURCES, error=exc.public_message,
+                                     status_code=exc.status_code, source_draft=values)
+    if command["status"] != "COMPLETED":
+        deps.connection_manager(request).note_sources_changed()
+        return await render_settings(request, SETTINGS_SOURCES, error="部分来源未修改，请查看逐项结果并核对草稿",
+                                     source_command=command, source_draft=values)
     # The MTProto ingester reads its target list from the same rows, so any of
     # these four actions can change what it should be polling.
     deps.connection_manager(request).note_sources_changed()
@@ -303,6 +324,7 @@ async def add_sources_bulk(request: Request):
                 "source_type": source_type,
                 "chat_id": chat_id,
                 "display_name": display_name,
+                "expected_revision": payload.get("expected_revision"),
             }
         )
     if not entries:
@@ -312,11 +334,22 @@ async def add_sources_bulk(request: Request):
             error="请至少选择一个会话",
             status_code=400,
         )
-    created = await deps.database(request).add_telegram_sources_bulk(entries)
+    account_id = str(form.get("account_id") or "").strip() or None
+    try:
+        command = await SourceCommands(deps.database(request)).execute("add", {
+            "entries": entries, "account_id": account_id, "idempotency_key": form.get("idempotency_key"),
+        })
+    except SourceCommandError as exc:
+        return await render_settings(request, SETTINGS_SOURCES,
+                                     error=exc.public_message, status_code=exc.status_code,
+                                     source_draft=form_values(form))
+    created = sum(item.get("created", False) for item in command["items"])
     deps.connection_manager(request).note_sources_changed()
     return await render_settings(
         request,
         SETTINGS_SOURCES,
+        source_command=command,
+        source_draft=form_values(form) if command["status"] != "COMPLETED" else None,
         notice=(
             f"已新增 {created} 个来源（其余已存在），均为停用状态，"
             "请在右侧逐个确认过滤规则后再启用。"

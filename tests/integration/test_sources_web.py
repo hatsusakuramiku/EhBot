@@ -1,9 +1,12 @@
 from pathlib import Path
+from uuid import uuid4
+import json
 
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.source_forms import batch_versions as _batch_versions
 
 
 def make_settings(root: Path) -> Settings:
@@ -62,6 +65,7 @@ def test_admin_can_add_and_update_source_rules(tmp_path: Path) -> None:
             "/sources",
             data={
                 "source_type": "CHANNEL",
+                "expected_revision": 0, "idempotency_key": str(uuid4()),
                 "chat_id": "-100600",
                 "display_name": "Configured Channel",
                 "enabled": "on",
@@ -100,9 +104,11 @@ def test_saving_a_source_tells_the_ingester_to_look_again(
     with TestClient(app) as client:
         authenticate(client, settings)
         manager = app.state.connection_manager
+        account = client.portal.call(manager.registry.create, "TG_USER", "Fixture user", {})
+        listener = manager._listener(account["account_id"])
         # Pretend a check already ran and found the channel unreadable.
-        manager._user_unreadable = {-100600: "Configured Channel"}
-        manager._user_checked_chats = (-100600,)
+        listener._user_unreadable = {-100600: "Configured Channel"}
+        listener._user_checked_chats = (-100600,)
         csrf_token = client.get("/settings/sources").context["csrf_token"]
         client.post(
             "/sources",
@@ -110,6 +116,8 @@ def test_saving_a_source_tells_the_ingester_to_look_again(
                 "source_type": "CHANNEL",
                 "chat_id": "-100600",
                 "display_name": "Configured Channel",
+                "account_id": account["account_id"],
+                "expected_revision": 0, "idempotency_key": str(uuid4()),
                 "enabled": "on",
                 "allowed_archive_formats": ["zip"],
                 "max_attachment_size_mb": "0",
@@ -117,8 +125,8 @@ def test_saving_a_source_tells_the_ingester_to_look_again(
             },
         )
 
-        assert manager._user_checked_chats is None
-        assert manager._user_unreadable == {}
+        assert listener._user_checked_chats is None
+        assert listener._user_unreadable == {}
 
 
 def test_needs_info_queue_is_separate_from_pending_queue(tmp_path: Path) -> None:
@@ -141,6 +149,7 @@ def _add_source(client: TestClient, *, chat_id: int, name: str, csrf: str, enabl
     client.post(
         "/sources",
         data={
+            "expected_revision": 0, "idempotency_key": str(uuid4()),
             "source_type": "CHANNEL",
             "chat_id": str(chat_id),
             "display_name": name,
@@ -178,6 +187,7 @@ class TestBatchActions:
                     "csrf_token": csrf,
                     "action": "enable",
                     "source_ids": [str(value) for value in ids],
+                    **_batch_versions(client),
                 },
                 follow_redirects=False,
             )
@@ -208,6 +218,7 @@ class TestBatchActions:
                     "csrf_token": csrf,
                     "action": "delete",
                     "source_ids": [str(source_id)],
+                    **_batch_versions(client),
                 },
             )
             listed = client.get("/settings/sources").context["sources"]
@@ -234,6 +245,7 @@ class TestBatchActions:
                     "csrf_token": csrf,
                     "action": "apply",
                     "source_ids": [str(value) for value in ids],
+                    **_batch_versions(client),
                     "allowed_archive_formats": ["7z"],
                     "max_attachment_size_mb": "512",
                     "required_tags": "language:chinese",
@@ -282,6 +294,7 @@ class TestBatchAdd:
                                 "source_type": "CHANNEL",
                                 "chat_id": -100801,
                                 "display_name": "Batch A",
+                                "expected_revision": 0,
                             }
                         ),
                         json.dumps(
@@ -289,9 +302,11 @@ class TestBatchAdd:
                                 "source_type": "PRIVATE_CHAT",
                                 "chat_id": 9001,
                                 "display_name": "Batch B",
+                                "expected_revision": 0,
                             }
                         ),
                     ],
+                    "idempotency_key": str(uuid4()),
                 },
                 follow_redirects=False,
             )
@@ -332,9 +347,11 @@ class TestBatchAdd:
                                 "source_type": "CHANNEL",
                                 "chat_id": -100802,
                                 "display_name": "Good",
+                                "expected_revision": 0,
                             }
                         ),
                     ],
+                    "idempotency_key": str(uuid4()),
                 },
             )
             rows = client.get("/settings/sources").context["sources"]

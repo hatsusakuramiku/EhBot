@@ -146,6 +146,7 @@ class StubTelethonClient:
     async def get_messages(self, chat_id, ids):
         class Message:
             media = "document"
+            document = type("Document", (), {"id": 5001})()
 
         self._script["requested"] = (chat_id, ids)
         return Message()
@@ -421,8 +422,9 @@ def test_the_sources_tab_reads_the_accounts_chats_for_picking(
         authenticate(client, settings)
         login(client)
         page = client.get("/settings/sources")
+        account_id = page.context["source_accounts"][0]["account_id"]
         listed = client.post(
-            "/sources/dialogs", data={"csrf_token": page.context["csrf_token"]}
+            "/sources/dialogs", data={"csrf_token": page.context["csrf_token"], "account_id": account_id}
         )
         picked = client.post(
             "/sources/dialogs/select",
@@ -431,6 +433,7 @@ def test_the_sources_tab_reads_the_accounts_chats_for_picking(
                 "source_type": "CHANNEL",
                 "chat_id": "-100500",
                 "display_name": "Alpha Channel",
+                "account_id": account_id,
             },
         )
         stored = client.get("/api/v1/settings/sources").json()
@@ -450,6 +453,8 @@ def test_the_sources_tab_reads_the_accounts_chats_for_picking(
         "source_type": "CHANNEL",
         "chat_id": -100500,
         "display_name": "Alpha Channel",
+        "account_id": account_id,
+        "expected_revision": 0,
     }
     # The rendered add form is what the operator then edits, so the values have
     # to be in it, not only in the context.
@@ -507,11 +512,12 @@ def test_the_chat_picker_requires_csrf(tmp_path: Path) -> None:
             assert response.status_code == 403, path
 
 
-async def seed_oversized_candidate(database: Database) -> int:
+async def seed_oversized_candidate(database: Database, account_id: str | None = None) -> int:
     """One APPROVED candidate whose only attachment is over the Bot API limit."""
     await database.initialize()
     await permit_all_message_types(database)
     await database.configure_telegram_source(
+        account_id=account_id,
         source_type="CHANNEL",
         chat_id=-100123,
         display_name="Fixture Channel",
@@ -541,7 +547,16 @@ async def seed_oversized_candidate(database: Database) -> int:
     )
     from app.candidates.ingestor import CandidateIngestor
 
-    await CandidateIngestor(database).process_pending_updates()
+    ingestor = CandidateIngestor(database)
+    if account_id is None:
+        await ingestor.process_pending_updates()
+    else:
+        from dataclasses import replace
+        pending = await database.pending_telegram_updates(limit=1)
+        message = ingestor._parse_message(pending[0][1])
+        attachment = {**message.attachments[0], "file_id": "", "file_unique_id": "mtproto:5001"}
+        await ingestor.process_message(replace(message, account_id=account_id,
+                                              attachments=(attachment,), file_unique_id="mtproto:5001"))
     with sqlite3.connect(database.path) as connection:
         candidate_id = int(
             connection.execute("SELECT id FROM candidates").fetchone()[0]
@@ -577,11 +592,12 @@ def test_an_oversized_attachment_is_fetched_by_the_user_account(
         tmp_path, {"code": "12345", "session": "s", "payload": payload}
     )
     database = Database(settings.data_path / "ehbot.db")
-    candidate_id = asyncio.run(seed_oversized_candidate(database))
 
     with TestClient(app) as client:
         authenticate(client, settings)
         login(client)
+        account_id = client.get("/api/v1/accounts").json()["items"][0]["account_id"]
+        candidate_id = client.portal.call(seed_oversized_candidate, database, account_id)
         page = client.get(f"/works/{candidate_id}")
         client.post(
             f"/candidates/{candidate_id}/telegram-user",
@@ -602,6 +618,7 @@ def test_an_oversized_attachment_is_fetched_by_the_user_account(
     details = json.loads(job[2])
     assert details["chat_id"] == -100123
     assert details["message_id"] == 5001
+    assert details["account_id"] == account_id
     assert stub.downloads == [(-100123, 5001)]
     with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
         artifact = connection.execute(
@@ -641,7 +658,7 @@ def test_the_work_page_offers_the_user_route_only_once_logged_in(
     assert entry(after)["action"] == f"/candidates/{candidate_id}/telegram-user"
 
 
-def test_a_download_without_a_session_fails_with_a_named_reason(
+def test_a_download_with_unknown_source_account_is_refused_before_enqueue(
     tmp_path: Path,
 ) -> None:
     app, settings, _ = make_app(
@@ -653,25 +670,12 @@ def test_a_download_without_a_session_fails_with_a_named_reason(
     with TestClient(app) as client:
         authenticate(client, settings)
         page = client.get(f"/works/{candidate_id}")
-        client.post(
+        refused = client.post(
             f"/candidates/{candidate_id}/telegram-user",
             data={"csrf_token": page.context["csrf_token"]},
             follow_redirects=True,
         )
         with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
-            job_id = int(
-                connection.execute(
-                    "SELECT id FROM download_jobs WHERE provider = 'TELEGRAM_USER'"
-                ).fetchone()[0]
-            )
-        wait_for_state(settings.data_path / "ehbot.db", job_id, "FAILED")
-        with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
-            state, code = connection.execute(
-                "SELECT state, error_code FROM download_jobs WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-
-    assert state == "FAILED"
-    # Named, because「没登录」is fixable by the operator and a generic download
-    # failure would not tell them that.
-    assert code == "ACCOUNT_NOT_ENABLED"
+            assert connection.execute("SELECT count(*) FROM download_jobs").fetchone() == (0,)
+    assert refused.status_code == 400
+    assert "来源账号归属未知或不匹配，请选择已确认的消息来源" in refused.text

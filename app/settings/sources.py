@@ -109,6 +109,7 @@ def parse_source(
     """
     source_type = str(values.get("source_type") or "")
     display_name = str(values.get("display_name") or "").strip()
+    account_id = str(values.get("account_id") or "").strip() or None
     try:
         chat_id = int(str(values.get("chat_id") or ""))
         max_attachment_size_mb = int(
@@ -135,6 +136,7 @@ def parse_source(
             "source_type": source_type,
             "chat_id": chat_id,
             "display_name": display_name,
+            "account_id": account_id,
             "enabled": checkbox(values.get("enabled")),
             **rules,
         },

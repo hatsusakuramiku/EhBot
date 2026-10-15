@@ -7135,6 +7135,394 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 - **接续 P5：** 以 CandidateIngestor、Database.save_candidate_message/create_manual_candidate、gid 判重和元数据补全入口为调查起点，031 建统一 ingest_entries 键/附加来源、未入库领取与恢复、转发坐标及历史冲突裁决；同类只启用一个直至 P6/P7。不要把 P4 当成全部多账号或 P3–P12 目标完成。
 - 首次阶段 commit 因本环境没有 Git author identity 退出，文件已暂存但没有提交；核对最新三个本地提交的身份一致后，沿用该身份以单次 `git -c` 参数提交，不改全局配置、不请求重复开工授权。
 
+**R91 本地提交确认：** `15dd3bb feat(accounts): preserve versioned credentials and share lifecycle commands`。实际 git log 已核对；P4 的实现、正式测试及文档在同一阶段提交，无推送/发布/部署。
+
+## R92 — P5 统一摄取身份与附加表（2026-10-14，进行中）
+
+- **状态：in_progress，未验收/提交。** 基线仍为 R91 / rc7 / 030 / 2280 collected（仅收集）；027–030 冻结，031 尚未创建。P3–P12 总目标 active，本段不表示多账号去重已上线。
+- 工作区新增 `app/candidates/identity.py` 与 `tests/unit/test_ingest_identity.py`：共用键函数按可信 gid、完整转发原帖、当前频道/超级群、账号作用域 peer 顺序选择身份；Bot/Telethon marked channel id 使用 `-(1000000000000 + channel_id)`，普通负群号不能假作频道。Token、标题、时间、file_id 不入键，不完整转发使用接收身份，账号分量转义避免键碰撞。
+- 前一执行片段记录该正式单元测试 **17 passed**；本次清理核查未重跑测试/collect，不据此推算新的整库收集数。函数尚未接入真实摄取、手动添加、补 gid、编辑、移除或历史迁移，不以键函数测试代替完整 P5 合同。
+- CodeGraph 调查确认：CandidateIngestor._gate 仍按 gid 命中即 IGNORE，会丢备用来源，且 AI 在未领取处理权前运行；Database._save_candidate_message_sync 仍先媒体组/回复/相邻合并、再按 gid+token 匹配，source_messages 归属仍为旧默认账号。历史归属不可猜作 Bot。接续以批准方案 §8.G 统一登记/领取/合并为准：031 ingest_entries、真实 observation 引用、owner/revision 屏障、有界恢复、键升级、来源编辑及移除代次；历史冲突先裁决，在途合并先使用 P3 停止，不直接拼接活动任务。
+- **用户临时文件要求复核：** Test-Path .scratch=False；git check-ignore .scratch/probe.tmp 命中；git ls-files .scratch 无输出。目录已删除，正式测试均在 tests/；保留现有 `/.scratch/` 忽略规则。未删除任何产品文件或正式测试，测试临时产物以后在会话退出、结果留痕后及时清理。此次无需新增忽略规则或重复删除；无产品行为、README/USAGE、版本/schema 变化。
+- 本次 codegraph.cmd sync 与 git diff --check 通过；Git 用户级 ignore 权限告警不影响仓库规则判定。不读真实私有配置、无真实供应商调用；没有新增阶段提交、推送、发布或部署。
+
+**R92 存储/原子领取与传输身份切片（2026-10-14，仍 in_progress）。** 新增未冻结 `031_ingest_entries.sql` 和 `app/candidates/entries.py`。统一表以 unique_key UNIQUE 匹配 pending/linked；candidate_id 可空，状态/revision/generation、owner/lease、固定输入观察、有限尝试与 retry_at 持久保存。完整观察仍在 source_messages，extra_json 仅固定键版本；telegram_accounts 增 external_account_id 可空唯一引用，新观察可准确绑定 Bot/用户 UUID，历史未知归属保持 NULL。
+
+- register_observation 在 BEGIN IMMEDIATE 中增量追加各账号观察，已关联来源只补 candidate_messages，不修改候选审核、元数据或任务。领取以 revision 更新，正常并发只有一位处理者；租约过期后换 revision，旧处理不能提交候选或撤销新 owner。renew 仅续活租约，fail 保存退避，默认三次后 BLOCKED。finish 与调用者候选创建同事务核验 owner/revision/输入修订，失效整笔回滚；候选实际删除通过 trigger 将关联条目标记 REMOVED，旧投递不可重建。
+- ParsedSourceMessage 增 account_id、peer_type、完整原频道/消息坐标。Bot 读取 MessageOriginChannel，MTProto 读取 from_id.channel_id/channel_post；隐藏/缺坐标转发不猜身份。缺 chat.type 的旧输入不凭普通负群号认定频道；明确 channel_post 且真实 marked id 才可兜底。两个真实 parser 的完整转发键匹配已测试。
+- **五个完整文件最终 91 passed / 0 failures / 0 errors / 0 skipped，6.707 秒**：unit/ingest_identity（20）、integration/ingest_entries（14）、integration/candidate_ingestion、unit/mtproto_translation、integration/database。此前两文件 31/0 与最终组重叠，不相加。覆盖真实线程竞争登记/领取、处理中补来源、不同 Token 同键、普通 peer 不误并、heartbeat/失联接替、晚 AI 候选回滚、有限重试、忽略不重复处理、实际业务删除及 030→031/重复初始化保留未知身份。
+- `pytest --collect-only -q` 返回 0，逐文件行统计 **2314 collected（仅收集，较 R91 净增 34）**。compileall、CodeGraph sync 与 diff --check 通过；database 的真实迁移计数断言为 31。所有测试使用临时库/私有目录，不读真实 data/private，不调用真实供应商。
+- 执行问题：CodeGraph 对私有方法的模糊符号定位返回不相关片段，使用准确现有文件/符号及局部源码核对；误猜 listener.py/account_listener.py 路径，目录核实真实文件 listeners.py 后读取。首次回归选错 test_mtproto.py，收集失败且未执行用例；改实际 test_mtproto_translation.py 后 91/0。文档补丁曾因 findings 的标题上下文不匹配整批拒绝，核对原文并移除无意义目标后重新应用，无半批写入。
+- **未完成边界与接续：** 当前仍只有存储/身份切片。旧 _gate/save_candidate_message、MTProto manager 和 manual 还未调用 entries.py；031 未回填历史候选/来源，非空 gid 单列唯一尚未建立。先接同一 ingest_message（本地规则→登记/唯一领取→事务外 AI→候选/核验同事务），再处理历史 gid 冲突、补 gid 原子升级/旧回调撤销、来源编辑保原审批/产物、真正新消息重加与旧转发隔离，以及在途合并先 P3 停止。移除 trigger/claim 测试不能替代这部分合同。不得宣称已完成 P5、多账号监听或整库全绿；rc7 不提升、P5 无阶段提交。
+- README 同步开发进度、AGENTS/PHASES/计划/清单同步当前基线与具体接手入口；没有新增用户可见摄取行为，USAGE 保留现状。临时报告和测试库在会话终止、计数记录后清理，正式测试均在 tests/；无真实库升级、推送、发布或部署。
+
+**本切片临时产物清理完成：** 所有测试/collect 会话已返回终止退出码；读取 XML 和 collect 计数留痕后，核对 .scratch 绝对路径、每个子项均在本 checkout 且无链接、Git 无跟踪项，删除全部 **100 个临时文件**及目录，Test-Path=False。git diff --check 再次通过。下次测试临时目录仅在需要时创建，不保留无用报告或依赖。
+
+**R92 真实摄取接入，跨日中断接手（2026-10-15，仍 in_progress）。** 当前 Bot batch 与 MTProto manager 已调用 CandidateIngestor.process_message；本地白名单/附件检查后登记/领取，再事务外 AI，固定读取首个持久输入并在同事务创建候选/finish_claim。新增 persistence.py，Database.save_candidate_message 与 deactivate_candidate_message 已改薄适配；直接重复保存补来源而不重新建候选。处理中另一个账号观察追加到同一记录；周期 heartbeat、有限失败恢复、空 Bot poll 也恢复已受理输入。编辑只移动来源，保留原审批/任务/产物；未审核空候选可退役，无 ID 的未开始候选允许升级合并并保留 AI 缓存，已持久任务暂返回 INGEST_MERGE_NEEDS_STOP（完整 P3 协调尚待接通）。
+
+- 中断前所有命令已有终止退出码，接手读取实际 XML：首次四文件 66 条/7 失败，修编辑后 58 条/5 失败；校准批准方案的重复来源与编辑目标身份合同，并保留原媒体组关联后四文件 **66/0，5.708 秒**。旧适配回归三文件 **46/0，4.791 秒**；改 deactivation 后三文件 **45/0，6.573 秒**；新增正式 pipeline 合同 **8/0，1.851 秒**。结果有重叠/后续源码改变，不能相加或视为最终 P5 验收。新增合同覆盖单次 AI、固定原输入、审批保留、明确 gid 不受回复/媒体组覆盖、编辑保已登记产物、重启恢复、取消等待真实 AI finally、编辑先停止旧 AI、拒绝输入修改后重判。
+- 当前还未复跑 collect，最新已确认收集数仍是上一切片 2314。取消重复打断清理、真实来源规则归属、Bot 事件账号持久归属、转发映射到已知 gallery、历史回填/非空 gid 唯一、手动 pending 竞争、移除新旧代次与在途停止仍需完成，rc7 不变/031 未冻结/无阶段提交。临时报告待本轮结果留痕后统一清理。
+
+**R92 临时文件清理复核（2026-10-15）。** 按用户要求核查 `.scratch`：现有 `/.scratch/` 规则已覆盖整个目录，`git check-ignore` 命中目录及子文件，`git ls-files -- .scratch` 为空。目录内共 603 个临时文件，包含 pytest 临时库/产物、8 份 XML 和两份一次性适配脚本；正式测试保留在 `tests/`。无需新增重复忽略规则。
+
+- 接手最后测试会话 49969，已返回退出码 0；读取实际 JUnit：六文件（ingest_pipeline、ingest_entries、candidate_ingestion、metadata_rule_evaluation、database、connection_manager）**95 passed / 0 failures / 0 errors / 0 skipped，14.261 秒**（p5-provenance.xml）。前一组 p5-scope.xml 为 **92/0/0/0，13.453 秒**，与后组重叠，不能相加。其余 6 份报告计数与上一条记录一致，早期失败由后续定向运行覆盖；未新增测试执行或 collect。
+- 当前工作区已增加真实 AI 取消清理等待、Bot 更新账号作用域、观察的 rule_source_id 与已知原帖 gallery 转发映射。上述定向结果不代表 P5 完整验收；新增转发测试的 parse_rules 配置键仍待核对，历史回填/唯一 gid、在途合并停止、手动入口及移除代次等后续工作保留。rc7/030 已提交基线不变，031 未冻结，P5 不提交。
+- 清理仅限本 checkout 的 `.scratch`：先核对绝对路径、全部子项无链接且未被 Git 跟踪，再删除无用临时树；不修改产品代码或正式测试。无产品行为与 README/USAGE 变更，无推送、发布、部署或真实数据库升级。后续测试产物在进程退出、结果留痕后及时清理。
+
+**清理结果：** 未发现仍运行的 Python/pytest 进程，603 个临时文件及 `.scratch` 目录已全部删除，`Test-Path .scratch=False`；既有忽略规则继续有效。
+
+**R92 临时产物再次清理（2026-10-15）。** 后续 P5/P6 定向运行重新生成了 `.scratch`，本次按用户要求删除整个测试临时目录，同时清理旧 `.pytest_cache` 与工作区 Python `__pycache__`。`.gitignore` 已有 `/.scratch/` 和 `.pytest_cache/`，不重复添加；`.dockerignore` 补 `.scratch`，防止临时测试库、报告进入镜像构建上下文。正式测试仍保留在 `tests/`，当前业务代码改动保留。
+
+- 普通沙箱删除旧 pytest 缓存时遇到两个目录的 Windows 权限拒绝；其他内容先清理，再经工具审批仅删除已核对绝对路径的本仓库 `.pytest_cache`，最终 `Test-Path .scratch=False`、`Test-Path .pytest_cache=False`。
+- `git ls-files` 确认两目录无跟踪文件；`git check-ignore -v` 确认子文件仍被忽略，`git diff --check` 通过。本次没有重跑测试，清理结果不能代替 P5/P6 阶段验收；版本、迁移冻结状态与阶段提交状态均不提升。
+- 无产品行为与 README/USAGE 变更；无真实私有配置读取、供应商调用、推送、发布、部署或数据库升级。后续临时报告应在结果留痕后及时删除。
+
+**R92 测试收尾与临时目录清理（2026-10-15，仍未验收）。** `.scratch` 仅用于测试临时数据库、报告与收集输出；正式测试位于 `tests/`。本次确认会话 57469 已退出，退出码 0；最终 `ingest-account-final.xml` 为 **367 tests / 0 failures / 0 errors / 0 skipped，83.068 秒**，覆盖 21 个摄取、手动添加、代次、来源账号下载、工作流与数据库相关文件。此前运行与本组重叠，不累加为通过总数；未跑全量套件。
+
+- 当前工作区已补手动添加共享键领取、移除后新旧观察代次隔离、下载实际账号绑定及传输前文件身份核验；相关正式回归保留。P5 的补 gid 入口、在途停止合并、手动元数据原子发布仍待完成；P6 来源管理与旧订阅政策迁移、完整多监听及账号接替仍待完成。031 未冻结，源码版本保持 rc7，没有阶段提交或验收。
+- 清理前核对 `.scratch` 绝对路径属于本仓库、没有链接/重解析点、没有 Git 跟踪文件；读取测试计数留痕后删除整个目录。现有 `.gitignore` 的 `/.scratch/` 继续生效，`.dockerignore` 已包含 `.scratch`，不重复添加忽略项。无需为临时目录改动 README/USAGE 的产品说明。
+
+**R92 统一身份升级、在途来源编辑与手动原子发布（2026-10-15，仍 in_progress）。** 续接 P3–P12 原目标，本轮不是 P5/P6 阶段验收，版本仍 rc7，031 未冻结，没有阶段提交。
+
+- `references.py` 将作品页 `set_candidate_eh_ref` 与 `publish_candidate` 的回复/媒体关系补 gid 都接入同一身份仲裁；031 增 `ingest_reference_changes`，短事务保存旧/新身份与停止意图。复用 P3 的 queue operation 和真实本地/远端停止；未确认期间不改画廊、不释放旧执行，SQL guard 阻止重启。目标已有 PROCESSING owner 在受理停止时立即撤销 revision，不能趁停止尚未完成另建候选/下载。停止后重算键、合并历史/观察，旧 gallery 键不转发到另一 gallery；保存未变的引用不取消当前下载。
+- `changes.py` 与 `ingest_observation_changes` 保存选中来源的最新编辑、observation revision 和受影响 task 集合。补全原无 gid 作品先停止源作品全部任务；普通消息编辑/失效只停止真正选用该观察的 TG 任务，保留其他账号来源/既有作品。等待真实 finally 后才移动/停用来源；停止期间再次编辑只采用最新输入。进程重启沿同一 P3 operation loop 恢复。已在停止的旧 switch/retry 不再启动旧接替。
+- `CandidateIngestor`、已判定消息的 Database 兼容写入口、显式来源停用都走上述仲裁；显式 account_id 传入停用路径，不能依赖调用现场恰好有某个账号 ContextVar。已完成/审核历史不再被 `_has_persistent_work` 一概误当成在途拒绝，停止后复用 `merging.merge_candidates`；保留 task/attempt/artifact、审核和人工/锁定字段，冲突整笔回滚。
+- 手动添加的 EH publisher 在一个 BEGIN IMMEDIATE 内完成候选、统一键关联、元数据、种子状态和封面占位。Database 公开旧入口复用 `insert_manual_candidate`；字段写入 helper 同时服务正常 EH 保存和原子手动发布。发布与 claim 心跳使用同一局部锁，避免完成后续租误报 stale；故障注入确认所有部分一起回滚，并发读取确认不会看见半件作品。测试仅替代供应商读取，保留真实发布事务。
+- 新正式测试：`test_ingest_references.py`、`test_ingest_source_stops.py`，扩展 manual_ingest_identity/ingest_pipeline；覆盖真实取消 finally 门、重启/连续编辑/旧切源、非选中来源不受扰、目标处理者受理时撤销、任务/产物身份保留、人工与锁定冲突、手动事务失败与续租交错。
+- 最新四文件 **41 tests / 0 failures / 0 errors / 0 skipped，9.588 秒**（target-owner-contract）。全库收集命令退出 0，按逐文件收集数合计 **2383 collected，仅收集**，较 R91 新增 103，未跑全量。compileall 和 CodeGraph sync 通过。26 文件综合回归仍在运行，会话 19354；不要因观察间隔重启它。
+- 过程失败：首次新合同 8 条全部在 tmp_path setup 报 WinError 3，因为清理后 `.scratch` 父目录不存在；JUnit 写报告后父目录建立，下一次使用独立 basetemp，8/0。source-edits 首轮 27 条中 1 条失败，原因是恢复测试没有进入实际 Bot listener 的账号上下文，外部账号输入不会被匿名恢复循环领取；补明确账号上下文后 27/0，未放宽产品隔离。此前 169/0、63/0、27/0、29/0、248/0 都与后续修改/组合重叠，不累加。
+- README/USAGE 已替换“重复画廊直接丢掉、不补来源”的旧描述，同步补 gid/编辑停止、移除代次和手动原子保存；PHASES、AGENTS、task_plan、findings、处理计划更新当前事实。P5 接续审计 §8.G/验收表的目标处理/移除/失败恢复交错；P6 来源管理、legacy_slot 旧订阅迁移、多监听公平性/限流/接替仍未完成，P7–P12 不变。不读真实 data/private，不访问真实供应商，不升级真实库，不推送/发布/部署。
+
+**R92 本轮最终验证与接续确认（2026-10-15）。** 会话 19354 已结束，退出码 1：26 文件 **470 tests / 1 failure / 0 errors / 0 skipped，201.308 秒**。唯一失败是 `test_manual_ingest_keeps_account_lease_through_caller_commit` 仍 monkeypatch 旧 `persist_gallery_metadata`，因此等不到原子发布阶段的门；更新到 `publish_manual_gallery`（含 ingest_claim 参数）后，五文件完整 **58 tests / 0 failures / 0 errors / 0 skipped，12.837 秒**，会话 35513 退出码 0。复验涵盖 account_service、ingest_references、ingest_source_stops、ingest_pipeline、manual_ingest_identity；26 文件运行中又补了目标 owner 受理时撤销的合同，最终 58 条使用更新后的源码。不把两轮计数相加，不声称最终源码单次跑完 26 文件或整库全绿。
+
+- 所有本轮测试会话均已结束；XML 结果留痕后，核对绝对路径、无重解析点/链接、Git 无跟踪文件，删除 `.scratch` 整个目录。既有 Git/Docker 忽略继续有效，正式测试保留在 tests/；compileall、collect（2383）、CodeGraph sync、diff --check 均通过。
+- **下一步具体缺口：** references/changes 的 PENDING/FAILED 结果目前持久在表中，作品页只有受理提示；应补共享读取投影/中文界面状态及失败后的明确再处理入口，不能把“已受理”等同于最终成功。继续核对人工冲突、移除和再编辑与补 gid 的交错、关联媒体组和迟到写入，再做 P5 完整阶段验收。P6 的旧订阅迁移/来源管理与多账号接替仍未交付，P7–P12 保持原范围。完整目标 active，031/rc7/阶段提交状态不提升。
+
+**R92 身份操作共享结果/重试及来源目标键补漏（2026-10-15，P5 仍进行中）。** 前一条的状态读取/中文失败反馈缺口已处理，不重复实现。新增 `app/candidates/operations.py`、`app/api/ingestion.py`、正式测试 `tests/integration/test_ingest_operations.py`（15 条）。
+
+- 未冻结 031 的两类变更加独立 revision；observation 保留 original_candidate_id/result_candidate_id/target_key，重输入、合并移属、完成/失败/重试增加版本。失败捕获后另事务写回带原 revision，避免把随后提交的新编辑误标 FAILED。注入回滚后的真实新输入验证。
+- 安全 GET 与作品 snapshot 的 ingest_operations 共用白名单，不返回 message_json、task 集合、附件句柄、gallery token 或账号秘密；API/status 统一中文状态/错误。GET 在原候选合并/移除后仍有效，Web 原详情可转仍存在的保留作品；完成/失败通知原/目标作品，PENDING 纳入 live。
+- retry 在 BEGIN IMMEDIATE 内校验 expected_revision、FAILED 与原身份/来源，重登记必要停止和回执；同 key 同内容先返原回执、异内容 409、缺条件 428。移除、新引用、新编辑和两端竞争不能应用旧命令；Cookie/Bearer 共用单管理员命令作用域。HTTP JSON、WS catalogue、Web 薄表单复用同一处理入口，Cookie CSRF 与 Bearer 规则保留。
+- 后续 §8.G 审计实际发现 changes 补 gid 没预留目标键，目标 owner 可在源停止期间发布；现与 reference 一样先撤销 owner/revision，claim_entry 同时检查两类意图。新合同又复现目标观察未全部关联（2 条只挂 1 条），修复 persistence 的 LINKED 关联 SQL，保留全部 ACTIVE、当前代次且非 IGNORE 的观察，不重新审批或创建另一候选。
+- 初轮三文件 **33/2 failures/0 errors/0 skipped，7.006 秒**：移除测试直接删业务行外键失败，改走真实 purge；WS 500 是错误地给 EventBus.publish 传位置字典，核对签名改为关键字。复验 33/0。后续九文件初轮 **142/1/0/0，151.691 秒**，唯一旧 meta 五类集合断言未纳入 ingest_operation，按新合同更新。九文件完整复验 **144/0/0/0，152.226 秒**，会话 32523 已退出 0；其间增加了后续目标键合同，不能宣称该轮覆盖最终源码全部新增测试。
+- 目标键合同首轮五文件 **63/1/0/0，14.639 秒**，真实缺陷为目标观察漏关联；修复后八文件完整 **87/0/0/0，29.127 秒**，会话 19223 已退出 0：ingest_operations、ingest_entries、ingest_source_stops、ingest_references、ingest_pipeline、ingest_generations、ingest_migration、manual_ingest_identity。此组包含 15 个新合同的真实 SQLite/HTTP/WS/Web 验证。两组重叠且源码时点不同，不相加为通过总数，不声称整库全绿。
+- 全库 **2398 collected，仅收集，0.91 秒**；较 R91 增 118、较上次 2383 增 15。已同步 README/USAGE/REALTIME_API、PHASES/处理计划/task_plan/findings。031 仍未冻结，rc7 不提升，不阶段提交。文档首批补丁因 AGENTS 上下文不精确被整批拒绝，核对后分开重做；无部分产品改动。
+- 接续：审计 reference/observation 交叉修改、移除及已关联媒体组/回复；核对候选提交后 `_on_candidates_ingested` 回调丢失时自动审批 interval=0/重启和元数据后续恢复，不能仅凭正常入口测试宣布持久后续意图完成。P6 继续旧订阅迁移/来源账号选择与多监听/接替，P7–P12 原范围不变；目标 active。
+
+- 收尾：为 pending observation 的 target_key 补局部索引后，操作/历史迁移两文件最后复验 **25 tests / 0 failures / 0 errors / 0 skipped，14.834 秒**，会话 58264 退出 0；diff --check 与 CodeGraph sync 通过。所有本轮测试句柄均已确认终态。Windows 全局进程枚举因宿主权限拒绝，未据此推断进程状态，也未停止其他进程。清理前已核对 `.scratch` 绝对位置、955 个临时文件、0 个重解析点、Git 无跟踪文件且忽略生效，结果留痕后删除；正式测试保留在 tests/。
+
+### 2026-10-15：P5 后续意图审计现场与临时文件清理
+
+- 摄取后续意图及自动审批原子提交仍在工作区验证中，P5 未验收、031 未冻结。新增正式测试为 `tests/integration/test_ingest_followups.py`；原子提交改动之前该文件 **7 tests / 0 failures / 0 errors / 0 skipped，4.957 秒**（已核对 JUnit）。此结果不能证明后续原子提交改动通过。
+- 随后的 `test_ingest_followups.py` + `test_auto_approval_workflow.py` 联跑（会话 68826）因真实 TestClient 测试跨事件循环调用 sweeper、争用新增 asyncio 锁而挂起，已中断并确认退出 1，无完整结果；输出的进度点不计通过。接续应改用 `client.portal.call` 并隔离后台 worker，再补自动审批原子回滚、并发与恢复合同测试，不放宽产品语义。
+- 用户要求清理 `.scratch`：本次重新生成的目录只有 49 个临时文件（测试数据库、产物、XML），无重解析点、无 Git 跟踪文件；`/.scratch/` 的 Git 忽略已生效，Docker 忽略也已配置。有效结果在此留痕后删除该目录；正式测试继续保留在 `tests/`。今后测试临时输出在结果留痕后及时清理。
+- 本次仅清理测试临时输出，无用户可见行为变更，无 README/USAGE 文档变更，不提升版本或作阶段完成提交。
+
+### 2026-10-15：R92 / P5 持久后续意图、自动审批原子提交与交叉身份合同
+
+**状态。** P3/P4 已验收事实不变；P5/P6 仍在工作区，P3–P12 完整目标 active。版本仍 rc7，027–030 冻结，031 未冻结；不作阶段提交、真实数据库升级、供应商调用或发布部署。
+
+**实现与实际缺陷。**
+
+- 031 的 LINKED trigger 将候选发布与 followup revision 一起提交；`candidates/followups.py` 按 entry/generation/revision 读取及确认，失败保留意图并按 30/120/600 秒退避。现有 AutoApprovalSweeper 启动和周期恢复，即便全扫描间隔为 0；同一实例的 callback/worker 通过锁协调。wiring callback 只唤醒/降低延迟；无新调度器。
+- `auto_approval/commit.py` 与 DownloadService 同一短事务提交自动状态、普通审核证据、入队任务及 AUTO_* 规则证据；拒绝决策也整体提交。最终写锁内重新判定优先规则、元数据、gid 和 ingest identity；预检仍在事务外。Database 三个 helper 可复用调用者连接，旧调用保持兼容。手动批量审批尚未在此轮收口，属于后续全域命令核验，不能声称所有审核入口已原子化。
+- 用真实 enqueue 替换停止测试的直接 SQL 后，复现来源编辑/改画廊/停用不触发 STOPPING：队列保存 observation_id，而 changes/operations/031 guard 读了 source_observation_id。统一真实字段，并改正低层测试夹具；保留真实入队/真实 finally 清理的回归。
+- 真实 purge 后同 gid 重加可复用 candidate 整数 ID，旧自动驳回仍会命中新行。AutoApprovalMatch 现捕获 ingest entry id/generation/revision 并在提交时复核，旧代次判定被拒绝；正式回归不靠不可能的整数 ID 永不复用假设。
+- 新增 `test_auto_approval_atomicity.py` 24 条；`test_ingest_followups.py` 7 条；`test_ingest_interleavings.py` 最终 16 条；`test_source_account_downloads.py` 补 3 条自动预检并发合同。预检等待时真实并发写入成功，来源修订/元数据变化拒绝旧结果。已知/未知作品的更正、编辑、停用和 purge 两种先后顺序，以及已关联媒体组/回复补全/冲突隔离均验证。
+
+**验证与排障（JUnit 已核对）。**
+
+- 上轮会话 68826 的中断已在前节留痕。真实 TestClient 的 sweep/enrich 调用改为 portal.call；只断言手动 sweep 次数的用例在测试内隔离 scheduler，startup 恢复仍由真实 worker 测试覆盖，不新增产品测试开关。
+- 首次复验清理后的 basetemp 父目录不存在，20 条中 17 个 setup errors；创建忽略的 .scratch 后两文件完整 **20/0/0/0，15.376 秒**，会话 55374 退出 0。临时输出完成留痕后仍清理。
+- 原子合同初轮 **23/16 failures/0 errors，6.373 秒**，均因新测试漏传 orchestrator 的两个必需 keyword 参数；修正后 **23/0，6.598 秒**。整数复用单条真实缺陷先失败（0.570 秒）；产品修复后的三文件 **44/1，24.819 秒**，剩余是测试错误地把手动重加固有审批事实计为自动副作用，改为重加后快照前后对照；原子文件最终 **24/0，6.883 秒**。
+- 真实入队停止首轮 **4/3 failures，1.430 秒**，修复实际字段后停止/操作/账号下载三文件 **34/0，8.512 秒**。随后账号下载文件新增预检并发合同并完整 **11/0，2.509 秒**。
+- 交错合同最初三轮各 **6/2 failures**（2.589/2.672/2.635 秒），逐项核实运行 purge 返回 cleanup_status、业务行立即删除、独立停止/移除句柄保留的实际合同后更新断言；非放宽停止条件。六条复验 **6/0，2.595 秒**，扩已知/未知身份后 **12/0，5.247 秒**，最终含媒体组/回复 **16/0，6.173 秒**。
+- 最终 **17 文件 240 tests / 0 failures / 0 errors / 0 skipped，139.654 秒**，会话 1036 退出 0：auto_approval_atomicity、auto_approval_workflow、ingest_followups、ingest_interleavings（当时 6 条）、ingest_entries、ingest_generations、ingest_migration、ingest_operations、ingest_pipeline、ingest_references、ingest_source_stops、manual_ingest_identity、source_account_downloads、realtime、review_actions、database、candidate_ingestion。交错文件随后扩至 16 条并完整通过；按节点最新共 **250 个不同用例通过**，不与旧重叠组相加。
+- 最终 **2448 collected，仅收集，0.90 秒**，较上次 2398 增 50；并非整库运行。diff --check、CodeGraph sync 通过；README/USAGE 与 AGENTS/PHASES/计划/task_plan/findings 同步。文档补丁两次因 sweeper 注释上下文缺词被整批拒绝，核对原文后分开重做，无部分写入。
+
+**接续。** 逐项核验 P5 §8.G 的迁移与所有旧写入口，特别是历史半审批记录及多 alias 后续意图归属，再做阶段完成审计。APPROVED 无 job 的旧半审批不能因本轮新事务已经原子化就宣称被自动修复；当前后续确认不会把它当成功，但历史恢复策略仍需核实。P6 来源列表/账号选择与 dialogs picker、legacy_slot 订阅迁移、监听公平/限流/接替保持待处理；P7–P12 原范围不变。所有已跑测试工具会话均终态，结果留痕后清理 .scratch，正式测试留在 tests/。
+
+- 最后补充：使用真实旧 030 库验证一个候选先有消息键、后来来源才补 gallery 键的回填；两个 alias 各有 followup 意图，真实 worker 只决定一次并确认全部 alias，再 initialize/重启不重复。followups 文件最终 **8 tests / 0 failures / 0 errors / 0 skipped，5.881 秒**，命令退出 0；按各节点最新共 **251 个不同用例通过**。最终收集 **2449 tests，0.90 秒，仅收集**（较 2398 新增 51）。多 alias 项已有直接证据，接续无需重做；历史半审批恢复策略与 P9/P10 边界、P5 其余逐项完成核验继续。
+- 清理核对：本轮 .scratch 解析为 E:\Workshop\Codex\EhBot\.scratch，共 1141 个临时文件、0 个重解析点；正式测试和上述结果留痕后清理。Git/Docker 忽略维持生效，不保留临时报告作为交付物。
+
+### 2026-10-15：R92 / P5 临时文件清理续记
+
+- 已确认上一轮测试会话 58005 正常退出 0；`test_ingest_migration.py` 的 JUnit 为 **11 tests / 0 failures / 0 errors / 0 skipped，12.347 秒**。新增正式用例验证旧 APPROVED 无任务记录升级后保留审批事实、不自动重下，管理员可显式入队；测试保留在 `tests/integration/`。此为局部验证，不代表 P5 验收或整库通过。
+- 按用户要求清理 `.scratch`：绝对路径核对为 `E:\Workshop\Codex\EhBot\.scratch`，含 11 个临时数据库、1 份 XML 报告，无重解析点。结果在此留痕后删除整个目录；`/.scratch/` 的 Git 忽略与 `.scratch` 的 Docker 忽略已生效，无跟踪文件。
+- 本次仅清理测试临时产物，无用户可见行为变更，无 README/USAGE 文档变更；不提升版本、不作阶段完成提交。P5/P6 及后续阶段状态不变。
+
+### 2026-10-15：R92 / P5 固定来源名称与 P6 来源账号管理接续
+
+**状态。** P3/P4 已验收；P5/P6 仍为工作区进行中，P7–P12 未交付。源码 rc7、027–030 冻结，031 仍未冻结，无真实数据库升级、供应商调用、推送、发布、部署或阶段完成提交。上一轮为实际临时产物清理，本轮继续完整目标，不重建已完成机制。
+
+**实现与边界。**
+
+- 关闭历史半审批调查：真实旧 030 库的 APPROVED 无任务记录重复 initialize 后保持审批，不自动重下；显式 enqueue 成功且不重复审批/普通审计。上轮会话 58005 的迁移文件 11/0 已在清理条目留痕，不再重复调查该边界。
+- P5 完成核验发现固定输入丢来源名称：`load_message` 一律 chat_title=str(chat_id)，AI 首次调用已丢原名。扩展既有失败重试合同后直接复现；031 增 `source_messages.chat_title`，新增/编辑保存原接收值，重载不再取当前可变来源别名。旧记录只能以已有配置别名回填，缺失用 Chat ID，不补猜账号。仅修改 chat_title 的编辑/重放与旧库回填幂等均补合同。
+- P6 的来源列表去掉仅筛旧 Bot 槽，模型/serializer 返回 account_id/account_label/account_kind。共享来源快照增加选择所需的 TG 账号公开字段；同 Chat ID 分属两个账号均可见。添加、会话预填/批量添加、已有行更新均保留账号归属，无效/已删除/非 TG 账号保存拒绝并回滚。
+- `AccountService.list_telegram_user_dialogs(account_id)` 使用明确用户账号及其监听缓存。省略账号仅兼容恰好一个已连接可用用户，多账号拒绝歧义。新增 `POST /api/v1/settings/sources/dialogs` / WS `api.api_source_dialogs`，Web picker 共用该服务；正式合同覆盖 Cookie/CSRF、Bearer、WS 和账号缓存隔离。
+- 此处未宣称来源写入已具备并发保护：原 upsert/bulk 写尚待 revision/CAS/幂等收口，旧订阅 migration、多监听公平/限流/自动接替也未完成。新增读取与归属透传不替代这些阶段要求。
+
+**验证与失败记录（JUnit 已核对）。**
+
+- 来源管理首轮 **9 tests / 1 failure，9.708 秒**：夹具的 API Hash 少于既有 32 字符要求，真实账号监听正确拒绝读取。改为受控合法形状，未放宽产品校验。
+- 来源管理/来源页/TG 三文件首轮 **33/3，46.867 秒**。失败来自旧夹具：缓存写在总管理器而非账号监听器；两个下载合同对账号未知的历史消息仍期待入队。缓存合同改到真实账号监听器，下载合同使用已确认账号来源并验证实际账号绑定，未知来源改为验证明确拒绝且无任务。完整三文件复验 **33/0/0/0，34.515 秒**，会话 32513 退出 0。
+- 来源管理随后扩至 HTTP/Bearer/WS、无效账号保存回滚，完整 **11/0/0/0，13.974 秒**，会话 12161 退出 0；最终联合复验再次覆盖这 11 条。
+- 设置写 API、settings_web、source_rules、api_v1、realtime、multi_account_sources 六文件 **232/0/0/0，340.220 秒**，会话 52136 退出 0。该组开始早于固定 chat_title 修复，不据此声称覆盖后加的名称合同。
+- 固定输入的频道名丢失单条先 **1 failure，0.513 秒**，明确看到 `Original channel` 被替成 `-1000000000777`；产品修复后的 pipeline/migration/entries 三文件 **37/0/0/0，17.672 秒**，会话 99063 退出 0。随后增加仅改名称的编辑重放参数和旧库回填合同，不用这轮旧计数替代最终验证。
+- 最终 **14 文件 180 tests / 0 failures / 0 errors / 0 skipped，74.044 秒**，会话 59491 退出 0：ingest_entries/followups/generations/interleavings/migration/operations/pipeline/references/source_stops，manual_ingest_identity、source_account_downloads、auto_approval_atomicity、multi_account_source_management，以及 unit/ingest_identity。其中文件迁移现 12 条，pipeline 13 条、来源管理 11 条。各组重叠且源码时点不同，不相加成一个通过总数。
+- 最终全库 **2463 collected，0.94 秒，仅收集**，不是整库运行。CodeGraph sync 与 diff --check 通过；README/USAGE/REALTIME_API 和 AGENTS/PHASES/计划/task_plan/findings 同步。前次 collect 命令受默认 quiet 配置影响未显示总数，之后 `-o addopts=''` 读取明确汇总；不以猜测数量留痕。
+
+**接续。** P5 的 §8.G 最终要求映射与旧写入口完成审计后才冻结 031/验收。P6 下一切片集中来源配置写核心：每条版本、受理/回执原子性、保存/批量/原表单/WS 全入口复用及冲突保留草稿；再接 legacy_slot 旧订阅迁移，历史观察身份继续未知，然后多监听公平/限流及停止后账号接替。P7–P12 范围不变，完整目标 active。本轮测试句柄均终态，临时结果留痕后清理 `.scratch`，正式测试留在 tests/。
+- 清理核对：`.scratch` 绝对位置为 `E:\Workshop\Codex\EhBot\.scratch`，1047 个临时文件、0 个重解析点，无 Git 跟踪文件，Git/Docker 忽略均保持生效。上述 JUnit 汇总已留痕，删除整个临时目录，不保留临时报告或私有测试库作为交付物。
+
+### 2026-10-15：R92 / P6 来源命令并发、逐项回执与 Web/WS 草稿
+
+**状态与迁移裁决。** P3/P4 仍已验收；P5/P6 工作区进行中，完整 P3–P12 目标 active。027–030 不改，031 的摄取身份职责不扩张；新增未冻结 **032_source_commands.sql** 为来源配置增加 revision 与同管理员回执。rc7 不提升，不作阶段提交、真实库升级、推送、发布或部署。上一目标回合实际核实并清理临时目录，本回合继续已授权来源写入切片。
+
+**实现。**
+
+- `app/settings/source_commands.py` 为 JSON、原 Web 表单与 WS 的唯一来源命令核心。BEGIN IMMEDIATE 内先核对回执内容，再校验目标来源的已读版本，配置变更与整批结果同事务提交。保存使用自然身份 account/chat 加 expected_revision，新建 0，编辑/恢复使用读到的正版本；拒绝缺版本/幂等键（428）、旧版本/异内容同键（409）。
+- 032 的配置 trigger 覆盖旧内部配置写者，仅 source_type/display_name/enabled/rules_json/dismissed/account_id/chat_id 变化推进该行版本；last_message_id 等运行游标不推进。不同来源不因全局版本互相冲突。source serializer 返回 revision；source_versions 提供包含墓碑的非敏感身份/版本，供 picker 记录已看到的状态。
+- 保存、批量 enable/disable/delete/apply 与会话批量 add 统一写入；批量逐项业务失败不挡其他成功项，回执写失败等系统异常则整笔回滚。已有来源的批量添加 SKIPPED，不覆盖原配置；旧创建版本 0 不能复活已删行。新增 JSON batch-add 与按幂等键读取来源命令回执的 API，自动 WS 目录复用。
+- Web 单项错误保存输入、原版本/键及当前配置；只有明确确认按钮才采用冲突快照版本。批量错误保留草稿、选择和原版本，并展示逐项结果。冲突信息保存原始 rules_json，历史损坏 JSON 也能按正确版本修复。
+- `realtime.js` 原以所有隐藏字段匹配表单，加入版本/键后刷新会失配。来源改用稳定表单身份；有来源草稿时后台刷新只提示变化，其他表单的提交也保留已被远端删除的来源草稿。核对又发现保护会挡住本次保存的 HTML 冲突响应，现单独识别提交响应，展示服务端保留的草稿/确认控件并继续标记为 dirty；后台不会自动采用新版本或重试。
+- 正式测试新增 `test_source_commands.py` 18 条，既有来源管理/来源页/设置 API/TG picker/数据库合同补显式版本与键；没有产品侧自动读取当前版本来满足旧客户端。`tests/source_forms.py` 只为普通非竞争测试明确读取版本；竞争测试使用各自捕获的旧快照和真实线程屏障。
+
+**实际验证（均已核对 JUnit，组间重叠/时点不同，不相加）。**
+
+- 来源命令首轮 **15 tests / 14 failures / 0 errors，4.676 秒**：12 条因 async fixture 漏用 pytest_asyncio.fixture，两个公开适配测试暴露 revision 误放到 CandidateMessage 而非 TelegramSourceConfig。修正夹具后第二轮 **15/8 failures，5.440 秒** 统一定位模型字段；移到正确类后 **15/1 failure，4.849 秒**，剩余为同 WS request_id 的测试误用，非业务重复执行。
+- 五文件来源适配首轮 **125/1 failure，172.549 秒**，以及随后来源单文件 **15/1 failure，4.781 秒**：测试在明确确认后复用了该已成功命令的幂等键，却期待版本冲突。改成分别验证“同键异内容为幂等冲突”和“新键旧版本为版本冲突”，没有放宽产品语义。单文件完整 **15/0，4.772 秒**；后续扩为 **18/0/0/0，6.941 秒**，覆盖损坏历史规则修复、批量 Web/WS 与会话 picker 的已读版本。
+- 来源页/来源管理/设置写 API/数据库/摄取迁移五文件 **134/0/0/0，161.483 秒**，会话 11823 退出 0。来源命令/来源管理/来源页/摄取 pipeline/来源账号下载五文件 **64/0/0/0，48.186 秒**，会话 73502 退出 0。
+- 设置页/WS/来源命令三文件 **150/1 failure/0 errors/0 skipped，216.079 秒**，会话 44781 退出 1。唯一失败是新增测试把 HTML 428 的 WS command.error 错写成 command.result；恢复正确协议断言。包含修正文件与最终模板的来源命令/来源页两文件最终 **29/0/0/0，25.462 秒**，会话 68367 退出 0。不以此宣称整个三文件组已经复跑。
+- `node tests/web/realtime.cjs .scratch/source-dom/node_modules/jsdom` 最终通过，退出 0（会话 17126），使用真实 HTMX/Alpine 验证根路径及 `/ehbot`：后台远端删除、其他表单提交、失败提交的冲突控件、原版本/键与输入节点保留。首次 DOM 通过后补入本次失败响应边界再完整通过；没有把 JS 语法检查当浏览器验证。
+- 全库 **2481 collected，0.93 秒，仅收集**；不是整库运行。compileall、Node syntax、CodeGraph sync、diff --check 通过。README/USAGE/REALTIME_API、计划/PHASES/task_plan/findings/AGENTS 同步。
+- 工具排障：PowerShell 的 npm.ps1 被执行策略阻止，改用 npm.cmd；offline 安装 ENOTCACHED，随后经工具审批将 jsdom@30.1.2 及 36 个依赖安装到忽略的 `.scratch/source-dom`，缓存也在 `.scratch`，不改项目依赖。一次 Python -c 被 PowerShell 吞引号，改用原生 XML 解析读取报告；不据失败命令猜结果。
+
+**接续与清理。** 所有 pytest/npm/Node 句柄均终态。已读取并留痕全部 XML 汇总；`.scratch` 绝对路径核对为 `E:\Workshop\Codex\EhBot\.scratch`，2973 个临时文件、0 个重解析点、无 Git 跟踪文件，Git/Docker 忽略保持生效，删除临时库、报告和 npm 工具输出；正式测试保留在 tests/。下一动作是 legacy_slot 旧共享订阅迁移至账号专属来源，历史 source_messages 账号仍保持未知，不猜归属；然后多监听公平/限流、可靠事件持久化后推进游标及停止后串行接替。P5 §8.G 最终映射/旧入口审计与 P7–P12 范围不变，P5/P6 不因本切片通过自动验收。
+
+### 2026-10-15：R92 / P6 旧共享订阅迁移与实际启动验证
+
+**状态。** 完成上述来源命令切片后继续旧订阅迁移，未重做 P4 或已验证的摄取身份机制。P5/P6 仍未阶段验收/提交，P7–P12 未交付，完整目标 active。rc7 不提升，027–030 冻结，031–033 未冻结，无真实库升级、真实供应商调用、推送、发布或部署。
+
+**实现与裁决。**
+
+- 新增 `033_legacy_source_subscriptions.sql`，保存原共享来源的 legacy_retired 位及每个旧导入账号的一次性完成标记；退休变更推进原来源配置版本。`AccountRegistry.import_legacy()` 在私有配置导入完成后、AccountService 启动监听前调用 `_import_legacy_sources_sync()`。
+- 单个 BEGIN IMMEDIATE 事务仅向 legacy_slot 明确为 TG_BOT/TG_USER 的未删原账号复制 bot-api://configured 共享来源的类型、Chat ID、名称、启停、规则和墓碑，已有专属配置不覆盖；复制及完成标记一并提交。原 TG 用户保留 last_message_id，Bot 不借用这个用户轮询游标。已核对旧 set_source_cursor 的调用处确为 telegram_user 摄取路径。
+- 原共享规则保留原值及历史引用，从配置列表和 source_versions 退休；历史 source_messages 的行、接收账号和原规则引用保持不变，不把它们“迁移”为某个新 UUID。旧凭据稍后才导入的另一个原账号可读取保留的原规则；已完成账号不会被重新覆盖，普通新增账号不会自动继承旧订阅。
+- 保存未指定账号的旧共享请求拒绝 ACCOUNT_SELECTION_REQUIRED；旧批量版本先冲突，明确读到退休版本仍返回 SOURCE_MIGRATED。原共享来源也不再作为轮询目标。复用 032 命令核心及原 AccountService 启动顺序，没有新增监听/调度器。
+- 正式新增 `tests/integration/test_legacy_source_subscriptions.py` 七条，覆盖两类账号、游标/墓碑/历史身份、重启后的编辑删除、已有专属配置与删除旧账号、晚到原账号、并发导入、回滚及陈旧命令。原 AccountService 实际 startup 回归加入来源迁移与重启保持验证；数据库当前迁移数更新为 33，032 的独立升级合同验证其自身迁移只执行一次。
+
+**实际验证（JUnit 已核对，重叠不相加）。**
+
+- 迁移/账号注册/来源命令三文件首轮 **43 tests / 0 failures / 0 errors / 0 skipped，23.297 秒**，会话 27162 退出 0。
+- 迁移、account_registry、account_service、multi_account_sources、multi_account_source_management、source_account_downloads、source_commands、database、ingest_migration 九文件 **121/0/0/0，62.154 秒**，会话 64537 退出 0，包含真实账号启动接口。
+- 联跑开始后加强中途故障：原 trigger 在首次完成标记时失败，改为按确定的 Bot→用户顺序复制、在第二个 TG_USER 完成标记处失败，确认第一账号已执行的复制和标记也整体回滚。最终迁移文件再次完整 **7/0/0/0，8.727 秒**，退出 0；不拿前轮时点替代该增强合同。
+- 全库 **2488 collected，0.95 秒，仅收集**，较来源命令切片净增七条，不是整库运行。compileall、CodeGraph sync、diff --check 通过；README/USAGE/REALTIME_API 和 AGENTS/PHASES/计划/task_plan/findings 同步。本切片无失败测试，不捏造原 bug 的失败复现。
+
+**接续与清理。** 所有测试句柄已终态，XML 实际汇总已记录；临时目录核对为 `E:\Workshop\Codex\EhBot\.scratch`，449 个临时文件、0 个重解析点、无 Git 跟踪文件，删除整目录。正式测试在 tests/。下一切片审阅并实现完整多监听的公平预算、FloodWait/独立退避和可靠事件持久化后的游标推进，再接来源账号优先的实际停止后串行接替。P5 最终要求映射与旧写入口审计、P7–P12 原范围继续保留，不因 033 通过而宣布整个 P6 完成。
+
+- 后续已完成源码定位（未修改监听逻辑）：AccountListener 每账号已有独立任务/cache/lease；manager._poll_telegram 仍在每次持久 raw updates 后 await 全部业务处理，ingestor.process_pending_updates 无每轮总预算。用户 _ingest_source 每来源先跑 pending 再逐消息 await AI，结束才推进游标；ProviderConnectionError.retry_after 虽已由 FloodWait 翻译，但用户来源循环只记录后继续请求并固定十秒重试。下一步先复现“慢来源阻塞同账号其他来源”与“限流后仍访问其他来源”，再在现有监听/持久摄取核心上收口预算、冷却和接收/判定边界。完整调查在 findings 最新小节，不能把此调查当作实现。
+
+### 2026-10-15：R92 / P6 可靠接收、独立消费与账号退避
+
+**状态。** 接续上一条调查，完成可靠监听切片；P5/P6 仍未阶段验收或提交，P7–P12 未交付，完整目标 active。源码 rc7/已提交 schema 030 不提升，027–030 冻结，工作区 031–034 未冻结。无真实供应商、真实库升级、推送、发布或部署；按授权在原方案内实施，不再索要开工许可。
+
+**实现与边界。**
+
+- 新增 034_telegram_user_inbox.sql 和 candidates/inbox.py，MTProto 归一化消息按账号/频道/消息去重保存，和订阅游标同一短事务提交；Bot 沿用原始更新表，可靠保存后继续下一轮 getUpdates。首次订阅仍 seed latest，无历史回扫。接收不领取 AI claim，消费继续走现有 process_message/ingest_entries，不再造业务去重或下载调度器。
+- AccountListener 在原接收循环旁管理独立消费任务，每轮借用自己的 immutable runtime lease。manager 保留旧单次摄取入口作为薄适配；实际多账号监听只接收、由独立消费者处理。候选提交后 ACK 失败不会重复 AI；成功或已持久登记可恢复摄取输入才确认投递。消费失败仍显示「消息处理失败，将自动重试」，状态变化通知沿用旧快照，网络接收继续。
+- 用户每轮十个来源、每来源百条，下一轮从上轮后继继续；Bot/MTProto 待处理事件及到期输入按频道交错、保留频道内顺序，一轮各最多百条。原 process_pending_updates 的无限 while 已去除。未知历史事件采用受管后台恢复任务，剩余批次持续消费，不阻塞账号启动，也不猜测旧账号归属。
+- FloodWait/retry_after 与网络退避属于该账号监听器，出现后不再继续本轮其他来源；dialog 检查亦受等待约束，保存来源不绕过冷却。会话已失效/应用凭据无效则报告错误并停止继续来源请求，配置不清除。当前冷却只在运行时，P9 接持久恢复、全局与跨功能预算；没有宣称下载和会话 picker 已共用该等待。
+- listener.stop/runtime.stop 均等待消费者实际 AI finally 完成；Bot 原始投递写线程和首次游标写线程复用已有 run_sync，取消不先释放 lease。正式测试控制真实线程阻塞，确认停止未结束后才 release。只有停止确认后的 TG 来源切换仍待后续切片。
+
+**实际验证（所有 JUnit 已读取，不叠加重叠组）。**
+
+- 新增正式 tests/integration/test_listener_delivery.py，首轮 **2 tests/2 failures/0 errors，3.204 秒**，两条都因测试 API hash 不合法而没有开始请求，不能作为原产品失败。修正夹具后 **2/2 failures，1.670 秒**：明确复现慢 AI 阻塞第二来源、FloodWait 后仍请求第二来源。
+- 实现后 listener/connection_manager 两文件首轮 **18/1 failure，7.024 秒**：原存储错误可见性回归失败；恢复独立消费的运行状态反馈。扩展测试轮 **25/1 failure，8.310 秒** 为新增测试残留 calls 断言放错函数；随后 listener **13/5 failures，11.123 秒**，包含两个错位断言、Bot 测试缺 base_url、SQL RAISE 实际是 IntegrityError、fetch 已开始但事务尚未提交的测试竞态。逐项修正测试，不放宽持久化/停止约束。后续三文件 **54/0/0/0，16.607 秒**。
+- listener_delivery、connection_manager、account_service、multi_account_sources、ingest_pipeline、candidate_ingestion、database、source_account_downloads、ingest_source_stops、ingest_generations、ingest_migration 十一文件 **154/0/0/0，52.967 秒**，会话 69373 退出 0。
+- 加入失效会话后 listener_delivery、connection_manager、account_service、multi_account_source_management、sources_web、source_rules、auto_approval_workflow、legacy_source_subscriptions 八文件 **102/0/0/0，56.855 秒**，会话 22496 退出 0。
+- 最后加入实际阻塞写线程合同，并对数据库原始投递/首次游标写入使用 run_sync；listener_delivery、connection_manager、database 三文件最终 **59/0/0/0，16.475 秒**，会话 29544 退出 0。listener_delivery 当前为 **18 个合同**，含监听/账号停止、投递回滚/恢复、重放去重、独立账号、限流到期/会话失效、来源预算/频道交错、有界旧积压持续后台恢复、034 升级重复初始化与写线程实际退出。
+- 全库 **2506 collected，0.91 秒，仅收集**，较上一切片净增十八条；没有运行整库。compileall、CodeGraph sync、diff --check 通过。README/USAGE/REALTIME_API、方案/计划/PHASES/task_plan/findings/AGENTS 已同步。
+- 一次多文件补丁因误猜 test_database 的 schema_version 断言未匹配而整体拒绝，没有部分落地；读取实际 migration_count 后重做。后续补丁曾把进度段插在段首残句后，已核对并移动，未改产品逻辑。
+
+**清理与接续。** 测试句柄均终态；XML 汇总已记录，临时目录核对为 E:\Workshop\Codex\EhBot\.scratch，975 个文件、0 个重解析点、无 Git 跟踪文件，Git/Docker 忽略有效；本切片清理整目录，正式测试留在 tests/。P5 继续最终 §8.G/旧写入口审计和验收；P6 下一步核对用户来源账号优先、同一文件的合格备用、旧请求实际退出后串行新 attempt 以及 Bot file_id 不串账号，补真实交错合同再验收。P7–P12 原范围保留，031–034 不冻结、不因窄切片通过宣布整个阶段完成。
+
+### 2026-10-15：R92 / P5 要求核对与不合格固定输入恢复
+
+**状态。** 新增 R92_REQUIREMENT_AUDIT.md，按批准方案 §8.3.G 对照源码/正式测试/已运行证据，并搜索当前 app 下所有 Python 候选/观察插入及画廊更新写者。P5/P6 仍在进行中，完整目标 active；rc7 不提升，031–034 未冻结，无阶段提交、真实库升级或发布。
+
+**发现与处理。** 原固定输入在第一次判定失败后，原订阅停用而另一个账号补入同键消息，prepare_observation 仍将旧输入交给 AI，随后原来源检查 IGNORE 使整个统一键被忽略，其他合格观察也无法建候选。正式 pipeline 用例已复现，修复如下：
+
+- persistence.reselect_pending_input 在持有短写事务时只处理 PENDING：原订阅/附件仍合格则保持输入；不合格时从同代次 ACTIVE、非 IGNORE 的已保存观察中确定地选一个合格输入，递增 revision、清理旧重试并为新输入重新计次。PROCESSING 不由该函数换人，也不重新判定已有 LINKED/IGNORED 作品。
+- prepare_observation 与 _due_inputs 复用同一个选择函数；恢复查询允许有合格备用观察的账号找到原输入属于其他账号的待处理记录，选择后仍只交给最终输入所属账号的消费任务。不要求观察方再收到新消息；未停用的合格原输入不会被其他账号改写。
+- admit_message 将本地来源检查置于 AI 前；_publish_message 在提交事务再次检查来源。AI 期间订阅失效时撤回该 claim、持久保留 PENDING 并选择合格备用，不把整个键判 IGNORED。仍用原 entries/claim/revision，无新调度器/表或并行费用操作机制。
+- test_ingest_pipeline 新增五条合同：原订阅停用、允许格式收紧、合格原输入保持，以及已有备用观察在首次失败后/AI 期间订阅停用后的新消费者恢复。原输入不变、无新事件恢复与中途修改分别验证。
+- 审计还确认新手动候选发布为 APPROVED 后，enqueue_manual_candidate 是事务外调用；现有自动判定 followup 不覆盖它。已将“新手动发布后、入队前崩溃”的持久意图明确记在 P8，不以全表扫描历史 APPROVED/no-job 猜重下意图。账号失效但订阅仍启用、过期 claim 的完整恢复继续审查，不能用本次订阅停用合同替代。
+
+**实际验证（JUnit 已核对，组间不相加）。**
+
+- 首轮单用例 **1/1 failure，0.479 秒**：测试未按 TaskGroup 的 ExceptionGroup 读取内部 RuntimeError，未到业务断言；修正异常断言后 **1/1 failure，0.532 秒**，真实失败为第二个合格来源未创建候选。
+- 首个修复五文件 **66/1 failure，29.639 秒**，唯一失败为新 helper 漏导入 load_message，补上导入；八文件 **114/0/0/0，45.112 秒**，会话 78420 退出 0。
+- 加入已保存观察恢复：pipeline、listener_delivery、source_stops、interleavings、manual_ingest_identity、entries、candidate_ingestion、followups、source_rules、generations 十文件 **132/0/0/0，47.648 秒**，会话 2023 退出 0。
+- 加入 AI 期间订阅变更的事务提交守卫后，同十文件 **133/0/0/0，48.493 秒**，会话 91154 退出 0。
+- 最后将本地来源检查提前到 AI 前，pipeline、listener_delivery、source_rules、candidate_ingestion 四文件最终 **70/0/0/0，22.700 秒**，会话 49915 退出 0。前十文件非最后改动时点，按本行替换受触节点结果，不能把宽组冒充最后全组重跑。
+- 全库 **2511 collected，0.93 秒，仅收集**，较监听切片新增五条。compileall、CodeGraph sync、diff --check 通过；README/USAGE、要求核对表、处理计划/PHASES/AGENTS/task_plan/findings 同步。无整库运行或阶段完成声明。
+
+**清理与接续。** 本切片测试句柄均终态，实际 XML 汇总已记录；.scratch 核对为 E:\Workshop\Codex\EhBot\.scratch，1241 个临时文件、0 个重解析点、无 Git 跟踪文件，留痕后清理。下一步沿 R92_REQUIREMENT_AUDIT.md 继续 P5 最终/旧写入口核验、账号失效/过期处理的边界；P6 接 TG 原账号优先与真实停止后串行新 attempt，P8/P9 已知缺口和 P7–P12 全范围继续保留。P5/P6 未验收，不冻结迁移，不提升版本。
+
+### 2026-10-15：R92 / P5 账号状态、过期处理的实际排他与有界恢复
+
+**范围与假设。** 延续已批准 P3–P12 完整目标，P3/P4 已验收，P5/P6 仍进行中；前一轮核实 .scratch 已清理且 Git/Docker 忽略有效，本轮继续摄取恢复审计。项目仍为单后台进程和同一运行 Database；本地任务记录不能冒充跨进程 worker_session。保存消息的判定不需重访 Telegram，不把网络暂时失联本身视为持久输入无效。
+
+**复现与处理。**
+
+- 新 test_ingest_account_recovery 使用真实启用账号、AccountRuntime 租约和 AccountLifecycle 停止/换凭据：四种原账号不可借用但订阅启用时，B 已存观察无法恢复；A 仍合格时 B 反而能领取 A 固定输入。首轮五条均取得业务断言失败。事务来源检查现含启停/删除/停止/当前凭据验证；固定输入只能由其账号领取。其他账号补观察，原账号不可借用才重选，保留两个账号来源。
+- 过期遗留 claim 的新观察/已存观察两条，以及活请求退出后的恢复一条取得有效失败。reselect_pending_input 以新 revision 撤销遗留 owner，再走统一有界 claim/选择；旧结果不能再提交。原输入仍合格时只由原账号恢复。
+- 原 ingestor 的活任务表和单次取消/实际清理等待移为 Database 共享的 IngestProcessors，手动验证也登记在同一表。短锁覆盖领取至任务登记，实际供应商请求在锁外；新事件及恢复扫描均不接替仍活着或清理中的任务。手动/Telegram 两方向、同/新 ingestor 实例、重复取消与真实 finally 阻塞都有正式合同。兼容已判定输入适配也检查本地活任务。
+- 百条窗口首次只有一个 A 频道的夹具 1/0，原频道交错已经覆盖它；改成 100 个不同有效 A 频道后，B 自有第 101 条连续三轮不被处理，单条 1/1。恢复读取保留原频道交错，增加共享的账号扫描位置，每轮最多百条、循环继续；不同消费者不反复卡在其他账号固定输入。进程重启从持久数据重扫，P9 持久 worker_session/预算另行验收。
+- pipeline.setup 账号夹具改为已验证启用，TG 用户保存测试 session；不为测试放宽产品账号规则。本轮无新迁移，031–034 仍未冻结；README、USAGE、方案、要求核对表、计划/PHASES/AGENTS/task_plan/findings 同步。
+
+**实际验证（已解析 JUnit，组间不相加）。**
+
+- 账号恢复首次 **5/5 failures，2.359 秒**；首次修复后的十一文件 **138/0/0/0，58.593 秒**，会话 15230 退出 0。
+- 过期恢复扩展首次 **8/3 failures，3.545 秒**；共用本地物理记录后 pipeline/manual/account_recovery 三文件 **33/0，12.444 秒**，会话 74292 退出 0。再加独立消费者与手动两个方向后十一文件 **145/0，61.453 秒**，会话 69577 退出 0。
+- 扫描饥饿用例：初版单频道 **1/0，0.864 秒**；有效百频道复现 **1/1 failure，1.899 秒**。修复后最终十一文件 **146 tests / 0 failures / 0 errors / 0 skipped，63.396 秒**，会话 74427 退出 0。文件为 account_recovery、pipeline、listener_delivery、manual_ingest_identity、source_stops、interleavings、entries、candidate_ingestion、followups、source_rules、generations。
+- 扩展十三文件 **180/0/0/0，82.794 秒**，会话 49487 退出 0：account_runtime、account_lifecycle、account_service、database、manual_add、ingest_migration、ingest_references、ingest_operations、auto_approval_atomicity、multi_account_sources、legacy_source_subscriptions、source_account_downloads、unit/test_ingest_identity。
+- 随后新增手动重复取消/真实清理阻塞，manual_ingest_identity 与 account_recovery 两文件 **21/0，8.888 秒**；最后将恢复断言也改为真实 runtime.use，最终同两文件 **21/0/0/0，8.813 秒**，会话 25056 退出 0。前述宽组非最后新增测试时点，不能称为最后全组重跑；产品代码未再改动。
+- 最后全库 **2525 collected，0.93 秒，仅收集**；较 2511 增加十四条正式合同。无整库执行、真实供应商请求、真实库升级、版本提升、阶段完成提交、推送或部署。
+
+**接续。** P5 继续要求/旧写入口的最终全合同核对与升级/回退说明，P6 继续 TG 来源账号优先、合格备用及旧请求实际停止后的新下载 attempt；摄取恢复测试不是下载接替验收。P8 新手动发布后/入队前崩溃的显式持久意图、P9 持久冷却/共享预算和 P7–P12 原范围保留。测试输出留痕后清理 .scratch，正式测试均在 tests/。
+
+**静态检查与清理。** CodeGraph sync、compileall 和 git diff --check 通过。所有测试会话已终态；.scratch 实际路径为 E:\Workshop\Codex\EhBot\.scratch，1971 个临时文件、0 个重解析点、无 Git 跟踪文件，Git/Docker 忽略有效；核对全部 XML 并留下上述计数后清理目录。P5/P6 未验收，不冻结迁移或作阶段提交。
+
+P6 下一入口已按当前源码核对并写 findings：resolve_telegram_user_source 的用户来源分支不可用即失败；_handle_job 绑定账号失败只结算当前任务，没有 TG 有界备用新 attempt。下一轮先补“来源用户不可用/下载失败、原请求 finally 尚未退出、合格备用及 file_id 不能跨 Bot”的真实下载合同，再复用已有 task/attempt/槽与停止机制实现，不能在账号 scope 内循环并隐藏多个实际执行。此调查没有新增下载实现或测试。
+
+### 2026-10-15：临时目录清理与 P6 未完成测试留痕
+
+- 按管理员要求清理 `.scratch/`：该目录仅放测试数据库/报告、临时依赖和下载的参考源码。现有 `.gitignore` 的 `/.scratch/` 与 `.dockerignore` 的 `.scratch` 已覆盖，无需重复添加；正式测试保留在 `tests/`。
+- 清理前核实绝对路径为 `E:\Workshop\Codex\EhBot\.scratch`，289 个文件、15,042,002 字节、0 个重解析点，无 Git 跟踪文件。读取唯一 JUnit 报告后清理整个目录，不保留临时依赖或复现产物。
+- P6 本轮最后执行 `tests/unit/test_telegram_file_identity.py` 与 `tests/integration/test_source_account_downloads.py`，JUnit 为 **33 tests / 2 failures / 0 errors / 0 skipped，3.274 秒**，退出 1。两条有效失败分别为：Bot 转用户预检错误接受同名同大小但 document id 不同的文件；原 TG 用户不可用时，无法使用同文档的备用账号自身私聊观察。新 document identity helper 和正式测试仍在工作区，来源选择修复尚未实现，不能宣称全部通过或 P6 完成。
+- 本次仅清理临时产物并记录进度，无用户功能或配置变化，README / USAGE 无需变更；未重跑测试、未提交或部署。P5/P6 未验收，031–034 未冻结；接续先解决以上两条失败，再核验旧请求退出后串行下载接替。
+
+### 2026-10-15：R92 / P6 精确文档匹配与持久串行下载接替
+
+**状态与假设。** 上一轮临时目录清理和证据记录属于实质进展，完整 P3–P12 目标继续 active。仍按单后台进程和一个 DownloadService/Database 运行；P9 才提供跨进程 worker_session。rc7/030 是最后已提交基线，工作区 031–035 均未冻结，P5/P6 未验收，无阶段提交、真实账号请求、真实库升级或发布。
+
+**实现与合同。**
+
+- telegram_files.document_id 按官方 TDLib 唯一文档格式对照 MTProto document id，严格拒绝未知/照片/畸形/越界标识，19 条单元合同。官方来源和格式证据见 findings，下载的参考源码及临时依赖已于上一轮清理，不需要新依赖。
+- AccountService 保持合格原用户优先；原用户不可借用才选同作品、同文档的其他有效观察，私聊用该账号自己的坐标；之后才考虑目标用户验证共享频道原消息。原始来源和选中备用来源分开固定，DownloadService 在入队/执行/产物提交时重查两个 revision 和附件身份。修改或移除备用观察不能提交旧下载。
+- Bot 备用只使用自己保存的同文档观察/file_id；实际 getFile 返回身份不符则不下载/发布。用户与 Bot 都复用现有队列的持久 replace-account 操作：失败历史保留 FAILED 与原错误，STOPPING 继续占槽，等待旧请求/账号 scope 真实退出，再短事务恢复同一个 task 的 PENDING；下一次领取生成新 attempt 和独立目录。首次失败固定有限账号池和已尝试集合，后加账号不延长该轮，耗尽终态 FAILED。
+- 035 只修改停止守卫，不改冻结 027–030；STOPPING→PENDING/FAILED 必须有当前 attempt、generation 对应且已完成的内部接替操作。显式 retry 的新任务语义保持。取消等待接替复用原 operation、增加版本，完成事务读取最新 action，预检期间的取消也能阻止后继。提交失败回滚操作状态及任务恢复，不释放槽。
+- 新 test_telegram_download_failover 覆盖同 task 新 attempt、独立目录、原错误冻结、同进程/重启/034 守卫升级与重复初始化、旧 generation 晚完成、真实清理等待、有限账号池耗尽、取消覆盖、事务回滚、Bot file_id 不串账号和 getFile 身份变化。其他来源/账号/队列原合同继续保留。
+
+**实际验证（JUnit 已解析，组间不相加）。**
+
+- 修复来源选择后首次两文件 **33 tests / 0 failures / 14 errors，0.560 秒**：上一轮清理目录后，pytest 的嵌套 basetemp 父目录尚未建立，十四条集成用例未运行；不是产品失败。JUnit 创建父目录后重跑 **33/0/0/0，3.330 秒**。
+- 扩展来源交错合同后两文件 **44/0/0/0，6.098 秒**。下载接替初始三条 **3/3 failures/0 errors，1.074 秒**，均复现旧 FAILED 提前释放槽而没有接替；实现后与来源/身份三文件 **47/0，7.148 秒**，扩展有限池/取消/回滚后 **51/0，8.856 秒**。
+- 首次十二文件 **194/1 failure/0 errors/0 skipped，48.714 秒**，会话 62904 退出 1；唯一失败为数据库迁移数量仍断言 34，035 后更新为 35。Bot 备用新增两条使 failover 首轮 **9/2 failures，3.262 秒**，均复现 Bot 失败没有持久接替；实现后身份/来源/failover 三文件 **53/0，9.607 秒**。
+- 加入 034→035 守卫升级与重复初始化后，十二文件最终 **197 tests / 0 failures / 0 errors / 0 skipped，49.712 秒**，会话 99136 退出 0。文件：telegram_download_failover、source_account_downloads、unit/telegram_file_identity、queue_control、queue_stopping、account_runtime、account_lifecycle、account_service、ingest_operations、ingest_source_stops、downloads、database。
+- 最后新增 Bot 返回错误文件身份一条，并在原三种恢复合同补旧 generation 晚完成断言；failover 文件最终 **11/0/0/0，3.992 秒**。产品代码未再修改；按节点最新结果共 **198 个不同用例通过**，不称为最后十二文件全组重跑。
+- 全库最终 **2569 collected，0.94 秒，仅收集**。CodeGraph sync、compileall 已通过；交付前核对 diff --check。README/USAGE、方案/计划、PHASES/task_plan/AGENTS/findings 已同步。一次多文档补丁错误引用根 AGENTS 尾部，工具整体拒绝；确认未部分写入后使用实际锚点重做。
+
+**接续边界。** 运行中账号停用/删除/换凭据仍由 AccountLifecycle._stop_bound_executions 发 cancel，需区分账号停止与管理员取消、接到合格备用，等待真实退出后才新 attempt；现有 source_account_downloads 的停用用例目前仍期望 CANCELLED，不能当作自动接替验收。显式 retry 需重选原账号/重置有限池，当前旧细节会继承 attempted_accounts，尚待修复。P5 最终要求/旧写入口与升级回退核验，P7 EH、P8 文件发布/手动入队持久意图、P9 心跳/持久预算、P10–P12 原范围继续。全部测试会话终态，结果留痕后清理 .scratch；正式测试留 tests/。
+
+**静态检查与清理。** git diff --check 通过；无凭据/环境变量变更，.env.example 无需变更。最后核实 .scratch 为 E:\Workshop\Codex\EhBot\.scratch，1252 个临时文件、0 个重解析点、无 Git 跟踪文件，Git/Docker 忽略有效；全部 XML 已解析并记上述结果，清理整个目录。无阶段完成声明或阶段提交。
+
+### 2026-10-15：再次清理临时测试产物（非阶段验收）
+
+- 按管理员要求检查 `.scratch/`：900 个临时文件，共 215,507,216 字节，只有 JUnit 报告、测试数据库、模拟账号配置和下载/打包产物；没有正式测试源码。绝对路径为 `E:\Workshop\Codex\EhBot\.scratch`，无 Git 跟踪文件、无重解析点。核对报告摘要后删除目录；正式测试继续保留在 `tests/`。
+- `.gitignore` 的 `/.scratch/` 与 `.dockerignore` 的 `.scratch` 已覆盖，无需重复添加。以后测试结束记录结果后即清理，不保留临时产物。
+- 删除前解析前轮七份报告（tests/failures/errors/skipped，组间重叠不相加）：tg-lifecycle-before **16/5/0/0**；tg-lifecycle-implemented **83/0/0/0**；tg-lifecycle-extended **52/0/0/0**；tg-history-before **3/3/0/0**；tg-history-rerun **6/0/0/0**；tg-lifecycle-final **186/0/0/0**；eh-rotation-before **27/1/0/0**。这些是前轮结果，不是当前源码最终通过的证明：最后 TG 组运行后又有 036/EH 轮转修改，EH 用例修正后尚未重跑。
+- 前轮接续待修：显式 retry 不应修改旧终态任务的账号快照，需恢复历史断言并原子更新新任务细节；接替预检前恢复原观察校验；账号停止应只撤销当前绑定，不能撤销已选择的备用账号，也不能缩窄其他下载状态的停止合同。P5/P6 未验收，P7 只有轮转基础，031–036 未冻结。
+- 本次只清理临时文件、核对忽略规则并留痕，没有修改产品代码或重跑测试，无用户行为变化，README / USAGE 无需变更；未提交、部署或发布。
+
+### 2026-10-15：R92 / P5 审计、P6 生命周期与历史/停止收束，P7 轮询基础
+
+**状态与前提。** 前次清理改变了工作区并保留验证证据，属于进展；P3–P12 总目标继续 active。沿用单后台进程、单管理员和现有 task/attempt/queue_operations。已提交基线仍 15dd3bb / rc7 / 030，027–030 不改；031–036 工作区未冻结，P5/P6/P7 尚未阶段验收或提交。所有供应商均为受控替身，未读真实私有目录、未升级真实库、未推送/发布/部署。
+
+**实现与本轮复现修复。**
+
+- 接续前轮未留完整交付记录的生命周期实现：真实 TG 观察绑定的运行账号停用、删除或换凭据，保存 `replace-account` 与 `stop_requested`；该控制标记只在操作参数中，不混入下载来源。等待旧请求/账号 scope 退出后，再恢复同一任务、新 attempt 和独立 staging；无备用则 FAILED。旧已失败 attempt 保留原错误，生命周期撤销的运行 attempt 只在确认退出后结算 CANCELLED。
+- 显式失败任务 retry/restart 清除有限池和 attempted 集合，并优先恢复原 TG 用户/原 Bot；Bot 来源转 MTProto 保留已验证用户自己的坐标，不能借 Bot Token 当用户。前轮另行 UPDATE details 导致旧终态任务历史被改写，本轮先恢复期望 B 的断言，再复现两条失败，将细节重置合入状态→PENDING 的同一 UPDATE；最终额外检查整个旧任务快照在重试受理及后继完成后完全不变。
+- 替代账号预检前恢复原观察校验；原消息已变更时不联系备用供应商。原校验缺失、重试历史污染及所有来源的停止状态被错误缩窄，合计五条有效失败已复现。生命周期按 TG 已结束旧 attempt 的实际绑定排除旧 A 对待执行 B 的影响；其他 provider 的 PENDING/PAUSED 停止合同恢复，没有用缩窄所有状态来规避问题。
+- 停止处理器取消时，shield 保住 producer 清理，再次处理不重复 cancel；新增取消先于/后于账号停止两种交错，管理员取消始终胜出，不自动重启。Bot 流式下载等待 A 的 finally 退出后才使用 B 自己的 file_id。
+- 本轮另复现 worker 关闭对已取消 producer 再次 cancel，使 finally 中断并提前确认停止。`_process_one` 现在只取消一次，屏蔽等待者的后续取消，保留活任务句柄直到实际结束；停止操作不能提前释放槽。
+- P5 旧写入口审计发现备用观察停止遗漏：`changes` 和失败操作重试原来只匹配 `observation_id`，现在同时匹配 `download_observation_id`。真实备用下载的编辑/移除，以及重试重新停止备用观察绑定三条失败已复现修复；确认实际清理后才应用变更，原观察保持原修订。
+- P5 在 R92_REQUIREMENT_AUDIT 记录了实际全部候选/观察写入口和调用约束，并补升级/回退步骤。新增临时 030 快照→升级合并→升级后修改→离线恢复的正式合同；恢复旧作品/来源/任务身份，检查 schema、完整性和外键，不调用当前初始化来伪装旧版本读取。
+- P7 前轮 036 公平轮询基础保留：持久序号打破时间并列并跨服务恢复；enabled/verified/connected/冷却/排除过滤。复现“查询可用账号也推进轮次”，改为只读查询，实际 use_kind 才推进，嵌套/显式账号保持身份。五条轮询合同通过。尚无持久元数据有限失败集合、能力管理、独占预算和收费结果查回，不能认为 P7 完成。
+
+**实际验证（均解析 JUnit，tests/failures/errors/skipped；各组不累加）。**
+
+- 历史/原观察/非 TG 停止初始 **5/5/0/0，2.068 秒**；修复后 failover/lifecycle/EH 三文件 **37/0/0/0，11.457 秒**。
+- EH 查询/并发/嵌套五例初始 **5/1/0/0，1.652 秒**，唯一失败是查询推进；修复后与下载交错两文件 **28/0/0/0，9.792 秒**。
+- 中途十三相关文件 **217/0/0/0，56.143 秒**；随后 worker 停机单例 **1/1/0/0，0.648 秒**，修复后 queue_stopping/failover/account_runtime 三文件 **34/0/0/0，10.747 秒**。
+- P5 完整十八文件 **248/0/0/0，137.821 秒**（会话 85949，退出 0）：unit/ingest_identity，integration/ingest_entries、ingest_pipeline、ingest_migration、ingest_generations、ingest_references、ingest_interleavings、ingest_operations、ingest_source_stops、ingest_account_recovery、manual_ingest_identity、ingest_followups、auto_approval_atomicity、auto_approval_workflow、candidate_ingestion、multi_account_sources、manual_add、review_actions。
+- 备用观察停止初始四例 **4/3/0/0，1.515 秒**；修复后 failover/ingest_operations/ingest_source_stops/queue_stopping 四文件 **57/0/0/0，19.859 秒**。加入离线快照恢复后，migration/operations/source_stops 三文件 **40/0/0/0，23.223 秒**（会话 57984，退出 0）。
+- 产品代码最终十三文件 **221/0/0/0，57.298 秒**（会话 83588，退出 0）：telegram_download_failover、source_account_downloads、queue_stopping、queue_control、account_runtime、account_lifecycle、account_service、downloads、database、ingest_operations、ingest_source_stops、eh_account_rotation、unit/telegram_file_identity。之后只加强完整历史快照断言，retry/restart 两例最终 **2/0/0/0，1.139 秒**；无后续产品代码修改。
+- 按上述最终报告的 classname/name 节点取最新结果，共 **445 个不同用例通过，0 failures/errors/skipped**；不是一次完整组或整库运行。全库 **2593 collected，0.95 秒，仅收集**。compileall 与 CodeGraph sync 通过；最终 diff --check 另核对。没有新 JS，不重复运行未改变的 DOM 测试。
+
+**文档与接续。** README/USAGE、方案/计划、PHASES/AGENTS/task_plan/findings 和本审计同步；无环境变量或凭据字段增删，.env.example 无需改变。P5 接阶段交付/本地提交边界收口；P6 接完整多监听/来源/API 合同验收，不再重做已验证的生命周期/重试/备用观察停止。P7 下一步先明确匿名 gdata 只请求一次、认证元数据池和成功结果发布上下文；归档必须先有持久收费意图/结果查回，再做有界跨账号新 attempt，不能给收费 POST 套通用异常重试。P8 手动发布后入队意图/精确产物、P9 心跳预算、P10 全域协议与 HMAC 回执、P11/P12 原范围保持。
+
+**临时产物。** 本轮未重建 .scratch，正式用例均在 tests/；十三个指定 TEMP 测试目录及同名 XML 共 2109 个文件、501,557,227 字节、0 个重解析点。所有会话终态，XML 摘要及最新节点计数记录后清理这些确切路径；不扫描或删除其他 TEMP 文件。后续交付前再次确认 .scratch 不存在。
+
+**最终核对。** 十三个指定 TEMP 目录和 XML 已实际删除，剩余 0，.scratch 不存在。标准 `git diff --check` 退出 0，空白错误 0；一次为去掉换行提示而错误设置 `core.autocrlf=false` 的检查把 Windows CRLF 当成整文件空白错误，已恢复标准命令验证，没有为此批量改换行。下一入口先核对 P6 的 listener_delivery、legacy_source_subscriptions、multi_account_sources、multi_account_source_management、source_commands 及账号 HTTP/Web/WS 合同在当前 036 树上的整体交付证据，再收口 P5/P6 阶段；P7 按 findings 的认证请求/发布上下文和收费意图切入，不重跑已证明的停机/历史问题来替代后续实施。
+
+### 2026-10-15：R92 / P6 来源监听合同与 P7 认证元数据有限接替
+
+**状态。** 上一轮对 .scratch 不存在和 Git/Docker 忽略生效做了现场核验，属于清理要求的验证。完整 P3–P12 目标继续 active；本轮按既有授权继续实现。P5/P6/P7 仍未阶段验收；rc7/030 为已提交基线，031–036 未冻结，无版本提升/阶段提交/真实账号请求/真实库升级/推送或部署。
+
+**实现。** ExHentaiService.account_request 改为同任务内的惰性请求 scope：公共 gdata 不借账号，认证回退才借用，并保留到调用者写入结束；批量未命中直接回退 HTML，不再逐画廊重复匿名请求。GdataClient 显式清空 Cookie 并拒绝重定向，防止共享客户端的 Cookie 自动附回公共请求。
+
+新增 MetadataAccountPool 与 036 的 eh_metadata_operations/attempts：记录有限账号/凭据版本快照、固定备用次序和结构化结果，通过原 AccountService selector 选择；途中新增账号不扩池，换凭据/停用在请求前重新检查。旧失败 scope 真实退出后才用备用自己的 Cookie，成功 scope 同步转交外层 AsyncExitStack，保留版本提交屏障。取消不继续下一账号；注册数据库写线程期间取消也排空线程并写回 CANCELLED。FAILED 与 UNAVAILABLE 分开，耗尽和无账号分别返回 EH_ALL_ACCOUNTS_FAILED / EH_NO_ACCOUNT_AVAILABLE，不保存 Cookie、链接 token 或供应商原始异常。
+
+AccountService.use_account/use_kind 对同一 EH 账号增加本进程锁，覆盖实际清理；其他账号可继续，TG 不串行化。队列已经绑定 EH 时元数据沿用该账号，不在 provider 内偷偷换 queue attempt；收费 POST 不使用此只读池。现有手动发布租约测试的 supplier stub 明确借认证凭据，新的真实受控 HTTP 合同验证匿名无需账号、认证成功租约随调用者发布及停止清理。
+
+**实际验证，均为临时库/受控传输。**
+
+- P6 初次命令把现有 test_accounts_api.py 拼成 test_account_api.py，pytest 收集错误、无测试执行；核对文件名后完整八文件 **95 tests / 0 failures / 0 errors / 0 skipped，80.819 秒**（会话 3659 退出 0）：listener_delivery、legacy_source_subscriptions、multi_account_sources、multi_account_source_management、source_commands、account_service、accounts_api、sources_web。
+- 新元数据合同首次 **7/6 failures/0 errors/0 skipped，2.438 秒**，分别证明匿名提前借账号、空 enrichment 推进轮询、批量二次匿名请求与共享 Cookie；修复后相关九文件 **75/0/0/0，16.506 秒**。加入持久池/本进程串行后五文件 **76/0/0/0，14.892 秒**（会话 55608 退出 0）。
+- 完整十七文件 **215/0/0/0，127.824 秒**（会话 86423 退出 0）：eh_metadata_accounts、eh_account_rotation、account_service、account_runtime、account_lifecycle、accounts_api、exhentai_torrents、manual_ingest_identity、manual_add、provider_late_results、source_preflight、webui_operations_fix、telegram_download_failover、database、unit/gdata、unit/exhentai_api、unit/exhentai_download。
+- EH 串行后来源/监听完整六文件 **81/0/0/0，55.319 秒**（会话 33909 退出 0）：listener_delivery、legacy_source_subscriptions、multi_account_sources、multi_account_source_management、source_commands、source_account_downloads。
+- 加强固定备用次序和匿名重定向后，元数据/轮询/账号/手动/种子/gdata 六文件 **82/0/0/0，39.671 秒**（会话 37778 退出 0）；最后将成功租约转交改成同步 push_async_exit，元数据/轮询两文件最终 **21/0/0/0，6.357 秒**。本轮报告按 classname/name 取最新，共 **309 个不同用例通过，0 failure/error/skip**；非一次整组或整库运行，不与前轮 445 相加。
+- 最新 **2610 collected，0.93 秒，仅收集**。compileall 与 CodeGraph sync 通过；交付前再核对标准 diff --check。无 JS、环境变量或配置字段变化，不重跑未改的 DOM，用法/README/方案/计划/PHASES/AGENTS/task_plan/findings 已同步，.env.example 无需变更。
+
+**接续与未验证。** P6 的完整来源/监听/API 定向证据已补，不再用重跑同组代替 P5/P6 阶段交付；混合 P5/P6/P7 工作区仍须谨慎收口提交边界，不能盲目全部提交并验收未完成 P7。P7 接能力/凭据健康与共享 Retry-After；当前 HTTP 429/200 错误页分类、批量 gdata 网络错误行为仍需结合真实 fixture 完成。之后接收费归档持久意图/只读核实、独立 attempt、认证种子与崩溃恢复；不把 metadata pool 用于收费 POST，不冒称已完成未知费用核实。P8 手动发布至入队意图/产物发布、P9 worker_session/预算、P10 全域协议/HMAC、P11/P12 范围保留。
+
+**临时文件。** 本轮仅使用八个确切命名的 TEMP 测试目录，正式测试保留 tests/，没有重建 .scratch。所有会话均已退出，报告计数已解析并写入本记录；最后静态核对后清理这些目录并补记实际结果，不扫描其他 TEMP 或真实 data/private。
+
+**最终静态与实际清理。** 标准 git diff --check 退出 0，只有既有 Windows 换行提示；compileall 退出 0，CodeGraph sync 通过。八个 TEMP 目录均核对绝对路径在本机 TEMP 下且无重解析点，共 1591 文件 / 374,288,197 字节，已实际全部删除，剩余 0；.scratch 不存在。未改变冻结迁移；本轮扩展未冻结 036，测试均使用新临时库。已有实验性旧 036 库不能靠重复 initialize 获得新表，继续试验需新临时库或旧 030 的隔离备份副本，不修改迁移记录冒充升级；正式已交付基线仍为 030。
+
+### 2026-10-15：临时产物清理接续（不构成阶段验收）
+
+用户要求正式测试归入 tests/、测试产物忽略、无用临时文件删除。现场确认 `.scratch` 已不存在，Git 的 `/.scratch/` 规则有效、无已跟踪文件，Docker 忽略表也包含 `.scratch`。不重建此目录；AGENTS 明确报告转入日志后删除指定 TEMP 目录，并纠正 R89/R90 审计中仍声称保留临时报告/脚本的文字。无产品行为或环境变量变更，README/USAGE 无需调整；P5/P6/P7 验收状态不变。
+
+清理前已读取上一轮 EH health 的六份 JUnit 报告，最后会话 8202 已确认退出 0。依报告原始 tests/failures/errors/skipped 与耗时记录如下，各组重叠不相加，也不代表整库或 P7 验收：
+
+- `ehbot-p7-health-first-20261015-a`：5/5/0/0，1.888 秒，初始复现失败。
+- `ehbot-p7-health-fixed-20261015-a`：47/0/0/0，9.518 秒。
+- `ehbot-p7-health-regression-20261015-a`：165/0/0/0，70.154 秒。
+- `ehbot-p7-health-snapshot-first-20261015-a`：3/1/0/0，1.082 秒，初始快照复现失败。
+- `ehbot-p7-health-final-20261015-a`：107/0/0/0，34.813 秒。
+- `ehbot-p7-health-last-20261015-a`：69/0/0/0，16.132 秒；包含 account_service、eh_health、eh_metadata_accounts、source_preflight、unit/eh_errors 五文件。
+
+六个目录均位于本机 TEMP 下，删除前核对绝对路径及无重解析点，共 877 文件 / 194,921,785 字节。只清理以上确切目录，不触碰其他 TEMP、真实数据库或 private，正式测试保留 tests/。本条仅补回既有运行证据及清理记录，EH health 实现的阶段文档同步与最终验收仍待完成。
+
+实际删除后复核：六个目标目录剩余 0，`.scratch` 不存在。无需为清理运行产品测试。
+
+### 2026-10-15：阶段提交规则明确（不构成产品阶段验收）
+
+用户要求「每完成一个阶段应当提交一次暂存的更改」。已同步 AGENTS、PHASES 和处理计划：每阶段验收后检查暂存差异，仅暂存该阶段代码、正式测试及同步文档，立即本地提交并核实 SHA，再进入下一阶段；提交失败标「待提交」并记录原因。现有本地提交授权无需重复询问，不包含推送、发布和部署。
+
+现场 Git 暂存区为空，最近提交仍为 P4 / R91 的 `15dd3bb`；工作区包含未验收的 P5/P6/P7，不能全部暂存后冒充单阶段完成。本次只明确执行规则，不变更产品、版本或迁移，也不据此验收 P5/P6/P7。无用户可见行为变更，README/USAGE 无需调整；CodeGraph sync 与标准 git diff --check 均通过，无需运行产品测试。本次未创建提交。
+
+### 2026-10-15：P7 收费意图既有运行补记与 P5 独立交付提取
+
+上轮 archive.py / 036 / downloader / service / wiring 已接单次收费申请及只读查回，具体协议证据、当前合同和未完项补入 findings。当前读取四份原始 JUnit（tests/failures/errors/skipped；重叠不相加）：first **26/0/24/0，0.789 秒**（basetemp 父目录未创建，24 个 setup error）；fixed **26/1/0/0，7.097 秒**（测试误把注册列表首项当公平首选，改读实际 selector）；confirm **26/0/0/0，9.292 秒**；regression **173/0/0/0，45.079 秒**。这些是已退出测试进程的产物，当前未重跑、不以此验收 P7。四个确切 TEMP 目录为 ehbot-p7-archive-{first,fixed,confirm,regression}-20261015-a，待记录完成后清理。
+
+按最新阶段提交要求，在命名 TEMP `ehbot-p5-split-20261015-a/tree` 导出 HEAD，逐文件/方法提取 P5，主工作区没有回退或丢弃改动。隔离版本只含 031；P6 下载接替/032–035 和 P7 EH 池/036 保留工作区。提取发现 P4 MTProto 仍先 admission 后 save，需改走共享 process_message；单账号共享订阅需兼容映射而不能伪造历史账号。首次独立测试正在核对这些真实生产入口，以及停止意图被来源编辑覆盖的边界。尚未宣称该提取版本验收或提交；以接续的实际结果为准。
+
 ### R92 / P5 — 统一摄取身份与原子发布（0.3.0rc8 / 031，2026-10-15）
 
 **交付范围。** 唯一规范键覆盖旧数据、Bot/MTProto 与手动添加，先持久领取再 AI/元数据；同键并发只补各账号观察。031 与 Python 历史回填同事务，非空 gid 单列唯一；未知旧账号不猜测，身份/人工字段/审核/活动任务冲突整笔回滚。补画廊、回复、编辑、移除代次与合并均走同一核心；真实停止后才应用变更，保留历史和锁定字段。自动审批/入队/审计原子提交，持久后续意图支持 interval=0/重启，历史已审批无任务不自动重下。
@@ -7143,7 +7531,7 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 
 **失败与修复。** 初次独立十八文件 250/5/0/0（139.039 秒）：提取遗漏停止后的旧切源抑制，两例；兼容共享 rule_source_id 时遗漏低层历史输入的空引用回退，三例。补入现有切源抑制，并保留无引用输入的账号/Chat 匹配。边界初验 8/1/0/0（4.100 秒）；随后六文件 66/1/0/0（21.169 秒），余下是旧手动租约测试仍挂旧的非原子 persist，已改挂真实 publish。新增注册 Bot/TG 用户监听合同初验 1/1/0/0（0.994 秒），fake HTTP 缺 base_url，补齐受控地址后四文件 60/0/0/0（8.914 秒）；同一新测试在当前混合树也 2/0/0/0（1.184 秒）。
 
-**最终实际验证。** P5 摄取组 23 文件 323/0/0/0（163.742 秒），补充六文件 79/0/0/0（74.998 秒），启动/关闭四文件 50/0/0/0（14.812 秒），最后含真实下载五文件 66/0/0/0（44.229 秒）；按节点取最新共 447 个通过，非一次整组运行；2465 collected，仅收集。 各组重叠不累加，均使用临时库与受控传输。23 文件涵盖完整摄取、迁移/离线恢复、手动原子发布、自动审批、停止交错、账号恢复、真实监听、Database 与 HTTP/WS 操作；六文件覆盖 MTProto 解析、来源/元数据规则、元数据 worker、作品页面及 EH 种子。最后服务启动/关闭改动后，四文件重新验证相关边界。没有整库运行或真实供应商请求，静态检查/索引精确性/提交结果由下述收口核对。版本提升仅标识本地源码，不表示发布。
+**最终实际验证。** P5 摄取组 23 文件 323/0/0/0（163.742 秒），补充六文件 79/0/0/0（74.998 秒），最后启动/关闭四文件 50/0/0/0（14.812 秒）；按节点取最新共 447 个通过，非一次整组运行；2465 collected，仅收集。 各组重叠不累加，均使用临时库与受控传输。23 文件涵盖完整摄取、迁移/离线恢复、手动原子发布、自动审批、停止交错、账号恢复、真实监听、Database 与 HTTP/WS 操作；六文件覆盖 MTProto 解析、来源/元数据规则、元数据 worker、作品页面及 EH 种子。最后服务启动/关闭改动后，四文件重新验证相关边界。没有整库运行或真实供应商请求，静态检查/索引精确性/提交结果由下述收口核对。版本提升仅标识本地源码，不表示发布。
 
 **升级收件箱补强。** 031 按账号隔离 Bot 收件箱，旧 legacy 范围必须保留独立的有界后台恢复；因此将现有 AccountService 的 legacy backlog 启动/关闭/循环一并纳入 P5，而不带入多启用/EH 选择。新增 205 条旧消息、无注册账号、禁止供应商请求的正式合同。初验四文件 50/1/0/0（14.573 秒），4 秒门槛时已正确处理 200 条，尚待第三轮；改为允许 10 秒完成三次有界批次后，最终 50/0/0/0（14.812 秒）。当前混合树的新监听/恢复三例也通过，3/0/0/0（5.387 秒），不计入独立树 447 个结果。
 
@@ -7151,6 +7539,33 @@ AGENTS 基线及 task_plan。没有新增环境变量，`.env.example` 不变。
 
 **接手。** 031 随本阶段提交冻结，032–036 仍是未冻结工作区。P6 下一步只提取来源 CAS/订阅迁移/可靠监听/有限 TG 账号接替的实际最终树并验收提交；P7 health/metadata/archive 既有实现保留，其余 EH 归档 attempt/认证种子/未知费用核实仍未完成。P8–P12 范围不变，总目标保持 active。每阶段验收后立即检查暂存差异并本地提交、核实 SHA，提交失败标待提交，不跨阶段累积；不推送、不发布、不部署。
 
-**P5 下载合同补验与同阶段修正。** 初次本地提交后补跑真实 create_app→worker→Telegram 产物链路，download-first 为 9/1/0/0（5.394 秒），复现 AccountService.use_kind 不接受来源 account_id。为单账号 P5 补显式账号类型/可用性校验与整个 scope 的凭据租约；Bot 来源转用户下载时不把 Bot ID 当用户账号。不引入 P6 备用账号池。download-fixed 为 66/1/0/0（44.915 秒），产品已修，剩余断言误把异常 code 当显示消息；改为检查 exc.code 后，最终五文件 66/0/0/0（44.229 秒）：ingest_legacy_runtime、downloads、account_service、account_runtime、review_actions。与此前 final/cross/backlog-fixed 按节点取最新，共 447 个不同用例通过，0 failure/error/skip；2465 collected，仅收集。同一 P5 本地提交使用 amend 修正，未推送；不能把首次 299d54a 当最终交付 SHA。提交快照共 74 文件，精确暂存并逐 blob SHA256 核验；最终 SHA 记录在工作区接手入口。
+
+**本地提交核实。** P5 / R92 已独立验收并本地提交 **2ea49f2**，版本 **0.3.0rc8 / schema 031**，027–031 冻结。23 文件 323/0、六文件 79/0，启动/关闭四文件 50/0，最后真实下载等五文件 66/0；按节点取最新 **447 个不同用例通过**，非一次整组运行；**2465 collected，仅收集**。提交的 74 个文件与隔离验证版本逐 blob SHA256 相同；P6/P7 仍是未验收工作区，032–036 未冻结。
+
+标准暂存 diff --check 首次发现 REALTIME_API.md 文件末尾多余空行，已修正；再次检查通过。重构遗留的两个未使用导入已移除，compileall 通过。实际 commit 为单行标题、无正文；Git 已确认暂存区为空，031 工作区与已提交版本相同。无推送、发布、部署或真实数据库升级。
+
+**下一入口。** P6 从当前工作区提取 032–035、来源命令/旧订阅迁移/可靠监听/有限 TG 下载账号接替，排除 EH 轮询、health、metadata pool、archive 与 036；完整验收后立即本地阶段提交。P7 已有受控 HTTP 归档意图 173/0，尚缺 EH 独立队列 attempt、认证种子与未知费用核实/崩溃收口。P8–P12 范围保持，总目标 active。
+
+**临时产物清理待核实。** 本轮仅使用 TEMP 下 ehbot-p5-split-20261015-a，保留到提交验证结束后删除。P7 四个 archive 测试目录的计数已写前文，进程已终态，随后按确切路径清理。不重建 .scratch。
+
+**P5 下载合同补验与同阶段修正。** 初次本地提交后补跑真实 create_app→worker→Telegram 产物链路，download-first 为 9/1/0/0（5.394 秒），复现 AccountService.use_kind 不接受来源 account_id。为单账号 P5 补显式账号类型/可用性校验与整个 scope 的凭据租约；Bot 来源转用户下载时不把 Bot ID 当用户账号。不引入 P6 备用账号池。download-fixed 为 66/1/0/0（44.915 秒），产品已修，剩余断言误把异常 code 当显示消息；改为检查 exc.code 后，最终五文件 66/0/0/0（44.229 秒）：ingest_legacy_runtime、downloads、account_service、account_runtime、review_actions。与此前 final/cross/backlog-fixed 按节点取最新，共 447 个不同用例通过，0 failure/error/skip；2465 collected，仅收集。同一 P5 本地提交使用 amend 修正，未推送；首次 299d54a 已由最终 2ea49f2 替代。提交快照共 74 文件，精确暂存并逐 blob SHA256 核验；最终 SHA 记录在工作区接手入口。
 
 **清理。** 所有测试会话已终态，结果在本日志留痕；提交哈希核验后删除本轮确切 TEMP 根目录 ehbot-p5-split-20261015-a 及前述四个 P7 archive 报告目录，不重建 .scratch。
+
+### R93 / P6 — 多 TG 监听、来源命令与串行下载账号接替（0.3.0rc9 / 035，2026-10-15）
+
+**范围。** Bot/TG 用户各自启用，独立监听、游标、session、实体缓存和候选消费；共享 P5 统一键，不建第二套队列。032 来源配置版本/同事务幂等回执，JSON/Web/WS 共用核心并保留冲突草稿；033 将旧共享规则一次性复制到已证明的历史导入账号，保留墓碑、用户游标和未知历史观察。034 将 MTProto 消息与游标原子持久化，慢 AI 不阻塞接收，来源/频道有界轮转，FloodWait/失效仅影响该账号。
+
+**传输。** 用户来源优先原账号，Bot 使用自身 Token/file_id；备用必须证明同一个 Telegram document，私聊使用目标账号自己的观察。原始/实际观察版本在入队与发布重查。失败或账号生命周期变更登记持久 replace-account，旧请求及清理真实退出后才恢复同一 task、新 attempt/独立 staging。035 只为当前代次、已完成的内部接替开放 STOPPING→PENDING/FAILED；取消优先，有限账号池跨重启不扩展，显式重试开启新任务并保留旧历史。
+
+**独立提取与失败。** 从已提交 P5 `2ea49f2` 导出命名 TEMP 树，逐文件/方法提取 032–035，排除 036 与 EH health/轮询/metadata/archive。初次十二文件 222/2/0/0（83.135 秒）：两项是 P7 测试预期（EH 多启用、P7 私有凭据 helper）误带入，恢复 P5 单 EH 合同；P6 另加实际 Bot/用户的直接/命令多启用与独立监听合同。静态核对发现最后一个消费错误可掩盖健康账号，改为先读取实际监听状态再汇总；各账号错误仍可见。
+
+**补验过程。** 一次五文件从主混合树 cwd 执行，89/2/0/0（36.449 秒），不作为独立提交证据；新测试没注入 CandidateIngestor 导致 TG 用户无监听，已补真实摄取服务。独立树五文件初验 89/3/0/0（39.168 秒），除上述两项外，旧停止合同在接收完第二来源前就取消却断言已存两条，改为明确等待两来源持久保存后施加停止。最终独立五文件 89/0/0/0（32.992 秒），含 account_service、telegram_account_runtime、listener_delivery、source_account_downloads、telegram_download_failover。完整 HTTP/Web/WS/摄取/队列/下载/账号十一文件 193/0/0/0（207.123 秒）。独立 rc9/035 树 2596 collected（仅收集）；定向组按当前节点取最新 419 个不同用例通过，0 failure/error/skip，非一次整组或整库运行。 原始十二文件中被 P6 阶段边界替换掉的 EH 多启用节点不计入当前集合；重复组不累加。
+
+**UI/静态。** 真实 HTMX/Alpine + jsdom 的来源草稿/远端删除、实时与日志场景在根路径和 /ehbot 前缀均通过。离线 npm 缓存未命中后，仅在指定 TEMP 安装 39 个临时依赖，测试后清理；未改依赖清单。compileall 与 collect 通过，阶段提交前检查 diff --check 和逐 blob SHA256。版本仅是本地源码标识，不代表发布。
+
+**升级/回退与边界。** 027–031 不改写；032–035 随阶段提交冻结。033 拷贝和导入标记同事务，失败回滚；034 升级保留既有游标，035 升级/重启/旧完成屏障见正式回归。沿 R92 离线完整快照备份/恢复步骤，不能删迁移记录或只降源码。仅临时库，未读真实 private/请求供应商/升级真实库。EH 仍单启用，完整 EH 池由 P7 交付；持久冷却/共享预算属 P9，最终全域协议属 P10。
+
+**交接。** 代码、正式测试与同步文档验收后立即本地阶段提交，核实 SHA 再进 P7。P7 现有 036/health/metadata/archive 保留主工作区，未验收；仍需独立归档 attempt、认证种子、未知费用核实/崩溃恢复。P8–P12 原范围保持，总目标 active。无推送、发布、部署。
+
+**清理留痕。** P5 提交 `2ea49f2` 的 74 blobs 已逐 SHA256 核验，暂存为空、031 相同；P5 TEMP 3227 文件及四个 P7 archive 目录 1/99/100/365 文件均已核对绝对路径与无重解析点后删除，剩余 0，.scratch 不存在。本轮 ehbot-p6-split-20261015-a 留至本地提交逐 blob 核验后删除，所有测试进程终态后才清理。

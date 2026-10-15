@@ -32,7 +32,11 @@ function content(state = "queued", search = "") {
       <input type="hidden" name="original__Title" value="${state}">
       <div data-field-name="Title"><input data-field="value" value="file title"></div></form>
     <form id="queue-batch" x-data="{ selected: [] }"><input name="job_ids" value="9" type="checkbox" x-model="selected">
-      <span data-queue-selected x-text="selected.length"></span></form>`;
+      <span data-queue-selected x-text="selected.length"></span></form>
+    ${state === "source-deleted" ? "" : `<form data-source-form="row-7" method="post" action="/sources">
+      <input type="hidden" name="expected_revision" value="${escape(state)}">
+      <input type="hidden" name="idempotency_key" value="key-${escape(state)}">
+      <input id="source-draft-name" name="display_name" value="Saved source"></form>`}`;
 }
 
 async function scenario(prefix) {
@@ -53,6 +57,7 @@ async function scenario(prefix) {
     "web.list": {method: "GET", path: "/candidates", params: [], encoding: "form"},
     "web.metadata": {method: "POST", path: "/candidates/{candidate_id}/metadata", params: ["candidate_id"], encoding: "form"},
     "web.repack": {method: "POST", path: "/downloaded/{candidate_id}/repack", params: ["candidate_id"], encoding: "form"},
+    "web.source": {method: "POST", path: "/sources", params: [], encoding: "form"},
   };
   class FakeSocket {
     constructor(url) { this.url = url; sockets.push(this); queueMicrotask(() => this.onopen()); }
@@ -68,6 +73,16 @@ async function scenario(prefix) {
       if (frame.name === "web.list") search = new URLSearchParams(frame.payload.query).get("search") || "";
       if (frame.name === "web.repack" && holdWrite) return;
       const result = {type: "command.result", request_id: frame.request_id, format: "html", data: content(state, search), status: 200, sequence};
+      if (frame.name === "web.source") {
+        const draft = Object.fromEntries(frame.payload.body);
+        Object.assign(result, {type: "command.error", status: 409, error: {message: "来源已变化"},
+          data: content("source-deleted", search) + `<section data-source-draft>保留草稿</section>
+          <form data-source-form="row-7" data-dirty="true" method="post" action="/sources">
+            <input type="hidden" name="expected_revision" value="${draft.expected_revision}">
+            <input type="hidden" name="idempotency_key" value="${draft.idempotency_key}">
+            <input id="source-draft-name" name="display_name" value="${draft.display_name}">
+            <button type="submit" name="confirmed_revision" value="20">核对后提交</button></form>`});
+      }
       if (frame.name === "web.list" && holdRead) { delayed.push(result); return; }
       results.push(result);
       queueMicrotask(() => this.message(result));
@@ -250,6 +265,34 @@ async function scenario(prefix) {
   await waitFor(() => win.document.querySelector("[data-state]").textContent === state);
   assert.equal(win.document.querySelector("[data-realtime-status]").textContent, "实时已连接");
   assert.equal(win.document.getElementById("title"), title);
+  const sourceName = win.document.getElementById("source-draft-name");
+  const sourceForm = sourceName.form;
+  const sourceVersion = sourceForm.elements.expected_revision.value;
+  const sourceKey = sourceForm.elements.idempotency_key.value;
+  sourceName.value = "My source draft";
+  sourceName.dispatchEvent(new win.Event("input", {bubbles: true}));
+  const beforeSourceRefresh = results.length;
+  state = "source-deleted";
+  sockets[1].message({type: "state", epoch: "epoch-1", sequence: ++sequence, scope: "conversion", data: {candidate_id: 1}});
+  await waitFor(() => results.length > beforeSourceRefresh);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(win.document.getElementById("source-draft-name"), sourceName, "background deletion preserves source draft node");
+  assert.equal(sourceName.value, "My source draft");
+  assert.match(win.document.querySelector("[data-realtime-status]").textContent, /未保存草稿已保留/);
+  win.document.getElementById("external-pack").click();
+  await waitFor(() => win.document.querySelector("[data-state]").textContent === "source-deleted");
+  assert.equal(win.document.getElementById("source-draft-name"), sourceName, "unrelated submission keeps remotely deleted source draft");
+  assert.equal(sourceForm.elements.expected_revision.value, sourceVersion, "refresh cannot silently adopt a newer version");
+  assert.equal(sourceForm.elements.idempotency_key.value, sourceKey, "unconfirmed draft keeps its original command identity");
+  sourceForm.dispatchEvent(new win.SubmitEvent("submit", {bubbles: true, cancelable: true}));
+  await waitFor(() => win.document.querySelector('[name="confirmed_revision"]'));
+  const conflictForm = win.document.getElementById("source-draft-name").form;
+  assert.notEqual(conflictForm, sourceForm, "failed source submission displays server conflict controls");
+  assert.equal(conflictForm.elements.display_name.value, "My source draft");
+  assert.equal(conflictForm.elements.expected_revision.value, sourceVersion);
+  assert.equal(conflictForm.elements.idempotency_key.value, sourceKey);
+  assert.equal(conflictForm.dataset.dirty, "true", "returned conflict draft remains protected from refresh");
+  delete conflictForm.dataset.dirty;
   const reads = results.length;
   win.fetch = () => Promise.resolve({status: 401});
   sockets[1].onclose({code: 1006});

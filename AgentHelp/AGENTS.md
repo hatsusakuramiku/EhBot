@@ -157,6 +157,12 @@ R90 extends R89 2141 -> **2213 collected only / 628 distinct related cases final
 
 **Current baseline / completed P4 R91 (supersedes the earlier historical snapshots above): 2280 collected only / 322 distinct related cases finally passed; rc7/030.** Sixteen full integration files passed 321/0 (274.521s); after the final login-cancel revision check, service/accounts_api passed 28/0 (14.805s), with overlap replaced by the latest result. Actual production wiring is AccountService; startup restores explicit activation, provider/listener/manual-add requests hold immutable leases, and old unversioned connection writes refuse changes. Shared account API, independent login challenges, fixed masked stop results, CSRF/no-store reveal, runtime health and Web masks/editing are connected. Three kinds retain configuration/session through disable/restart/re-enable. Account and realtime DOM scenarios pass with real HTMX preserved nodes. P4 is accepted; 027–030 are frozen. Next is P5 unified ingestion keys; P6/P7 remove the per-kind runtime limit. No whole-suite run, push, release, deployment or real supplier use; see R91_COMPLETION_AUDIT and progress. Temporary reports/dependencies are cleaned after recording results.
 
+**In-progress P5 / R92 storage/identity slice:** 2314 collected only (+34 over R91); five full files passed 91/0/0 skipped (6.707s). Uncommitted 031 creates ingest_entries and observation/account identity fields; entries.py has atomic registration, claims/renewals, bounded retry and stale-result finalization; Bot/MTProto parse reliable origin coordinates. Main ingestion/manual paths still use the old gate/save flow; historical backfill/conflict arbitration, unique gid, key upgrades, edits/removal generations and active-merge stops remain required. This is not P5 acceptance; rc7 unchanged, 031 not frozen. Latest progress and implementation-plan handoff name the next exact wiring steps. No actual supplier use, deployment or full-suite run.
+
+**P5/P6 continuation, 2026-10-15 (supersedes that storage-only snapshot):** 031 now performs transactional legacy reconciliation/backfill and non-null gallery uniqueness. Bot and MTProto share durable admission before AI; manual validation reserves the same key before EH, then commits candidate/metadata/torrents/cover/ownership together with renewal serialized against publication. Gallery correction and reply-based identity completion use durable reference changes; source edits/deactivation persist until their selected execution actually exits. The P3 operation loop processes both after restart, superseding old retry/switch intentions. Stopped merges retain jobs/artifacts/attempts, approvals and manual/locked fields. Removal generations isolate late old observations from proven new direct posts. TG jobs bind observation/revision/account and verify cross-account shared-channel media. Same-kind activation is enabled in this unfinished worktree. **2383 collected only**; latest targeted evidence is in progress. P5 still needs final contract audit and acceptance; P6 source-management UI/API, legacy shared-rule migration, full listener/failover contracts remain. Do not claim P5/P6 accepted, freeze 031, raise rc7 or deploy this intermediate worktree. P3–P12 goal stays active; do not redo P4 or the already-connected ingestion/backfill.
+
+**Latest P6 download replacement slice (2026-10-15):** 2569 collected only (0.94s). Twelve full related files passed 197/0 (49.712s); the final failover file passed 11/0 (3.992s) after adding the old-attempt completion fence and Bot getFile identity-change contract. By latest node result this is 198 distinct cases, not a final whole-group rerun or whole-suite result. Uncommitted 035 allows only a physically confirmed internal replacement operation to resume the same task; finite account pools, independent attempts/staging, exact document identity, private observer coordinates, restart/upgrade, cancellation and rollback have contracts. P5/P6 remain unaccepted; 031-035 are unfrozen and rc7 unchanged. Next audit account-lifecycle-triggered replacement and explicit retry selection, then the remaining P5/P6 requirements. Temporary test output is recorded and removed; formal tests remain in tests/.
+
 **Compare `collected`, not `passed`:** the twenty-seven `test_seven_zip_real.py`
 cases skip or run depending on whether the host has a real toolchain in
 `data/tools/7zip/`, so `passed` is 1741 on a machine that has one and 1714 with
@@ -178,6 +184,152 @@ R37 1512 -> R38 1513 -> R39 1515 -> R40 1535 -> R41 1537 -> R42 1544 -> R43 1547
 日志白名单一条、账户轮询失败自述一条、Bot 下载原子写两条（原有一条 partial-file 用例被替换）；
 R43 新增三条：冷会话按会话列表解析频道、解析失败只扫一次列表、轮询端到端读取未曾见过的频道；R44 新增四条：读不出的来源只报一次并在后续轮询跳过（原有的一条失败自述用例被替换）、重新保存来源会重跑检测、检测本身失败则放弃本轮、保存来源的 Web 路由触发重检（净 +3）；R45 新增两条：MTProto 下载按 Telethon 的真实签名取整条消息、下载失败把兜底错误码背后的原因写进 `download_job_failed` 的 `error_detail`；R46 新增三条：下载路径改用独立的（长传输）Telethon 客户端、Telethon 自身重试耗尽抛出的 ValueError 译成可重试的 `TELEGRAM_USER_UNREACHABLE`、传输客户端的关键重试参数用 stub telethon 钉住；R47 新增两条：真实图片签名免过压缩率门、没读到成员字节时（7z/rar）该门照旧生效；R48 新增七条：7z 固体块按块判比例（单元一条）、触发块才读一次成员头并据此放行/拒绝（单元三条）、块未触发不读头、`-slt` 解析 `Block`、真 7zz 端到端两条（平坦页放行、压缩垃圾拒绝）；R49 新增十一条：来源页按需读账户自己的会话列表（单元六条：广播频道/超级群/小群/私聊各自归类、只有用户名时仍有名字、读不出来的实体按 ID 正负兜底；集成两条：会话按类别与名称排序并顺手填好实体缓存、未登录或只有半份凭据时点名拒绝；Web 三条：来源页读出账户会话并把选中行预填进表单且不写入来源、未登录时说明原因且伪造的预填被同一符号规则拒绝、两个新端点要求 CSRF）；R50 新增七十五条：解析规则（默认只收 Eh 链接、宽松读取/严格校验、六条判定路径与标题规则、往返，单元二十五条）、AI 候选判定（输出解析、未开启/无链皆 skip、拒绝与通过、覆盖开关、失败兜底、请求体与 scope，单元十六条）、彻底删除（`remove_work` 清全部兄弟 job、`purge_work` 的记录/文件/审计/在途守卫，单元七条；页面两个删除动作与文件取舍，集成五条；候选列表批量删除三条，含一个不能审核的 Tab 上也能删）、来源批量（启停/删除/套用规则与批量添加，集成七条）、022 迁移与墓碑语义四条；另有既有摄取用例改为「宽松解析方案」夹具。R51 新增二十二条：内置解压器的方法白名单与错误分类（单元两条）、准入阶段按 profile 回退而密码失败不回退、无回退 profile 时给出可操作错误（单元三条）、旧式 `.rNN` 分卷双向发现与缺卷按实际命名报出（单元两条）、跨挂载打包先硬链接后复制、被拒时退回复制（单元两条）、真 7-Zip 下的 AES-256 / Deflate64 回退与普通 ZIP 不牺牲流式路径（集成五条）、真 RAR 夹具的 RAR3 / RAR5 / `-hp` / 固体 / `.partN` / 旧式 `.rNN` 全流水线（集成八条，夹具由 `scripts/make_rar_fixtures.py` 生成后提交）。R52 新增十八条：手机底栏直连、每域首页可达全部子页、外壳无第二菜单（集成三条，重写既有一条）；候选与已下载卡片全量中文标签、已下载卡片补来源/页数/大小（集成两条）；来源纳入已下载搜索与 `dir=asc|desc` 双向排序（集成三条）；`/settings/ai` 总开关、两个功能页的控制链状态、候选判定独立模型链（集成三条）；候选判定改用 `CHAIN_SCOPE_CANDIDATE`、总开关关闭时零调用（单元两条，重写既有一条净 +1）；`ConversionService.path_source()` 总开关分支与调用数（单元两条）；作用域注册表与候选/路径两条「全部失败不回退全局默认、全局模型零调用」回归（单元五条）；更新 snapshot 透传 `search_providers`/`direction`（既有一条）与 `CANDIDATE_SORT_ORDERS` 导入。R53 新增三十八条：凭据线格式与存储记录（三种前缀签发/解析往返、不碰撞、十种畸形形状拒绝、sha256 与常数时间比较、过期与撤销是两个独立事实，单元二十二条）；移动端鉴权端到端（登录签发、Bearer 直达、初始密码未改拒绝、错密码/空密码、API 与页面登录共享锁定、畸形/未签发/refresh 当 Bearer、过期 access、Bearer 免 CSRF 而 cookie 会话仍要求、refresh 轮换、logout 整族、whoami、改密吊销密码令牌，集成十六条）。R54 新增十三条：单 Key 生命周期（全新部署无 Key、明文只显示一次、快照不含明文/哈希、再次生成使旧 Key 失效且库里恰好一条有效、撤销后可再生成、Key 免 CSRF、改密保 Key、access logout 不动 Key、生成需会话与 CSRF）与令牌有效期（保存到登录响应、越界拒绝）。R32 与 R33 的新增用例此前没有并进这个数，R34 一并算清；R57 新增两条：页面路由名不再被 API 同名处理函数劫持、登录表单 action 指回 `/login`；R58 新增九条：自动驳回规则（驳回规则命中即置已驳回并写 `AUTO_REJECT` 快照、优先级让通过/驳回互相压过、停用的驳回规则不触发，集成四条）与网页动作（保存并显示徽章、编辑回填、试跑报告动作、未知动作被拒，集成四条），迁移 024 的缺省回填与非法值拒绝（集成一条，另扩既有数据库用例）；R59 新增二十三条：去重排序/分组与执行（单元十一条）、已下载去重页/动作/API（集成五条）、数据库查询（集成三条）、重发同画廊被忽略与并发裁决（集成净 +1）、无 ID 候选不被自动规则处理（集成一条）、无 ID 通过先确认（候选页一条）与作品详情页无 ID 提示（一条）；R60 新增十七条：手动添加判重（同画廊 / 同 infohash 第二次 409 且带「查看已有候选 #N」、同 ID 不同 token 也拦、被拒的重复不改动已有行，集成五条）、磁链判重与删行后可重加（集成两条）、预览 slug 解析与摄取闸门（单元五条：运营者例子、两种日期形状、三类反例、多 URL；集成两条）、自动决策匹配详情与列表行筛选原因（详情页两条、候选页一条；另改两条卡片的标签断言）；R61 新增五十八条：搜索语法（解析器单元四十四条：块与自由文本、引号、通配与字面量、`-` 排除、分段退化五种、数值字段不参与、`status:`/`source:` 双向、chips 文案与 × 移除、编译参数顺序与转义）、数据库层检索（集成七条：标签不误命中其它字段、整体匹配与 `%` 模糊之别、排除与字段限定、自由文本多词 AND、已下载同语法含 `ArtistRaw`、`source:`/`status:` 只在本页生效、坏查询不抛错）、网页（候选四条：chips、退化提示、点标签两个动作、载荷 `search_filters`；已下载一条、作品详情一条）、搜索把 `%` 当通配而 `[%]` 当字面量（单元一条））；R62 新增十九条：标题取值与「没有标题」的语义（`title_subquery()` 排序、日文优先、跟随「标题来源」、画廊压过 Telegram、列表/详情两个投影同解，解析单元七条）、启动一次性维护（只删三类非人工行、人工/锁定不动、删完落回待补充、标记幂等，集成六条）、抓取 worker（只取三个状态、最新优先、抓到转待审核、抓不到仍待补充、失败退避、摄取唤醒，集成六条），另有一批既有用例按「摄取不再写标题」的新契约改写（`test_candidate_ingestion` / `test_candidates_web` / `test_work_detail_web` / `test_exhentai_torrents` / `test_database` / `test_source_rules` / `test_review_actions` / `test_metadata_rule_evaluation` / `test_telegraph_workflow` / `test_torrent_workflow` / `test_auto_approval_workflow` / `test_downloads` / `test_connection_manager`，并删掉 `title_required` 相关断言）；R63 重写手动添加十一条：只认 Eh 链接（磁力 → 400）、未配置连接 → 400 且不建候选、链接无效 → 400 且不建候选、重复 → 409 + `existing_candidate_id`、正常 → 303 到 `/works/<id>` 且元数据已落库、预览链接可添加). There is no R7 — that number
 was the library domain, deleted on 2026-08-26; its narrow replacement is R10.)
+
+**P5 operation-result continuation, 2026-10-15:** 2398 collected only (+15 operation contracts). Shared safe operation reads/CAS retries and receipts now back HTTP/WS/Web status, failure feedback and merged-work redirects. Failure writeback matches the captured operation revision. Source completion reserves its target key, revokes old processors and links all eligible target observations. Nine related files passed 144/0 before the final target-key changes; the final ingestion/migration/generation/manual eight-file run passed 87/0 (29.127s). Do not add overlapping counts or call this whole-suite/P5 acceptance. Continue cross-operation/removal and post-commit callback recovery audits named in the implementation plan. rc7/031-unfrozen and P6–P12 remain in progress/pending.
+
+**P5 durable-followup continuation, 2026-10-15:** 2449 collected only. The latest
+17-file regression passed 240/0 (139.654s); its six-case interleaving file was
+then expanded to 16/0 (6.173s), and followups to 8/0 (5.881s), giving 251
+distinct latest passing cases. Legacy multi-alias recovery decides once. Durable
+publication intents recover at interval zero; automatic review, enqueue and rule
+evidence commit together and recheck ingest generations. Source stop/retry/SQL
+guards use the real queue field `observation_id`, not a hand-seeded alternate.
+Use `client.portal.call` for sweeps owned by TestClient's event loop; manual-count
+tests isolate the scheduler, while recovery tests start the real worker. P5 is
+not yet accepted; 031 remains unfrozen and P6–P12 remain in progress/pending.
+
+**P5/P6 source-management continuation, 2026-10-15:** 2463 collected only.
+The final 14-file ingestion/source/atomicity/identity regression passed 180/0
+(74.044s), including 11 source-management contracts over HTTP/Bearer/WS/Web.
+The earlier settings/API/WS six-file run passed 232/0 (340.220s); the earlier
+source/TG three-file run passed 33/0 (34.515s). Do not add overlapping groups.
+Persist the received chat_title with the fixed ingestion input: rebuilding it
+from chat_id was reproduced as a real AI-input bug. Legacy records use an
+existing configured label or their chat id, without guessing the account.
+Legacy APPROVED-without-job records retain approval and allow explicit enqueue;
+they cannot prove whether the administrator previously removed a job.
+Source account listing/picking/roundtrip is wired, but source-write CAS/receipts,
+legacy subscriptions and complete multi-listener takeover still need work.
+P5/P6 are not accepted; rc7/031-unfrozen and the full P3-P12 goal remain active.
+
+**P6 source-command continuation, 2026-10-15:** 2481 collected only (0.93s).
+Unfrozen 032 adds per-source configuration revisions and administrator-scoped
+receipts, separate from 031 ingestion identity. Save, enable/disable/delete/apply
+and dialog batch-add use `settings/source_commands.py` through JSON, legacy
+forms and WS. Require observed versions and keys; replay receipts before CAS.
+Batch results are per item, committed with the receipt; cursors do not change
+configuration versions. Never replace draft versions with current values during
+refresh. Source DOM tests cover root/proxy paths and remote deletion. The latest
+five-file source/ingestion/download run passed 64/0 (48.186s); earlier five-file
+source/settings/database/migration run passed 134/0 (161.483s), and the expanded
+source-command file passed 18/0 (6.941s). Groups overlap; do not add counts.
+Legacy subscription migration, complete listeners/failover and the P5 completion
+audit remain. rc7 unchanged; 031/032 unfrozen, P5/P6 not accepted, no deployment.
+
+**P6 legacy-source continuation, 2026-10-15:** 2488 collected only (0.95s).
+Unfrozen 033 and AccountRegistry.import_legacy copy old shared subscriptions once
+per proven legacy TG_BOT/TG_USER slot, before runtime starts. Keep tombstones,
+prefer existing dedicated configurations and retain the old user's cursor.
+Retire original configuration from editors but preserve it and every historical
+observation's unknown identity. Mark copy completion in the same transaction;
+restart must not overwrite edits or revive dismissed rows. Unrelated new
+accounts inherit nothing. Nine related files passed 121/0 (62.154s); the seven
+migration contracts were then strengthened to fail after the first account copy
+and passed 7/0 (8.727s). Do not add overlapping groups. Next: listener fairness,
+independent FloodWait/backoff, durable events before cursor advancement, then
+stopped serial takeover. P5/P6 remain unaccepted; 031-033 unfrozen, rc7 unchanged.
+
+**P6 durable-listener continuation, 2026-10-15:** 2506 collected only (0.91s).
+Unfrozen 034 stores normalized MTProto deliveries with the source cursor in one
+transaction; Bot keeps its existing raw inbox. AccountListener owns a separately
+leased, managed business consumer, using the same CandidateIngestor/ingest_entries.
+Do not create another identity gate or download scheduler. Receive at most ten
+user sources per pass, one hundred messages each; consumer interleaves chats and
+bounds each pass to one hundred events plus one hundred due entries. Independent
+FloodWait/network backoff stops the remaining account requests; invalid sessions
+report an error and retain credentials. Runtime cooldown is not persisted yet;
+P9 owns durable cooldown and shared listener/download/dialog budgets. Legacy
+unknown inputs recover in a managed background task, never block startup or get
+reassigned to an imported account. Stop waits for AI cleanup and actual delivery
+writer threads. Eleven files passed 154/0 (52.967s), then eight files passed 102/0
+(56.855s); final listener/manager/database run passed 59/0 (16.475s), including
+the real blocked-writer case. Groups overlap; no full suite was run. Next: P5
+final requirement/old-writer audit and TG serial fallback after actual stop.
+031-034 remain unfrozen, rc7 unchanged, P5/P6 not accepted. Clean temporary output
+after recording actual JUnit results; formal tests stay under tests/.
+
+**P5 final-audit continuation, 2026-10-15:** 2511 collected only (0.93s).
+Read R92_REQUIREMENT_AUDIT.md before restarting investigations. Pending fixed
+inputs whose subscription is no longer eligible now yield to a saved eligible
+observer through one reselect_pending_input helper used by delivery and recovery.
+Keep an eligible original stable; never replace a PROCESSING claim here. Both
+pre-AI local checks and transactional publication check the subscription. A
+subscription changed during AI leaves recoverable pending work, not a whole-key
+rejection. Ten files passed 133/0 (48.493s), then four files passed 70/0 (22.700s)
+after moving the local check before AI. Five new pipeline contracts cover new
+observations, already-saved observers, restart and mid-AI subscription changes.
+Groups overlap. Remaining audits include unavailable accounts with still-enabled
+subscriptions and expired claims; P8 must persist new manual publication-to-enqueue
+intent without redownloading historical APPROVED/no-job records. P5/P6 remain
+unaccepted and 031-034 unfrozen; no stage commit/version bump or deployment.
+
+**P5 account/expired-owner continuation, 2026-10-15 (supersedes the pending
+account/claim audit above):** 2525 collected only (0.93s). Account state joins
+subscription eligibility; disabled/deleted/stopping/unverified inputs can yield
+to saved eligible observers, while an eligible original is claimed only by its
+own account lease. Database-scoped IngestProcessors shares TG/manual physical
+tasks and the short reserve/register lock: expiry cannot replace a live request
+or its cleanup. Abandoned expired claims advance revision before reselection.
+Bounded recovery retains per-account scan position across consumer replacement
+and cannot get stuck behind 100 foreign fixed inputs. Eleven files passed
+146/0 (63.396s); thirteen extended files passed 180/0 (82.794s). Final manual/
+account-recovery pair passed 21/0 (8.813s), including repeated manual cancellation
+while cleanup stays live. Groups overlap; exact reproduction failures are in progress.
+P5 final old-writer/whole-contract audit and upgrade guidance remain; P6 download
+serial fallback is separate. P9 still owns worker sessions/persisted budgets.
+No phase acceptance, frozen migration, version bump or release in this slice.
+
+**Latest P5/P6/P7 continuation, 2026-10-15 (supersedes pending lifecycle/retry
+items in earlier snapshots):** 2593 collected only (0.95s), rc7/030 committed,
+031-036 unfrozen. TG account disable/delete/edit requests serial replacement;
+operator cancellation wins. Explicit failed-task retry resets its finite pool
+and original-user selection in the same state update, preserving the entire old
+task snapshot. Bot-origin MTProto retains verified user coordinates. Validate
+the origin before replacement preflight and both observations at publication.
+Source edit/deactivation/retry must match observation_id AND
+download_observation_id; the previous attempt's finished binding must not revoke
+a different pending successor. Worker shutdown must not cancel producer cleanup
+again or discard its physical task handle before actual exit. Final related
+thirteen files passed 221/0 (57.298s); stronger full-history retry assertions then
+passed 2/0. P5 eighteen-file audit passed 248/0 (137.821s), then latest migration/
+operations/source-stop files passed 40/0 (23.223s). Latest-node union is 445
+distinct passes, not one full-suite run. R92 audit now includes actual writer
+call paths and offline snapshot restore/upgrade guidance. P7 only has persistent
+fair selection (036); selected_account reads never advance it, use_kind does,
+nested/explicit scopes retain account identity. Metadata finite failover,
+capability/cooldown ownership and uncertain paid-archive reconciliation remain.
+No stage acceptance, version bump, commit, push or deployment. Formal tests live
+in tests; this turn uses named TEMP outputs, not .scratch, and removes them after
+recording the results. P5/P6 acceptance and P7-P12 implementation remain required.
+
+**P6/P7 metadata continuation, 2026-10-15:** 2610 collected only (0.93s),
+rc7/030 committed; 031-036 remain unfrozen. Public gdata does not borrow an EH
+account or consume a rotation turn; missing batch entries go directly to HTML.
+Gdata explicitly clears Cookie and refuses redirects. MetadataAccountPool is
+wired for authenticated reads only: persist a finite account/version snapshot,
+fixed fallback order and safe outcomes in 036, exit a failed scope before the
+next, and retain the successful scope through the caller's writes. Do not use
+this pool for paid POSTs or rotate inside a queue-bound EH account scope.
+use_account/use_kind serialize each EH account in this process, including
+physical cleanup; this is not the P9 persisted budget/worker-session solution.
+P6 eight files passed 95/0; final listener/source six passed 81/0. EH/account/
+download seventeen files passed 215/0 (127.824s), then metadata-related six
+82/0 (39.671s), final lease-transfer pair 21/0 (6.357s). Latest-node union is
+309 passes for this turn, not a full suite and not added to the earlier 445.
+Capability/credential health, shared Retry-After, paid intent/reconciliation,
+archive attempt replacement, authenticated torrents and crash recovery remain.
+No phase acceptance/version bump/commit/release. P5/P6 phase-delivery staging
+still needs care because their working tree is intertwined with unfinished P7.
 
 **The suite takes ~19 minutes on a Linux host, not the 150-320 s above.** Almost
 all of it is argon2: `PasswordHash.recommended()` costs ~0.7 s per hash and
@@ -211,8 +363,8 @@ zone name round-trips is fine; one that asks `ZoneInfo` to resolve it is not.
 Timezone validation is by shape for the same reason a slim container has the same
 gap.
 
-
-**Completed P5 / R92 (supersedes historical snapshots):** rc8/031, 2465 collected only; P5 摄取组 23 文件 323/0/0/0（163.742 秒），补充六文件 79/0/0/0（74.998 秒），启动/关闭四文件 50/0/0/0（14.812 秒），最后含真实下载五文件 66/0/0/0（44.229 秒）；按节点取最新共 447 个通过，非一次整组运行；2465 collected，仅收集。 031 is frozen. The standalone commit excludes 032-036 and all unfinished P6/P7 changes. Bot/MTProto and manual ingestion share one key/claim; legacy singleton subscriptions remain compatible without relabeling historical observations. P6-P12 remain unfinished. No full-suite run, real suppliers, push, release or deployment. See R92_REQUIREMENT_AUDIT and the latest progress entry.
+**P5 / R92 completed, current handoff (2026-10-15):** P5 / R92 已独立验收并本地提交 **2ea49f2**，版本 **0.3.0rc8 / schema 031**，027–031 冻结。23 文件 323/0、六文件 79/0，启动/关闭四文件 50/0，最后真实下载等五文件 66/0；按节点取最新 **447 个不同用例通过**，非一次整组运行；**2465 collected，仅收集**。提交的 74 个文件与隔离验证版本逐 blob SHA256 相同；P6/P7 仍是未验收工作区，032–036 未冻结。
+P6 从当前工作区提取 032–035、来源命令/旧订阅迁移/可靠监听/有限 TG 下载账号接替，排除 EH 轮询、health、metadata pool、archive 与 036；完整验收后立即本地阶段提交。P7 已有受控 HTTP 归档意图 173/0，尚缺 EH 独立队列 attempt、认证种子与未知费用核实/崩溃收口。P8–P12 范围保持，总目标 active。
 
 ## Architecture rules
 
@@ -1129,3 +1281,6 @@ code now does:
   stale numbers already.
 - When a change touches none of the above (pure internal refactor), say so in the
   commit message — "no doc change" is a statement of consideration, not an ad-lib.
+
+
+**Latest completed P6 / R93:** rc9/035, 2596 collected only; 419 distinct related cases finally passed; real HTMX/Alpine realtime/log/source-draft DOM scenarios passed at root/proxy. Migrations 027–035 are frozen. P7 EH/036 is unaccepted; the independent P6 tree keeps one enabled EH account. See R93_COMPLETION_AUDIT and the implementation-plan handoff. No full suite, supplier request, push, release or deployment.
