@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
@@ -19,6 +19,8 @@ from app.connections.telegram import TelegramBotApi
 from app.connections.telegram_files import document_id
 from app.connections.telegram_user import LoginChallenge, TelegramUserClient, TelegramUserCredentials, TelegramUserError
 from app.downloads.execution import run_sync
+from app.exhentai.health import ExHentaiHealth
+from app.exhentai.errors import ExHentaiDownloadError
 
 
 @dataclass(slots=True)
@@ -55,6 +57,7 @@ class AccountService:
         self._logins: dict[str, _PendingLogin] = {}
         self._login_locks: dict[str, asyncio.Lock] = {}
         self._activation_lock = asyncio.Lock()
+        self._eh_locks: dict[str, asyncio.Lock] = {}
         self._operation_task = None
         self._backlog_task = None
 
@@ -90,6 +93,17 @@ class AccountService:
     async def test_account(self, account_id: str, *, expected_revision: int) -> dict:
         """Verify saved credentials, retaining them and reporting a named error."""
         self.registry._expected(expected_revision)
+        account = await self.registry.get(account_id)
+        lock = self._eh_locks.setdefault(account_id, asyncio.Lock()) if account["kind"] == "EH" else nullcontext()
+        async with lock:
+            if account["kind"] == "EH":
+                try:
+                    await ExHentaiHealth(self.registry._database).check_shared()
+                except ExHentaiDownloadError as exc:
+                    raise ProviderConnectionError(exc.code, exc.public_message, retry_after=exc.retry_after) from None
+            return await self._test_account(account_id, expected_revision=expected_revision)
+
+    async def _test_account(self, account_id: str, *, expected_revision: int) -> dict:
         async with self.runtime.use(account_id, for_verification=True) as context:
             if context.revision != expected_revision:
                 raise AccountError("REVISION_CONFLICT", "账号已被另一端修改，请刷新后核对")
@@ -113,6 +127,12 @@ class AccountService:
                 result = await self.registry.record_identity(account_id, context.credential_revision, remote_identity, label,
                                                              expected_revision=context.revision)
             except (ProviderConnectionError, AccountError) as exc:
+                if context.kind == "EH":
+                    await ExHentaiHealth(self.registry._database).record_failure(exc,
+                        account_id=account_id, credential_revision=context.credential_revision)
+                    if getattr(exc, "failure_scope", None) in {"site", "gdata"}:
+                        self._notify()
+                        raise
                 self._states[account_id] = ProviderStatus("error", True, error=exc.public_message)
                 self._notify()
                 raise
@@ -120,16 +140,12 @@ class AccountService:
         self._notify()
         return result
 
-
     async def enable_account(self, account_id: str, *, expected_revision: int) -> dict:
         """Enable a verified saved account; no credential re-entry is needed."""
         async with self._activation_lock:
             account = await self.registry.get(account_id)
             if account["revision"] != expected_revision:
                 raise AccountError("REVISION_CONFLICT", "账号已被另一端修改，请刷新后核对")
-            if account["kind"] == "EH" and any(other["kind"] == "EH" and other["enabled"] and other["account_id"] != account_id
-                    for other in await self.registry.list_accounts()):
-                raise AccountError("ACCOUNT_RUNTIME_LIMIT", "当前阶段 EH 账号只能启用一个")
             result = await self.registry.enable(account_id, expected_revision=expected_revision)
             await self._start_listener(result)
             self._notify()
@@ -252,10 +268,9 @@ class AccountService:
             async with self._activation_lock:
                 # Check private storage before accepting activation; the CAS
                 # transaction below still owns current-version arbitration.
-                account = await self.registry.get(account_id)
                 await self.registry.context(account_id)
                 response = await run_sync(self.registry._enable_sync, account_id, expected_revision,
-                                          command=db_command, exclusive_kind=account["kind"] == "EH")
+                                          command=db_command, exclusive_kind=False)
                 current = await self.registry.get(account_id)
                 if current["enabled"] and current["stop_operation_id"] is None:
                     await self._start_listener(current)
@@ -364,30 +379,93 @@ class AccountService:
         self._logins.clear()
 
     async def selected_account(self, kind: str):
+        if kind == "EH":
+            return await run_sync(self._select_account_sync, kind, (), advance=False)
         for account in await self.registry.list_accounts():
             if (account["kind"] == kind and account["enabled"] and account["stop_operation_id"] is None
                     and self._states.get(account["account_id"], ProviderStatus("not_configured", False)).state == "connected"):
                 return account
         return None
 
+    async def select_account(self, kind: str, *, excluded_account_ids=(), candidate_versions=None, capability="AUTH"):
+        """Reserve the fairest connected account, with a durable sequence.
+
+        The database transaction advances one provider-kind cursor before the
+        request starts. A failed request can therefore record the selected
+        account and move to the next one without two workers both choosing the
+        first row. Exclusions are the finite attempted set for one operation.
+        """
+        excluded = tuple(str(value) for value in excluded_account_ids if value)
+        return await run_sync(self._select_account_sync, kind, excluded,
+                              candidate_versions=candidate_versions, capability=capability)
+
+    def _select_account_sync(self, kind, excluded, *, advance=True, candidate_versions=None, capability="AUTH"):
+        with self.registry._database.connection() as connection:
+            if advance:
+                connection.execute("BEGIN IMMEDIATE")
+            if kind == "EH" and ExHentaiHealth.shared_failure(connection) is not None:
+                return None
+            rows = connection.execute(
+                "SELECT ea.account_id FROM external_accounts ea "
+                "LEFT JOIN account_rotation ar ON ar.account_id = ea.account_id "
+                "WHERE ea.kind = ? AND ea.enabled = 1 AND ea.deleted_at IS NULL "
+                "AND ea.stop_operation_id IS NULL AND ea.verified_credential_revision = ea.credential_revision "
+                "AND (ar.cooldown_until IS NULL OR ar.cooldown_until <= CURRENT_TIMESTAMP) "
+                "ORDER BY ar.last_sequence IS NOT NULL, ar.last_sequence, ea.created_at, ea.account_id",
+                (kind,),
+            ).fetchall()
+            for (account_id,) in rows:
+                if account_id in excluded:
+                    continue
+                account = self.registry._row(connection, account_id)
+                if candidate_versions is not None and candidate_versions.get(account_id) != account["credential_revision"]:
+                    continue
+                if kind == "EH" and ExHentaiHealth.account_failure(
+                        connection, account_id, account["credential_revision"], capability) is not None:
+                    continue
+                if self._states.get(account_id, ProviderStatus("not_configured", False)).state != "connected":
+                    continue
+                if not advance:
+                    return self.registry._public(account)
+                connection.execute("INSERT OR IGNORE INTO account_rotation_state(kind, next_sequence) VALUES(?, 1)", (kind,))
+                sequence = connection.execute(
+                    "UPDATE account_rotation_state SET next_sequence = next_sequence + 1 WHERE kind = ? "
+                    "RETURNING next_sequence - 1", (kind,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO account_rotation(account_id, last_sequence) VALUES(?, ?) "
+                    "ON CONFLICT(account_id) DO UPDATE SET last_sequence = excluded.last_sequence",
+                    (account_id, sequence),
+                )
+                return self.registry._public(account)
+        return None
 
     @asynccontextmanager
     async def use_account(self, account_id: str, *, kind: str):
-        """Borrow the named source account through actual request cleanup."""
+        """Borrow the named source account; never substitute another account."""
         existing = current_account_context.get()
         if existing is not None and existing.account_id == account_id:
             if existing.kind != kind:
                 raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
             yield existing
             return
-        account = await self.registry.get(account_id)
-        if account["kind"] != kind:
-            raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
-        if (not account["enabled"] or account["stop_operation_id"] is not None
-                or self.account_status(account_id)["state"] != "connected"):
-            raise AccountError("ACCOUNT_UNAVAILABLE", "来源账号已停用或无法连接，请选择可用来源")
-        async with self.runtime.use(account_id) as context:
-            yield context
+        # Serialize EH operations through physical cleanup. TG listening and
+        # transfer retain their own independent runtime leases.
+        lock = self._eh_locks.setdefault(account_id, asyncio.Lock()) if kind == "EH" else nullcontext()
+        async with lock:
+            account = await self.registry.get(account_id)
+            if account["kind"] != kind:
+                raise AccountError("ACCOUNT_KIND_INVALID", "所选账号不支持该下载来源")
+            if (not account["enabled"] or account["stop_operation_id"] is not None
+                    or self.account_status(account_id)["state"] != "connected"):
+                raise AccountError("ACCOUNT_UNAVAILABLE", "来源账号已停用或无法连接，请选择可用来源")
+            if kind == "EH":
+                with self.registry._database.connection() as connection:
+                    failure = ExHentaiHealth.account_failure(connection, account_id, account["credential_revision"])
+                if failure is not None:
+                    raise AccountError("EH_ACCOUNT_UNAVAILABLE", "此凭据版本已失效，请重新测试或修改配置")
+            async with self.runtime.use(account_id) as context:
+                yield context
 
     @asynccontextmanager
     async def use_kind(self, kind: str, *, required: bool = True, account_id: str | None = None):
@@ -399,7 +477,7 @@ class AccountService:
         if existing is not None and existing.kind == kind:
             yield existing
             return
-        account = await self.selected_account(kind)
+        account = await self.select_account(kind) if kind == "EH" else await self.selected_account(kind)
         if account is None:
             if required:
                 raise AccountError("ACCOUNT_NOT_ENABLED", "没有已启用的来源账号")
@@ -483,6 +561,10 @@ class AccountService:
         by_kind = {}
         for account_id, state in self._states.items():
             kind = self._kinds.get(account_id)
+            if kind == "EH" and state.state == "connected":
+                runtime = self.account_status(account_id)
+                if runtime["state"] == "error":
+                    state = ProviderStatus("error", True, identity=state.identity, error=runtime["error"])
             if kind == "TG_BOT" and account_id in self._listeners and state.state == "connected":
                 state = self._listeners[account_id].snapshot().telegram
             elif kind == "TG_USER" and account_id in self._listeners and state.state == "connected":
@@ -498,6 +580,12 @@ class AccountService:
     def account_status(self, account_id):
         """Expose runtime health separately from persistent activation intent."""
         state = self._states.get(account_id, ProviderStatus("not_configured", True))
+        if self._kinds.get(account_id) == "EH" and state.state == "connected":
+            with self.registry._database.connection() as connection:
+                row = connection.execute("SELECT credential_revision FROM external_accounts WHERE account_id = ?", (account_id,)).fetchone()
+                failure = ExHentaiHealth.account_failure(connection, account_id, row[0]) if row is not None else None
+            if failure is not None:
+                return {"state": "error", "error": "EH 凭据已失效，请重新测试或修改配置"}
         listener = self._listeners.get(account_id)
         if listener is not None and state.state == "connected":
             kind = self._kinds.get(account_id)

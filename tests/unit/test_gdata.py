@@ -174,6 +174,24 @@ async def test_gdata_client_reports_missing_gallery() -> None:
     assert captured.value.code == "EXHENTAI_GDATA_NOT_FOUND"
 
 
+@pytest.mark.asyncio
+async def test_public_gdata_refuses_redirects_that_could_restore_shared_cookies():
+    requests = []
+
+    async def handler(request):
+        requests.append(request)
+        assert str(request.url) == GDATA_ENDPOINT
+        assert not request.headers.get("Cookie")
+        return httpx.Response(302, headers={"Location": "https://api.e-hentai.org/redirected"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+        client.cookies.set("fixture", "must-stay-private", domain=".e-hentai.org")
+        with pytest.raises(GdataError) as failed:
+            await GdataClient(client).fetch_one(1, "token")
+    assert failed.value.code == "EXHENTAI_GDATA_HTTP"
+    assert len(requests) == 1
+
+
 # Measured 2026-08-21 against gid 4108964: the torrent holds the uploader's
 # own archive, so its fsize does not match the gallery filesize.
 TORRENT_ENTRY = {

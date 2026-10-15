@@ -190,7 +190,7 @@ STOPPING 保留作品槽。已验收 P3 / schema 029 接入本地请求/线程/�
 Python：`python -m pytest tests/integration/test_realtime.py`（使用项目环境）。
 账号管理接口（已验收 P4 / rc7 / 030）：`GET /api/v1/accounts`（掩码列表）、`GET /accounts/{account_id}`、`POST /accounts/commands`、`GET /accounts/commands/{idempotency_key}` 与 `GET /accounts/operations/{operation_id}`，后三者均在 `/api/v1` 下。命令 action 为 create/rename/edit/test/enable/disable/delete/login-start/login-complete/login-cancel，非 create 必须提交 account_id、expected_revision，所有命令要求 idempotency_key。DB 配置命令与回执同事务；网络命令先持久受理，相同键不重复验证或发送验证码。UNKNOWN/PENDING 不表示成功，也不自动重放副作用，先核对账号状态再决定新的显式操作。
 
-edit/disable/delete 可返回 202 和 operation_id；账号立即停止新选择，旧执行与远端停止确认后才完成，旧私有凭据版本在此期间保留。operation 完成时返回固定的掩码 `result`（删除为 account_id/deleted），后续其他客户端修改不改变该操作结果；客户端使用这次结果的 revision，不用另一次 GET 的最新版本悄悄覆盖草稿。列表另外返回按 account_id 映射的 `runtime`（state/error），启用意图与实际连接健康分别观察。login-complete/login-cancel 还要求 challenge_id；登录挑战仅进程内有效，旧版本或其他账号的挑战拒绝。HTTP Cookie 需要 X-CSRF-Token，Bearer 免 CSRF；读取/查看响应 no-store。`POST /api/v1/accounts/{account_id}/reveal` 明确查看配置，要求 expected_revision 与相同鉴权/CSRF，过滤 TG session。reveal 不在 WS 命令目录中，WS 只传掩码与非敏感回执。Web 复用这些 HTTP JSON 命令，WS 转发其余账号接口也进入同一核心。账号表单直接用 HTTP JSON 提交，实时表单转发不会重复接管；回复丢失后原输入重试复用原幂等键。P6/P7 再接同时监听和账号池，每类型当前只启用一个。
+edit/disable/delete 可返回 202 和 operation_id；账号立即停止新选择，旧执行与远端停止确认后才完成，旧私有凭据版本在此期间保留。operation 完成时返回固定的掩码 `result`（删除为 account_id/deleted），后续其他客户端修改不改变该操作结果；客户端使用这次结果的 revision，不用另一次 GET 的最新版本悄悄覆盖草稿。列表另外返回按 account_id 映射的 `runtime`（state/error），启用意图与实际连接健康分别观察。login-complete/login-cancel 还要求 challenge_id；登录挑战仅进程内有效，旧版本或其他账号的挑战拒绝。HTTP Cookie 需要 X-CSRF-Token，Bearer 免 CSRF；读取/查看响应 no-store。`POST /api/v1/accounts/{account_id}/reveal` 明确查看配置，要求 expected_revision 与相同鉴权/CSRF，过滤 TG session。reveal 不在 WS 命令目录中，WS 只传掩码与非敏感回执。Web 复用这些 HTTP JSON 命令，WS 转发其余账号接口也进入同一核心。账号表单直接用 HTTP JSON 提交，实时表单转发不会重复接管；回复丢失后原输入重试复用原幂等键。P6/P7 已接多 TG 同时监听与 EH 有限账号池，各类型均可启用多个账号。
 DOM 行为：在临时目录安装 `jsdom` 后运行 `node tests/web/realtime.cjs <jsdom 绝对路径>`。
 账号表单另外运行 `node tests/web/accounts.cjs <jsdom 绝对路径>`，验证捕获阶段不重复提交、丢失回复重试、保留节点只绑定一次、CSRF 更新、掩码/草稿/登录挑战及停止完成后的固定版本结果。临时依赖和测试产物验证后清理。
 该测试使用真实 HTMX/Alpine 和 WebUI 脚本，验证 Tag 左/右键、固定 URL、输入/勾选/焦点保留、按钮禁用、多值表单、断线不重发、HTTP 降级、序列/旧响应校正、日志快照及代理前缀。
@@ -208,7 +208,7 @@ P6 工作区新增来源账号选择与会话读取（P6 已验收）：
 - `GET /api/v1/settings/sources` 的每条来源增加 `account_id`、`account_label`、`account_kind`、`revision`；历史账号未知时账号字段为 null。`source_accounts` 列出可配置的 TG Bot/用户，字段仅 account_id/kind/label/enabled，不含凭据或会话。不同账号的相同 Chat ID 分别列出。`source_versions` 列出 source_id/account_id/chat_id/revision/dismissed，含已隐藏的墓碑，供明确重新添加使用。
 - `POST /api/v1/settings/sources/dialogs` 请求 `{"account_id":"所选 TG 用户 UUID"}`，返回 `{"items":[...],"total":1}`。每条会话保留该 account_id，并沿用 chat_id/title/kind/username 字段。只读会话、不修改来源；账号不存在 404，类型不支持、停用或有歧义 400。省略账号仅兼容恰好一个已启用且连接正常的 TG 用户，多账号不静默取第一项。
 - Cookie 请求需要 `X-CSRF-Token`，Bearer 免 CSRF；WS `api.api_source_dialogs` 以 payload.body 转发同一接口。Web 来源页调用同一账号服务，预填与批量添加携带选定账号，更新来源保留账号归属。
-- P6 已支持多个 TG Bot/用户同时启用并完成来源/监听/下载接替验收；EH 单启用保留到 P7，全域协议核对在 P10。
+- P6 已支持多个 TG Bot/用户同时启用并完成来源/监听/下载接替验收；P7 已接 EH 多启用和有限池，全域协议核对在 P10。
 
 P6 来源命令（032 已冻结；Cookie/CSRF、Bearer 和 WS 共用同一核心）：
 
@@ -220,3 +220,6 @@ P6 来源命令（032 已冻结；Cookie/CSRF、Bearer 和 WS 共用同一核心
 - 自动 WS 目录包含 api.post_source/api.put_sources_batch/api.api_add_sources_bulk/api.api_source_command_receipt；使用 payload.body 或 payload.params.key。Web 旧表单也要求原版本和幂等键，冲突不自动改版本重试。消息游标不推进配置 revision，不同来源互不制造版本冲突。
 - 033 已冻结：原单账号凭据导入后的来源规则一次性复制给对应 legacy_slot 的 TG_BOT/TG_USER，已有专属配置保留；完成标记与复制同事务提交，后续账号不自动继承，重启不覆盖编辑/删除。原共享配置保留历史引用并从 sources/source_versions 隐藏，历史 observation 身份不改。旧共享保存缺明确账号返回 ACCOUNT_SELECTION_REQUIRED；退休来源批量写按旧版本拒绝，已读到退休版本也返回 SOURCE_MIGRATED。客户端应重新读取来源并选择账号。
 - 034 已冻结：TG 用户接收消息和来源游标同事务持久化，候选消费从网络轮询分离；没有新增客户端命令。账号运行状态继续报告消费失败，接收不会因此停止；服务器恢复后继续消费，不要求客户端重发入库操作。FloodWait 仅暂停对应用户账号的监听请求，完整持久冷却/跨功能预算在 P9。来源配置 revision 不随接收游标变化。
+
+
+P7 / 036 已冻结：归档/认证种子复用任务命令和操作查询，不新增平行下载接口。task.attempts 的 details_json 保留 account_id、credential_revision、有限账号池；原始错误保留在各次 attempt。GP/认证明确失败可生成新的 attempt；共享限流不轮换。费用结果不明返回 EH_ARCHIVE_RESULT_UNKNOWN，普通 retry/restart 只读核实原申请，不能以新账号绕过未知费用。收费意图的公开字段不包含 Cookie 或私有定位 URL；eh_archive_intent_id 只是不可推导的定位标识。

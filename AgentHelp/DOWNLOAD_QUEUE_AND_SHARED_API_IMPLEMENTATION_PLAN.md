@@ -6,12 +6,12 @@
 
 | 项目 | 当前事实 |
 |---|---|
-| 当前阶段 | P6 / R93 独立验收完成，待本地阶段提交；rc9/035；2596 collected only / 419 distinct passed；DOM root/proxy 通过；见 R93_COMPLETION_AUDIT |
-| 已完成 | P0–P6；P5=2ea49f2；P6 已独立验收，立即提交并核实 SHA；P7 未混入 |
-| 下一动作 | P6 已独立验收，立即完成阶段提交与 SHA 核对；之后接 P7 的独立归档 attempt/认证种子/未知费用核实与恢复。P7 已有受控 HTTP 归档意图 173/0，尚缺 EH 独立队列 attempt、认证种子与未知费用核实/崩溃收口。P8–P12 范围保持，总目标 active。 |
-| 工作区 | R88=cfa649d；R89=6b728ba；R90=5be84e1；R91=15dd3bb；R92=2ea49f2。剩余 P6/P7 未验收，当前工作区用 036；各独立提交必须用其实际 schema 验证 |
-| 版本/schema | P6 验收 rc9/035，027–035 随提交冻结。工作区 036 未冻结；仅临时库验证，无真实库升级/发布 |
-| 验证基线 | P6 独立 rc9/035 树 2596 collected only / 419 distinct related cases passed；首次/修复/最终与边界见 R93 audit/progress；未运行整库 |
+| 当前阶段 | P7 / R94 已验收，待立即本地提交；rc10/036，2661 collected only / 363 distinct passed；详 R94 audit |
+| 已完成 | P0–P7；P5=2ea49f2，P6=c61af7e；P7 收费意图、只读核实、认证种子与独立队列 attempt 已验收 |
+| 下一动作 | P7 立即本地阶段提交并核实 SHA；之后 P8 从 artifacts/ConversionService/手动添加和下载完成后的打包意图切入，确保只打包指定新产物、保旧有效文件且崩溃可恢复 |
+| 工作区 | R88=cfa649d；R89=6b728ba；R90=5be84e1；R91=15dd3bb；R92=2ea49f2；R93=c61af7e；R94 待阶段提交；没有 P8 源码混入 |
+| 版本/schema | P7 验收 rc10/036，027–036 随阶段提交冻结；仅临时库验证，无发布/真实库升级 |
+| 验证基线 | rc10/036：2661 collect-only；24 文件 362/0，最终四文件 42/0，最新节点共 363 passed；非整库 |
 | 环境 | Windows PowerShell；本 checkout 无 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout |
 | 边界 | 不读真实 data/private；临时数据库/文件测试；真实供应商、其他客户端仓库与部署另记未验证 |
 | 现场问题 | rg 不可用，用 CodeGraph/Select-String；git ignore 权限告警不影响查询，.git 写入需工具审批 |
@@ -34,8 +34,8 @@
 | P3 / R90 | complete | 真实取消/切源/移除、本地子任务/线程/进程树收束、远端查回与停止确认、旧 poller 屏障、最小 staging | 029/rc6；目标预检、refile 屏障、持久移除/清理与重加等待、共享资源拒绝及归属核实；六项原触发转正式回归；628 个不同用例最终通过，见 R90 audit |
 | P4 / R91 | complete | 账号注册/独立配置版本、掩码查看/部分编辑/启停/删除、共享 API/UI | 实际 startup/provider/API/UI 接通；322 个不同用例最终通过及两个 DOM 脚本通过，rc7/030。每类型只启用一个；停用保留凭据，编辑等待旧执行停止，固定停止结果保留版本。见 R91 audit |
 | P5 / R92 | complete | ingest_entries 统一身份、历史回填与单账号摄取/发布 | 2ea49f2，rc8/031；447 个不同用例最新通过。MTProto 可靠收件箱/来源专属迁移及下载接替按原计划 P6 |
-| P6 / R93 | complete | 多 TG 独立监听/游标/来源 CAS 与有限串行下载接替 | rc9/035，419 distinct passed + DOM root/proxy；待本地阶段提交，详 R93 audit |
-| P7 | in_progress | EH 公平轮询、有界失败集合、能力/冷却、未知费用核实 | 036 已接公平起点与认证元数据持久有限尝试，匿名成功不借账号、批量不重复公共请求、固定备用顺序、成功租约随结果写入和本进程同账号串行。待能力/冷却/共享退避、独立归档 attempt、收费意图/未知查回、种子认证与崩溃恢复 |
+| P6 / R93 | complete | 多 TG 独立监听/游标/来源 CAS 与有限串行下载接替 | rc9/035，419 distinct passed + DOM root/proxy；本地提交 c61af7e，58 blobs 已核对；详 R93 audit |
+| P7 / R94 | complete | EH 公平有限池/能力退避/收费未知核实/认证种子 | rc10/036，363 distinct passed；待阶段提交；详 R94 audit |
 | P8 | pending | artifact 生产者/精确打包依赖、可恢复文件发布、受管打包取消、流水线意图 | 依赖 P2–P3；保旧有效文件，只打包指定新产物，无线程/子进程晚发布 |
 | P9 | pending | worker_session/心跳、周期 reconcile、停止/清理恢复、账号/全局/远端预算 | 依赖 P6–P8；快速重启恢复，长任务不误回收，STOPPING 不假释放槽，费用不重复 |
 | P10 | pending | 全域 revision/幂等/批量结果、v2 与旧映射、Web 共享 JSON、WS/草稿冲突 | 前置切片随交付自带保护；此阶段逐域收口，无无条件写旁路，不自动覆盖草稿 |

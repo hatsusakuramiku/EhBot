@@ -7,6 +7,7 @@ import json
 import httpx
 
 from app.connections.models import ProviderConnectionError
+from app.exhentai.errors import response_limit, credential_rejected
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,15 @@ class ExHentaiApi:
             raise ProviderConnectionError(
                 "EXHENTAI_UNREACHABLE", "暂时无法连接 ExHentai"
             ) from None
+        limited = response_limit(response)
+        if limited is not None:
+            error = ProviderConnectionError(limited.code, limited.public_message, retry_after=limited.retry_after)
+            error.failure_scope = limited.failure_scope
+            raise error
+        if credential_rejected(response):
+            error = ProviderConnectionError("EXHENTAI_UNAUTHORIZED", "ExHentai Cookie 无效或已过期")
+            error.failure_scope = "credential"
+            raise error
         if response.status_code != 200 or "ExHentai" not in response.text:
             raise ProviderConnectionError(
                 "EXHENTAI_UNAUTHORIZED", "ExHentai Cookie 无效或已过期"

@@ -174,7 +174,7 @@ class AccountLifecycle:
             details = json.loads(details_json or "{}")
             # The previous attempt remains current until its pending successor
             # is claimed. Its historical binding must not revoke that successor.
-            if (provider in {"TELEGRAM", "TELEGRAM_USER"} and finished_at is not None
+            if (provider in {"TELEGRAM", "TELEGRAM_USER", "EXHENTAI", "EH_TORRENT"} and finished_at is not None
                     and details.get("account_id") and details["account_id"] != account_id):
                 continue
             existing = connection.execute(
@@ -182,7 +182,11 @@ class AccountLifecycle:
                 (task_id,),
             ).fetchall()
             if not existing and job_id is not None and status not in TERMINAL:
-                if provider in {"TELEGRAM", "TELEGRAM_USER"} and details.get("observation_id") and details.get("origin_account_id"):
+                tg_replacement = provider in {"TELEGRAM", "TELEGRAM_USER"} and details.get("observation_id") and details.get("origin_account_id")
+                eh_replacement = (provider in {"EXHENTAI", "EH_TORRENT"} and details.get("account_pool") is not None
+                    and connection.execute("SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED'",
+                                           (task_id,)).fetchone() is None)
+                if tg_replacement or eh_replacement:
                     connection.execute("UPDATE download_jobs SET error_code = 'ACCOUNT_UNAVAILABLE', "
                                        "error_message = '下载账号已停用或正在修改配置' WHERE id = ?", (job_id,))
                     replacement_id = self._queue.request_account_replacement(

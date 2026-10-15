@@ -45,6 +45,7 @@ from app.downloads.models import (
 
 from app.downloads.queue import DownloadError, QueueControl, STALE_EXECUTION_ERRORS, task_snapshot
 from app.downloads.execution import attempt_path, execution_scope, failure_transaction, run_sync
+from app.exhentai.errors import ExHentaiDownloadError
 
 
 class DownloadService:
@@ -71,6 +72,7 @@ class DownloadService:
         telegraph_preflight=None,
         telegram_user_source=None,
         telegram_bot_source=None,
+        exhentai_source=None,
     ) -> None:
         self._database = database
         self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
@@ -99,6 +101,7 @@ class DownloadService:
         self._account_scope = account_scope
         self._telegram_user_source = telegram_user_source
         self._telegram_bot_source = telegram_bot_source
+        self._exhentai_source = exhentai_source
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
         # Resolved per job so an operator directory change applies without a
@@ -763,6 +766,14 @@ class DownloadService:
         details = {key: value for key, value in self._safe_details(operation["resource_json"]).items()
                    if not key.startswith("download_")}
         params = json.loads(operation["params_json"])
+        if operation["provider"] in {PROVIDER_EXHENTAI, PROVIDER_EH_TORRENT}:
+            try:
+                return await self._exhentai_source(operation["candidate_id"], operation["task_id"],
+                    {**details, "account_pool": params["account_pool"],
+                     "attempted_accounts": params["attempted_accounts"]},
+                    capability="ARCHIVE" if operation["provider"] == PROVIDER_EXHENTAI else "TORRENT")
+            except (ExHentaiDownloadError, ProviderConnectionError) as exc:
+                return {"replacement_error": {"code": exc.code, "message": exc.public_message}}
         is_bot = operation["provider"] == PROVIDER_TELEGRAM
         resolver = self._telegram_bot_source if is_bot else self._telegram_user_source
         try:
@@ -783,7 +794,13 @@ class DownloadService:
         """Recheck source and selected account in the same transaction as resume."""
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if details is not None:
+            if details is not None and "replacement_error" in details:
+                error = details["replacement_error"]
+                connection.execute("UPDATE download_jobs SET error_code = ?, error_message = ? WHERE id = ?",
+                                   (error["code"], error["message"], operation["legacy_job_id"]))
+                details = None
+            is_eh = operation["provider"] in {PROVIDER_EXHENTAI, PROVIDER_EH_TORRENT}
+            if details is not None and not is_eh:
                 try:
                     self._validate_telegram_source_sync(operation["candidate_id"], details,
                         "TG_BOT" if operation["provider"] == PROVIDER_TELEGRAM else None, connection)
@@ -793,9 +810,13 @@ class DownloadService:
                 "SELECT 1 FROM external_accounts WHERE account_id = ? AND kind = ? AND enabled = 1 "
                 "AND deleted_at IS NULL AND stop_operation_id IS NULL "
                 "AND verified_credential_revision = credential_revision",
-                (details["account_id"], "TG_BOT" if operation["provider"] == PROVIDER_TELEGRAM else "TG_USER"),
+                (details["account_id"], "EH" if is_eh else "TG_BOT" if operation["provider"] == PROVIDER_TELEGRAM else "TG_USER"),
             ).fetchone() is None:
                 raise DownloadError("ACCOUNT_UNAVAILABLE", "备用账号在预检期间已改变")
+            if details is not None and is_eh and connection.execute(
+                "SELECT credential_revision FROM external_accounts WHERE account_id = ?", (details["account_id"],),
+            ).fetchone()[0] != details["credential_revision"]:
+                raise DownloadError("ACCOUNT_UNAVAILABLE", "EH 备用凭据版本已改变")
             self._queue_control.finish_operation(operation, replacement_details=details, connection=connection)
 
     async def _run_operations(self) -> None:
@@ -1031,6 +1052,13 @@ class DownloadService:
         try:
             details = self._safe_details(job["details_json"])
             scope_params = {"required": job["provider"] != PROVIDER_EH_TORRENT}
+            if self._exhentai_source is not None and job["provider"] in {PROVIDER_EXHENTAI, PROVIDER_EH_TORRENT}:
+                if not details.get("account_id"):
+                    details = await self._exhentai_source(job["candidate_id"], job["task_id"], details,
+                        capability="ARCHIVE" if job["provider"] == PROVIDER_EXHENTAI else "TORRENT")
+                if not details and job["provider"] == PROVIDER_EH_TORRENT:
+                    return await self._handle_job_unscoped(job)
+                scope_params["account_id"] = details.get("account_id")
             if job["provider"] in {PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER}:
                 await run_sync(self._validate_telegram_source_sync, job["candidate_id"], details,
                                "TG_BOT" if job["provider"] == PROVIDER_TELEGRAM else None)
@@ -1039,11 +1067,25 @@ class DownloadService:
                 scope_params["account_id"] = details["account_id"]
             # Magnets may not need an EH account; .torrent fetch still rejects
             # missing credentials through its existing named provider error.
-            async with self._account_scope(kind, **scope_params):
+            async with self._account_scope(kind, **scope_params) as context:
+                if self._exhentai_source is not None and job["provider"] in {PROVIDER_EXHENTAI, PROVIDER_EH_TORRENT} and details.get("account_id"):
+                    if context.credential_revision != details["credential_revision"]:
+                        raise DownloadError("ACCOUNT_UNAVAILABLE", "本轮 EH 凭据版本已改变")
+                    await run_sync(self._save_account_selection_sync, job, details)
                 return await self._handle_job_unscoped(job)
-        except (ProviderConnectionError, DownloadError) as exc:
+        except (ProviderConnectionError, DownloadError, ExHentaiDownloadError) as exc:
             await run_sync(self._mark_job_failed_sync, job["job_id"], exc.code, exc.public_message)
             return None
+
+    def _save_account_selection_sync(self, job, details):
+        """Attach the exact account/pool to this live attempt before provider I/O."""
+        raw = json.dumps(details, separators=(",", ":"))
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE download_jobs SET details_json = ? WHERE id = ?", (raw, job["job_id"]))
+            connection.execute("UPDATE queue_attempts SET details_json = ? WHERE attempt_id = ? AND finished_at IS NULL",
+                               (raw, job["attempt_id"]))
+        job["details_json"] = raw
 
     async def _handle_job_unscoped(self, job: dict) -> str | None:
         """Run one delivery, returning the untranslated cause of a refusal.
@@ -1434,6 +1476,13 @@ class DownloadService:
             current = task_snapshot(connection, job_id)
             row = connection.execute("SELECT provider, details_json FROM download_jobs WHERE id = ?", (job_id,)).fetchone()
             resolver = self._telegram_bot_source if row[0] == PROVIDER_TELEGRAM else self._telegram_user_source
+            if (self._exhentai_source is not None and row[0] in {PROVIDER_EXHENTAI, PROVIDER_EH_TORRENT}
+                    and self._safe_details(row[1]).get("account_pool") is not None
+                    and code in {"EXHENTAI_ARCHIVE_AUTH", "EH_GP_INSUFFICIENT", "EH_TORRENT_AUTH", "ACCOUNT_UNAVAILABLE", "ACCOUNT_NOT_FOUND"}
+                    and connection.execute("SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED'",
+                                           (current["task_id"],)).fetchone() is None):
+                self._queue_control.request_account_replacement(connection, job_id, current)
+                return
             if (resolver is not None and self._account_scope is not None
                     and row[0] in {PROVIDER_TELEGRAM_USER, PROVIDER_TELEGRAM}
                     and (code.startswith("TELEGRAM_USER_") or code in {"ACCOUNT_UNAVAILABLE", "ACCOUNT_NOT_FOUND"}
@@ -1443,7 +1492,7 @@ class DownloadService:
             if connection.execute(
                 "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED' "
                 "UNION ALL SELECT 1 FROM download_jobs WHERE id = ? AND provider = 'EH_TORRENT' "
-                "AND details_json NOT IN ('', '{}') LIMIT 1",
+                "AND json_extract(details_json, '$.hash') IS NOT NULL LIMIT 1",
                 (current["task_id"], job_id),
             ).fetchone() is not None:
                 self._queue_control._operation(connection, job_id, "cancel", current, {})

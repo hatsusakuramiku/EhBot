@@ -763,3 +763,6 @@ WS 事件可能迟到或丢失，所以即使界面没有提示冲突，写命�
 
 
 P6 / R93 独立验收：rc9/035；来源命令、专属订阅迁移、可靠监听、有限 TG 串行下载接替通过。独立 rc9/035 树 2596 collected（仅收集）；定向组按当前节点取最新 419 个不同用例通过，0 failure/error/skip，非一次整组或整库运行。 详 R93_COMPLETION_AUDIT；P7–P12 按原范围继续。
+
+
+P7 / R94 验收记录：036 随阶段提交冻结。MetadataAccountPool 负责只读元数据，DownloadAccountPool 只为既有队列选择确切账号；收费动作独立 ArchiveRequests 意图，未知结果仅原账号 GET 核实，READY 定位符在重试中复用。GP/认证明确拒绝的归档和认证种子在物理退出后新建 queue attempt；取消/停用优先，新账号不扩展本轮。详细合同和实际验证见 R94_COMPLETION_AUDIT。P8 文件发布与 P9 会话/预算按原阶段继续。

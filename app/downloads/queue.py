@@ -361,7 +361,10 @@ class QueueControl:
                 target = "CONVERSION_PENDING" if provider == "CONVERSION" else "PENDING"
                 # A saved torrent handle may still refer to an external transfer.
                 # P3 reconciles and stops it before retry becomes claimable.
-                if provider == "EH_TORRENT" and details_json not in (None, "", "{}"):
+                if provider == "EH_TORRENT" and (json.loads(details_json or "{}").get("hash") or connection.execute(
+                    "SELECT 1 FROM queue_remote_resources WHERE task_id = ? AND status <> 'STOP_CONFIRMED'",
+                    (current["task_id"],),
+                ).fetchone() is not None):
                     operation_id = self._operation(connection, job_id, action, current, params)
                     target = "STOPPING"
                 if provider in {"TELEGRAM", "TELEGRAM_USER"}:
@@ -375,6 +378,11 @@ class QueueControl:
                         if details.get("origin_account_id"):
                             details["account_id"] = details["origin_account_id"]
                     details_json = json.dumps(details, separators=(",", ":"))
+                if provider in {"EXHENTAI", "EH_TORRENT"}:
+                    details = json.loads(details_json or "{}")
+                    details_json = json.dumps({key: value for key, value in details.items()
+                        if key not in {"account_pool", "account_versions", "attempted_accounts", "account_id", "credential_revision"}},
+                        separators=(",", ":"))
             connection.execute(
                 "UPDATE download_jobs SET state = ?, details_json = ?, error_code = NULL, error_message = NULL, "
                 "lease_owner = NULL, lease_expires_at = NULL, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -438,7 +446,7 @@ class QueueControl:
                 "SELECT account_id FROM external_accounts WHERE kind = ? AND enabled = 1 "
                 "AND deleted_at IS NULL AND stop_operation_id IS NULL "
                 "AND verified_credential_revision = credential_revision ORDER BY created_at, account_id",
-                ("TG_BOT" if provider == "TELEGRAM" else "TG_USER",))]
+                ("EH" if provider in {"EXHENTAI", "EH_TORRENT"} else "TG_BOT" if provider == "TELEGRAM" else "TG_USER",))]
         attempted = list(dict.fromkeys([*details.get("attempted_accounts", []), details.get("account_id")]))
         operation_id = QueueControl._operation(connection, job_id, "replace-account", current,
             {"account_pool": pool, "attempted_accounts": attempted, "stop_requested": stop_requested})

@@ -99,15 +99,14 @@ async def test_legacy_import_startup_repeats_without_writing_old_private_files(s
 
 
 @pytest.mark.asyncio
-async def test_stage_gate_stores_many_accounts_but_rejects_second_runtime(service):
+async def test_multiple_same_kind_accounts_can_run_concurrently(service):
     first = await configured(service)
     second = await service.registry.create("EH", "Second", {"ipb_member_id": "5678", "ipb_pass_hash": "test-cookie", "igneous": "test-igneous"})
     second = await service.test_account(second["account_id"], expected_revision=second["revision"])
-    with pytest.raises(AccountError) as limited:
-        await service.enable_account(second["account_id"], expected_revision=second["revision"])
-    assert limited.value.code == "ACCOUNT_RUNTIME_LIMIT"
+    enabled = await service.enable_account(second["account_id"], expected_revision=second["revision"])
+    assert enabled["enabled"]
     assert (await service.registry.get(first["account_id"]))["enabled"]
-    assert not (await service.registry.get(second["account_id"]))["enabled"]
+    assert (await service.registry.get(second["account_id"]))["enabled"]
 
 
 @pytest.mark.asyncio
@@ -330,7 +329,7 @@ async def test_manual_ingest_keeps_account_lease_through_caller_commit(service, 
     async def fetch(gid, token):
         # This stub represents the authenticated HTML fallback. Public gdata
         # deliberately holds no account through manual publication.
-        await credentials()
+        await gallery_service._account_credentials()
         return {}, None
     async def publish(*args, **kwargs):
         assert current_account_context.get().account_id == account["account_id"]

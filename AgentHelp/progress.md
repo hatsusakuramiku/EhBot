@@ -7569,3 +7569,21 @@ AccountService.use_account/use_kind 对同一 EH 账号增加本进程锁，覆�
 **交接。** 代码、正式测试与同步文档验收后立即本地阶段提交，核实 SHA 再进 P7。P7 现有 036/health/metadata/archive 保留主工作区，未验收；仍需独立归档 attempt、认证种子、未知费用核实/崩溃恢复。P8–P12 原范围保持，总目标 active。无推送、发布、部署。
 
 **清理留痕。** P5 提交 `2ea49f2` 的 74 blobs 已逐 SHA256 核验，暂存为空、031 相同；P5 TEMP 3227 文件及四个 P7 archive 目录 1/99/100/365 文件均已核对绝对路径与无重解析点后删除，剩余 0，.scratch 不存在。本轮 ehbot-p6-split-20261015-a 留至本地提交逐 blob 核验后删除，所有测试进程终态后才清理。
+
+**P6 提交核实。** 本地提交 `c61af7e`（单行标题、无正文）；58 个提交文件与独立 rc9/035 验收快照逐 blob SHA256 相同，暂存为空、027–035 工作区与提交相同。P7 未夹带。所有测试和 Node/npm 进程已退出；结果留痕后清理确切 TEMP 目录。无推送、发布或部署。
+
+### R94 / P7 — EH 有限账号池、能力退避与收费核实（0.3.0rc10 / 036，2026-10-15）
+
+**实现。** 036 的公平序号、只读元数据操作/尝试、版本化能力健康、SITE/GDATA 共享 Retry-After 与独立归档收费意图接入真实 AccountService/wiring。匿名 gdata 不借账号、不带 Cookie、不推进轮询；认证 HTML 固定有限账号/凭据集合，失败请求先退出，同账号操作/连接测试串行，成功租约保留到写入。明确认证失效只标实际版本 AUTH，重验成功恢复；额度不足只冷却 ARCHIVE，不影响元数据/种子；站点限流不逐账号重试放大请求。
+
+**队列与费用。** DownloadAccountPool 只为现有队列选账号，QueueControl 沿 P6 的 replace-account/真实退出屏障推进同任务的新 attempt；归档/认证种子的账号、版本和有限池在供应商请求前保存到当前任务与 attempt。GP/认证明确拒绝才自动接替，各账号自己读取申请页与链接。收费 POST 前保存意图和私有定位符；超时/取消/结果未知只用原账号 GET 核实，不盲目重复 POST 或换 B。原账号版本不可用时保持 EH_ARCHIVE_RESULT_UNKNOWN；原版本恢复可显式重试只读核实。READY 私有定位符随任务重试保留，下载失败后不重复收费。新账号不扩池，取消优先于预检，旧历史不被新结果改写。付款意图跨取消/删除保留，不伪称远端费用被撤销。
+
+**种子。** .torrent 请求使用确切账号 Cookie，登录失败更新 AUTH 并经新 attempt 接替；种子文件在 infohash 验证后才推送 qBittorrent，认证失败阶段没有远端资源。EH Cookie 不发给 ehtracker 等外部地址，显式逐跳处理有限重定向；网络错误不把签名 URL/供应商异常拼进公开消息。磁链不借 EH 账号、不受 EH 站点冷却阻塞。账号池字段不是远端 hash/推送意图，种子页限流不能凭非空 details 伪造 STOPPING/远端停止。预检改走认证只读池，不请求收费归档。
+
+**失败留痕。** 初次四文件 68/1/0/0（7.055 秒），新用例错写 enqueue_eh_torrent_download，核对现有接口改用 enqueue_torrent_download。随后十文件 152/1/0/0（34.943 秒），唯一剩余是 FakeClient.added 保存 multipart 请求却按纯 torrent bytes 断言；改为仅一次推送且 multipart 包含准确 payload。七文件 135/0/0/0（41.086 秒），增加账号停用/真实清理等待、READY 重试无二次 POST。静态核对补限流时无远端资源与磁链无需 EH 的合同。
+
+**最终验证。** 完整二十四个相关文件 362/0/0/0（94.528 秒）；最后调整磁链冷却边界后，download_accounts/rotation/metadata_accounts/archive_intents 四文件 42/0/0/0（16.943 秒）。按 classname/name 取最新 363 个不同相关用例通过，0 failure/error/skip，非一次整组或整库运行；2661 collected，仅收集。涵盖实际 MockTransport 的归档 form→POST→只读查回→landing→ZIP、队列 attempt/产物、认证 .torrent→qBittorrent、有限池/重启/取消/停用以及 API/数据库/旧 provider 屏障。没有真实供应商请求或真实账号测试。P6 既有 DOM 未改，不重复运行；compileall/CodeGraph 与标准 diff --check 通过。
+
+**交付。** rc10/036 仅本地源码，027–035 保持不变，036 随阶段提交冻结。README/USAGE/REALTIME_API、PHASES/计划/task_plan/findings/本日志与 R94 audit 同步；无环境变量/配置字段变化，.env.example 无需改。独立元数据操作崩溃诊断与收费意图已有持久记录/只读恢复，进程会话、快速重启调度、持续心跳和完整预算按 P9；原档→打包流水线/文件发布崩溃恢复接 P8。P10–P12 原范围保持，总目标 active。立即暂存本阶段代码、正式测试和文档并本地提交，核实 SHA 后才进 P8；不推送、发布或部署。
+
+**升级/回退与清理。** 036 未交付前仍有实验性结构变更，最终验证全部用新临时库；旧实验 036 不能重复 initialize 自动补表。正式升级沿 R92 完整离线快照/隔离副本步骤，036 冻结后不改写；回退恢复旧完整库/私有配置/配套源码，不能删版本记录。P6 TEMP 已核对无重解析点后删除 3865 文件，剩余 0，.scratch 不存在。本轮仅 ehbot-p7-download-20261015-a，报告留痕后、提交核验后删除；正式用例在 tests/。

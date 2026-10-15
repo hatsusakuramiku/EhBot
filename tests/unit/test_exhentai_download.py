@@ -86,10 +86,10 @@ _TAGGED_GALLERY_PAGE = """
 _GALLERY_URL = "https://exhentai.org/g/3893499/4f732d0bde/"
 
 
-def _posting(html: str):
+def _discovering(html: str):
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url == _GALLERY_URL
-        assert request.content == b"dl=yes&p_p=0"
+        assert request.method == "GET" and request.content == b""
         return httpx.Response(200, text=html)
 
     return handler
@@ -103,7 +103,7 @@ async def test_request_archive_url_prefers_the_archiver_over_a_tag_link() -> Non
     Download/Archive/Original, so a gallery page produced a tag-search URL and
     the downloader stored a search-results page as `gallery-<gid>.zip`.
     """
-    async with _client(_posting(_TAGGED_GALLERY_PAGE)) as client:
+    async with _client(_discovering(_TAGGED_GALLERY_PAGE)) as client:
         link = await ExHentaiDownloader(client).request_archive_url(
             _credentials(), 3893499, "4f732d0bde"
         )
@@ -126,7 +126,7 @@ async def test_request_archive_url_refuses_a_page_with_no_archive_button() -> No
         '<a href="https://exhentai.org/archiver.php?gid=3893499&amp;token=4f732d0bde&amp;or=1">Archive Download</a>',
         "",
     )
-    async with _client(_posting(page)) as client:
+    async with _client(_discovering(page)) as client:
         with pytest.raises(ExHentaiDownloadError) as raised:
             await ExHentaiDownloader(client).request_archive_url(
                 _credentials(), 3893499, "4f732d0bde"

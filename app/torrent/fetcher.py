@@ -16,13 +16,14 @@ from __future__ import annotations
 from html.parser import HTMLParser
 from http.cookies import SimpleCookie
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
 from app.connections.exhentai import ExHentaiCredentials
 from app.torrent.bencode import MAX_TORRENT_BYTES, infohash
 from app.torrent.models import TorrentError
+from app.exhentai.errors import ExHentaiDownloadError, credential_rejected, response_limit
 
 
 TORRENT_PAGE_URL = "https://exhentai.org/gallerytorrents.php"
@@ -110,6 +111,22 @@ class TorrentFileFetcher:
             cookie[name] = value
         return cookie.output(header="", sep=";").strip()
 
+    @staticmethod
+    def _check_response(response):
+        error = response_limit(response)
+        if error is not None:
+            raise error
+        if credential_rejected(response):
+            raise ExHentaiDownloadError("EH_TORRENT_AUTH", "EH 种子认证失败，请重新测试账号", failure_scope="credential")
+
+    @staticmethod
+    def _headers(url, cookie):
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or parsed.username is not None:
+            raise TorrentError("TORRENT_FILE_FETCH_FAILED", "种子下载地址无效")
+        own = parsed.scheme == "https" and parsed.hostname in {"exhentai.org", "e-hentai.org"} and parsed.port in {None, 443}
+        return {"Cookie": cookie if own else ""}
+
     async def fetch(
         self,
         credentials: ExHentaiCredentials,
@@ -125,12 +142,14 @@ class TorrentFileFetcher:
                 TORRENT_PAGE_URL,
                 params={"gid": int(gid), "t": token},
                 headers=headers,
+                follow_redirects=False,
             )
-        except httpx.HTTPError as exc:
+        except httpx.HTTPError:
             raise TorrentError(
                 "TORRENT_FILE_FETCH_FAILED",
-                f"无法访问种子页面: {exc}",
-            ) from exc
+                "无法访问种子页面，请核对网络",
+            ) from None
+        self._check_response(page)
         if page.status_code != 200:
             raise TorrentError(
                 "TORRENT_FILE_FETCH_FAILED",
@@ -138,14 +157,19 @@ class TorrentFileFetcher:
             )
         link = urljoin(str(page.url), select_link(page.text, digest))
         try:
-            response = await self._client.get(
-                link, headers=headers, follow_redirects=True
-            )
-        except httpx.HTTPError as exc:
+            for _ in range(6):
+                response = await self._client.get(link, headers=self._headers(link, cookie_header), follow_redirects=False)
+                if response.status_code not in {301, 302, 303, 307, 308} or not response.headers.get("location"):
+                    break
+                link = urljoin(link, response.headers["location"])
+            else:
+                raise TorrentError("TORRENT_FILE_FETCH_FAILED", "种子下载重定向次数过多")
+        except httpx.HTTPError:
             raise TorrentError(
                 "TORRENT_FILE_FETCH_FAILED",
-                f"下载 torrent 文件失败: {exc}",
-            ) from exc
+                "下载 torrent 文件失败，请核对网络",
+            ) from None
+        self._check_response(response)
         if response.status_code != 200:
             raise TorrentError(
                 "TORRENT_FILE_FETCH_FAILED",

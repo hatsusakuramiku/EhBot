@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from functools import wraps
 
@@ -17,9 +19,11 @@ from app.exhentai.downloader import (
     ExHentaiDownloadError,
     ExHentaiDownloader,
 )
+from app.connections.runtime import current_account_context
 from app.exhentai.enrich import enrich_metadata
 from app.exhentai.gdata import GalleryData
 from app.exhentai.gdata_client import GdataClient, GdataError
+from app.exhentai.health import ExHentaiHealth
 from app.exhentai.tagdb import TagTranslator
 from app.thumbnails import (
     THUMBNAIL_KIND_CANDIDATE_COVER,
@@ -29,6 +33,13 @@ from app.thumbnails.identity import identity_hash
 
 
 PROVIDER_NAME = "EXHENTAI"
+
+
+@dataclass
+class _AccountRequest:
+    stack: AsyncExitStack
+    owner: asyncio.Task
+    authenticated: bool = False
 
 
 def _account_request(method):
@@ -51,6 +62,8 @@ class ExHentaiService:
         translator: TagTranslator | None = None,
         work_path_provider=None,
         account_scope=None,
+        account_pool=None,
+        archive_requests=None,
     ) -> None:
         self._database = database
         self._work_path = work_path
@@ -62,72 +75,37 @@ class ExHentaiService:
         # without a restart; the constructor value stays the default.
         self._work_path_provider = work_path_provider
         self._account_scope = account_scope
-
-    @staticmethod
-    def _write_cover(connection, candidate_id, gallery):
-        thumb_url = (gallery.thumb or "").strip()
-        if not thumb_url:
-            return
-        digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
-        connection.execute(
-            "UPDATE candidates SET thumb_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (thumb_url, candidate_id),
-        )
-        connection.execute(
-            "INSERT INTO thumbnails(hash, kind, variant, source_url, state) VALUES (?, ?, ?, ?, 'PENDING') "
-            "ON CONFLICT(hash) DO NOTHING", (digest, THUMBNAIL_KIND_CANDIDATE_COVER, THUMBNAIL_VARIANT_CARD, thumb_url),
-        )
-
-    @staticmethod
-    def _write_torrents(connection, candidate_id, gallery):
-        best = gallery.best_torrent
-        connection.execute(
-            "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (gallery.torrent_count, best.hash if best is not None else None, candidate_id),
-        )
-
-    @staticmethod
-    def _write_metadata(connection, candidate_id, metadata):
-        for field_name, value in metadata.items():
-            if value is None or value == "":
-                continue
-            connection.execute(
-                "INSERT INTO metadata_values "
-                "(candidate_id, field_name, field_value, value_source, confidence, is_manual) "
-                "VALUES (?, ?, ?, 'EXHENTAI', 0.6, 0) "
-                "ON CONFLICT(candidate_id, field_name, value_source) "
-                "DO UPDATE SET field_value = excluded.field_value, confidence = excluded.confidence, "
-                "is_manual = 0, created_at = CURRENT_TIMESTAMP "
-                "WHERE metadata_values.is_manual = 0 AND metadata_values.is_locked = 0",
-                (candidate_id, field_name, str(value)),
-            )
-
-    def _publish_manual_gallery_sync(self, gid, token, metadata, gallery, ingest_claim):
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            candidate_id = self._database.insert_manual_candidate(
-                connection, filter_reason="手动添加：ExHentai 画廊链接", ex_gid=gid,
-                ex_gallery_token=token, ingest_claim=ingest_claim,
-            )
-            self._write_metadata(connection, candidate_id, metadata)
-            if gallery is not None:
-                self._write_torrents(connection, candidate_id, gallery)
-                self._write_cover(connection, candidate_id, gallery)
-            # Manual publication starts APPROVED; source metadata rules do not
-            # undo that explicit approval (the normal reevaluator skips it).
-            return candidate_id
-
-    async def publish_manual_gallery(self, gid, token, metadata, gallery, *, ingest_claim) -> int:
-        """Commit the validated candidate, metadata, routing facts and ownership together."""
-        return await run_sync(self._publish_manual_gallery_sync, gid, token, metadata, gallery, ingest_claim)
+        self._account_pool = account_pool
+        self._archive_requests = archive_requests
+        self._health = ExHentaiHealth(database)
+        self._request: ContextVar[_AccountRequest | None] = ContextVar("eh_request", default=None)
 
     @asynccontextmanager
     async def account_request(self):
-        """Hold the selected account through a request and its caller's writes."""
-        if self._account_scope is None:
+        """Borrow only for authentication, retaining that lease through writes.
+
+        Public gdata and empty enrichment do not select an account. Nested
+        validation/publication in the same task shares the lazy request scope.
+        """
+        existing = self._request.get()
+        if existing is not None and existing.owner is asyncio.current_task():
             yield
             return
-        async with self._account_scope("EH", required=False):
-            yield
+        async with AsyncExitStack() as stack:
+            token = self._request.set(_AccountRequest(stack, asyncio.current_task()))
+            try:
+                yield
+            finally:
+                self._request.reset(token)
+
+    async def _account_credentials(self):
+        request = self._request.get()
+        if self._account_scope is not None:
+            assert request is not None
+            if not request.authenticated:
+                await request.stack.enter_async_context(self._account_scope("EH", required=False))
+                request.authenticated = True
+        return await self._credentials_provider()
 
     async def _effective_work_path(self) -> Path:
         if self._work_path_provider is None:
@@ -181,6 +159,25 @@ class ExHentaiService:
             candidate_id
         )
 
+    async def publish_manual_gallery(self, gid, token, metadata, gallery, *, ingest_claim) -> int:
+        """Commit the validated candidate, metadata, routing facts and ownership together."""
+        return await run_sync(self._publish_manual_gallery_sync, gid, token, metadata, gallery, ingest_claim)
+
+    def _publish_manual_gallery_sync(self, gid, token, metadata, gallery, ingest_claim):
+        with self._database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            candidate_id = self._database.insert_manual_candidate(
+                connection, filter_reason="手动添加：ExHentai 画廊链接", ex_gid=gid,
+                ex_gallery_token=token, ingest_claim=ingest_claim,
+            )
+            self._write_metadata(connection, candidate_id, metadata)
+            if gallery is not None:
+                self._write_torrents(connection, candidate_id, gallery)
+                self._write_cover(connection, candidate_id, gallery)
+            # Manual publication starts APPROVED; source metadata rules do not
+            # undo that explicit approval (the normal reevaluator skips it).
+            return candidate_id
+
     async def enrich_candidates_for_review(self, candidates: list) -> int:
         refs = await run_sync(
             self._missing_metadata_refs_sync, candidates
@@ -208,7 +205,6 @@ class ExHentaiService:
         refs = await run_sync(self._missing_metadata_ids_sync, ids)
         return await self._enrich_refs(refs)
 
-    @_account_request
     async def _enrich_refs(self, refs: list[tuple[int, int, str]]) -> int:
         """Fetch and persist metadata for gallery references already filtered.
 
@@ -221,10 +217,12 @@ class ExHentaiService:
 
         async with self._http_session() as client:
             try:
+                await self._health.check_shared(public=True)
                 galleries = await GdataClient(client).fetch_many(
                     [(gid, token) for _, gid, token in refs]
                 )
-            except GdataError as exc:
+            except ExHentaiDownloadError as exc:
+                await self._health.record_failure(exc)
                 logging.getLogger(__name__).warning(
                     "review_metadata_enrichment_failed",
                     extra={"error_code": exc.code},
@@ -233,20 +231,21 @@ class ExHentaiService:
 
         enriched = 0
         for candidate_id, gid, token in refs:
-            gallery = galleries.get(gid)
-            if gallery is not None:
-                metadata = enrich_metadata(gallery, self._translator)
-            else:
-                try:
-                    metadata, gallery = await self._fetch_metadata(gid, token)
-                except ExHentaiDownloadError as exc:
-                    logging.getLogger(__name__).warning(
-                        "review_metadata_fallback_failed",
-                        extra={"error_code": exc.code},
-                    )
-                    continue
-            await self.persist_gallery_metadata(candidate_id, metadata, gallery)
-            enriched += 1
+            async with self.account_request():
+                gallery = galleries.get(gid)
+                if gallery is not None:
+                    metadata = enrich_metadata(gallery, self._translator)
+                else:
+                    try:
+                        metadata, gallery = await self._fetch_authenticated_metadata(gid, token)
+                    except ExHentaiDownloadError as exc:
+                        logging.getLogger(__name__).warning(
+                            "review_metadata_fallback_failed",
+                            extra={"error_code": exc.code},
+                        )
+                        continue
+                await self.persist_gallery_metadata(candidate_id, metadata, gallery)
+                enriched += 1
         return enriched
 
     def _missing_metadata_ids_sync(
@@ -315,8 +314,13 @@ class ExHentaiService:
         """
         async with self._http_session() as client:
             try:
+                await self._health.check_shared(public=True)
                 gallery = await GdataClient(client).fetch_one(gid, token)
             except GdataError as exc:
+                await self._health.record_failure(exc)
+                if exc.failure_scope in {"site", "gdata"}:
+                    raise ExHentaiDownloadError(exc.code, exc.public_message,
+                        failure_scope=exc.failure_scope, retry_after=exc.retry_after) from None
                 logging.getLogger(__name__).info(
                     "exhentai_gdata_fallback",
                     extra={"error_code": exc.code},
@@ -324,15 +328,35 @@ class ExHentaiService:
             else:
                 return enrich_metadata(gallery, self._translator), gallery
 
-            credentials = await self._credentials_provider()
-            if credentials is None:
-                raise ExHentaiDownloadError(
-                    "EXHENTAI_NOT_CONFIG",
-                    "gdata 未收录该画廊，需要配置 ExHentai Cookie 后重试",
-                )
-            metadata = await ExHentaiDownloader(client).fetch_metadata(
-                credentials, gid, token
+        return await self._fetch_authenticated_metadata(gid, token)
+
+    async def _fetch_authenticated_metadata(self, gid, token):
+        """Use HTML after the public request has already missed this gallery."""
+        existing = current_account_context.get()
+        if self._account_pool is not None and (existing is None or existing.kind != "EH"):
+            async def fetch(context):
+                credentials = await self._credentials_provider()
+                await self._health.check_shared()
+                async with self._http_session() as client:
+                    return await ExHentaiDownloader(client).fetch_metadata(credentials, gid, token)
+            metadata = await self._account_pool.fetch(gid, fetch, self._request.get().stack)
+            self._request.get().authenticated = True
+            return metadata, None
+        credentials = await self._account_credentials()
+        if credentials is None:
+            raise ExHentaiDownloadError(
+                "EXHENTAI_NOT_CONFIG",
+                "gdata 未收录该画廊，需要配置 ExHentai Cookie 后重试",
             )
+        async with self._http_session() as client:
+            await self._health.check_shared()
+            try:
+                metadata = await ExHentaiDownloader(client).fetch_metadata(credentials, gid, token)
+            except ExHentaiDownloadError as exc:
+                await self._health.record_failure(exc,
+                    account_id=existing.account_id if existing is not None and existing.kind == "EH" else None,
+                    credential_revision=existing.credential_revision if existing is not None and existing.kind == "EH" else None)
+                raise
             return metadata, None
 
     @_account_request
@@ -341,18 +365,15 @@ class ExHentaiService:
         gid, token = await self._candidate_gid_token(candidate_id)
         if gid <= 0 or not token or token == "None":
             raise ExHentaiDownloadError("CANDIDATE_HAS_NO_EX_REFERENCE", "候选没有有效的 ExHentai 画廊链接")
-        credentials = await self._credentials_provider()
-        if credentials is None:
-            raise ExHentaiDownloadError("EXHENTAI_NOT_CONFIG", "ExHentai Cookie 未配置")
-        async with self._http_session() as client:
-            await ExHentaiDownloader(client).fetch_metadata(credentials, gid, token)
+        await self._fetch_authenticated_metadata(gid, token)
 
     @_account_request
     async def download_archive_for_candidate(
         self, candidate_id: int
     ) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
-        credentials = await self._credentials_provider()
+        await self._health.check_shared()
+        credentials = await self._account_credentials()
         if credentials is None:
             raise ExHentaiDownloadError(
                 "EXHENTAI_NOT_CONFIG",
@@ -360,9 +381,11 @@ class ExHentaiService:
             )
         async with self._http_session() as client:
             downloader = ExHentaiDownloader(client)
-            archive_url = await downloader.request_archive_url(
-                credentials, gid, token
-            )
+            context = current_account_context.get()
+            if self._archive_requests is None or context is None or context.kind != "EH":
+                raise ExHentaiDownloadError("EXHENTAI_ACCOUNT_REQUIRED", "原档申请需要已注册的 EH 账号与持久申请记录")
+            continue_url = await self._archive_requests.acquire(downloader, credentials, context, gid, token)
+            archive_url = await downloader.archive_file_url(credentials, continue_url)
             work_path = await self._effective_work_path()
             destination = (
                 work_path
@@ -430,6 +453,22 @@ class ExHentaiService:
         with self._database.connection() as connection:
             self._write_metadata(connection, candidate_id, metadata)
 
+    @staticmethod
+    def _write_metadata(connection, candidate_id, metadata):
+        for field_name, value in metadata.items():
+            if value is None or value == "":
+                continue
+            connection.execute(
+                "INSERT INTO metadata_values "
+                "(candidate_id, field_name, field_value, value_source, confidence, is_manual) "
+                "VALUES (?, ?, ?, 'EXHENTAI', 0.6, 0) "
+                "ON CONFLICT(candidate_id, field_name, value_source) "
+                "DO UPDATE SET field_value = excluded.field_value, confidence = excluded.confidence, "
+                "is_manual = 0, created_at = CURRENT_TIMESTAMP "
+                "WHERE metadata_values.is_manual = 0 AND metadata_values.is_locked = 0",
+                (candidate_id, field_name, str(value)),
+            )
+
     def _persist_torrents_sync(
         self, candidate_id: int, gallery: GalleryData
     ) -> None:
@@ -442,6 +481,14 @@ class ExHentaiService:
         """
         with self._database.connection() as connection:
             self._write_torrents(connection, candidate_id, gallery)
+
+    @staticmethod
+    def _write_torrents(connection, candidate_id, gallery):
+        best = gallery.best_torrent
+        connection.execute(
+            "UPDATE candidates SET torrent_count = ?, torrent_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (gallery.torrent_count, best.hash if best is not None else None, candidate_id),
+        )
 
     def _persist_cover_sync(
         self, candidate_id: int, gallery: GalleryData
@@ -460,6 +507,20 @@ class ExHentaiService:
         """
         with self._database.connection() as connection:
             self._write_cover(connection, candidate_id, gallery)
+
+    @staticmethod
+    def _write_cover(connection, candidate_id, gallery):
+        thumb_url = (gallery.thumb or "").strip()
+        if not thumb_url:
+            return
+        digest = identity_hash(thumb_url, THUMBNAIL_VARIANT_CARD)
+        connection.execute(
+            "UPDATE candidates SET thumb_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (thumb_url, candidate_id),
+        )
+        connection.execute(
+            "INSERT INTO thumbnails(hash, kind, variant, source_url, state) VALUES (?, ?, ?, ?, 'PENDING') "
+            "ON CONFLICT(hash) DO NOTHING", (digest, THUMBNAIL_KIND_CANDIDATE_COVER, THUMBNAIL_VARIANT_CARD, thumb_url),
+        )
 
     def _record_artifact_sync(
         self,

@@ -463,6 +463,11 @@ class AccountRegistry:
                 raise AccountError("ACCOUNT_IDENTITY_CHANGED", "凭据属于另一个平台账号，请新建账号以保留原来源身份")
             if row["stop_operation_id"] is not None:
                 raise AccountError("ACCOUNT_STOPPING", "账号正在停止，不能提交验证结果")
+            if row["kind"] == "EH":
+                connection.execute(
+                    "DELETE FROM eh_account_health WHERE account_id = ? AND credential_revision = ? AND capability = 'AUTH'",
+                    (account_id, credential_revision),
+                )
             if (row["remote_identity"] == remote_identity and row["platform_name"] == platform_name
                     and row["verified_credential_revision"] == credential_revision):
                 return self._public(row)

@@ -55,6 +55,8 @@ from app.downloads.archived import ArchivedWorkService
 from app.downloads.service import DownloadService
 from app.exhentai.scrape_worker import MetadataScrapeWorker
 from app.exhentai.service import ExHentaiService
+from app.exhentai.accounts import DownloadAccountPool, MetadataAccountPool
+from app.exhentai.archive import ArchiveRequests
 from app.exhentai.tagdb import TagTranslator
 from app.exhentai.tagdb_sync import TagDatabaseError, TagDatabaseSync
 from app.logging import apply_runtime_log_level
@@ -562,6 +564,7 @@ def build_lifespan(
                 account_scope=connection_manager.use_kind,
                 telegram_user_source=connection_manager.resolve_telegram_user_source,
                 telegram_bot_source=connection_manager.resolve_telegram_bot_source,
+                exhentai_source=DownloadAccountPool(connection_manager).select,
                 # Auto-pack a finished download into a CBZ. The idempotent
                 # conversion insert makes the torrent route's own auto-pack a
                 # no-op here, so a single conversion job is created per
@@ -721,6 +724,8 @@ def build_lifespan(
                 http_client=exhentai_client,
                 translator=tag_translator,
                 account_scope=connection_manager.use_kind,
+                account_pool=MetadataAccountPool(connection_manager),
+                archive_requests=ArchiveRequests(database, secret_store),
                 work_path_provider=archive_settings_service.work_path,
             )
             application.state.exhentai_service = exhentai_service

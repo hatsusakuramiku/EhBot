@@ -1284,3 +1284,6 @@ code now does:
 
 
 **Latest completed P6 / R93:** rc9/035, 2596 collected only; 419 distinct related cases finally passed; real HTMX/Alpine realtime/log/source-draft DOM scenarios passed at root/proxy. Migrations 027–035 are frozen. P7 EH/036 is unaccepted; the independent P6 tree keeps one enabled EH account. See R93_COMPLETION_AUDIT and the implementation-plan handoff. No full suite, supplier request, push, release or deployment.
+
+
+**Latest completed P7 / R94:** rc10/036, 2661 collected only; 363 distinct related cases finally passed. EH fair finite pools, capability/shared backoff, paid intent reconciliation, independent archive/torrent queue attempts and authenticated torrent fetch are integrated. 027–036 frozen on phase commit. P8 exact artifacts/publication/pipeline comes next; P9 sessions/heartbeats/budgets and P10–P12 remain. No full suite, actual supplier request, push, release or deployment. See R94_COMPLETION_AUDIT and the implementation-plan handoff.

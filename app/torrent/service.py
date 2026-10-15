@@ -27,6 +27,9 @@ from app.downloads.queue import QueueControl, STALE_EXECUTION_ERRORS, task_snaps
 from app.torrent.client import QBittorrentClient
 from app.torrent.delivery import resolve_content_path, take_delivery
 from app.torrent.fetcher import TorrentFileFetcher
+from app.connections.runtime import current_account_context
+from app.exhentai.errors import ExHentaiDownloadError
+from app.exhentai.health import ExHentaiHealth
 from app.torrent.models import (
     TorrentClientConfig,
     TorrentDelivery,
@@ -113,7 +116,7 @@ class TorrentService:
 
     async def push_for_candidate(self, candidate_id: int) -> dict:
         """Borrow EH credentials for the entire fetch/push, including intent writes."""
-        if self._account_scope is not None:
+        if self._account_scope is not None and await run_sync(self._candidate_magnet_sync, candidate_id) is None:
             async with self._account_scope("EH", required=False):
                 return await self._push_for_candidate(candidate_id)
         return await self._push_for_candidate(candidate_id)
@@ -160,9 +163,15 @@ class TorrentService:
             raise TorrentError(
                 "TORRENT_FILE_FETCH_FAILED", "HTTP \u5ba2\u6237\u7aef\u672a\u914d\u7f6e"
             )
-        payload = await TorrentFileFetcher(self._http_client).fetch(
-            credentials, gid, token, digest
-        )
+        try:
+            await ExHentaiHealth(self._database).check_shared()
+            payload = await TorrentFileFetcher(self._http_client).fetch(credentials, gid, token, digest)
+        except ExHentaiDownloadError as exc:
+            context = current_account_context.get()
+            await ExHentaiHealth(self._database).record_failure(exc,
+                account_id=context.account_id if context is not None else None,
+                credential_revision=context.credential_revision if context is not None else None, capability="TORRENT")
+            raise
         already_present = await self._push_owned(config, digest, payload=payload)
         logging.getLogger(__name__).info(
             "torrent_pushed candidate=%d hash=%s duplicate=%s",

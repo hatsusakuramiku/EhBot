@@ -3,23 +3,17 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 
 from app.archive.formats import ZIP_SIGNATURES
 from app.connections.exhentai import ExHentaiCredentials
+from app.exhentai.errors import ExHentaiDownloadError, response_limit, credential_rejected, has_gallery_heading
 from app.exhentai.metadata import (
     merge_metadata,
     parse_gallery_html,
 )
-
-
-class ExHentaiDownloadError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.public_message = message
 
 
 #: Every anchor on a page, captured as href + label. The label alone cannot
@@ -112,13 +106,22 @@ class ExHentaiDownloader:
         cookie_header = self._cookie_header(credentials)
         try:
             response = await self._client.get(
-                url, headers={"Cookie": cookie_header}
+                url, headers={"Cookie": cookie_header}, follow_redirects=False
             )
         except httpx.HTTPError as exc:
             raise ExHentaiDownloadError(
                 "EXHENTAI_UNREACHABLE",
                 "无法连接 ExHentai 获取元数据",
+                failure_scope="site", retry_after=60,
             ) from exc
+        limited = response_limit(response)
+        if limited is not None:
+            raise limited
+        if credential_rejected(response):
+            raise ExHentaiDownloadError(
+                "EXHENTAI_METADATA_AUTH", "ExHentai Cookie 已失效，请重新验证或修改配置",
+                failure_scope="credential",
+            )
         if response.status_code != 200:
             raise ExHentaiDownloadError(
                 "EXHENTAI_METADATA_HTTP",
@@ -129,7 +132,8 @@ class ExHentaiDownloader:
                 "EXHENTAI_METADATA_AUTH",
                 "ExHentai Cookie 已失效，无法访问画廊",
             )
-        parsed = parse_gallery_html(response.text)
+        # A generic error page's <title> must never become the gallery title.
+        parsed = parse_gallery_html(response.text) if has_gallery_heading(response.text) else None
         if parsed is None:
             raise ExHentaiDownloadError(
                 "EXHENTAI_METADATA_PARSE",
@@ -145,34 +149,69 @@ class ExHentaiDownloader:
         token: str,
     ) -> str:
         url = f"https://exhentai.org/g/{int(gid)}/{token}/"
-        body = "dl=yes&p_p=0"
         cookie_header = self._cookie_header(credentials)
         try:
-            response = await self._client.post(
+            response = await self._client.get(
                 url,
-                headers={
-                    "Cookie": cookie_header,
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                content=body,
+                headers={"Cookie": cookie_header},
+                follow_redirects=False,
             )
         except httpx.HTTPError as exc:
             raise ExHentaiDownloadError(
                 "EXHENTAI_UNREACHABLE",
                 "无法连接 ExHentai 申请原档",
+                failure_scope="site", retry_after=60,
             ) from exc
-        if response.status_code != 200:
-            raise ExHentaiDownloadError(
-                "EXHENTAI_ARCHIVE_HTTP",
-                f"原档申请返回 HTTP {response.status_code}",
-            )
+        # This is only discovery; the paid form belongs to archiver.php.
+        from app.exhentai.archive import archive_response_error
+        error = archive_response_error(response)
+        if error is not None:
+            raise error
         link = _find_archive_link(response.text)
-        if link is None:
+        parsed = urlsplit(link or "")
+        query = parse_qs(parsed.query)
+        if (parsed.scheme != "https" or parsed.hostname not in {"exhentai.org", "e-hentai.org"}
+                or parsed.username is not None or parsed.port not in {None, 443}
+                or parsed.path != "/archiver.php" or query.get("gid") != [str(gid)] or query.get("token") != [token]):
             raise ExHentaiDownloadError(
                 "EXHENTAI_ARCHIVE_LINK",
                 "画廊未提供原档下载链接（原档可能尚未生成，或页面结构有变），"
                 "请稍后重试",
             )
+        return link
+
+    async def archive_page(self, credentials, url, *, submit=False):
+        """Read a provider page; True submits the paid original form once.
+
+        submit=False is a read-only GET. True is allowed only at the HTTPS EH
+        archiver endpoint. H@H landing pages receive an explicit empty Cookie,
+        overriding any cookie jar on the shared client.
+        """
+        parsed = urlsplit(url)
+        own_site = parsed.scheme == "https" and parsed.hostname in {"exhentai.org", "e-hentai.org"} and parsed.port in {None, 443}
+        if (parsed.scheme not in {"http", "https"} or parsed.username is not None
+                or (submit and (not own_site or parsed.path != "/archiver.php"))):
+            raise ExHentaiDownloadError("EXHENTAI_ARCHIVE_URL", "EH 归档地址无效")
+        headers = {"Cookie": self._cookie_header(credentials) if own_site else ""}
+        try:
+            if submit:
+                return await self._client.post(url, headers=headers, follow_redirects=False,
+                    data={"dltype": "org", "dlcheck": "Download Original Archive"})
+            return await self._client.get(url, headers=headers, follow_redirects=False)
+        except httpx.HTTPError:
+            raise ExHentaiDownloadError("EXHENTAI_ARCHIVE_UNREACHABLE", "无法连接 EH 归档服务",
+                                       failure_scope="site" if own_site else "operation", retry_after=60 if own_site else None) from None
+
+    async def archive_file_url(self, credentials, continue_url):
+        """Resolve the confirmed landing page to its file link, without a POST."""
+        from app.exhentai.archive import ArchivePage, archive_response_error
+        response = await self.archive_page(credentials, continue_url)
+        error = archive_response_error(response)
+        if error is not None:
+            raise error
+        link = ArchivePage(response.text, continue_url).download_url
+        if link is None:
+            raise ExHentaiDownloadError("EXHENTAI_ARCHIVE_DOWNLOAD_LINK", "EH 归档下载页未提供文件地址，请稍后核实")
         return link
 
     @staticmethod
@@ -210,7 +249,9 @@ class ExHentaiDownloader:
         archive_url: str,
         destination: Path,
     ) -> int:
-        cookie_header = self._cookie_header(credentials)
+        parsed = urlsplit(archive_url)
+        own_site = parsed.scheme == "https" and parsed.hostname in {"exhentai.org", "e-hentai.org"} and parsed.port in {None, 443}
+        cookie_header = self._cookie_header(credentials) if own_site else ""
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             async with self._client.stream(
@@ -234,12 +275,12 @@ class ExHentaiDownloader:
         except ExHentaiDownloadError:
             destination.unlink(missing_ok=True)
             raise
-        except (httpx.HTTPError, OSError) as exc:
+        except (httpx.HTTPError, OSError):
             destination.unlink(missing_ok=True)
             raise ExHentaiDownloadError(
                 "EXHENTAI_ARCHIVE_DOWNLOAD",
-                f"原档下载失败: {exc}",
-            ) from exc
+                "原档下载失败，请核对网络或归档下载节点后重试",
+            ) from None
 
 
 # Re-export SimpleCookie so the imports above stay short

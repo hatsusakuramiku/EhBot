@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+from app.exhentai.errors import GdataError, response_limit
 
 from app.exhentai.gdata import (
     GalleryData,
@@ -17,13 +18,6 @@ MAX_GALLERIES_PER_REQUEST = 25
 
 # E-Hentai asks clients to pace bursts; wait between batches.
 BATCH_PAUSE_SECONDS = 1.0
-
-
-class GdataError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.public_message = message
 
 
 class GdataClient:
@@ -73,17 +67,20 @@ class GdataClient:
         }
         try:
             response = await self._client.post(
-                GDATA_ENDPOINT, json=payload
+                GDATA_ENDPOINT, json=payload, headers={"Cookie": ""}, follow_redirects=False
             )
         except httpx.HTTPError as exc:
             raise GdataError(
                 "EXHENTAI_GDATA_UNREACHABLE",
                 "无法连接 E-Hentai 元数据接口",
+                failure_scope="gdata", retry_after=60,
             ) from exc
-        if response.status_code == 429:
+        limited = response_limit(response, scope="gdata")
+        if limited is not None:
             raise GdataError(
                 "EXHENTAI_GDATA_RATE_LIMITED",
                 "E-Hentai 元数据接口触发限流，请稍后重试",
+                failure_scope="gdata", retry_after=limited.retry_after,
             )
         if response.status_code != 200:
             raise GdataError(
@@ -105,7 +102,7 @@ class GdataClient:
         if body.get("error"):
             raise GdataError(
                 "EXHENTAI_GDATA_REJECTED",
-                f"元数据接口拒绝了请求: {body['error']}",
+                "元数据接口拒绝了请求",
             )
         entries = body.get("gmetadata")
         if not isinstance(entries, list):
