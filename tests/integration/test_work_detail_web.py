@@ -18,6 +18,8 @@ from tests.integration.test_queue_control import observed
 import itertools
 import json
 from pathlib import Path
+
+from tests.work_commands import observed_work, observed_review
 import re
 from urllib.parse import unquote_plus
 
@@ -463,7 +465,7 @@ def test_a_refused_action_shows_the_whole_page_again(tmp_path: Path) -> None:
         authenticate(client, settings)
         csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
         response = client.post(
-            f"/candidates/{candidate_id}/approve", data={"csrf_token": csrf}
+            f"/candidates/{candidate_id}/approve", data={**observed_review(client, candidate_id), "csrf_token": csrf}
         )
 
     assert response.status_code == 400
@@ -494,8 +496,19 @@ def test_the_source_message_and_its_attachment_are_named(tmp_path: Path) -> None
 
 def test_the_json_endpoint_and_the_page_read_the_same_snapshot(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     """One snapshot per domain, so the two surfaces cannot disagree."""
+    from datetime import datetime
+
+    class SnapshotTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, tzinfo=tz)
+
+    # Unpacked ComicInfo projects Added from the current second. Compare the
+    # two transports at one instant instead of depending on request speed.
+    monkeypatch.setattr('app.conversion.comicinfo.datetime', SnapshotTime)
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(seed_work(database, status="PROCESSING"))
@@ -613,7 +626,7 @@ def test_pressing_the_archive_button_refetches_a_completed_download(
         csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/exhentai-archive",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         assert response.status_code == 200
 
@@ -905,7 +918,7 @@ def test_manual_eh_ref_repoints_and_clears_stale_torrent(
         response = client.post(
             f"/works/{candidate_id}/eh-ref",
             data={
-                "csrf_token": csrf,
+                **observed_review(client, candidate_id), "csrf_token": csrf,
                 "ex_gid": "https://exhentai.org/g/12345/deadbeef",
             },
         )
@@ -928,7 +941,7 @@ def test_manual_eh_ref_repoints_and_clears_stale_torrent(
     csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
     bare = client.post(
         f"/works/{candidate_id}/eh-ref",
-        data={"csrf_token": csrf, "ex_gid": "99999"},
+        data={**observed_review(client, candidate_id), "csrf_token": csrf, "ex_gid": "99999"},
     )
     assert bare.status_code == 400
     assert "无法识别画廊" in bare.text
@@ -945,7 +958,7 @@ def test_manual_eh_ref_refuses_a_garbage_gallery_id(tmp_path: Path) -> None:
         csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
         response = client.post(
             f"/works/{candidate_id}/eh-ref",
-            data={"csrf_token": csrf, "ex_gid": "not-a-gallery"},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "ex_gid": "not-a-gallery"},
         )
 
     assert response.status_code == 400
@@ -965,18 +978,18 @@ def test_manual_preview_url_is_set_and_cleared(tmp_path: Path) -> None:
         saved = client.post(
             f"/works/{candidate_id}/preview",
             data={
-                "csrf_token": csrf,
+                **observed_review(client, candidate_id), "csrf_token": csrf,
                 "preview_url": "https://telegra.ph/example-page",
             },
         )
         after_save = client.get(f"/works/{candidate_id}")
         bad = client.post(
             f"/works/{candidate_id}/preview",
-            data={"csrf_token": csrf, "preview_url": "https://example.com/nope"},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "preview_url": "https://example.com/nope"},
         )
         cleared = client.post(
             f"/works/{candidate_id}/preview",
-            data={"csrf_token": csrf, "preview_url": ""},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "preview_url": ""},
         )
         after_clear = client.get(f"/works/{candidate_id}")
 
@@ -1005,16 +1018,16 @@ def test_manual_magnet_torrent_is_set_and_cleared(tmp_path: Path) -> None:
         csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
         saved = client.post(
             f"/works/{candidate_id}/torrent",
-            data={"csrf_token": csrf, "magnet": magnet},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "magnet": magnet},
         )
         after_save = client.get(f"/works/{candidate_id}")
         bad = client.post(
             f"/works/{candidate_id}/torrent",
-            data={"csrf_token": csrf, "magnet": "not a magnet"},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "magnet": "not a magnet"},
         )
         cleared = client.post(
             f"/works/{candidate_id}/torrent",
-            data={"csrf_token": csrf, "magnet": ""},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf, "magnet": ""},
         )
         after_clear = client.get(f"/works/{candidate_id}")
 
@@ -1065,6 +1078,7 @@ def test_editing_metadata_on_a_packed_work_synchronizes_in_place(
                 "csrf_token": csrf,
                 "field_name": "Title",
                 "field_value": "Renamed Book",
+                **observed_work(client, candidate_id),
             },
         )
 
@@ -1323,11 +1337,12 @@ class TestPurgeFromThePage:
                     "csrf_token": csrf,
                     "mode": "delete",
                     "return_to": "/candidates/pending?sort=title",
+                    **observed_review(client, candidate_id),
                 },
             )
 
             assert response.status_code == 303
-            assert response.headers["location"] == "/candidates/pending?sort=title"
+            assert response.headers["location"].startswith("/candidates/pending?sort=title&notice=")
             # The work is gone for the session that deleted it; no reload
             # is needed for the page to stop answering at its old URL.
             assert client.get(f"/works/{candidate_id}").status_code == 404
@@ -1348,7 +1363,7 @@ class TestPurgeFromThePage:
             csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
             client.post(
                 f"/candidates/{candidate_id}/delete",
-                data={"csrf_token": csrf, "mode": "delete"},
+                data={"csrf_token": csrf, "mode": "delete", **observed_review(client, candidate_id)},
             )
 
         assert archive.exists()
@@ -1382,8 +1397,9 @@ class TestPurgeFromThePage:
             csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
             client.post(
                 f"/candidates/{candidate_id}/delete",
-                data={"csrf_token": csrf, "mode": "delete-files"},
+                data={"csrf_token": csrf, "mode": "delete-files", **observed_review(client, candidate_id)},
             )
+            client.portal.call(client.app.state.archived_work_service.process_removals)
 
         assert not cbz.exists()
         assert not cbz.parent.exists()
@@ -1407,7 +1423,7 @@ class TestPurgeFromThePage:
             csrf = client.get(f"/works/{candidate_id}").context["csrf_token"]
             response = client.post(
                 f"/candidates/{candidate_id}/delete",
-                data={"csrf_token": csrf, "mode": "delete"},
+                data={"csrf_token": csrf, "mode": "delete", **observed_review(client, candidate_id)},
             )
             still_there = client.get(f"/works/{candidate_id}")
 

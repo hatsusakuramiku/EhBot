@@ -43,7 +43,7 @@ def request_reference(database, candidate_id: int, gallery_id: int, token: str |
         return request_reference_in_transaction(connection, database, candidate_id, gallery_id, token)
 
 
-def request_reference_in_transaction(connection, database, candidate_id, gallery_id, token):
+def request_reference_in_transaction(connection, database, candidate_id, gallery_id, token, *, command_guard=None):
     """Allow reply/media evidence to upgrade through the same stop/identity arbiter."""
     key = ingest_key(gallery_id=gallery_id)
     source = candidate_record(connection, candidate_id)
@@ -53,6 +53,8 @@ def request_reference_in_transaction(connection, database, candidate_id, gallery
     ).fetchone()
     if pending is not None:
         if pending[1:] != (gallery_id, token):
+            raise IngestError('INGEST_IDENTITY_CHANGING')
+        if command_guard is not None:
             raise IngestError('INGEST_IDENTITY_CHANGING')
         return _result(connection, pending[0])
     if (source['ex_gid'], source['ex_gallery_token']) == (gallery_id, token) and connection.execute(
@@ -67,6 +69,9 @@ def request_reference_in_transaction(connection, database, candidate_id, gallery
         "VALUES(?, ?, ?, ?, ?, ?, ?)",
         (operation_id, candidate_id, source['ex_gid'], source['ex_gallery_token'], gallery_id, token, key),
     )
+    if command_guard is not None:
+        connection.execute('UPDATE ingest_reference_changes SET command_guard_json = ? WHERE operation_id = ?',
+                           (json.dumps(command_guard), operation_id))
     _stop_source(connection, database, candidate_id)
     if not needs_stop(connection, candidate_id):
         _finish(connection, operation_id)
@@ -89,6 +94,17 @@ def _result(connection, operation_id):
     return dict(zip(('operation_id', 'candidate_id', 'status', 'result_candidate_id', 'error_code'), row))
 
 
+def check_command_target(connection, operation_id, candidate_id, gallery_id):
+    guard = connection.execute('SELECT command_guard_json FROM ingest_reference_changes WHERE operation_id = ?',
+                               (operation_id,)).fetchone()[0]
+    if guard is not None:
+        current = connection.execute('SELECT w.work_id, w.revision FROM candidates c JOIN work_versions w ON w.candidate_id = c.id '
+                                     'WHERE c.ex_gid = ? AND c.id <> ?', (gallery_id, candidate_id)).fetchone()
+        actual = dict(zip(('work_id', 'revision'), current)) if current else None
+        if actual != json.loads(guard)['target']:
+            raise IngestError('INGEST_REFERENCE_TARGET_CHANGED')
+
+
 def _finish(connection, operation_id):
     row = connection.execute(
         "SELECT candidate_id, old_gid, old_token, gallery_id, gallery_token, target_key "
@@ -108,6 +124,7 @@ def _finish(connection, operation_id):
     ).fetchone()[0])
     target = connection.execute('SELECT id FROM candidates WHERE ex_gid = ?', (gid,)).fetchone()
     target_id = int(target[0]) if target is not None else source_id
+    check_command_target(connection, operation_id, source_id, gid)
     old_entries = connection.execute(
         'SELECT id, unique_key, generation FROM ingest_entries WHERE candidate_id = ? AND id <> ?',
         (source_id, target_entry['id']),

@@ -79,6 +79,17 @@ class ReviewService:
         field_name: str,
         field_value: str,
     ) -> None:
+        cleaned_value = self.validate_manual_metadata(field_name, field_value)
+        await self._database.set_manual_metadata(
+            candidate_id, operator_name, field_name, cleaned_value
+        )
+        await self._database.re_evaluate_candidate_metadata_rules(
+            candidate_id
+        )
+
+    @staticmethod
+    def validate_manual_metadata(field_name: str, field_value: str) -> str:
+        """Validate an operator value before any field in a command is saved."""
         if not editable_metadata_field(field_name):
             raise ReviewError(
                 "METADATA_FIELD_INVALID",
@@ -98,12 +109,7 @@ class ReviewService:
                     "METADATA_VALUE_INVALID",
                     "Rating must be a number",
                 ) from exc
-        await self._database.set_manual_metadata(
-            candidate_id, operator_name, field_name, cleaned_value
-        )
-        await self._database.re_evaluate_candidate_metadata_rules(
-            candidate_id
-        )
+        return cleaned_value
 
     async def set_metadata_lock(
         self,

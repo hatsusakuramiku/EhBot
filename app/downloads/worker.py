@@ -64,6 +64,14 @@ class WorkerSession:
                     "'$.status', 'UNKNOWN', '$.error', json_object('code', 'ACCOUNT_COMMAND_INTERRUPTED', "
                     "'message', '请求被中断，请先核对账号状态再发起新操作')) "
                     "WHERE json_extract(response_json, '$.status') = 'PENDING'")
+                connection.execute("UPDATE work_metadata_fetches SET status = 'UNKNOWN', "
+                    "error_code = 'METADATA_FETCH_INTERRUPTED' WHERE status = 'RUNNING'")
+                connection.execute("UPDATE toolchain_operations SET status = 'UNKNOWN', "
+                    "error_code = 'TOOLCHAIN_INTERRUPTED', finished_at = CURRENT_TIMESTAMP WHERE status = 'RUNNING'")
+                connection.execute("UPDATE ai_network_operations SET status = 'UNKNOWN', "
+                    "error_code = 'AI_REQUEST_INTERRUPTED', finished_at = CURRENT_TIMESTAMP WHERE status = 'RUNNING'")
+                connection.execute("DELETE FROM ai_network_claims WHERE operation_id IN "
+                                   "(SELECT operation_id FROM ai_network_operations WHERE status != 'RUNNING')")
             self._started = True
         except BaseException:
             self._lock_file.close()

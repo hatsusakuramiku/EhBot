@@ -13,6 +13,8 @@ from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
+from tests.work_commands import observed_review
+from tests.settings_commands import save_then_read_preferences
 import re
 import time
 from urllib.parse import parse_qsl
@@ -850,12 +852,12 @@ def test_the_review_page_offers_the_torrent_and_queues_it_once(
         # from page copy, so the button reads what every other surface calls it.
         assert "EH \u79cd\u5b50" in detail.text
         response = client.post(
-            f"/candidates/{candidate_id}/torrent", data={"csrf_token": csrf}
+            f"/candidates/{candidate_id}/torrent", data={**observed_review(client, candidate_id), "csrf_token": csrf}
         )
         assert response.status_code == 303
         # Idempotent: pressing twice must not create a second job.
         client.post(
-            f"/candidates/{candidate_id}/torrent", data={"csrf_token": csrf}
+            f"/candidates/{candidate_id}/torrent", data={**observed_review(client, candidate_id), "csrf_token": csrf}
         )
 
     jobs = asyncio.run(
@@ -885,7 +887,7 @@ def test_the_queue_shows_progress_and_offers_the_manual_actions(
         authenticate(client, settings)
         page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": csrf,
@@ -899,7 +901,7 @@ def test_the_queue_shows_progress_and_offers_the_manual_actions(
         )
         client.post(
             f"/candidates/{candidate_id}/torrent",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         # The app runs its own worker and poller, so this waits for them
         # rather than driving them from a second event loop.
@@ -959,7 +961,7 @@ def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
         authenticate(client, settings)
         page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": csrf,
@@ -973,7 +975,7 @@ def test_the_queue_keeps_showing_a_torrent_that_is_still_seeding(
         )
         client.post(
             f"/candidates/{candidate_id}/torrent",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -1016,7 +1018,7 @@ def test_the_settings_page_saves_a_client_without_echoing_the_password(
         authenticate(client, settings)
         page = client.get("/settings/archive")
         csrf = page.context["csrf_token"]
-        saved = client.post(
+        saved = save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": csrf,
@@ -1051,7 +1053,7 @@ def test_an_unreadable_local_save_path_is_refused_at_save_time(
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
         page = client.get("/settings/archive")
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": page.context["csrf_token"],
@@ -1090,7 +1092,7 @@ def test_auto_pack_carries_a_delivered_torrent_into_the_library(
         authenticate(client, settings)
         page = client.get(f"/works/{candidate_id}")
         csrf = page.context["csrf_token"]
-        saved = client.post(
+        saved = save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": csrf,
@@ -1106,7 +1108,7 @@ def test_auto_pack_carries_a_delivered_torrent_into_the_library(
         assert saved.status_code == 303
         client.post(
             f"/candidates/{candidate_id}/torrent",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         deadline = time.monotonic() + 30
         conversion_state = None
@@ -1139,7 +1141,7 @@ def test_auto_pack_is_off_until_the_operator_turns_it_on(
         authenticate(client, settings)
         page = client.get("/settings/archive")
         assert page.context["torrent"]["auto_pack"] is False
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": page.context["csrf_token"],
@@ -1152,7 +1154,7 @@ def test_auto_pack_is_off_until_the_operator_turns_it_on(
         assert reloaded.context["torrent"]["auto_pack"] is True
         # Unchecking the box has to switch it back off, not just leave the
         # stored value alone.
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": page.context["csrf_token"],
@@ -1180,7 +1182,7 @@ def test_auto_pack_cannot_be_enabled_without_a_local_save_path(
     with TestClient(app, follow_redirects=False) as client:
         authenticate(client, settings)
         page = client.get("/settings/archive")
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/torrent",
             data={
                 "csrf_token": page.context["csrf_token"],

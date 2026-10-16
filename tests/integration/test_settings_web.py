@@ -8,12 +8,17 @@ arguments is exercised rather than assumed.
 
 from __future__ import annotations
 
+from tests.rule_commands import observed_rule
+from tests.ai_commands import (save_then_read_provider, save_then_read_catalogue, save_then_read_chain,
+                              admit_network_and_read_page)
+from tests.settings_commands import save_then_read_preferences
 import asyncio
 import json
 import logging
 import re
 import sqlite3
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 
@@ -69,6 +74,11 @@ def _authenticate(client: TestClient, settings: Settings) -> str:
 def _csrf(client: TestClient, section: str = "connections") -> str:
     """Fetch a csrf token from any settings tab."""
     return client.get(f"/settings/{section}").context["csrf_token"]
+
+
+def _maintenance_conditions(client, scope):
+    snapshot = client.get('/api/v1/settings/paths').json()
+    return {'expected_revision': snapshot['settings_versions'][scope], 'idempotency_key': uuid4().hex}
 
 
 def _seed_candidate(database: Database, title: str = "A Title") -> int:
@@ -215,7 +225,7 @@ class TestSystemTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            saved = client.post(
+            saved = save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={
                     "csrf_token": csrf,
@@ -244,7 +254,7 @@ class TestSystemTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "log_level": "DEBUG"},
             )
@@ -253,7 +263,7 @@ class TestSystemTab:
                 for item in logging.getLogger("uvicorn.access").filters
             )
 
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "log_level": "INFO"},
             )
@@ -270,7 +280,7 @@ class TestSystemTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "source_concurrency": "99"},
             )
@@ -281,11 +291,11 @@ class TestSystemTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "poll_interval_ms": "10000"},
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "poll_interval_ms": ""},
             )
@@ -305,7 +315,7 @@ class TestSystemTab:
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
             before = client.get("/")
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={"csrf_token": csrf, "timezone": "Asia/Shanghai"},
             )
@@ -446,7 +456,7 @@ class TestPathsTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            saved = client.post(
+            saved = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/template",
                 data={
                     "csrf_token": csrf,
@@ -496,7 +506,7 @@ class TestPathsTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            saved = client.post(
+            saved = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/template",
                 data={
                     "csrf_token": csrf,
@@ -520,7 +530,7 @@ class TestPathsTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/template",
                 data={"csrf_token": csrf, "library_template": "{category}/{oops}"},
             )
@@ -534,11 +544,11 @@ class TestPathsTab:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             csrf = _authenticate(client, settings)
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/template",
                 data={"csrf_token": csrf, "library_template": "{category}/{title}"},
             )
-            cleared = client.post(
+            cleared = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/template",
                 data={"csrf_token": csrf, "library_template": "  "},
                 follow_redirects=False,
@@ -741,7 +751,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             saved = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Only Doujinshi",
                     "priority": "50",
@@ -767,7 +777,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             saved = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Reject NTR",
                     "priority": "10",
@@ -829,7 +839,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             response = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Bogus",
                     "priority": "10",
@@ -864,7 +874,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Only Doujinshi",
                     "priority": "50",
@@ -885,7 +895,7 @@ class TestRuleSaving:
 
             saved = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval', rule_id),
                     "csrf_token": editing.context["csrf_token"],
                     "rule_id": str(rule_id),
                     "name": "Only Manga",
@@ -970,7 +980,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             saved = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Five Fields",
                     "priority": "20",
@@ -1036,7 +1046,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Four Fields",
                     "priority": "20",
@@ -1065,7 +1075,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Doomed",
                     "priority": "50",
@@ -1076,19 +1086,20 @@ class TestRuleSaving:
                 follow_redirects=False,
             )
             rule_id = asyncio.run(database.list_auto_approval_rules())[0].rule_id
+            deletion_version = observed_rule(client, 'auto-approval', rule_id)
             deleted = client.post(
                 f"/auto-approval-rules/{rule_id}/delete",
-                data={"csrf_token": csrf},
+                data={**observed_rule(client, 'auto-approval', rule_id), "csrf_token": csrf},
                 follow_redirects=False,
             )
             assert deleted.status_code == 303
             missing = client.post(
                 f"/auto-approval-rules/{rule_id}/delete",
-                data={"csrf_token": csrf},
+                data={**deletion_version, 'idempotency_key': 'second-delete', "csrf_token": csrf},
             )
-            # Deleting a rule that is already gone is a 404, not a silent 303:
+            # A different command for the deleted identity is 410:
             # a stale tab must not report success for a rule it cannot see.
-            assert missing.status_code == 404
+            assert missing.status_code == 410
 
         assert asyncio.run(database.list_auto_approval_rules()) == ()
 
@@ -1159,7 +1170,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             response = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "Broken",
                     "priority": "50",
@@ -1182,7 +1193,7 @@ class TestRuleSaving:
             csrf = _authenticate(client, settings)
             response = client.post(
                 "/auto-approval-rules",
-                data={
+                data={**observed_rule(client, 'auto-approval'),
                     "csrf_token": csrf,
                     "name": "  ",
                     "priority": "50",
@@ -1220,7 +1231,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             saved = client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "Doujinshi shelf",
                     "priority": "50",
@@ -1248,7 +1259,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "Doujinshi shelf",
                     "priority": "50",
@@ -1271,7 +1282,7 @@ class TestPathRules:
 
             saved = client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths', rule_id),
                     "csrf_token": editing.context["csrf_token"],
                     "path_rule_id": str(rule_id),
                     "name": "Manga shelf",
@@ -1306,7 +1317,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "Shelf",
                     "priority": "50",
@@ -1319,14 +1330,14 @@ class TestPathRules:
 
             client.post(
                 f"/archive-settings/paths/rules/{rule_id}/toggle",
-                data={"csrf_token": csrf, "enabled": "off"},
+                data={**observed_rule(client, 'paths', rule_id), "csrf_token": csrf, "enabled": "off"},
             )
             rule = asyncio.run(database.get_archive_path_rule(rule_id))
             assert rule is not None and rule.enabled is False
 
             client.post(
                 f"/archive-settings/paths/rules/{rule_id}/delete",
-                data={"csrf_token": csrf},
+                data={**observed_rule(client, 'paths', rule_id), "csrf_token": csrf},
             )
         assert asyncio.run(database.get_archive_path_rule(rule_id)) is None
 
@@ -1364,7 +1375,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             page = client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "Escape",
                     "priority": "50",
@@ -1387,7 +1398,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             page = client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "No condition",
                     "priority": "50",
@@ -1409,7 +1420,7 @@ class TestPathRules:
             csrf = _authenticate(client, settings)
             client.post(
                 "/archive-settings/paths/rules",
-                data={
+                data={**observed_rule(client, 'paths'),
                     "csrf_token": csrf,
                     "name": "Shelf",
                     "priority": "50",
@@ -1582,7 +1593,7 @@ class TestReArchive:
             _authenticate(client, settings)
             csrf = _csrf(client, "paths")
             page = client.post(
-                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+                "/archive-settings/paths/rearchive", data={**_maintenance_conditions(client, "rearchive"), "csrf_token": csrf}
             )
 
         assert page.status_code == 200
@@ -1597,7 +1608,7 @@ class TestReArchive:
             _seed_work(settings, 1, title="未打包作品")
             csrf = _csrf(client, "paths")
             response = client.post(
-                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+                "/archive-settings/paths/rearchive", data={**_maintenance_conditions(client, "rearchive"), "csrf_token": csrf}
             )
             assert response.status_code == 200
         # Read after shutdown: the conversion worker claims PENDING rows, and a
@@ -1631,7 +1642,7 @@ class TestReArchive:
             )
             csrf = _csrf(client, "paths")
             response = client.post(
-                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+                "/archive-settings/paths/rearchive", data={**_maintenance_conditions(client, "rearchive"), "csrf_token": csrf}
             )
 
         assert response.status_code == 200
@@ -1665,7 +1676,7 @@ class TestReArchive:
             )
             csrf = _csrf(client, "paths")
             response = client.post(
-                "/archive-settings/paths/rearchive", data={"csrf_token": csrf}
+                "/archive-settings/paths/rearchive", data={**_maintenance_conditions(client, "rearchive"), "csrf_token": csrf}
             )
 
         assert "跳过 1 件" in response.text
@@ -1690,7 +1701,7 @@ class TestReArchive:
             csrf = _csrf(client, "paths")
             response = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": csrf, "force": "on"},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": csrf, "force": "on"},
             )
 
         assert response.status_code == 200
@@ -1768,7 +1779,7 @@ def _add_provider(client: TestClient, csrf: str, **overrides: str) -> None:
         "enabled": "on",
     }
     data.update(overrides)
-    response = client.post("/settings/ai/providers", data=data, follow_redirects=False)
+    response = save_then_read_provider(client, 'POST', "/settings/ai/providers", data=data, follow_redirects=False)
     assert response.status_code == 303, response.text[:400]
 
 
@@ -1808,22 +1819,22 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/models/1/params",
                 data={"csrf_token": csrf, "params": '{"max_tokens": 64}'},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/append",
                 data={"csrf_token": csrf, "model_id": "1"},
                 follow_redirects=False,
@@ -1837,7 +1848,7 @@ class TestAISettings:
         settings = _settings(tmp_path)
         with TestClient(_ai_app(settings, _AiTransport())) as client:
             _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_provider(client, 'POST',
                 "/settings/ai/providers",
                 data={
                     "csrf_token": _csrf(client, "ai"),
@@ -1855,7 +1866,7 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            response = client.post(
+            response = save_then_read_provider(client, 'POST',
                 "/settings/ai/providers",
                 data={
                     "csrf_token": csrf,
@@ -1883,13 +1894,13 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "主:sk-live-secret-0001"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "gpt-4o-mini"},
                 follow_redirects=False,
@@ -1897,7 +1908,7 @@ class TestAISettings:
             assert response.status_code == 303
 
             # No test first: saving it as the primary works anyway.
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/primary",
                 data={"csrf_token": csrf, "model_id": "1"},
                 follow_redirects=False,
@@ -1908,8 +1919,8 @@ class TestAISettings:
             assert "未验证" in page.text
             assert "gpt-4o-mini" in page.text
 
-            response = client.post(
-                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            response = admit_network_and_read_page(client, 'model',
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}, target_id=1
             )
             assert response.status_code == 200
             assert "验证通过" in response.text
@@ -1935,7 +1946,7 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={
                     "csrf_token": csrf,
@@ -1944,7 +1955,7 @@ class TestAISettings:
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={
                     "csrf_token": csrf,
@@ -1974,7 +1985,7 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": f"主:{secret}"},
                 follow_redirects=False,
@@ -1982,7 +1993,7 @@ class TestAISettings:
             page = client.get("/settings/ai")
             assert secret not in page.text
             assert "主" in page.text
-            rejected = client.post(
+            rejected = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "",
                       },
@@ -1996,7 +2007,7 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "  "},
             )
@@ -2012,21 +2023,21 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            response = client.post(
-                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            response = admit_network_and_read_page(client, 'model',
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}, target_id=1
             )
-            assert response.status_code == 400
-            assert "验证失败" in response.text
+            assert response.status_code == 200
+            assert "操作失败" in response.text
             page = client.get("/settings/ai")
         assert "验证失败" in page.text
         assert "AI_AUTH" in page.text
@@ -2044,21 +2055,21 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf, default_params='{"temperature": 0.5}')
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            response = client.post(
-                "/settings/ai/models/1/verify", data={"csrf_token": csrf}
+            response = admit_network_and_read_page(client, 'model',
+                "/settings/ai/models/1/verify", data={"csrf_token": csrf}, target_id=1
             )
-        assert response.status_code == 400
-        assert "参数" in response.text
+        assert response.status_code == 200
+        assert "请检查模型高级参数" in response.text
         assert "AI_PARAM_REJECTED" in response.text
 
     def test_a_models_own_params_are_editable_from_its_row(
@@ -2070,17 +2081,17 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "o3-mini"},
                 follow_redirects=False,
             )
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/models/1/params",
                 data={
                     "csrf_token": csrf,
@@ -2089,7 +2100,7 @@ class TestAISettings:
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            client.post("/settings/ai/models/1/verify", data={"csrf_token": csrf})
+            admit_network_and_read_page(client, 'model', "/settings/ai/models/1/verify", target_id=1, data={"csrf_token": csrf})
         assert stub.chat_bodies[-1]["max_completion_tokens"] == 512
         assert "temperature" not in stub.chat_bodies[-1]
 
@@ -2102,21 +2113,21 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            page = client.post(
+            page = admit_network_and_read_page(client, 'fetch',
                 "/settings/ai/providers/1/models/fetch",
-                data={"csrf_token": csrf},
+                data={"csrf_token": csrf}, target_id=1,
             )
             assert page.status_code == 200
             assert "alpha" in page.text and "beta" in page.text
             # The list is offered, not auto-added.
             assert stub.requests[-1].url.path.endswith("/models")
 
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": ["alpha", "beta"]},
                 follow_redirects=False,
@@ -2133,7 +2144,7 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            response = client.post(
+            response = save_then_read_provider(client, 'POST',
                 "/settings/ai/providers",
                 data={
                     "csrf_token": csrf,
@@ -2144,7 +2155,7 @@ class TestAISettings:
                 follow_redirects=False,
             )
         assert response.status_code == 303
-        assert response.headers["location"].endswith("/settings/ai?provider=2")
+        assert '/settings/ai?provider=2&provider_uuid=' in response.headers['location']
 
     def test_chain_reorder_remove_and_promote(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path)
@@ -2152,19 +2163,19 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             for name in ("a", "b"):
-                client.post(
+                save_then_read_catalogue(client, 'POST',
                     "/settings/ai/providers/1/models",
                     data={"csrf_token": csrf, "model_name": name},
                     follow_redirects=False,
                 )
             for model_id in (1, 2):
-                client.post(
+                save_then_read_chain(client, 'POST',
                     "/settings/ai/chain/append",
                     data={"csrf_token": csrf, "model_id": str(model_id)},
                     follow_redirects=False,
@@ -2172,7 +2183,7 @@ class TestAISettings:
             page = client.get("/settings/ai")
             assert "主力 · 本地 / a" in page.text
 
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/shift",
                 data={"csrf_token": csrf, "model_id": "2", "delta": "-1"},
                 follow_redirects=False,
@@ -2181,7 +2192,7 @@ class TestAISettings:
             page = client.get("/settings/ai")
             assert "主力 · 本地 / b" in page.text
 
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/primary",
                 data={"csrf_token": csrf, "model_id": "1"},
                 follow_redirects=False,
@@ -2190,7 +2201,7 @@ class TestAISettings:
             page = client.get("/settings/ai")
             assert "主力 · 本地 / a" in page.text
 
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/remove",
                 data={"csrf_token": csrf, "model_id": "2"},
                 follow_redirects=False,
@@ -2211,25 +2222,25 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/keys/1/toggle",
                 data={"csrf_token": csrf, "enabled": "off"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
             assert "Key 0/1 可用" in client.get("/settings/ai").text
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/keys/1/reset",
                 data={"csrf_token": csrf},
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            response = client.post(
+            response = save_then_read_catalogue(client, 'POST',
                 "/settings/ai/keys/1/toggle",
                 data={"csrf_token": csrf, "enabled": "on"},
                 follow_redirects=False,
@@ -2246,22 +2257,22 @@ class TestAISettings:
             _authenticate(client, settings)
             csrf = _csrf(client, "ai")
             _add_provider(client, csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": csrf, "model_name": "m"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/append",
                 data={"csrf_token": csrf, "model_id": "1"},
                 follow_redirects=False,
             )
-            response = client.post(
+            response = save_then_read_provider(client, 'POST',
                 "/settings/ai/providers/1/delete",
                 data={"csrf_token": csrf},
                 follow_redirects=False,
@@ -2312,7 +2323,7 @@ class TestAIPathsSettings:
         asyncio.run(database.initialize())
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
                 follow_redirects=False,
@@ -2343,7 +2354,7 @@ class TestAIPathsSettings:
         asyncio.run(database.initialize())
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={
                     "csrf_token": _csrf(client, "paths"),
@@ -2364,22 +2375,22 @@ class TestAIPathsSettings:
             _authenticate(client, settings)
             ai_csrf = _csrf(client, "ai")
             _add_provider(client, ai_csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": ai_csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/models",
                 data={"csrf_token": ai_csrf, "model_name": "big"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/primary",
                 data={"csrf_token": ai_csrf, "model_id": "1"},
                 follow_redirects=False,
             )
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={
                     "csrf_token": _csrf(client, "paths"),
@@ -2416,36 +2427,36 @@ class TestAIPathsSettings:
             _authenticate(client, settings)
             ai_csrf = _csrf(client, "ai")
             _add_provider(client, ai_csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": ai_csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             for name in ("big", "small"):
-                client.post(
+                save_then_read_catalogue(client, 'POST',
                     "/settings/ai/providers/1/models",
                     data={"csrf_token": ai_csrf, "model_name": name},
                     follow_redirects=False,
                 )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/primary",
                 data={"csrf_token": ai_csrf, "model_id": "1"},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/append",
                 data={"csrf_token": ai_csrf, "model_id": "2"},
                 follow_redirects=False,
             )
 
             paths_csrf = _csrf(client, "paths")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai/models",
                 data={"csrf_token": paths_csrf, "ai_model_source": "custom"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/paths/chain/primary",
                 data={"csrf_token": paths_csrf, "model_id": "2"},
                 follow_redirects=False,
@@ -2458,7 +2469,7 @@ class TestAIPathsSettings:
             assert "跟随全局默认" in page.text  # 仍是可选的一项
 
             # 切回跟随：本页列表还在，但生效的是全局默认。
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai/models",
                 data={"csrf_token": paths_csrf, "ai_model_source": "default"},
                 follow_redirects=False,
@@ -2479,7 +2490,7 @@ class TestAIPathsSettings:
         asyncio.run(database.initialize())
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={
                     "csrf_token": _csrf(client, "paths"),
@@ -2499,12 +2510,12 @@ class TestAIPathsSettings:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "paths")
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={"csrf_token": csrf, **_paths_ai_data()},
                 follow_redirects=False,
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai/prompt-default",
                 data={"csrf_token": csrf},
                 follow_redirects=False,
@@ -2534,7 +2545,7 @@ class TestAIPathsSettings:
             _authenticate(client, settings)
             page = client.post(
                 "/archive-settings/paths/ai/cache/clear",
-                data={"csrf_token": _csrf(client, "paths")},
+                data={**_maintenance_conditions(client, "path-cache"), "csrf_token": _csrf(client, "paths")},
             )
         assert "已清除 1 条" in page.text
         assert asyncio.run(database.ai_path_suggestion_count()) == 0
@@ -2547,7 +2558,7 @@ class TestAIPathsSettings:
             _authenticate(client, settings)
             page = client.post(
                 "/archive-settings/paths/ai/cache/clear",
-                data={"csrf_token": _csrf(client, "paths")},
+                data={**_maintenance_conditions(client, "path-cache"), "csrf_token": _csrf(client, "paths")},
             )
         assert "已清除 0 条" not in page.text
         assert "没有可清除" in page.text
@@ -2559,7 +2570,7 @@ class TestAIPathsSettings:
         settings = _settings(tmp_path)
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={
                     "csrf_token": _csrf(client, "paths"),
@@ -2600,7 +2611,7 @@ class TestReArchiveDryRun:
             _seed_work(settings, 1, title="未打包作品")
             response = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": _csrf(client, "paths"), "dry_run": "on"},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": _csrf(client, "paths"), "dry_run": "on"},
             )
 
         assert response.status_code == 200
@@ -2628,13 +2639,13 @@ class TestReArchiveDryRun:
                 pack_state="CONVERSION_COMPLETED",
                 cbz_relative="旧/已打包作品.cbz",
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
             )
             response = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": _csrf(client, "paths"), "dry_run": "on"},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": _csrf(client, "paths"), "dry_run": "on"},
             )
 
         assert "试跑结果" in response.text
@@ -2669,13 +2680,13 @@ class TestAiReArchiveSweep:
                 pack_state="CONVERSION_COMPLETED",
                 cbz_relative="旧/已打包作品.cbz",
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
             )
             response = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": _csrf(client, "paths")},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": _csrf(client, "paths")},
             )
 
         assert response.status_code == 200
@@ -2721,17 +2732,17 @@ class TestAiReArchiveSweep:
                 pinned_path="手动/名字.cbz",
                 pinned_is_manual=True,
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/archive-settings/paths/ai",
                 data={"csrf_token": _csrf(client, "paths"), **_paths_ai_data()},
             )
             default_run = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": _csrf(client, "paths")},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": _csrf(client, "paths")},
             )
             forced_run = client.post(
                 "/archive-settings/paths/rearchive",
-                data={"csrf_token": _csrf(client, "paths"), "force": "on"},
+                data={**_maintenance_conditions(client, "rearchive"), "csrf_token": _csrf(client, "paths"), "force": "on"},
             )
 
         assert default_run.status_code == 200
@@ -2769,7 +2780,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/parse",
                 data={
                     "csrf_token": csrf,
@@ -2793,7 +2804,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/parse",
                 data={"csrf_token": csrf, "accept_archive": "on"},
             )
@@ -2806,7 +2817,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/parse",
                 data={
                     "csrf_token": csrf,
@@ -2814,7 +2825,7 @@ class TestParseRulesSection:
                     "archive_formats": ["zip"],
                 },
             )
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/parse/reset",
                 data={"csrf_token": csrf},
                 follow_redirects=False,
@@ -2832,7 +2843,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/parse/ai",
                 data={
                     "csrf_token": csrf,
@@ -2862,7 +2873,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/parse/ai",
                 data={
                     "csrf_token": csrf,
@@ -2881,7 +2892,7 @@ class TestParseRulesSection:
         with TestClient(create_app(settings)) as client:
             _authenticate(client, settings)
             csrf = _csrf(client, "parse")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/parse/ai",
                 data={"csrf_token": csrf, "ai_candidate_fallback": "maybe"},
             )
@@ -2917,7 +2928,7 @@ class TestAIControlChain:
             csrf = page.context["csrf_token"]
             # A checkbox that is absent reads as off, the way every other one
             # on this page does.
-            response = client.post(
+            response = save_then_read_preferences(client, 'POST',
                 "/settings/ai/master",
                 data={"csrf_token": csrf},
                 follow_redirects=False,
@@ -2930,7 +2941,7 @@ class TestAIControlChain:
             # call, so the master switch promises not to affect it.
             assert "「测试模型」按钮不受此开关影响" in closed.text
 
-            client.post(
+            save_then_read_preferences(client, 'POST',
                 "/settings/ai/master",
                 data={"csrf_token": csrf, "ai_enabled": "on"},
                 follow_redirects=False,
@@ -2943,7 +2954,7 @@ class TestAIControlChain:
         settings = _settings(tmp_path)
         with TestClient(_ai_app(settings, _AiTransport())) as client:
             _authenticate(client, settings)
-            client.post(
+            save_then_read_preferences(client, 'POST',
                 "/settings/ai/master",
                 data={"csrf_token": _csrf(client, "ai")},
                 follow_redirects=False,
@@ -2965,18 +2976,18 @@ class TestAIControlChain:
             _authenticate(client, settings)
             ai_csrf = _csrf(client, "ai")
             _add_provider(client, ai_csrf)
-            client.post(
+            save_then_read_catalogue(client, 'POST',
                 "/settings/ai/providers/1/keys",
                 data={"csrf_token": ai_csrf, "api_keys": "k"},
                 follow_redirects=False,
             )
             for name in ("big", "small"):
-                client.post(
+                save_then_read_catalogue(client, 'POST',
                     "/settings/ai/providers/1/models",
                     data={"csrf_token": ai_csrf, "model_name": name},
                     follow_redirects=False,
                 )
-            client.post(
+            save_then_read_chain(client, 'POST',
                 "/settings/ai/chain/primary",
                 data={"csrf_token": ai_csrf, "model_id": "1"},
                 follow_redirects=False,
@@ -2988,13 +2999,13 @@ class TestAIControlChain:
             assert "本页单独指定" in page.text
             parse_csrf = page.context["csrf_token"]
 
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/parse/model-source",
                 data={"csrf_token": parse_csrf, "ai_model_source": "custom"},
                 follow_redirects=False,
             )
             assert response.status_code == 303
-            response = client.post(
+            response = save_then_read_chain(client, 'POST',
                 "/settings/parse/chain/primary",
                 data={"csrf_token": parse_csrf, "model_id": "2"},
                 follow_redirects=False,
@@ -3006,7 +3017,7 @@ class TestAIControlChain:
             assert "主力 本地 / small" in page.text
 
             # 切回跟随：本页列表还在，但生效的是全局默认。
-            client.post(
+            save_then_read_preferences(client, 'post',
                 "/settings/parse/model-source",
                 data={"csrf_token": parse_csrf, "ai_model_source": "default"},
                 follow_redirects=False,

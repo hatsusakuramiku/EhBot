@@ -13,6 +13,7 @@ from app.main import create_app
 from app.review.service import ReviewError, ReviewService
 from tests.ingest_admission import permit_all_message_types
 from tests.telegram_accounts import with_fixture_bot, bot_transport
+from tests.work_commands import observed_review, observed_review_form
 from app.connections.runtime import current_account_context
 
 
@@ -164,7 +165,7 @@ def test_approve_automatically_enqueues_download(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         assert response.status_code == 303
 
@@ -187,7 +188,7 @@ def test_reject_does_not_require_reason(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/reject",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         assert response.status_code == 303
 
@@ -209,7 +210,7 @@ def test_approve_without_download_source_keeps_candidate_pending(
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 400
         # The message is source-agnostic now that four routes can supply a
@@ -250,7 +251,7 @@ def test_a_gallery_with_a_torrent_routes_to_the_torrent(
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 303
 
@@ -291,7 +292,7 @@ def test_archive_download_is_never_an_automatic_route(
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 400
         assert "\u6ca1\u6709\u53ef\u7528\u7684\u4e0b\u8f7d\u6765\u6e90" in response.text
@@ -319,6 +320,9 @@ def test_metadata_edit_persists_and_creates_action(tmp_path: Path) -> None:
                 "csrf_token": csrf,
                 "field_name": "Title",
                 "field_value": "Edited Title",
+                "work_id": detail.context['work']['metadata_editor']['work_id'],
+                "expected_revision": detail.context['work']['metadata_editor']['revision'],
+                "idempotency_key": "edit-title",
             },
         )
         assert response.status_code == 303
@@ -363,13 +367,13 @@ def test_requeue_restores_pending_review(tmp_path: Path) -> None:
         csrf = detail.context["csrf_token"]
         client.post(
             f"/candidates/{candidate_id}/reject",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         rejected_detail = client.get(f"/works/{candidate_id}")
         rejected_csrf = rejected_detail.context["csrf_token"]
         response = client.post(
             f"/candidates/{candidate_id}/requeue",
-            data={"csrf_token": rejected_csrf, "note": "double check"},
+            data={**observed_review(client, candidate_id), "csrf_token": rejected_csrf, "note": "double check"},
         )
         assert response.status_code == 303
 
@@ -437,7 +441,7 @@ def test_the_work_page_offers_requeue_on_a_failed_candidate(
         assert "重新排队" in detail.text
         response = client.post(
             f"/candidates/{candidate_id}/requeue",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 303
 
@@ -550,6 +554,7 @@ def test_batch_review_approves_and_rejects_multiple_candidates(
                 "csrf_token": csrf,
                 "action": "approve",
                 "candidate_ids": [str(value) for value in approve_ids],
+                **observed_review_form(client, approve_ids),
             },
         )
         assert approved.status_code == 303
@@ -559,6 +564,7 @@ def test_batch_review_approves_and_rejects_multiple_candidates(
                 "csrf_token": csrf,
                 "action": "reject",
                 "candidate_ids": [str(value) for value in reject_ids],
+                **observed_review_form(client, reject_ids),
             },
         )
         assert rejected.status_code == 303

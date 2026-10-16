@@ -198,13 +198,17 @@ class QueueControl:
                 "WHERE operation_id = ?", (operation["operation_id"],),
             )
 
-    def _get_task_sync(self, task_id: str) -> dict:
-        with self._database.connection() as connection:
+    def _get_task_sync(self, task_id: str, *, connection=None) -> dict:
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            if not connection.in_transaction:
+                connection.execute('BEGIN')
             connection.row_factory = sqlite3.Row
             task = connection.execute("SELECT * FROM queue_tasks WHERE task_id = ?", (task_id,)).fetchone()
             if task is None:
                 raise DownloadError("TASK_NOT_FOUND", "任务不存在")
             result = dict(task)
+            job = connection.execute('SELECT error_code FROM download_jobs WHERE task_id = ?', (task_id,)).fetchone()
+            result['error_code'] = job[0] if job else None
             result['attempts'] = [dict(row) for row in connection.execute(
                 "SELECT * FROM queue_attempts WHERE task_id = ? ORDER BY attempt_no", (task_id,),
             )]
@@ -436,6 +440,8 @@ class QueueControl:
                     "WHERE id = ? AND status IN ('FAILED', 'PROCESSING', 'NEEDS_INFO')", (candidate_id,),
                 )
         elif action in {"cancel", "switch-source", "stop-seeding"}:
+            if action == 'switch-source' and provider == 'CONVERSION':
+                raise DownloadError('PROVIDER_UNSUPPORTED', '打包任务不能切换下载来源')
             if action == "stop-seeding":
                 if provider != "EH_TORRENT" or state != "COMPLETED":
                     raise DownloadError("JOB_NOT_SEEDING", "只有已完成的种子任务可以停止做种")

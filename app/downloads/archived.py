@@ -30,7 +30,7 @@ import json
 import logging
 import sqlite3
 import zipfile
-from contextlib import closing
+from contextlib import closing, nullcontext
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
@@ -318,7 +318,10 @@ class ArchivedWorkService:
         """Share archive fields and non-archive operator fields across both UIs."""
         from app.api.serializers import metadata_entry
         from app.review.models import split_metadata_entries
+        from app.review.commands import WorkCommands
+        version = await WorkCommands(self._database).version(candidate_id)
         snapshot = await self.archive_metadata(candidate_id, fetched_names=fetched_names)
+        snapshot.update(version)
         primary, _ = split_metadata_entries(await self._database.list_metadata(candidate_id))
         snapshot["fields"] = snapshot.pop("elements")
         for entry in primary:
@@ -328,6 +331,51 @@ class ArchivedWorkService:
             field.update(lock_field=entry.field_name, lock_available=field["editable"], archive_field=False)
             snapshot["fields"].append(field)
         return snapshot
+
+    async def finish_metadata_sync(self, sync_id):
+        """Finish one durable edit follow-up, returning its saved result on replay."""
+        library, _ = await self._roots()
+        return await run_sync(self._finish_metadata_sync, sync_id, library)
+
+    def _finish_metadata_sync(self, sync_id, library):
+        from app.review.commands import WorkCommandError
+        with self._database.connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT s.status, s.result_json, s.work_id, s.revision, '
+                's.fields_json, s.fetched_fields_json, s.operator_name, v.candidate_id, v.revision '
+                'FROM work_metadata_syncs s JOIN work_versions v ON v.work_id = s.work_id '
+                'WHERE s.sync_id = ?', (sync_id,)).fetchone()
+            if row is None:
+                raise WorkCommandError('METADATA_SYNC_NOT_FOUND', '元数据同步操作不存在', status_code=404)
+            if row[0] != 'PENDING':
+                return json.loads(row[1])
+            if row[7] is None or row[3] != row[8]:
+                result = {'synced': False, 'reason': 'WORK_CHANGED',
+                          'message': '元数据已保存，作品随后已变化，本次归档同步已跳过'}
+            else:
+                result = self._sync_archive_metadata_sync(row[7], library, json.loads(row[4]),
+                    json.loads(row[5]), row[6], connection=connection)
+                result['work_id'] = row[2]
+                result['revision'] = connection.execute(
+                    'SELECT revision FROM work_versions WHERE work_id = ?', (row[2],)).fetchone()[0]
+            connection.execute('UPDATE work_metadata_syncs SET status = ?, result_json = ? WHERE sync_id = ?',
+                ('COMPLETED' if result['synced'] else 'SKIPPED', json.dumps(result), sync_id))
+            return result
+
+    async def process_metadata_syncs(self):
+        """Use the existing operations loop to recover committed, unfinished edits."""
+        def pending():
+            with self._database.connection() as connection:
+                return [row[0] for row in connection.execute('SELECT sync_id FROM work_metadata_syncs '
+                    "WHERE status = 'PENDING' ORDER BY created_at, sync_id LIMIT 100")]
+        count = 0
+        for sync_id in await run_sync(pending):
+            try:
+                await self.finish_metadata_sync(sync_id)
+                count += 1
+            except (OSError, sqlite3.Error):
+                logger.warning('metadata_sync_pending sync_id=%s', sync_id)
+        return count
 
     async def sync_archive_metadata(self, candidate_id: int, *, fields=None, fetched_fields=None, operator_name="admin") -> dict:
         """Update ComicInfo in place; skipped writes retain the database edit.
@@ -340,10 +388,12 @@ class ArchivedWorkService:
         library, _ = await self._roots()
         return await asyncio.to_thread(self._sync_archive_metadata_sync, candidate_id, library, fields, fetched_fields or {}, operator_name)
 
-    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin") -> dict:
+    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin", connection=None) -> dict:
         from app.conversion.comicinfo import changed_elements, element_sources
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        owns_connection = connection is None
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            if owns_connection:
+                connection.execute("BEGIN IMMEDIATE")
             row = self._cbz_row(connection, candidate_id)
             reason = None
             message = "元数据已保存，归档文件已同步"
@@ -517,9 +567,10 @@ class ArchivedWorkService:
         return result
 
     def _begin_removal_sync(self, candidate_id, delete_files, operator_name, purge,
-                            library, work_root, work):
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+                            library, work_root, work, connection=None):
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             # Running refile uses the existing physical-stop barrier. A manual
             # rename has no worker, so wait for its short publication to end.
             if connection.execute("SELECT 1 FROM queue_relocations WHERE candidate_id = ? "
@@ -782,6 +833,7 @@ class ArchivedWorkService:
         filename: str | None = None,
         directory: str | None = None,
         operator_name: str = "admin",
+        command=None,
     ) -> dict:
         """Move or rename this work's published CBZ inside the library.
 
@@ -851,7 +903,7 @@ class ArchivedWorkService:
                 target_dir = target_dir / safe_segment
 
         target = _resolve_inside(library_root, target_dir / f"{cleaned}{CBZ_SUFFIX}")
-        if target == source:
+        if target == source and command is None:
             # Not an error: the operator submitted the name it already has, and
             # refusing would read as the rename being broken.
             return {
@@ -870,6 +922,7 @@ class ArchivedWorkService:
             is_manual=True,
             override_manual=False,
             operator_name=operator_name,
+            command=command,
         )
 
     def _reconcile_moves_sync(self, candidate_id):
@@ -890,6 +943,7 @@ class ArchivedWorkService:
         is_manual: bool,
         override_manual: bool,
         operator_name: str,
+        command=None,
     ) -> dict:
         """Move one published CBZ and record where it went, once, for both callers.
 
@@ -910,6 +964,7 @@ class ArchivedWorkService:
         result = await run_sync(
             self._relocate_sync, work, source, target, library_root,
             is_manual, override_manual, operator_name,
+            command,
         )
         if self._notify is not None:
             self._notify(work.candidate_id)
@@ -924,6 +979,7 @@ class ArchivedWorkService:
         is_manual: bool,
         override_manual: bool,
         operator_name: str,
+        command=None,
     ) -> dict:
         """Journal before rename; commit the path, pin and refile result together."""
         source = _resolve_inside(library_root, source)
@@ -957,13 +1013,21 @@ class ArchivedWorkService:
 
         with self._database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if command is not None:
+                receipt = command.inspect(connection)
+                if receipt is not None:
+                    return receipt
             try:
                 Relocations(self._database).check(candidate_id=work.candidate_id, connection=connection)
             except ConversionError as exc:
                 raise ArchivedWorkError(exc.code, exc.public_message) from exc
             artifact_id = validate(connection)
             try:
-                resolved = unique_library_target(target, reserved=frozenset({str(source)}))
+                if command is not None and command.strict:
+                    self._require_command_path_free(connection, work, target, library_root)
+                    resolved = target
+                else:
+                    resolved = unique_library_target(target, reserved=frozenset({str(source)}))
             except LibraryTemplateError as exc:
                 raise ArchivedWorkError(exc.code, exc.public_message) from exc
             relative = resolved.relative_to(library_root.resolve()).as_posix()
@@ -976,8 +1040,14 @@ class ArchivedWorkService:
         try:
             with self._database.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                if command is not None:
+                    receipt = command.inspect(connection)
+                    if receipt is not None:
+                        return receipt
                 if validate(connection) != artifact_id:
                     raise ArchivedWorkError("WORK_PATH_CHANGED", "作品版本已改变，请刷新后重试")
+                if command is not None and command.strict:
+                    self._require_command_path_free(connection, work, target, library_root)
                 try:
                     if resolved != source:
                         if resolved.exists():
@@ -1003,6 +1073,10 @@ class ArchivedWorkService:
                         connection.execute("UPDATE download_jobs SET state = 'CONVERSION_COMPLETED', error_code = NULL, "
                             "error_message = NULL, details_json = json_patch(details_json, ?) WHERE task_id = ?",
                             (json.dumps({'refiled': True, 'moved': moved, 'relative_path': relative}), execution.task_id))
+                    result = {"candidate_id": work.candidate_id, "path": str(resolved),
+                              "relative_path": relative, "moved": moved, "committed": execution is not None}
+                    if command is not None:
+                        result = command.complete(connection, result)
                 except BaseException:
                     # Restore on SQL failure before another writer can observe
                     # the rolled-back path and start removal/republication.
@@ -1022,8 +1096,7 @@ class ArchivedWorkService:
             raise
         if moved:
             _prune_empty_parents(source, library_root)
-        return {"candidate_id": work.candidate_id, "path": str(resolved),
-                "relative_path": relative, "moved": moved, "committed": execution is not None}
+        return result
 
     async def clear_path_pin(self, candidate_id: int) -> None:
         """Drop where this book was told to land, so the current mode decides.
@@ -1047,6 +1120,7 @@ class ArchivedWorkService:
         *,
         operator_name: str = "admin",
         allow_while_running: bool = False,
+        command=None,
     ) -> dict:
         """Move a packed book to the path the current rules computed for it.
 
@@ -1100,6 +1174,7 @@ class ArchivedWorkService:
             is_manual=False,
             override_manual=True,
             operator_name=operator_name,
+            command=command,
         )
 
     async def has_manual_path_pin(self, candidate_id: int) -> bool:
@@ -1155,10 +1230,10 @@ class ArchivedWorkService:
         )
 
     def _park_for_invalid_path_sync(
-        self, candidate_id: int, code: str, message: str
+        self, candidate_id: int, code: str, message: str, connection=None
     ) -> None:
         key = f"convert:{candidate_id}"
-        with self._database.connection() as connection:
+        with self._database.connection() if connection is None else nullcontext(connection) as connection:
             connection.execute(
                 "INSERT INTO download_jobs "
                 "(candidate_id, idempotency_key, provider, state, "
@@ -1190,6 +1265,7 @@ class ArchivedWorkService:
         directory: str = "",
         filename: str = "",
         operator_name: str = "admin",
+        command=None,
     ) -> dict:
         """Set where this work's CBZ belongs, moving the file if there is one.
 
@@ -1215,6 +1291,7 @@ class ArchivedWorkService:
         yet. That is what makes 「先设路径，再打包」 work, which is the whole point
         of asking for it on the detail page.
         """
+        await run_sync(self._reconcile_moves_sync, candidate_id)
         work = await self._require_work(candidate_id)
         if work.pack_state == CONVERSION_STATE_RUNNING:
             raise ArchivedWorkError(
@@ -1230,6 +1307,12 @@ class ArchivedWorkService:
             detect_library_limits(library_root),
         )
         current = work.archive_relative_path
+        if command is not None:
+            target = _resolve_inside(library_root, library_root / relative)
+            if work.cbz_path:
+                return await self._relocate(work, Path(work.cbz_path), target, library_root=library_root,
+                    is_manual=True, override_manual=False, operator_name=operator_name, command=command)
+            return await run_sync(self._pin_command_sync, candidate_id, target, library_root, operator_name, command)
         if current == relative.as_posix() and work.cbz_path:
             # The submitted path is the one it already has. Not an error:
             # refusing would read as the form being broken.
@@ -1283,6 +1366,38 @@ class ArchivedWorkService:
             "moved": moved,
             "created_directory": created_directory,
         }
+
+    def _require_command_path_free(self, connection, work, target, library_root):
+        relative = target.relative_to(library_root.resolve()).as_posix()
+        owner = connection.execute('SELECT candidate_id FROM work_archive_paths WHERE relative_path = ? '
+                                   'AND candidate_id <> ?', (relative, work.candidate_id)).fetchone()
+        reserved = connection.execute("SELECT candidate_id FROM queue_relocations WHERE destination = ? "
+            "AND candidate_id <> ? AND status IN ('PREPARED', 'RECOVERY_REQUIRED')",
+            (str(target), work.candidate_id)).fetchone()
+        if owner or reserved:
+            raise ArchivedWorkError('PATH_TAKEN_BY_WORK', '该路径已被其他作品占用，请换一个名称')
+        if target.exists() and (not work.cbz_path or Path(work.cbz_path).resolve() != target):
+            raise ArchivedWorkError('PATH_TAKEN_ON_DISK', '目标位置已有同名文件，请换一个名称')
+
+    def _pin_command_sync(self, candidate_id, target, library_root, operator, command):
+        with self._database.connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            receipt = command.inspect(connection)
+            if receipt is not None:
+                return receipt
+            Relocations(self._database).check(candidate_id=candidate_id, connection=connection)
+            work = self._database._downloaded_work_sync(candidate_id, connection)
+            if work is None:
+                raise ArchivedWorkError('WORK_NOT_DOWNLOADED', '该作品没有已下载的档案')
+            if work.pack_state in {CONVERSION_STATE_RUNNING, 'STOPPING'} or work.cbz_path:
+                raise ArchivedWorkError('WORK_PATH_CHANGED', '作品正在执行或已有产物，请刷新后核对路径')
+            self._require_command_path_free(connection, work, target, library_root)
+            relative = target.relative_to(library_root.resolve()).as_posix()
+            self._database.write_archive_path_pin(connection, candidate_id, relative, True, operator)
+            # No file exists yet. The directory can be created without exposing
+            # a published artifact; the packer still owns actual publication.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            return command.complete(connection, {'relative_path': relative, 'moved': False})
 
     @staticmethod
     def _plan_explicit_path(

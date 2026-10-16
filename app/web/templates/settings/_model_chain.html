@@ -11,7 +11,16 @@
   列表为空时该去哪里加模型。页面上不写任何状态词：徽标一律来自 `ui.badge`。
 -#}
 {% import "components/ui.html" as ui %}
-{% macro model_chain(chain, models, endpoint, csrf_token, empty_hint) -%}
+{% macro chain_command_fields(scope, item=none) %}
+  <input type="hidden" name="expected_revision" value="{{ settings_versions['ai-chain:' ~ scope] }}">
+  <input type="hidden" name="idempotency_key" value="{{ new_command_key() }}">
+  {% if item %}
+    <input type="hidden" name="model_id" value="{{ item.model_id }}">
+    <input type="hidden" name="model_uuid" value="{{ item.model_uuid }}">
+    <input type="hidden" name="model_label" value="{{ item.label if item.label is defined else item.name }}">
+  {% endif %}
+{% endmacro %}
+{% macro model_chain(chain, models, endpoint, csrf_token, empty_hint, scope='default') -%}
   {% if chain %}
     <ol class="ui-form" style="margin: var(--s-3) 0 0; padding-left: 0; list-style: none">
       {% for entry in chain %}
@@ -30,24 +39,24 @@
           </div>
           <div class="ui-form-actions">
             {% if not loop.first %}
-              <form method="post" action="{{ endpoint }}/shift">
+              <form data-ai-chain-command data-settings-action="ai-chain-{{ scope }}-up-{{ entry.model_uuid }}" method="post" action="{{ endpoint }}/shift">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+                {{ chain_command_fields(scope, entry) }}
                 <input type="hidden" name="delta" value="-1">
                 <button class="ui-btn" data-size="sm" type="submit">上移</button>
               </form>
             {% endif %}
             {% if not loop.last %}
-              <form method="post" action="{{ endpoint }}/shift">
+              <form data-ai-chain-command data-settings-action="ai-chain-{{ scope }}-down-{{ entry.model_uuid }}" method="post" action="{{ endpoint }}/shift">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+                {{ chain_command_fields(scope, entry) }}
                 <input type="hidden" name="delta" value="1">
                 <button class="ui-btn" data-size="sm" type="submit">下移</button>
               </form>
             {% endif %}
-            <form method="post" action="{{ endpoint }}/remove">
+            <form data-ai-chain-command data-settings-action="ai-chain-{{ scope }}-remove-{{ entry.model_uuid }}" method="post" action="{{ endpoint }}/remove">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="model_id" value="{{ entry.model_id }}">
+              {{ chain_command_fields(scope, entry) }}
               <button class="ui-btn" data-size="sm" type="submit">移出</button>
             </form>
           </div>
@@ -60,13 +69,14 @@
 
   {% set available = models | rejectattr("in_chain") | list %}
   {% if available %}
-    <form class="ui-form" method="post" action="{{ endpoint }}/append" style="margin-top: var(--s-4)">
+    <form data-ai-chain-command data-settings-action="ai-chain-{{ scope }}-append" class="ui-form" method="post" action="{{ endpoint }}/append" style="margin-top: var(--s-4)">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ chain_command_fields(scope) }}
       <div class="ui-field">
         <label for="chain-model-{{ endpoint | replace('/', '-') }}">加入备用</label>
-        <select class="ui-select" id="chain-model-{{ endpoint | replace('/', '-') }}" name="model_id">
+        <select class="ui-select" id="chain-model-{{ endpoint | replace('/', '-') }}" name="model_identity">
           {% for model in available %}
-            <option value="{{ model.model_id }}">{{ model.label }}{% if not model.enabled %}（已停用）{% endif %}</option>
+            <option value="{{ model.model_id }}:{{ model.model_uuid }}">{{ model.label }}{% if not model.enabled %}（已停用）{% endif %}</option>
           {% endfor %}
         </select>
       </div>

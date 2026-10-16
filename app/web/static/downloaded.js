@@ -100,6 +100,10 @@
 
   function openDrawer(button) {
     if (!drawer || !renameForm) return;
+    if (!drawer.hidden && renameForm.dataset.dirty === "true") {
+      filenameField.focus();
+      return;
+    }
     lastTrigger = button;
     var id = button.getAttribute("data-rename-open");
     var path = button.getAttribute("data-rename-name") || "";
@@ -107,6 +111,11 @@
     var title = button.getAttribute("data-rename-title") || "";
 
     renameForm.setAttribute("action", "/downloaded/" + id + "/rename");
+    renameForm.elements.work_id.value = button.getAttribute("data-rename-work-id");
+    renameForm.elements.expected_revision.value = button.getAttribute("data-rename-revision");
+    renameForm.elements.idempotency_key.value = crypto.randomUUID();
+    renameForm.elements.repack.checked = false;
+    delete renameForm.dataset.dirty;
     /* Pre-filled from the current name so the operator edits rather than
      * retypes, and so submitting untouched is the documented no-op instead of a
      * silent move to a template-derived path. */

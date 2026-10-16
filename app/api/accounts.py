@@ -85,7 +85,7 @@ async def api_account_reveal(request: Request, account_id: str):
 @router.post("/accounts/commands")
 async def api_account_command(request: Request):
     manager = await _access(request, write=True)
-    payload = await _json_body(request)
+    payload = deps.command_payload(request, await _json_body(request))
     action = payload.get("action")
     if not isinstance(action, str):
         raise ApiError("ACCOUNT_ACTION_INVALID", "请指定账号命令")

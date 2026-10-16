@@ -12,6 +12,9 @@ import hashlib
 import io
 import subprocess
 import tarfile
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from pathlib import Path
 
 import pytest
@@ -77,6 +80,63 @@ def install_with(tools_path: Path, payload: bytes, **kwargs) -> Path:
         )
     finally:
         RELEASE_ASSETS[("linux", "x64")] = original
+
+
+def test_actual_install_files_are_exclusive_across_threads_and_processes(tmp_path, monkeypatch):
+    payload = release_payload()
+    asset = RELEASE_ASSETS[('linux', 'x64')]
+    monkeypatch.setitem(RELEASE_ASSETS, ('linux', 'x64'), ReleaseAsset(asset.file_name, hashlib.sha256(payload).hexdigest()))
+    entered, release = Event(), Event()
+
+    def download(url):
+        entered.set()
+        assert release.wait(10)
+        return payload
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(install, tmp_path, system='linux', machine='x64', force=True, download=download)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(ToolchainError) as failure:
+                install(tmp_path, system='linux', machine='x64', force=True, download=lambda _: pytest.fail('Concurrent fetch'))
+            assert failure.value.code == 'TOOLCHAIN_BUSY'
+            code = '''
+from pathlib import Path
+import sys
+from app.archive.toolchain import install, ToolchainError
+try:
+    install(Path(sys.argv[1]), system='linux', machine='x64', force=True, download=lambda _: b'forbidden')
+except ToolchainError as exc:
+    print(exc.code)
+'''
+            second = subprocess.run([sys.executable, '-c', code, str(tmp_path)], capture_output=True, text=True, timeout=5)
+            assert second.returncode == 0 and second.stdout.strip() == 'TOOLCHAIN_BUSY', second.stderr
+        finally:
+            release.set()
+        assert first.result().is_file()
+
+
+def test_replace_failure_restores_previous_and_interrupted_swap_recovers_before_fetch(tmp_path, monkeypatch):
+    payload = release_payload()
+    executable = install_with(tmp_path, payload)
+    before = executable.read_bytes()
+    root = install_root(tmp_path)
+    original = Path.replace
+
+    def fail(source, destination):
+        if source.name.endswith('.incoming'):
+            raise OSError('fixture replacement refused')
+        return original(source, destination)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'replace', fail)
+        with pytest.raises(OSError, match='fixture replacement refused'):
+            install_with(tmp_path, payload, force=True)
+    assert executable.read_bytes() == before
+    assert not root.with_name(root.name + '.previous').exists()
+    root.replace(root.with_name(root.name + '.previous'))
+    assert install(tmp_path, system='linux', machine='x64', download=lambda _: pytest.fail('Recovery fetched')) == executable
+    assert executable.read_bytes() == before
 
 
 def windows_runner(command: list[str], **kwargs) -> subprocess.CompletedProcess:

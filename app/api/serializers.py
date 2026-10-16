@@ -87,6 +87,8 @@ def candidate_summary(item: Any) -> dict[str, Any]:
     """
     return {
         "candidate_id": item.candidate_id,
+        "work_id": item.work_id,
+        "revision": item.revision,
         "status": status_payload(item.status),
         "filter_result": item.filter_result,
         "filter_reason": item.filter_reason,
@@ -457,6 +459,8 @@ def downloaded_work(work: Any) -> dict[str, Any]:
     packing = work.pack_state == CONVERSION_STATE_RUNNING
     return {
         "candidate_id": work.candidate_id,
+        "work_id": work.work_id,
+        "revision": work.revision,
         "job_id": work.job_id,
         "provider": {
             "code": work.provider,
@@ -613,6 +617,8 @@ def auto_approval_rule(rule: Any) -> dict[str, Any]:
     """
     return {
         "rule_id": rule.rule_id,
+        "rule_uuid": rule.rule_uuid,
+        "revision": rule.version,
         "name": rule.name,
         "enabled": rule.enabled,
         "enablement": toggle_view(rule.enabled).to_payload(),
@@ -638,6 +644,8 @@ def archive_path_rule(rule: Any) -> dict[str, Any]:
     """
     return {
         "rule_id": rule.rule_id,
+        "rule_uuid": rule.rule_uuid,
+        "revision": rule.version,
         "name": rule.name,
         "enabled": rule.enabled,
         "enablement": toggle_view(rule.enabled).to_payload(),
@@ -682,6 +690,10 @@ def ai_provider(provider: Any) -> dict[str, Any]:
     """
     return {
         "provider_id": provider.provider_id,
+        "provider_uuid": provider.provider_uuid,
+        "revision": provider.revision,
+        "keys_revision": provider.keys_revision,
+        "models_revision": provider.models_revision,
         "name": provider.name,
         "code": provider.code,
         "code_label": PROVIDER_CODE_LABELS.get(provider.code, provider.code),
@@ -725,6 +737,9 @@ def ai_provider_key(key: Any, *, usable: bool) -> dict[str, Any]:
     """
     return {
         "key_id": key.key_id,
+        "key_uuid": key.key_uuid,
+        "revision": key.revision,
+        "health_revision": key.health_revision,
         "provider_id": key.provider_id,
         "label": key.label,
         "enabled": key.enabled,
@@ -741,6 +756,8 @@ def ai_provider_model(model: Any) -> dict[str, Any]:
     """One model name and its verification state."""
     return {
         "model_id": model.model_id,
+        "model_uuid": model.model_uuid,
+        "revision": model.revision,
         "provider_id": model.provider_id,
         "name": model.name,
         "enabled": model.enabled,
@@ -770,6 +787,7 @@ def ai_selectable_model(
     """
     return {
         "model_id": model.model_id,
+        "model_uuid": model.model_uuid,
         "provider_id": provider.provider_id,
         "provider_name": provider.name,
         "model_name": model.name,
@@ -792,8 +810,10 @@ def ai_chain_entry(entry: Any) -> dict[str, Any]:
         "primary": entry.is_primary,
         "scope": entry.scope,
         "provider_id": entry.provider.provider_id,
+        "provider_uuid": entry.provider.provider_uuid,
         "provider_name": entry.provider.name,
         "model_id": entry.model.model_id,
+        "model_uuid": entry.model.model_uuid,
         "model_name": entry.model.name,
         "label": f"{entry.provider.name} / {entry.model.name}",
     }
@@ -808,6 +828,8 @@ def archive_password(entry: Any) -> dict[str, Any]:
     """
     return {
         "password_id": entry.password_id,
+        "password_uuid": entry.password_uuid,
+        "revision": entry.revision,
         "name": entry.name,
         "priority": entry.priority,
         "enabled": entry.enabled,
@@ -839,6 +861,8 @@ def tool_profile(profile: Any) -> dict[str, Any]:
     """One registered extraction tool. Operators never submit raw commands."""
     return {
         "profile_id": profile.profile_id,
+        "profile_uuid": profile.profile_uuid,
+        "revision": profile.revision,
         "name": profile.name,
         "backend": profile.backend,
         "kind": profile.kind,

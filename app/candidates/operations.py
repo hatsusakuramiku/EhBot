@@ -6,7 +6,7 @@ import json
 
 from app.candidates.entries import IngestError
 from app.candidates.merging import candidate_record
-from app.candidates.references import _stop_source
+from app.candidates.references import _stop_source, check_command_target
 
 
 def _identity(operation_id):
@@ -39,6 +39,7 @@ def _validate_retry(connection, kind, row):
     ).fetchone():
         raise IngestError('INGEST_CANDIDATE_REMOVING')
     if kind == 'reference':
+        check_command_target(connection, row['operation_id'], row['candidate_id'], row['gallery_id'])
         if (source['ex_gid'], source['ex_gallery_token']) != (row['old_gid'], row['old_token']):
             raise IngestError('INGEST_REFERENCE_CHANGED')
         if connection.execute(

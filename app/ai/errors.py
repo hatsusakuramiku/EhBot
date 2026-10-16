@@ -17,6 +17,7 @@ AI_PROVIDER_NOT_FOUND = "AI_PROVIDER_NOT_FOUND"
 AI_KEY_INVALID = "AI_KEY_INVALID"
 AI_MODEL_INVALID = "AI_MODEL_INVALID"
 AI_MODEL_NOT_FOUND = "AI_MODEL_NOT_FOUND"
+AI_CONFIGURATION_CHANGED = "AI_CONFIGURATION_CHANGED"
 #: Chain-entry refusals that R31 no longer raises. The old save-time gate made
 #: an unverified, disabled or key-less model impossible to configure at all,
 #: which also made whole classes of endpoints (reasoning models, gateways that
@@ -82,6 +83,7 @@ class AiError(ValueError):
 
 
 __all__ = [
+    "AI_CONFIGURATION_CHANGED",
     "AI_CANDIDATE_INVALID",
     "AI_CHAIN_DUPLICATE",
     "AI_CHAIN_EMPTY",

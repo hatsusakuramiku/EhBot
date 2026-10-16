@@ -19,10 +19,38 @@
     });
     var name = host.querySelector("[data-new-field]"), value = host.querySelector("[data-new-value]");
     if (name && name.value.trim()) payload.fields[name.value.trim()] = value.value;
+    payload.work_id = host.dataset.workId;
+    payload.expected_revision = Number(host.dataset.revision);
+    var identity = JSON.stringify(payload);
+    if (!host._metadataCommand || host._metadataCommand.identity !== identity) {
+      host._metadataCommand = { identity: identity, key: window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2) };
+    }
+    payload.idempotency_key = host._metadataCommand.key;
     return payload;
   }
   function hasChanges(payload) {
     return Object.keys(payload.fields).length || Object.keys(payload.locks).length || Object.keys(payload.fetched_fields).length;
+  }
+  function fetchPayload(host) {
+    var payload = { work_id: host.dataset.workId, expected_revision: Number(host.dataset.revision) };
+    var identity = JSON.stringify(payload);
+    if (!host._metadataFetchCommand || host._metadataFetchCommand.identity !== identity) {
+      host._metadataFetchCommand = { identity: identity, key: window.crypto && window.crypto.randomUUID
+        ? window.crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2) };
+    }
+    payload.idempotency_key = host._metadataFetchCommand.key;
+    return payload;
+  }
+  function setVersion(host, editor) {
+    host.dataset.workId = editor.work_id;
+    host.dataset.revision = String(editor.revision);
+    ["work_id", "expected_revision"].forEach(function (name) {
+      var input = host.querySelector('[name="' + name + '"]');
+      if (input) input.value = name === "work_id" ? editor.work_id : String(editor.revision);
+    });
+    delete host._metadataCommand;
+    delete host._metadataFetchCommand;
   }
   function applyFetched(host, editor) {
     rows(host).forEach(function (row) {
@@ -36,7 +64,11 @@
       if (value.value !== baseline) return;
       value.value = fields[name];
       if (editor.packaged) row.dataset.fetchedValue = value.value;
-      else { value.dataset.original = value.value; delete row.dataset.fetchedValue; }
+      else {
+        value.dataset.original = value.value; delete row.dataset.fetchedValue;
+        var original = host.querySelector('[name="original__' + name + '"]');
+        if (original) original.value = value.value;
+      }
     });
     host.dataset.dirty = "true";
   }
@@ -60,10 +92,15 @@
       var lock = row.querySelector('[data-field="lock"]');
       if (field && value) { value.value = field.field_value; value.dataset.original = value.value; }
       if (field && lock) { lock.checked = !!field.is_locked; lock.dataset.original = lock.checked ? "1" : "0"; }
+      var original = host.querySelector('[name="original__' + row.dataset.fieldName + '"]');
+      var lockOriginal = host.querySelector('[name="lock_original__' + (row.dataset.lockField || row.dataset.fieldName) + '"]');
+      if (field && original) original.value = field.field_value;
+      if (field && lockOriginal) lockOriginal.value = field.is_locked ? "1" : "0";
       if (field) row.dataset.manual = field.is_manual ? "1" : "0";
       delete row.dataset.fetchedValue;
     });
     delete host.dataset.dirty;
+    setVersion(host, editor);
   }
   document.addEventListener("submit", function (event) {
     var form = event.target, editor = document.querySelector("[data-metadata-editor]");
@@ -72,7 +109,7 @@
     if (form !== editor && !fetch) return;
     event.preventDefault(); event.stopImmediatePropagation();
     var status = editor.querySelector("[data-metadata-status]");
-    var payload = fetch ? null : changes(editor);
+    var payload = fetch ? fetchPayload(editor) : changes(editor);
     if (!fetch && !hasChanges(payload)) { status.textContent = "没有需要保存的修改"; return; }
     var controls = Array.from(editor.elements).concat(Array.from(form.elements)).filter(function (node) { return !node.disabled; });
     controls.forEach(function (node) { node.disabled = true; });
@@ -83,9 +120,18 @@
         // Restore disabled flags before examining editable values.
         controls.forEach(function (node) { node.disabled = false; });
         if (fetch) {
+          if (body.status === "RUNNING") { status.textContent = "仍在拉取，可稍后再次查询；草稿已保留"; return; }
+          if (!body.metadata_editor || body.snapshot_changed || body.work_id !== payload.work_id
+              || body.input_revision !== payload.expected_revision
+              || Number(editor.dataset.revision) !== payload.expected_revision) {
+            status.textContent = "作品已变化，请核对最新状态；草稿与原版本已保留"; return;
+          }
           if (body.metadata_editor.error) { status.textContent = body.metadata_editor.error; return; }
           applyFetched(editor, body.metadata_editor);
+          setVersion(editor, body.metadata_editor);
           status.textContent = body.metadata_editor.packaged ? "拉取完成，归档尚未修改；请点击保存元数据" : "拉取完成，下次打包使用这些值";
+        } else if (!body.metadata_editor || body.snapshot_changed) {
+          status.textContent = "修改已受理，但作品随后有变化；请核对最新状态，草稿已保留";
         } else if (body.sync_skipped && !["WORK_NOT_PACKED", "NO_ARCHIVE_CHANGES"].includes(body.sync_skipped)) {
           status.textContent = body.sync_message;
         } else {
@@ -96,5 +142,6 @@
       }).catch(function (error) { status.textContent = error.message; })
       .finally(function () { controls.forEach(function (node) { node.disabled = false; }); });
   }, true);
-  window.EhBotMetadata = { changes: changes, hasChanges: hasChanges, applyFetched: applyFetched, json: json };
+  window.EhBotMetadata = { changes: changes, hasChanges: hasChanges, applyFetched: applyFetched, json: json,
+                          fetchPayload: fetchPayload };
 })();

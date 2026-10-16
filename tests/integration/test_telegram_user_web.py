@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from tests.work_commands import observed_review
 import sqlite3
 from uuid import uuid4
 
@@ -601,7 +602,7 @@ def test_an_oversized_attachment_is_fetched_by_the_user_account(
         page = client.get(f"/works/{candidate_id}")
         client.post(
             f"/candidates/{candidate_id}/telegram-user",
-            data={"csrf_token": page.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": page.context["csrf_token"]},
             follow_redirects=True,
         )
         with sqlite3.connect(settings.data_path / "ehbot.db") as connection:
@@ -672,7 +673,7 @@ def test_a_download_with_unknown_source_account_is_refused_before_enqueue(
         page = client.get(f"/works/{candidate_id}")
         refused = client.post(
             f"/candidates/{candidate_id}/telegram-user",
-            data={"csrf_token": page.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": page.context["csrf_token"]},
             follow_redirects=True,
         )
         with sqlite3.connect(settings.data_path / "ehbot.db") as connection:

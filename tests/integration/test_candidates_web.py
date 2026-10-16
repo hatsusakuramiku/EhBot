@@ -12,6 +12,9 @@ from app.config import Settings
 from app.db.database import Database
 from app.main import create_app
 from tests.ingest_admission import permit_all_message_types
+from tests.work_commands import observed_review, observed_review_form
+from tests.integration.test_review_actions import seed_candidate as seed_review_candidate
+from tests.telegram_accounts import bot_transport
 from tests.integration.markup import (
     gated_targets,
     nested_form_lines,
@@ -568,13 +571,13 @@ def test_quick_approve_returns_to_the_tab_it_was_fired_from(
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(
-        seed_archive_candidate(
+        seed_review_candidate(
             database, update_id=340, message_id=100, title="Inline Approve"
         )
     )
     set_status(database, candidate_id, "NEEDS_INFO")
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         page = client.get("/candidates/needs-info")
         response = client.post(
@@ -584,6 +587,7 @@ def test_quick_approve_returns_to_the_tab_it_was_fired_from(
                 # What the list sends and the detail page does not: its presence
                 # is the whole difference between the two callers.
                 "tab": "needs_info",
+                **observed_review_form(client, [candidate_id]),
             },
         )
 
@@ -600,17 +604,17 @@ def test_quick_approve_without_a_tab_still_lands_on_the_detail_page(
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(
-        seed_archive_candidate(
+        seed_review_candidate(
             database, update_id=341, message_id=101, title="Detail Approve"
         )
     )
 
-    with TestClient(create_app(settings), follow_redirects=False) as client:
+    with TestClient(create_app(settings, telegram_transport=bot_transport()), follow_redirects=False) as client:
         authenticate(client, settings)
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
 
     assert response.status_code == 303
@@ -779,6 +783,7 @@ def test_a_batch_purge_removes_the_candidate_entirely(tmp_path: Path) -> None:
                 "action": "delete",
                 "tab": "all",
                 "candidate_ids": ["1"],
+                **observed_review_form(client, [1]),
             },
         )
         listed = client.get("/candidates/all")
@@ -846,6 +851,7 @@ def test_a_batch_purge_works_on_a_tab_that_cannot_review(
                 "action": "delete",
                 "tab": "failed",
                 "candidate_ids": [str(candidate_id)],
+                **observed_review_form(client, [candidate_id]),
             },
         )
         listed = client.get("/candidates/failed")

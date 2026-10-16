@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import json
 from pathlib import Path
+from tests.work_commands import observed_review
 import zipfile
 
 import httpx
@@ -326,7 +327,7 @@ def test_an_oversized_attachment_routes_to_the_preview_page(
         detail = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
         assert response.status_code == 303
 
@@ -358,7 +359,7 @@ def test_a_small_attachment_still_wins_over_the_preview_page(
         detail = client.get(f"/works/{candidate_id}")
         client.post(
             f"/candidates/{candidate_id}/approve",
-            data={"csrf_token": detail.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": detail.context["csrf_token"]},
         )
 
     jobs = asyncio.run(
@@ -391,17 +392,17 @@ def test_the_manual_preview_button_refuses_a_second_active_source(tmp_path: Path
         # from page copy, so the button reads what every other surface calls it.
         assert "预览页图源" in detail.text
         client.post(
-            f"/candidates/{candidate_id}/approve", data={"csrf_token": csrf}
+            f"/candidates/{candidate_id}/approve", data={**observed_review(client, candidate_id), "csrf_token": csrf}
         )
         response = client.post(
             f"/candidates/{candidate_id}/telegraph",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
         assert response.status_code == 400
         # Repeating a competing source does not steal the existing work slot.
         client.post(
             f"/candidates/{candidate_id}/telegraph",
-            data={"csrf_token": csrf},
+            data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
 
     jobs = asyncio.run(

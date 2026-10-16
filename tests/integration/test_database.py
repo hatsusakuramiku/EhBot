@@ -209,7 +209,7 @@ async def test_initial_migration_is_idempotent_and_enables_sqlite_safety(
             row[1] for row in connection.execute("PRAGMA table_info(api_credentials)")
         }
 
-    assert migration_count == 38
+    assert migration_count == 39
     assert "last_message_id" in telegram_source_columns
     # Migration 022: the source tombstone and the candidate's job index.
     assert "dismissed" in telegram_source_columns
@@ -910,7 +910,7 @@ async def test_manual_add_rejects_a_duplicate_infohash_case_insensitively(
 
     # The gate reads the table, not a cache: remove the first row and the same
     # infohash may be added again.
-    with sqlite3.connect(tmp_path / "ehbot.db") as connection:
+    with database.connection() as connection:
         connection.execute("DELETE FROM candidates WHERE id = ?", (first,))
     # Inserting the same infohash again must simply succeed now.
     await database.create_manual_candidate(

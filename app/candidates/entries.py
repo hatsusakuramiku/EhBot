@@ -261,11 +261,11 @@ def check_claim(connection: sqlite3.Connection, claim: IngestClaim, *, now: int 
 def claim_manual_gallery(connection: sqlite3.Connection, gallery_id: int, *, owner: str,
                          active_entry_ids=()) -> IngestClaim:
     """Reserve the same key before manual validation, including pending receivers."""
-    from app.db.database import DuplicateGalleryCandidate
+    from app.db.database import Database
     key = ingest_key(gallery_id=gallery_id)
-    existing = connection.execute("SELECT id FROM candidates WHERE ex_gid = ?", (gallery_id,)).fetchone()
-    if existing is not None:
-        raise DuplicateGalleryCandidate(int(existing[0]))
+    duplicate = Database._manual_duplicate_sync(connection, gallery_id, None)
+    if duplicate is not None:
+        raise duplicate
     connection.execute("INSERT INTO ingest_entries(unique_key) VALUES(?) ON CONFLICT(unique_key) DO NOTHING", (key,))
     eid = int(connection.execute("SELECT id FROM ingest_entries WHERE unique_key = ?", (key,)).fetchone()[0])
     if eid in active_entry_ids:

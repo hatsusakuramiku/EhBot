@@ -47,11 +47,13 @@
         没有画廊 ID 的候选不会被任何规则处理（无法识别重复作品），只能人工审核；试跑也不统计它们。保存前请先试跑。
       </p>
       <form class="ui-form" method="post" action="{{ url_for('save_auto_approval_rule') }}"
-            data-rule-editor style="margin-top: var(--s-4)">
+            data-rule-editor data-rule-command data-settings-action="rule-auto-approval-editor"
+            {% if rule_draft and rule_draft.action == 'save' %}data-dirty="true"{% endif %} style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ rule_command_fields(edit_rule, rule_current) }}
         {#- Present only when editing, so the same endpoint inserts or updates
             without the page having to choose a different action. -#}
-        {% if edit_rule %}
+        {% if edit_rule and edit_rule.rule_id %}
         <input type="hidden" name="rule_id" value="{{ edit_rule.rule_id }}">
         {% endif %}
         <div class="ui-form-grid">
@@ -199,6 +201,7 @@
             <a class="ui-btn" href="{{ url_for('edit_auto_approval_rule', rule_id=rule.rule_id).path }}">编辑</a>
             <form method="post" action="{{ url_for('toggle_auto_approval_rule', rule_id=rule.rule_id) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              {{ rule_command_fields(rule) }}
               <input type="hidden" name="enabled" value="{{ 'off' if rule.enabled else 'on' }}">
               <button class="ui-btn" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
             </form>
@@ -214,7 +217,8 @@
                           "规则会被移除，之后的候选不再受它影响。已经由它自动通过或驳回的作品不受影响，历史记录里仍保留当时的规则内容。",
                           confirm_label="确认删除",
                           action=url_for('delete_auto_approval_rule', rule_id=rule.rule_id).path,
-                          csrf_token=csrf_token, size="sm", key=rule.rule_id) }}
+                          csrf_token=csrf_token, size="sm", key=rule.rule_id,
+                          hidden={'rule_uuid': rule.rule_uuid, 'expected_revision': rule.revision, 'idempotency_key': new_command_key()}) }}
           </div>
           {% if preview_rule_id == rule.rule_id %}
             <p class="ui-hint">

@@ -17,13 +17,13 @@ from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from app.api import deps
 from app.api.contracts import ApiError
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.candidates import manual as manual_ingest
 from app.conversion.convert import ConversionError
-from app.db.database import DuplicateGalleryCandidate
 from app.downloads.models import (
     MAX_JOB_PRIORITY,
     MIN_JOB_PRIORITY,
@@ -34,11 +34,16 @@ from app.downloads.models import (
     PROVIDER_TELEGRAPH,
 )
 from app.downloads.service import DownloadError
+from app.downloads.archived import ArchivedWorkError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import METADATA_FIELDS, editable_metadata_field
 from app.conversion.comicinfo import EDITABLE_ELEMENTS
-from app.review.service import ReviewError, ReviewService
-from app.review.orchestration import select_telegram_attachment
+from app.review.service import ReviewError
+from app.review.application import edit_metadata, fetch_metadata, enqueue_work, remove_work
+from app.review.batches import ReviewBatches
+from app.review.commands import WorkCommandError, WorkCommands
+from app.review.manual import add_manual_work
+from app.api.works import configured_sources
 
 
 router = APIRouter(tags=["actions"])
@@ -89,7 +94,7 @@ async def _guard(request: Request) -> str:
     """Authenticate, verify CSRF, and return the operator name."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    return str(request.session.get("username") or "admin")
+    return await deps.operator_name(request)
 
 
 def _event_bus(request: Request):
@@ -172,7 +177,34 @@ async def _body(request: Request) -> dict:
         raise ApiError("BODY_INVALID", "\u8bf7\u6c42\u4f53\u4e0d\u662f\u5408\u6cd5 JSON") from exc
     if not isinstance(payload, dict):
         raise ApiError("BODY_INVALID", "\u8bf7\u6c42\u4f53\u5fc5\u987b\u662f\u5bf9\u8c61")
-    return payload
+    return deps.command_payload(request, payload)
+
+
+async def _source_correction(request, candidate_id, action):
+    from app.review.source_commands import SourceCommands
+    await _guard(request)
+    try:
+        result = await SourceCommands(deps.database(request)).execute(candidate_id, action, await _body(request))
+    except ReviewError as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return JSONResponse(result, status_code=202 if result['status'] == 'PENDING' else 200,
+                        headers={'Cache-Control': 'no-store'})
+
+
+@router.put('/works/{candidate_id}/eh-ref')
+async def api_set_work_eh_ref(request: Request, candidate_id: int):
+    return await _source_correction(request, candidate_id, 'eh-ref')
+
+
+@router.put('/works/{candidate_id}/preview')
+async def api_set_work_preview(request: Request, candidate_id: int):
+    return await _source_correction(request, candidate_id, 'preview')
+
+
+@router.put('/works/{candidate_id}/torrent')
+async def api_set_work_torrent(request: Request, candidate_id: int):
+    return await _source_correction(request, candidate_id, 'torrent')
 
 
 def _required_provider(payload: dict) -> str:
@@ -224,74 +256,23 @@ async def apply_review_batch(
     candidate_ids: list[int],
     operator: str,
     *,
+    versions: dict | None = None,
+    idempotency_key: str | None = None,
     announce_candidate: Callable[[int], None] | None = None,
     announce_job: Callable[[int], None] | None = None,
 ) -> dict:
-    """Approve or reject a selection, one candidate at a time.
-
-    Shared by the JSON endpoint below and by the HTML form fallback on
-    `/candidates`, so the two can never disagree about what a batch does; the
-    action name is checked here rather than in each caller, because the form
-    path posts a raw field and would otherwise reach the orchestrator with
-    whatever the operator's browser sent.
-
-    `approve_and_enqueue` is deliberately all-or-nothing over the ids it gets,
-    so this passes it **one id at a time**: each candidate is still validated and
-    routed atomically, but a selection containing one already-approved or
-    unroutable item no longer refuses the other forty-nine. That is what makes a
-    batch replay-safe -- re-sending it after a partial run approves only what is
-    still pending and reports the rest under ``skipped`` with the reason, which
-    is what an operator who double-clicked\u300c\u5168\u90e8\u901a\u8fc7\u300dneeds. Auditing is
-    unaffected: the orchestrator writes one `review_actions` row per candidate it
-    actually acts on, so a skip leaves no trace of an action that did not happen.
-    """
-    if action not in REVIEW_BATCH_ACTIONS:
-        raise ApiError(
-            "ACTION_UNKNOWN",
-            f"\u672a\u77e5\u7684\u5ba1\u6838\u52a8\u4f5c\uff1a{action}",
-            details={"allowed": sorted(REVIEW_BATCH_ACTIONS)},
-        )
-
-    applied: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for candidate_id in candidate_ids:
-        try:
-            if action == "approve":
-                job_ids = await orchestrator.approve_and_enqueue(
-                    [candidate_id], operator
-                )
-            else:
-                await orchestrator.reject([candidate_id], operator)
-                job_ids = ()
-        except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
-            translated = _translate(exc)
-            if not isinstance(translated, ApiError):
-                # A domain refusal is a skip; anything else is a fault, and
-                # reporting it as a skip would hide it behind a tidy 200.
-                raise translated from exc
-            skipped.append(
-                {
-                    "candidate_id": candidate_id,
-                    "code": translated.code,
-                    "message": translated.message,
-                }
-            )
-            continue
-        applied.append(
-            {"candidate_id": candidate_id, "job_ids": [int(j) for j in job_ids]}
-        )
+    """Shared HTTP/form adapter for durable per-work review outcomes."""
+    try:
+        result = await orchestrator.review_batch(action, candidate_ids, versions, idempotency_key, operator)
+    except (ReviewError, DownloadError) as exc:
+        raise _translate(exc) from exc
+    for item in result['applied']:
         if announce_candidate is not None:
-            announce_candidate(candidate_id)
+            announce_candidate(item['candidate_id'])
         if announce_job is not None:
-            for job_id in job_ids:
-                announce_job(int(job_id))
-
-    return {
-        "action": action,
-        "requested": len(candidate_ids),
-        "applied": applied,
-        "skipped": skipped,
-    }
+            for job_id in item['job_ids']:
+                announce_job(job_id)
+    return result
 
 
 #: The two 彻底删除 actions a batch may run. Split exactly like `remove` and
@@ -307,68 +288,26 @@ async def apply_candidate_delete_batch(
     candidate_ids: list[int],
     operator: str,
     *,
+    versions: dict | None = None,
+    idempotency_key: str | None = None,
     announce_candidate: Callable[[int], None] | None = None,
 ) -> dict:
-    """Purge a selection of candidates, records and optionally files.
-
-    One candidate at a time, for the reason `apply_review_batch` acts per
-    candidate: a missing work must not refuse the
-    other forty-nine. A refused work -- missing row -- is reported
-    under ``skipped`` with the reason, and re-sending the batch finishes what a
-    half-failed first attempt started.
-
-    A genuine fault is re-raised rather than folded into ``skipped``: a broken
-    filesystem must not read as 「49 已删除，1 跳过」.
-    """
+    """Accept durable purges with observed versions and fixed child outcomes."""
     if action not in CANDIDATE_DELETE_ACTIONS:
         raise ApiError(
             "ACTION_UNKNOWN",
             f"未知的删除动作：{action}",
             details={"allowed": sorted(CANDIDATE_DELETE_ACTIONS)},
         )
-    delete_files = action == "delete-files"
-
-    applied: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for candidate_id in candidate_ids:
-        try:
-            result = await archived_service.purge_work(
-                candidate_id,
-                delete_files=delete_files,
-                operator_name=operator,
-            )
-        except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
-            translated = _translate(exc)
-            if not isinstance(translated, ApiError):
-                raise translated from exc
-            skipped.append(
-                {
-                    "candidate_id": candidate_id,
-                    "code": translated.code,
-                    "message": translated.message,
-                }
-            )
-            continue
-        applied.append(
-            {
-                "candidate_id": candidate_id,
-                "removed_jobs": result["removed_jobs"],
-                "removal_id": result["removal_id"],
-                "operation_ids": result["operation_ids"],
-                "cleanup_status": result["cleanup_status"],
-                "deleted_files": list(result["deleted_files"]),
-                "failed_files": list(result["failed_files"]),
-            }
-        )
+    try:
+        result = await ReviewBatches(archived_service._database, archived=archived_service).run(
+            action, candidate_ids, versions, idempotency_key, operator)
+    except (ReviewError, ArchivedWorkError) as exc:
+        raise _translate(exc) from exc
+    for item in result['applied']:
         if announce_candidate is not None:
-            announce_candidate(candidate_id)
-
-    return {
-        "action": action,
-        "requested": len(candidate_ids),
-        "applied": applied,
-        "skipped": skipped,
-    }
+            announce_candidate(item['candidate_id'])
+    return result
 
 
 @router.post("/candidates/batch")
@@ -395,6 +334,8 @@ async def api_batch_review(request: Request) -> dict:
             action,
             candidate_ids,
             operator,
+            versions=payload.get('versions'),
+            idempotency_key=payload.get('idempotency_key'),
             announce_candidate=lambda candidate_id: _publish(
                 request, EVENT_CANDIDATE, candidate_id=candidate_id
             ),
@@ -414,6 +355,8 @@ async def api_batch_review(request: Request) -> dict:
         action,
         candidate_ids,
         operator,
+        versions=payload.get('versions'),
+        idempotency_key=payload.get('idempotency_key'),
         announce_candidate=lambda candidate_id: _publish(
             request, EVENT_CANDIDATE, candidate_id=candidate_id
         ),
@@ -437,35 +380,16 @@ async def manual_add(request: Request) -> dict:
     await _guard(request)
     payload = await _body(request)
     manager = deps.optional_service(request, "connection_manager")
-    if not manual_ingest.exhentai_configured(manager):
-        raise ApiError(
-            "EXHENTAI_NOT_CONFIGURED", manual_ingest.NOT_CONFIGURED_MESSAGE
-        )
     try:
-        candidate_id = await manual_ingest.ingest_manual_link(
-            str(payload.get("url") or ""),
-            database=deps.database(request),
-            exhentai_service=deps.exhentai_service(request),
-            orchestrator=deps.review_orchestrator(request),
-            download_service=deps.download_service(request),
-        )
-    except DuplicateGalleryCandidate as exc:
-        # Not an error to fix: the work is already here, and the client's move is
-        # to open it. Carried as a code plus the id so it can do that without
-        # parsing the message.
-        raise ApiError(
-            "CANDIDATE_DUPLICATE",
-            f"作品已存在：候选 #{exc.existing_candidate_id}",
-            status_code=409,
-            details={"existing_candidate_id": exc.existing_candidate_id},
-        ) from exc
-    except (ReviewError, ExHentaiDownloadError) as exc:
-        raise ApiError(
-            str(getattr(exc, "code", "MANUAL_ADD_FAILED")),
-            str(getattr(exc, "public_message", exc)),
-        ) from exc
-    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    return {"candidate_id": candidate_id}
+        result = await add_manual_work(deps.database(request), deps.exhentai_service(request),
+            deps.review_orchestrator(request), deps.download_service(request), payload,
+            configured=manual_ingest.exhentai_configured(manager))
+    except WorkCommandError as exc:
+        raise _translate(exc) from exc
+    if result['status'] == 'COMPLETED':
+        _publish(request, EVENT_CANDIDATE, candidate_id=result['candidate_id'])
+    return JSONResponse(result, status_code=202 if result['status'] == 'RUNNING' else 200,
+                        headers={'Cache-Control': 'no-store'})
 
 
 async def apply_job_batch(
@@ -594,8 +518,8 @@ async def job_action(request: Request, job_id: int, action: str) -> dict:
 async def patch_metadata(request: Request, candidate_id: int) -> dict:
     """Apply operator overrides and field locks to one or more metadata fields.
 
-    Writes go through `ReviewService`, which re-evaluates the source rules after
-    each change: editing a field can move a candidate out of NEEDS_INFO, and
+    Writes go through the atomic work application, which re-evaluates source rules
+    once after the whole edit: editing a field can move a candidate out of NEEDS_INFO, and
     that has to happen here rather than on the next ingest.
 
     `fields` and `locks` are independent, and either alone is a valid request:
@@ -637,108 +561,91 @@ async def apply_metadata_patch(request: Request, candidate_id: int, payload: dic
         )
 
     database = deps.database(request)
-    if await database.get_candidate(candidate_id) is None:
-        raise ApiError(
-            "CANDIDATE_NOT_FOUND",
-            "\u5019\u9009\u4e0d\u5b58\u5728\u6216\u5df2\u88ab\u5220\u9664",
-            status_code=404,
-        )
-
-    service = ReviewService(database)
     try:
-        for field_name, value in fields.items():
-            await service.set_manual_metadata(
-                candidate_id, operator, field_name, str(value)
-            )
-        for field_name, locked in locks.items():
-            await service.set_metadata_lock(
-                candidate_id, operator, field_name, bool(locked)
-            )
+        result = await edit_metadata(database, deps.archived_work_service(request), candidate_id,
+                                     {**payload, 'fields': fields, 'locks': locks}, operator)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
     except ReviewError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
 
-    archived = deps.archived_work_service(request)
-    sync = await archived.sync_archive_metadata(candidate_id, fields=fields, fetched_fields=fetched, operator_name=operator)
-
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    return {
-        "candidate_id": candidate_id,
-        "updated": sorted(fields),
-        "locked": sorted(name for name, on in locks.items() if on),
-        "unlocked": sorted(name for name, on in locks.items() if not on),
-        "archive_synced": sync["synced"],
-        "sync_skipped": sync.get("reason"),
-        "sync_message": sync["message"],
-        "metadata": await database.effective_metadata(candidate_id),
-        "metadata_editor": await archived.metadata_editor(candidate_id),
-    }
+    return result
+
+
+@router.post('/works/{candidate_id}/delete')
+async def delete_work(request: Request, candidate_id: int):
+    """Accept a purge once; read current stop/cleanup at /removals/{id}."""
+    operator = await _guard(request)
+    payload = await _body(request)
+    mode = payload.get('mode', 'delete')
+    if not isinstance(mode, str) or mode not in CANDIDATE_DELETE_ACTIONS:
+        raise ApiError('ACTION_UNKNOWN', '不支持的删除动作')
+    try:
+        result = await remove_work(deps.database(request), deps.archived_work_service(request),
+                                   candidate_id, mode, payload, operator)
+    except (ReviewError, ArchivedWorkError) as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    return JSONResponse(result, status_code=202)
+
+
+@router.post("/works/{candidate_id}/review")
+async def review_work(request: Request, candidate_id: int) -> dict:
+    """Review the observed work; approval and its download intent commit together."""
+    operator = await _guard(request)
+    payload = await _body(request)
+    try:
+        result = await deps.review_orchestrator(request).work_command(candidate_id, payload.get('action'), payload, operator)
+    except (ReviewError, DownloadError) as exc:
+        raise _translate(exc) from exc
+    _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
+    for job_id in result['job_ids']:
+        _publish(request, EVENT_DOWNLOAD, job_id=job_id)
+    return result
 
 
 @router.post("/works/{candidate_id}/requeue")
 async def requeue_work(request: Request, candidate_id: int) -> dict:
-    """Put a work the operator or a rule set aside back into the review queue.
-
-    Runs through `ReviewService.requeue_candidate`, the coroutine the work detail
-    page posts to, so the JSON layer cannot requeue a work the page would have
-    refused: whether a status may be requeued is decided by the service
-    (`REQUEUEABLE_STATUSES`), once, for both layers.
-
-    The body is optional. `note` is the operator's own sentence for the audit
-    row; omitting it is the common case, not an error.
-    """
+    """Legacy requeue URL mapped to the same versioned work command."""
     operator = await _guard(request)
     payload = await _body(request)
-    note = str(payload.get("note") or "").strip() or None
-    service = ReviewService(deps.database(request))
     try:
-        await service.requeue_candidate(candidate_id, operator, note)
-    except ReviewError as exc:
-        # Same envelope as the metadata route beside it: the service owns the
-        # refusal and its wording, and a missing row is reported by it rather
-        # than re-derived here.
-        raise ApiError(exc.code, exc.public_message) from exc
+        result = await deps.review_orchestrator(request).work_command(candidate_id, 'requeue', payload, operator)
+    except (ReviewError, DownloadError) as exc:
+        raise _translate(exc) from exc
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    return {"candidate_id": candidate_id, "status": "PENDING_REVIEW"}
+    return {**result, "status": "PENDING_REVIEW"}
 
 
 @router.post("/works/{candidate_id}/convert")
 async def convert_work(request: Request, candidate_id: int) -> dict:
     """Queue packaging for a work; pressing it again is a re-pack.
 
-    One endpoint for both, because `ConversionService.enqueue_for_candidate` is
-    idempotent per work: the page's 打包为 CBZ and 重新打包 are the same button
-    with two labels, and a second endpoint would be a second place that decides
-    what "already packed" means.
+    The work application atomically commits the observed version, exact input,
+    task and retry receipt. The page's 打包为 CBZ and 重新打包 use this same core.
 
     The response carries the queued job id: the client needs it to follow the
     task it just started, and the page only ever re-read it off the work.
     """
     await _guard(request)
-    if await deps.database(request).get_candidate(candidate_id) is None:
-        raise ApiError(
-            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
-        )
-    service = deps.conversion_service(request)
     payload = await _body(request) if await request.body() else {}
-    artifact_id = payload.get("input_artifact_id")
-    if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
-        raise ApiError("ARTIFACT_INVALID", "请提供有效的原档产物 ID")
     try:
-        job_id = await service.enqueue_for_candidate(candidate_id, input_artifact_id=artifact_id)
-    except ConversionError as exc:
+        result = await enqueue_work(deps.database(request), deps.conversion_service(request), candidate_id,
+                                    'CONVERSION', payload)
+    except (WorkCommandError, ConversionError) as exc:
         raise _translate(exc) from exc
-    _publish(request, EVENT_DOWNLOAD, job_id=job_id)
-    return {"candidate_id": candidate_id, "job_id": job_id}
+    _publish(request, EVENT_DOWNLOAD, job_id=result['job_id'])
+    return result
 
 
 @router.post("/works/{candidate_id}/fetch-metadata")
 async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
     """Re-read the gallery's metadata for one work.
 
-    Runs `ExHentaiService.fetch_metadata_for_candidate`, the call the work detail
-    page makes: read the gallery, then persist it through the one shared writer
-    (`persist_gallery_metadata`) so the JSON path cannot store a different subset
-    of the same gallery than the page does.
+    Shares the work-detail application service: accept a durable versioned
+    operation, read the gallery outside the write transaction, then atomically
+    commit metadata/torrents/cover and its result after rechecking the work.
 
     The refusals are the service's, and they are the ones an operator actually
     hits: no ExHentai connection configured, no gallery on this candidate, or an
@@ -746,23 +653,25 @@ async def fetch_work_metadata(request: Request, candidate_id: int) -> dict:
     """
     await _guard(request)
     database = deps.database(request)
-    candidate = await database.get_candidate(candidate_id)
-    if candidate is None:
-        raise ApiError(
-            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
-        )
     try:
-        fetched = await deps.exhentai_service(request).fetch_metadata_for_candidate(
-            candidate_id
-        )
+        result = await fetch_metadata(database, deps.exhentai_service(request), deps.archived_work_service(request),
+            candidate_id, await _body(request) if await request.body() else {})
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
     except ExHentaiDownloadError as exc:
         raise ApiError(exc.code, exc.public_message) from exc
     _publish(request, EVENT_CANDIDATE, candidate_id=candidate_id)
-    return {
-        "candidate_id": candidate_id,
-        "has_gallery": candidate.ex_gid is not None,
-        "metadata_editor": await deps.archived_work_service(request).metadata_editor(candidate_id, fetched_names=fetched),
-    }
+    return JSONResponse(result, status_code=202 if result['status'] == 'RUNNING' else 200)
+
+
+@router.get("/metadata-fetches/{operation_id}")
+async def metadata_fetch_operation(request: Request, operation_id: str) -> dict:
+    """Read the saved result without dispatching another provider request."""
+    await deps.require_session(request)
+    try:
+        return await WorkCommands(deps.database(request)).metadata_fetch_result(operation_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code) from exc
 
 
 @router.post("/works/{candidate_id}/sources/{provider}")
@@ -771,10 +680,11 @@ async def pull_work_source(
 ) -> dict:
     """Pull this work's archive from one named source, as the page's buttons do.
 
-    Every call is `redownload=True`, for the page's reason: pressing a source
+    Each new command is `redownload=True`: pressing a source
     button on a work that already came from it means 「再拉一次」 -- that is what
     makes an old failure recoverable, where a no-op press would leave the bad
-    file on disk for every later pack to read.
+    file on disk for every later pack to read. Replaying the same command returns
+    its original task before any routing or preparation and never revives it.
 
     The two Telegram routes need an archive attachment to name; a candidate
     without one is refused with the page's sentence rather than with an
@@ -792,64 +702,14 @@ async def pull_work_source(
             f"未知的来源：{provider}",
             details={"allowed": sorted(SOURCE_ENQUEUE)},
         )
-    database = deps.database(request)
-    candidate = await database.get_candidate(candidate_id)
-    if candidate is None:
-        raise ApiError(
-            "CANDIDATE_NOT_FOUND", "候选不存在或已被删除", status_code=404
-        )
-    service = deps.download_service(request)
+    payload = await _body(request) if await request.body() else {}
     try:
-        if target == PROVIDER_TELEGRAM:
-            result = await service.enqueue_telegram_download(
-                candidate_id, _archive_attachment(candidate, target), redownload=True
-            )
-        elif target == PROVIDER_TELEGRAM_USER:
-            result = await service.enqueue_telegram_user_download(
-                candidate_id, _archive_attachment(candidate, target), redownload=True
-            )
-        elif target == PROVIDER_TELEGRAPH:
-            # Presence check before the enqueue, exactly as the page does it: a
-            # deployment with no Telegraph client should be told that, not given
-            # a job that can only fail.
-            deps.telegraph_service(request)
-            result = await service.enqueue_telegraph_download(
-                candidate_id, redownload=True
-            )
-        elif target == PROVIDER_EH_TORRENT:
-            deps.torrent_service(request)
-            result = await service.enqueue_torrent_download(
-                candidate_id, redownload=True
-            )
-        else:  # PROVIDER_EXHENTAI
-            result = await service.enqueue_exhentai_download(
-                candidate_id, redownload=True
-            )
-    except DownloadError as exc:
+        result = await enqueue_work(deps.database(request), deps.download_service(request), candidate_id,
+                                    target, payload, available=configured_sources(request))
+    except (WorkCommandError, DownloadError) as exc:
         raise _translate(exc) from exc
-    _publish(request, EVENT_DOWNLOAD, job_id=result.job_id)
-    return {
-        "candidate_id": candidate_id,
-        "provider": target,
-        "job_id": result.job_id,
-        "task_id": result.task_id,
-        "revision": result.revision,
-    }
-
-
-def _archive_attachment(candidate: Any, provider: str = PROVIDER_TELEGRAM) -> dict:
-    """The first archive attachment on a candidate, or the page's refusal.
-
-    Same guard and same sentence as `/candidates/{id}/download`: a Bot API pull
-    has to name the attachment it is fetching, and a candidate that carries none
-    is the operator on the wrong work rather than a broken server.
-    """
-    archives = [attachment for message in candidate.messages for attachment in message.attachments
-                if attachment.get("type") == "archive"]
-    selected = select_telegram_attachment(archives, provider)
-    if selected is not None:
-        return dict(selected)
-    raise ApiError("ARCHIVE_ATTACHMENT_MISSING", "该候选没有可下载的压缩附件")
+    _publish(request, EVENT_DOWNLOAD, job_id=result['job_id'])
+    return result
 
 
 def _translate(exc: Exception) -> Exception:
@@ -859,6 +719,8 @@ def _translate(exc: Exception) -> Exception:
     returned unchanged so it surfaces as a 500 instead of being disguised as a
     tidy 400.
     """
+    if isinstance(exc, WorkCommandError):
+        return ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details)
     code = getattr(exc, "code", None)
     message = getattr(exc, "public_message", None)
     if code and message:

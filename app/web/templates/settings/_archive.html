@@ -27,53 +27,55 @@
         {{ ui.callout("种子路线已关闭", tone="muted",
                       detail="TORRENT_ENABLED=false。下方设置仍可保存，但不会生效。") }}
       {% endif %}
-      <form class="ui-form" method="post" action="{{ url_for('save_torrent_client_settings') }}"
+      <form data-settings-action="torrent" {% if settings_draft and settings_draft.action == 'torrent' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_torrent_client_settings') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('torrent', 'torrent') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
           <label for="qb-url">WebUI 地址</label>
-          <input class="ui-input" id="qb-url" name="base_url" value="{{ torrent.base_url }}"
+          <input class="ui-input" id="qb-url" name="base_url" value="{{ preference_value('torrent', 'base_url', torrent.base_url) }}"
                  placeholder="http://127.0.0.1:8080">
           <small>置空则跳过种子这一级，候选直接降到预览页路线。</small>
         </div>
         <div class="ui-form-grid">
           <div class="ui-field">
             <label for="qb-user">用户名</label>
-            <input class="ui-input" id="qb-user" name="username" value="{{ torrent.username }}">
+            <input class="ui-input" id="qb-user" name="username" value="{{ preference_value('torrent', 'username', torrent.username) }}">
           </div>
           <div class="ui-field">
             <label for="qb-pass">密码</label>
             <input class="ui-input" id="qb-pass" name="password" type="password"
                    autocomplete="new-password"
                    placeholder="{{ '已保存，置空则不修改' if torrent.password_set else '未设置' }}">
-            <small>加密保存在 data/private/，本页不回显。</small>
+            <small>密码加密保存，本页不回显；留空保留已保存密码。</small>
+            {% if settings_draft and settings_draft.action == 'torrent' %}<small>密码不会由服务器回填；若输入框已清空，请重新填写要修改的密码。留空保留已保存的密码。</small>{% endif %}
           </div>
           <div class="ui-field">
             <label for="qb-category">分类</label>
             <input class="ui-input" id="qb-category" name="category"
-                   value="{{ torrent.category }}" placeholder="ehbot">
+                   value="{{ preference_value('torrent', 'category', torrent.category) }}" placeholder="ehbot">
           </div>
         </div>
         <div class="ui-field">
           <label for="qb-save">保存目录（客户端视角）</label>
-          <input class="ui-input" id="qb-save" name="save_path" value="{{ torrent.save_path }}"
+          <input class="ui-input" id="qb-save" name="save_path" value="{{ preference_value('torrent', 'save_path', torrent.save_path) }}"
                  placeholder="/downloads/ehbot">
           <small>随加种请求下发。请关掉 autoTMM，否则会被分类规则覆盖。</small>
         </div>
         <div class="ui-field">
           <label for="qb-local">保存目录（EhBot 视角）</label>
           <input class="ui-input" id="qb-local" name="local_save_path"
-                 value="{{ torrent.local_save_path }}" placeholder="/downloads/ehbot">
+                 value="{{ preference_value('torrent', 'local_save_path', torrent.local_save_path) }}" placeholder="/downloads/ehbot">
           <small>EhBot 从这里读取完成的文件。客户端在其他容器或 NAS 时两边路径不同；保存前会校验可读。</small>
         </div>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="keep_seeding" type="checkbox"
-                 {% if torrent.keep_seeding %}checked{% endif %}>
+                 {% if preference_value('torrent', 'keep_seeding', torrent.keep_seeding, check=true) %}checked{% endif %}>
           <span>完成后继续做种（收货用硬链接，不动原文件）</span>
         </label>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="auto_pack" type="checkbox"
-                 {% if torrent.auto_pack %}checked{% endif %}>
+                 {% if preference_value('torrent', 'auto_pack', torrent.auto_pack, check=true) %}checked{% endif %}>
           <span>种子下载后自动打包（需填写上方「EhBot 视角」目录）</span>
         </label>
         <div class="ui-form-actions">
@@ -92,12 +94,13 @@
     <section class="ui-panel">
       <h2 class="ui-section-title">下载后自动打包</h2>
       <p class="ui-hint">任意来源（Telegram、ExHentai、预览页、种子）下载完成后自动进入 CBZ 转换队列。转换按候选幂等，重复触发不会产生重复任务。</p>
-      <form class="ui-form" method="post" action="{{ url_for('save_auto_pack_after_download') }}"
+      <form data-settings-action="auto-pack" {% if settings_draft and settings_draft.action == 'auto-pack' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_auto_pack_after_download') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('auto-pack', 'auto-pack') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label class="ui-checkline">
           <input class="ui-checkbox" name="enabled" type="checkbox"
-                 {% if auto_pack_after_download %}checked{% endif %}>
+                 {% if preference_value('auto-pack', 'enabled', auto_pack_after_download, check=true) %}checked{% endif %}>
           <span>下载完成后自动打包</span>
         </label>
         <div class="ui-form-actions">
@@ -120,11 +123,23 @@
         <p class="ui-hint">官方未为当前平台发布二进制，请自行安装后在右侧 profile 中填写绝对路径。</p>
       {% endif %}
       {% if toolchain.platform_supported %}
-        <form method="post" action="{{ url_for('install_archive_toolchain') }}"
+        <form data-settings-action="toolchain-install" {% if toolchain_draft %}data-dirty="true"{% endif %} method="post" action="{{ url_for('install_archive_toolchain') }}"
               style="margin-top: var(--s-3)">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_revision" value="{{ toolchain_draft.expected_revision if toolchain_draft else toolchain.revision }}">
+          <input type="hidden" name="idempotency_key" value="{{ toolchain_draft.idempotency_key if toolchain_draft else new_command_key() }}">
+          {% if toolchain_draft and toolchain_draft.expected_revision|string != toolchain.revision|string %}
+          <p class="ui-hint">安装状态已变化，请先核对原操作结果。</p>
+          <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': toolchain.revision, 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对，按当前版本新建安装操作</button>
+          {% endif %}
           <button class="ui-btn" type="submit">{{ '重新下载并校验' if toolchain.managed_path else '从官方下载并校验' }}</button>
         </form>
+      {% endif %}
+      {% set installation = toolchain_operation if toolchain_operation else toolchain.operation %}
+      {% if installation %}
+      <p class="ui-hint">工具安装：{{ {'RUNNING': '执行中', 'COMPLETED': '已完成', 'FAILED': '失败', 'UNKNOWN': '结果待核实'}.get(installation.status, installation.status) }}。
+        {% if installation.status == 'UNKNOWN' %}中断后不会自动重装，请先核对当前可用工具，再明确发起新操作。{% endif %}
+        <a href="{{ url_for('toolchain_operation_page', operation_id=installation.toolchain_operation_id) }}">查看操作结果</a></p>
       {% endif %}
     </section>
   </div>
@@ -133,47 +148,48 @@
     <section class="ui-panel">
       <h2 class="ui-section-title">安全限制</h2>
       <p class="ui-hint">在全量解压之前生效。任何超限压缩包直接失败，不会被部分解开。</p>
-      <form class="ui-form" method="post" action="{{ url_for('save_archive_limits') }}"
+      <form data-settings-action="limits" {% if settings_draft and settings_draft.action == 'limits' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_archive_limits') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('limits', 'archive-limits') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-form-grid">
           <div class="ui-field">
             <label for="lim-members">最大成员数</label>
             <input class="ui-input" id="lim-members" name="max_members" type="number" min="1"
-                   value="{{ limits.max_members }}">
+                   value="{{ preference_value('archive-limits', 'max_members', limits.max_members) }}">
           </div>
           <div class="ui-field">
             <label for="lim-depth">最大目录层级</label>
             <input class="ui-input" id="lim-depth" name="max_depth" type="number" min="1"
-                   value="{{ limits.max_depth }}">
+                   value="{{ preference_value('archive-limits', 'max_depth', limits.max_depth) }}">
           </div>
           <div class="ui-field">
             <label for="lim-ratio">最大压缩率</label>
             <input class="ui-input" id="lim-ratio" name="max_compression_ratio" type="number"
-                   step="0.1" min="0.1" value="{{ limits.max_compression_ratio }}">
+                   step="0.1" min="0.1" value="{{ preference_value('archive-limits', 'max_compression_ratio', limits.max_compression_ratio) }}">
             <p class="ui-hint">只对无法识别为真实图片的成员生效。空白页、纯色页这类大尺寸 JPEG 本身就能被压掉几百倍，按比例拦会误伤。7z / rar 按压缩块判（`Block`），并在某块触发时才读一次该块首个成员的头 16 字节来确认是不是图片。</p>
           </div>
         </div>
         <div class="ui-field">
           <label for="lim-total">解压总大小上限（字节）</label>
           <input class="ui-input" id="lim-total" name="max_total_bytes" type="number" min="1"
-                 value="{{ limits.max_total_bytes }}">
+                 value="{{ preference_value('archive-limits', 'max_total_bytes', limits.max_total_bytes) }}">
         </div>
         <div class="ui-field">
           <label for="lim-member">单成员大小上限（字节）</label>
           <input class="ui-input" id="lim-member" name="max_member_bytes" type="number" min="1"
-                 value="{{ limits.max_member_bytes }}">
+                 value="{{ preference_value('archive-limits', 'max_member_bytes', limits.max_member_bytes) }}">
         </div>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="keep_original" type="checkbox"
-                 {% if keep_original %}checked{% endif %}>
+                 {% if preference_value('archive-limits', 'keep_original', keep_original, check=true) %}checked{% endif %}>
           <span>CBZ 发布成功后保留原始压缩包</span>
         </label>
         <div class="ui-field">
           <label for="image-quality">图像质量</label>
           <select class="ui-select" id="image-quality" name="image_quality">
             {% for level in image_quality.levels %}
-              <option value="{{ level.value }}" {% if level.selected %}selected{% endif %}>{{ level.label }}</option>
+              <option value="{{ level.value }}" {% if level.value == preference_value('archive-limits', 'image_quality', image_quality.selected) %}selected{% endif %}>{{ level.label }}</option>
             {% endfor %}
           </select>
           <small>重编码不可逆，默认保留原始文件。只处理 JPEG 页；PNG 与重编码后变大的页自动保留原图。预估体积：high 约 60–70%、medium 约 40–50%、low 约 20–30%。</small>
@@ -191,30 +207,42 @@
       </div>
       <p class="ui-hint">只能选择已登记的 profile。本页不接受任意命令行。</p>
       {% for profile in profiles %}
-        <form class="ui-record" method="post"
+        {% set original = profile_draft['values'] if profile_draft and profile_draft.name == profile.name else none %}
+        <form data-profile-command data-settings-action="profile-{{ profile.profile_uuid }}" {% if original %}data-dirty="true"{% endif %} class="ui-record" method="post"
               action="{{ url_for('save_archive_tool_profile', name=profile.name) }}"
               style="margin-top: var(--s-4)">
+          <input type="hidden" name="profile_uuid" value="{{ original.profile_uuid if original else profile.profile_uuid }}">
+          <input type="hidden" name="expected_revision" value="{{ original.expected_revision if original else profile.revision }}">
+          <input type="hidden" name="idempotency_key" value="{{ original.idempotency_key if original else new_command_key() }}">
+          {% if original and not profile.draft_only and original.profile_uuid == profile.profile_uuid and original.expected_revision|string != profile.revision|string %}
+            <p class="ui-hint">原工具版本 {{ original.expected_revision }}；当前版本 {{ profile.revision }}。请先核对草稿。</p>
+            <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': profile.revision, 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对，采用当前版本保存草稿</button>
+          {% endif %}
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="ui-record-head">
             <span class="ui-record-title">{{ profile.name }}</span>
+            {% if profile.draft_only or (original and original.profile_uuid != profile.profile_uuid) %}
+            <span class="ui-record-meta">原工具配置已移除，保留草稿供复制；不会覆盖同名的新配置。</span>
+            {% else %}
             <span class="ui-record-meta">{{ profile.backend }} · {{ profile.kind }} · {{ profile.supported_formats|join('、')|upper }}</span>
             <div class="ui-record-badges">{{ ui.badge(profile.enablement) }}</div>
+            {% endif %}
           </div>
           {% if profile.kind != 'BUILTIN' %}
             <div class="ui-field">
               <label for="exe-{{ profile.profile_id }}">可执行文件或桥接程序</label>
               <input class="ui-input" id="exe-{{ profile.profile_id }}" name="executable_path"
-                     value="{{ profile.executable_path or '' }}" placeholder="7zz">
+                     value="{{ original.executable_path if original and original.executable_path is defined else (profile.executable_path or '') }}" placeholder="7zz">
             </div>
           {% endif %}
           <div class="ui-field">
             <label for="timeout-{{ profile.profile_id }}">超时（秒）</label>
             <input class="ui-input" id="timeout-{{ profile.profile_id }}" name="timeout_seconds"
-                   type="number" min="1" value="{{ profile.timeout_seconds }}">
+                   type="number" min="1" value="{{ original.timeout_seconds if original and original.timeout_seconds is defined else profile.timeout_seconds }}">
           </div>
           <label class="ui-checkline">
             <input class="ui-checkbox" name="enabled" type="checkbox"
-                   {% if profile.enabled %}checked{% endif %}>
+                   {% if (original and original.enabled == 'on') or (not original and profile.enabled) %}checked{% endif %}>
             <span>启用该 profile</span>
           </label>
           <div class="ui-form-actions">

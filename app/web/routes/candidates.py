@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, Form, Request
 from fastapi.responses import RedirectResponse
 
 from app.api.actions import (
@@ -34,20 +34,53 @@ from app.api.contracts import (
 from app.api.events import EVENT_CANDIDATE, EVENT_DOWNLOAD
 from app.api.serializers import candidate_summary
 from app.api.status import candidate_tab_view
-from app.review.orchestration import select_telegram_attachment
 from app.conversion.service import ConversionError
 from app.db.database import CANDIDATE_SORT_ORDERS, SORT_DIRECTIONS, sort_direction
 from app.downloads.service import DownloadError
 from app.exhentai.service import ExHentaiDownloadError
 from app.review.models import REVIEWABLE_STATUSES
 from app.review.service import ReviewError
+from app.review.commands import WorkCommandError
+from app.review.application import edit_metadata as apply_metadata_edit, fetch_metadata, enqueue_work, remove_work
+from app.api.works import configured_sources
 from app.search.query import PAGE_CANDIDATES
-from app.telegraph.models import TelegraphError
-from app.torrent.models import TorrentError
 from app.web import deps
-from app.web.routes.works import render_review_error
+from app.web.routes.works import render_review_error, render_work
 
 router = APIRouter()
+
+
+def review_preconditions(form, candidate_id=None):
+    """Read submitted versions only, including a list row's dedicated fields."""
+    suffix = '_' + str(candidate_id) if candidate_id is not None else ''
+    try:
+        revision = int(form.get('expected_revision' + suffix))
+    except (TypeError, ValueError):
+        revision = None
+    return {'work_id': form.get('work_id' + suffix), 'expected_revision': revision,
+            'idempotency_key': form.get('idempotency_key' + suffix)}
+
+
+async def enqueue_candidate_task(request, candidate_id, provider, csrf_token):
+    """Thin form adapter for the same task application as the JSON endpoint."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    payload = review_preconditions(form)
+    if form.get('input_artifact_id') is not None:
+        payload['input_artifact_id'] = form.get('input_artifact_id')
+    service = deps.conversion_service(request) if provider == 'CONVERSION' else deps.download_service(request)
+    try:
+        result = await enqueue_work(deps.database(request), service, candidate_id, provider, payload,
+                                    available=configured_sources(request))
+    except (ReviewError, DownloadError, ConversionError) as exc:
+        return await render_work(request, candidate_id, error=exc.public_message,
+            status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+            enqueue_draft={**payload, 'command': provider})
+    request.app.state.event_bus.publish(EVENT_DOWNLOAD, job_id=result['job_id'])
+    return RedirectResponse(request.url_for('work_detail', candidate_id=candidate_id).path, status_code=303)
 
 
 #: The six candidate tabs, in the order the strip shows them. The label is
@@ -129,6 +162,7 @@ async def _render_candidates(
     *,
     error: str | None = None,
     status_code: int = 200,
+    batch_draft: dict | None = None,
 ):
     """Render one candidate tab.
 
@@ -174,7 +208,7 @@ async def _render_candidates(
     )
     statuses = CANDIDATE_TABS[tab]
 
-    if tab == "pending":
+    if tab == "pending" and batch_draft is None:
         # Enrichment happens here because it is what the operator is about to
         # read. The approval call beside it is now only a latency optimisation:
         # `AutoApprovalSweeper` owns the schedule, so a rule fires without
@@ -241,6 +275,7 @@ async def _render_candidates(
             # card and an API client describe a candidate identically -- the
             # cover URL included, which is a proxy path and never upstream.
             "candidates": [candidate_summary(item) for item in items],
+            "batch_draft": batch_draft,
             # How many rows on this page cannot be deduplicated or decided by
             # an automatic rule (R59). The batch approve dialog says the count
             # out loud: approving one is allowed, doing it by accident is not.
@@ -447,6 +482,12 @@ async def batch_review(request: Request):
     if not candidate_ids:
         return await _candidates_redirect(request, "请至少选择一条候选")
     operator = request.session.get("username", "admin")
+    versions = {str(candidate_id): review_preconditions(form, candidate_id) for candidate_id in candidate_ids}
+    draft = {'versions': versions, 'idempotency_key': form.get('idempotency_key'),
+             'candidate_ids': candidate_ids, 'action': action}
+    tab = str(form.get('tab') or 'pending')
+    if tab not in CANDIDATE_TABS:
+        tab = 'pending'
     try:
         if action in CANDIDATE_DELETE_ACTIONS:
             result = await apply_candidate_delete_batch(
@@ -454,6 +495,8 @@ async def batch_review(request: Request):
                 action,
                 candidate_ids,
                 operator,
+                versions=versions,
+                idempotency_key=form.get('idempotency_key'),
                 announce_candidate=lambda candidate_id: (
                     request.app.state.event_bus.publish(
                         EVENT_CANDIDATE, candidate_id=candidate_id
@@ -466,6 +509,8 @@ async def batch_review(request: Request):
                 action,
                 candidate_ids,
                 operator,
+                versions=versions,
+                idempotency_key=form.get('idempotency_key'),
                 announce_candidate=lambda candidate_id: (
                     request.app.state.event_bus.publish(
                         EVENT_CANDIDATE, candidate_id=candidate_id
@@ -476,10 +521,16 @@ async def batch_review(request: Request):
                 ),
             )
     except ApiError as exc:
-        return await _candidates_redirect(request, exc.message)
+        return await _render_candidates(request, tab, error=exc.message, status_code=exc.status_code,
+                                        batch_draft=draft)
     skipped = result["skipped"]
     if not skipped:
         return await _candidates_redirect(request)
+    if any(item['code'] in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT'} for item in skipped):
+        return await _render_candidates(request, tab, error=(
+            f"{len(result['applied'])} 条已受理，{len(skipped)} 条未受理：{skipped[0]['message']}。"
+            "已保留原选择和版本，请核对后刷新列表再发起新操作；重发只返回原结果。"),
+            status_code=409, batch_draft=draft)
     return await _candidates_redirect(
         request,
         f"{len(result['applied'])} 条已处理，{len(skipped)} 条跳过："
@@ -533,12 +584,10 @@ async def delete_candidate(
             request, candidate_id, f"未知的删除动作：{mode}"
         )
     operator = request.session.get("username", "admin")
+    payload = review_preconditions(await request.form())
     try:
-        result = await deps.archived_work_service(request).purge_work(
-            candidate_id,
-            delete_files=mode == "delete-files",
-            operator_name=operator,
-        )
+        result = await remove_work(deps.database(request), deps.archived_work_service(request),
+                                   candidate_id, mode, payload, operator)
     except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
         message = getattr(exc, "public_message", None)
         if message is None:
@@ -551,7 +600,9 @@ async def delete_candidate(
                 _with_message("/candidates", "error", str(message)),
                 status_code=303,
             )
-        return await render_review_error(request, candidate_id, str(message))
+        return await render_work(request, candidate_id, error=str(message),
+            status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+            removal_draft={**payload, 'mode': mode})
     request.app.state.event_bus.publish(
         EVENT_CANDIDATE, candidate_id=candidate_id
     )
@@ -584,15 +635,15 @@ async def approve_candidate(
     deps.validate_csrf(request, csrf_token)
     operator = request.session.get("username", "admin")
     try:
-        await deps.review_orchestrator(request).approve_and_enqueue([candidate_id], operator)
-    except ReviewError as exc:
+        form = await request.form()
+        payload = review_preconditions(form, candidate_id if tab is not None else None)
+        await deps.review_orchestrator(request).work_command(candidate_id, 'approve', payload, operator)
+    except (ReviewError, DownloadError) as exc:
         if tab is not None:
             return await _candidates_redirect(request, exc.public_message)
-        return await render_review_error(
-            request,
-            candidate_id,
-            exc.public_message,
-        )
+        return await render_work(request, candidate_id, error=exc.public_message,
+            status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+            review_draft=payload)
     if tab is not None:
         return await _candidates_redirect(request)
     return RedirectResponse(
@@ -613,11 +664,12 @@ async def reject_candidate(
     deps.validate_csrf(request, csrf_token)
     operator = request.session.get("username", "admin")
     try:
-        await deps.review_service(request).reject_candidate(candidate_id, operator)
-    except ReviewError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
+        payload = review_preconditions(await request.form())
+        await deps.review_orchestrator(request).work_command(candidate_id, 'reject', payload, operator)
+    except (ReviewError, DownloadError) as exc:
+        return await render_work(request, candidate_id, error=exc.public_message,
+            status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+            review_draft=payload)
     return RedirectResponse(
         request.url_for("work_detail", candidate_id=candidate_id).path,
         status_code=303,
@@ -636,13 +688,15 @@ async def requeue_candidate(
     deps.validate_csrf(request, csrf_token)
     operator = request.session.get("username", "admin")
     form = await request.form()
-    note = str(form.get("note") or "").strip() or None
+    payload = review_preconditions(form)
+    if form.get('note') is not None:
+        payload['note'] = form.get('note')
     try:
-        await deps.review_service(request).requeue_candidate(candidate_id, operator, note)
-    except ReviewError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
+        await deps.review_orchestrator(request).work_command(candidate_id, 'requeue', payload, operator)
+    except (ReviewError, DownloadError) as exc:
+        return await render_work(request, candidate_id, error=exc.public_message,
+            status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+            review_draft=payload)
     return RedirectResponse(
         request.url_for("work_detail", candidate_id=candidate_id).path,
         status_code=303,
@@ -662,16 +716,19 @@ async def edit_metadata(
         return redirect
     deps.validate_csrf(request, csrf_token)
     operator = request.session.get("username", "admin")
+    form = await request.form()
     try:
-        await deps.review_service(request).set_manual_metadata(
-            candidate_id, operator, field_name, field_value
-        )
+        revision = int(str(form.get('expected_revision', '')))
+    except ValueError:
+        revision = None
+    try:
+        result = await apply_metadata_edit(deps.database(request), deps.archived_work_service(request),
+            candidate_id, {'fields': {field_name: field_value}, 'work_id': form.get('work_id'),
+                           'expected_revision': revision, 'idempotency_key': form.get('idempotency_key')}, operator)
     except ReviewError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    sync = await deps.archived_work_service(request).sync_archive_metadata(candidate_id, fields=[field_name])
-    notice = sync["message"]
+        return await render_work(request, candidate_id, error=exc.public_message,
+            metadata_draft={**dict(form), 'new_field': field_name, 'new_value': field_value}, status_code=400)
+    notice = result['sync_message']
     return RedirectResponse(
         request.url_for("work_detail", candidate_id=candidate_id).path + "?message=" + quote_plus(notice),
         status_code=303,
@@ -684,38 +741,7 @@ async def download_candidate(
     candidate_id: int,
     csrf_token: str = Form(),
 ):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    candidate = await deps.database(request).get_candidate(candidate_id)
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    archive_attachments = []
-    for message in candidate.messages:
-        for attachment in message.attachments:
-            if attachment.get("type") == "archive":
-                archive_attachments.append(attachment)
-    if not archive_attachments:
-        return await render_review_error(
-            request,
-            candidate_id,
-            "该候选没有可下载的压缩附件",
-        )
-    try:
-        await deps.download_service(request).enqueue_telegram_download(
-            candidate_id,
-            select_telegram_attachment(archive_attachments, "TELEGRAM") or {},
-            redownload=True,
-        )
-    except DownloadError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'TELEGRAM', csrf_token)
 
 
 @router.post("/candidates/{candidate_id}/telegram-user")
@@ -732,39 +758,7 @@ async def download_candidate_with_user(
     deliberately. Same shape as `/download` otherwise -- one attachment, one job,
     refusals re-render the work page.
     """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    candidate = await deps.database(request).get_candidate(candidate_id)
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="Candidate not found")
-    archive_attachments = [
-        attachment
-        for message in candidate.messages
-        for attachment in message.attachments
-        if attachment.get("type") == "archive"
-    ]
-    if not archive_attachments:
-        return await render_review_error(
-            request,
-            candidate_id,
-            "该候选没有可下载的压缩附件",
-        )
-    try:
-        await deps.download_service(request).enqueue_telegram_user_download(
-            candidate_id,
-            select_telegram_attachment(archive_attachments, "TELEGRAM_USER") or {},
-            redownload=True,
-        )
-    except DownloadError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'TELEGRAM_USER', csrf_token)
 
 
 @router.post("/candidates/{candidate_id}/exhentai-metadata")
@@ -777,12 +771,22 @@ async def fetch_exhentai_metadata(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
+    form = await request.form()
     try:
-        await deps.exhentai_service(request).fetch_metadata_for_candidate(candidate_id)
-    except ExHentaiDownloadError as exc:
+        revision = int(form.get('expected_revision', ''))
+    except (ValueError, TypeError):
+        revision = None
+    try:
+        result = await fetch_metadata(deps.database(request), deps.exhentai_service(request),
+            deps.archived_work_service(request), candidate_id,
+            {'work_id': form.get('work_id'), 'expected_revision': revision,
+             'idempotency_key': form.get('idempotency_key')})
+    except (ReviewError, ExHentaiDownloadError) as exc:
         return await render_review_error(
             request, candidate_id, exc.public_message
         )
+    if result['status'] == 'RUNNING':
+        return await render_review_error(request, candidate_id, '正在拉取元数据，请稍后核对操作状态')
     return RedirectResponse(
         request.url_for("work_detail", candidate_id=candidate_id).path,
         status_code=303,
@@ -810,22 +814,7 @@ async def download_exhentai_archive(
     no-op press would leave the bad file on disk for every later re-pack to
     read.
     """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        await deps.download_service(request).enqueue_exhentai_download(
-            candidate_id, redownload=True
-        )
-    except DownloadError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'EXHENTAI', csrf_token)
 
 
 @router.post("/candidates/{candidate_id}/telegraph")
@@ -839,23 +828,7 @@ async def download_telegraph_preview(
     Queued rather than run inline: a 78-page book takes far longer than a
     request should, and the queue already reports progress and failures.
     """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        deps.telegraph_service(request)
-        await deps.download_service(request).enqueue_telegraph_download(
-            candidate_id, redownload=True
-        )
-    except (DownloadError, TelegraphError) as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'TELEGRAPH', csrf_token)
 
 
 @router.post("/candidates/{candidate_id}/torrent")
@@ -870,23 +843,7 @@ async def download_torrent(
     source, plus one of its own: the transfer is the client's work and may
     take hours, so there is nothing useful to return synchronously.
     """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        deps.torrent_service(request)
-        await deps.download_service(request).enqueue_torrent_download(
-            candidate_id, redownload=True
-        )
-    except (DownloadError, TorrentError) as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'EH_TORRENT', csrf_token)
 
 
 @router.post("/candidates/{candidate_id}/convert")
@@ -895,17 +852,4 @@ async def convert_candidate(
     candidate_id: int,
     csrf_token: str = Form(),
 ):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        await deps.conversion_service(request).enqueue_for_candidate(candidate_id)
-    except ConversionError as exc:
-        return await render_review_error(
-            request, candidate_id, exc.public_message
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+    return await enqueue_candidate_task(request, candidate_id, 'CONVERSION', csrf_token)

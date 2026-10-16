@@ -4,13 +4,16 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+import threading
 
 from app.archive.models import (
     ArchivePasswordEntry,
+    ArchivePasswordAttempt,
     ArchivePathRule,
     SafetyLimits,
     ToolProfile,
 )
+from app.downloads.execution import run_sync
 from app.auto_approval.rules import (
     RuleValidationError,
     evaluate_rule,
@@ -59,6 +62,7 @@ from app.torrent.models import TorrentClientConfig
 
 
 MASTER_KEY_NAME = "archive_password_key"
+_MASTER_KEY_LOCK = threading.Lock()
 
 SETTING_KEEP_ORIGINAL = "keep_original"
 SETTING_LIBRARY_TEMPLATE = "library_template"
@@ -236,11 +240,14 @@ class ArchiveSettingsService:
 
     def _load_master_key_sync(self) -> bytes:
         path = self._master_key_path()
-        if path.is_file():
-            return bytes.fromhex(path.read_text(encoding="utf-8").strip())
-        key = generate_master_key()
-        write_private_text(path, key.hex())
-        return key
+        # The scheduler is single-process, but preparation runs in concurrent
+        # threads and service copies. Never replace a peer's first vault key.
+        with _MASTER_KEY_LOCK:
+            if path.is_file():
+                return bytes.fromhex(path.read_text(encoding="utf-8").strip())
+            key = generate_master_key()
+            write_private_text(path, key.hex())
+            return key
 
     async def master_key(self) -> bytes:
         return await asyncio.to_thread(self._load_master_key_sync)
@@ -798,26 +805,29 @@ class ArchiveSettingsService:
         computed from the validated AST, so it is the engine's own rendering and
         nothing the page typed.
         """
-        dsl_snapshot = render_rule_dsl(condition)
-        text = (path_template or "").strip()
-        if not text:
-            raise ArchiveSettingsError(
-                "PATH_RULE_TEMPLATE_EMPTY", "路径模板不能为空"
-            )
-        try:
-            cleaned = validate_library_template(text)
-        except LibraryTemplateError as exc:
-            raise ArchiveSettingsError(exc.code, exc.public_message) from exc
         return await self._database.save_archive_path_rule(
             rule_id=rule_id,
             name=name,
             enabled=enabled,
             priority=priority,
             condition=condition,
-            dsl_snapshot=dsl_snapshot,
-            path_template=cleaned,
+            dsl_snapshot=render_rule_dsl(condition),
+            path_template=self.validate_path_rule_template(path_template),
             case_sensitive=case_sensitive,
         )
+
+    @staticmethod
+    def validate_path_rule_template(path_template: str) -> str:
+        """Validate a routing template for internal writes and public commands."""
+        text = (path_template or "").strip()
+        if not text:
+            raise ArchiveSettingsError(
+                "PATH_RULE_TEMPLATE_EMPTY", "路径模板不能为空"
+            )
+        try:
+            return validate_library_template(text)
+        except LibraryTemplateError as exc:
+            raise ArchiveSettingsError(exc.code, exc.public_message) from exc
 
     async def image_quality(self) -> str:
         """The stored re-encode level, defaulting to the lossless original."""
@@ -923,7 +933,7 @@ class ArchiveSettingsService:
     async def install_toolchain(self, *, force: bool = False) -> Path:
         """Download and verify the pinned official 7-Zip build."""
         try:
-            executable = await asyncio.to_thread(
+            executable = await run_sync(
                 install_seven_zip, self.tools_path, force=force
             )
         except ToolchainError as exc:
@@ -971,6 +981,19 @@ class ArchiveSettingsService:
     async def add_password(
         self, *, name: str, password: str, priority: int, enabled: bool = True
     ) -> int:
+        cleaned_name = self.password_values(name, password)
+        key = await self.master_key()
+        secret_json = await asyncio.to_thread(encrypt_password, key, password)
+        return await self._database.save_archive_password(
+            name=cleaned_name,
+            secret_json=secret_json,
+            priority=priority,
+            enabled=enabled,
+        )
+
+    @staticmethod
+    def password_values(name: str, password: str) -> str:
+        """Validate the original vault input without encrypting or writing it."""
         cleaned_name = name.strip()
         if not cleaned_name:
             raise ArchiveSettingsError(
@@ -982,19 +1005,12 @@ class ArchiveSettingsService:
                 "ARCHIVE_PASSWORD_REQUIRED",
                 "\u5bc6\u7801\u4e0d\u80fd\u4e3a\u7a7a",
             )
-        key = await self.master_key()
-        secret_json = await asyncio.to_thread(encrypt_password, key, password)
-        return await self._database.save_archive_password(
-            name=cleaned_name,
-            secret_json=secret_json,
-            priority=priority,
-            enabled=enabled,
-        )
+        return cleaned_name
 
     async def delete_password(self, password_id: int) -> None:
         await self._database.delete_archive_password(password_id)
 
-    async def password_attempts(self) -> tuple[tuple[int, str], ...]:
+    async def password_attempts(self) -> tuple[ArchivePasswordAttempt, ...]:
         """Decrypt enabled vault entries in attempt order.
 
         Entries that fail integrity verification are skipped instead of
@@ -1004,8 +1020,8 @@ class ArchiveSettingsService:
         if not secrets:
             return ()
         key = await self.master_key()
-        attempts: list[tuple[int, str]] = []
-        for password_id, envelope in secrets:
+        attempts: list[ArchivePasswordAttempt] = []
+        for password_id, envelope, password_uuid, revision in secrets:
             try:
                 plaintext = await asyncio.to_thread(
                     decrypt_password, key, envelope
@@ -1016,11 +1032,12 @@ class ArchiveSettingsService:
                     extra={"error_code": "ARCHIVE_PASSWORD_UNDECRYPTABLE"},
                 )
                 continue
-            attempts.append((password_id, plaintext))
+            attempts.append(ArchivePasswordAttempt(password_id, password_uuid, revision, plaintext))
         return tuple(attempts)
 
-    async def mark_password_success(self, password_id: int) -> None:
-        await self._database.mark_archive_password_success(password_id)
+    async def mark_password_success(self, attempt: ArchivePasswordAttempt) -> None:
+        await self._database.mark_archive_password_success(attempt.password_id,
+            password_uuid=attempt.password_uuid, expected_revision=attempt.revision)
 
 
 __all__ = [

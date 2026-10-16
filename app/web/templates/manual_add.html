@@ -35,11 +35,11 @@
   <h2 class="ui-section-title" id="manual-add-existing-heading">作品已存在</h2>
   <div class="ui-panel">
     <p>
-      候选 <a href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">#{{ existing_candidate_id }}</a>
+      候选 <a href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}?work_id={{ existing_work_id }}">#{{ existing_candidate_id }}</a>
       {%- if existing_candidate_title %} · {{ existing_candidate_title }}{% endif %}
     </p>
     <div class="ui-form-actions">
-      <a class="ui-btn" data-variant="primary" href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}">跳转到该候选</a>
+      <a class="ui-btn" data-variant="primary" href="{{ url_for('work_detail', candidate_id=existing_candidate_id) }}?work_id={{ existing_work_id }}">跳转到该候选</a>
       <a class="ui-btn" href="{{ url_for('manual_add_page') }}">返回</a>
     </div>
   </div>
@@ -47,12 +47,18 @@
 {% endif %}
 
 {% if error %}{{ ui.callout(error, tone="danger", role="alert") }}{% endif %}
+{% if operation %}
+{{ ui.callout("手动添加仍在处理" if operation.status == 'RUNNING' else ("手动添加未完成" if operation.status == 'FAILED' else "手动添加结果待核实"), tone="waiting",
+              detail="保留原链接与操作键；相同命令不会再次拉取画廊。请核对操作结果后再发起新操作。") }}
+<p><a href="/manual-add/operations/{{ operation.manual_add_operation_id }}">查看操作结果</a></p>
+{% endif %}
 
 <section class="ui-section" aria-labelledby="manual-add-heading">
   <h2 class="ui-section-title" id="manual-add-heading">添加任务</h2>
   <div class="ui-panel">
-    <form class="ui-form" method="post" action="{{ url_for('manual_add_submit') }}">
+    <form class="ui-form" method="post" data-manual-form {% if draft %}data-dirty="true"{% endif %} action="{{ url_for('manual_add_submit') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="idempotency_key" value="{{ draft.idempotency_key if draft else new_command_key() }}">
       <div class="ui-field">
         <label for="manual-input">链接</label>
         {#- The accepted shape is spelled out under the field rather than in a
@@ -60,7 +66,7 @@
             about to paste, and it names the connection it needs. -#}
         <textarea class="ui-textarea" id="manual-input" name="input" rows="3" required
                   maxlength="1000" aria-describedby="manual-input-hint"
-                  placeholder="https://exhentai.org/g/..."></textarea>
+                  placeholder="https://exhentai.org/g/...">{{ draft.url if draft else '' }}</textarea>
         <small id="manual-input-hint">
           <strong>ExHentai 链接</strong>：<code class="ui-code-inline">https://exhentai.org/g/123456/abcdef12/</code> ·
           <strong>预览链接</strong>：<code class="ui-code-inline">https://telegra.ph/ehentai-123456-abcdef12-10-06</code>，slug 里带画廊 ID 时同样识别
@@ -88,6 +94,7 @@
       </p>
       {% endif %}
       <div class="ui-form-actions">
+        {% if draft %}<a class="ui-btn" href="{{ url_for('manual_add_page') }}">新建另一操作</a>{% endif %}
         <button class="ui-btn" data-variant="primary" type="submit"
                 {% if not exhentai_configured %}disabled{% endif %}>解析并加入下载队列</button>
       </div>

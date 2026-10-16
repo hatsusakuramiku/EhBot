@@ -6,8 +6,6 @@ builds one and the dry run that shows what it would have matched.
 
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
@@ -18,13 +16,14 @@ from app.auto_approval.rules import (
     editor_rows,
 )
 from app.auto_approval.service import AutomaticApprovalService
-from app.settings.auto_approval import dry_run_payload, rule_payload
+from app.settings.auto_approval import dry_run_payload
 from app.settings.forms import form_values
 from app.web import deps
 # The row -> AST parser is shared with the paths tab's rule editor, so both
 # rule forms mean the same things on the wire.
 from app.web.rule_forms import parse_rule_condition as _parse_rule_condition
-from app.web.settings_view import render_settings, settings_redirect
+from app.web.settings_view import render_settings
+from app.web.rule_commands import rule_form, rule_draft
 
 router = APIRouter()
 
@@ -46,48 +45,8 @@ async def auto_approval_rules_page(request: Request):
 
 @router.post("/auto-approval-rules")
 async def save_auto_approval_rule(request: Request):
-    """Create a rule, or overwrite the one `rule_id` names.
-
-    One endpoint for both because it is one form: the editor renders with the
-    fields filled when editing and blank when creating, and the only difference
-    on the wire is a hidden `rule_id`. Splitting it would put the same
-    validation in two routes, and `save_auto_approval_rule` in the database
-    layer already branches on `rule_id is None` -- this passes that decision
-    through rather than making a second one.
-
-    An update bumps `version`, which is why the editor is safe to reuse: the
-    rule snapshot stored on every past automatic approval names the version it
-    fired as, so editing a rule cannot rewrite the history of what it did.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    try:
-        # `validate_rule_ast` is the gate, not the editor: every operator and
-        # value is checked here, so something the browser accepted and the
-        # engine cannot is refused at the moment it would be stored.
-        # The validation half is `app/settings/auto_approval.py`'s, shared with
-        # `POST /api/v1/settings/auto-approval/rules` (R76).
-        await deps.database(request).save_auto_approval_rule(
-            **rule_payload(
-                form_values(form), condition=_parse_rule_condition(form)
-            )
-        )
-    except LookupError:
-        # The rule was deleted between the page render and the save. Reported as
-        # a 404 rather than re-created under its old id, which would resurrect a
-        # rule the operator had removed.
-        raise HTTPException(status_code=404, detail="规则不存在") from None
-    except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
-        return await render_settings(
-            request,
-            SETTINGS_AUTO_APPROVAL,
-            error=str(exc),
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_AUTO_APPROVAL)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'auto-approval', 'save')
 
 
 @router.post("/auto-approval-rules/dry-run")
@@ -114,6 +73,7 @@ async def dry_run_auto_approval_rule(request: Request):
             SETTINGS_AUTO_APPROVAL,
             error=str(exc),
             status_code=400,
+            rule_draft=rule_draft(form, 'auto-approval'),
         )
     result = await AutomaticApprovalService(deps.database(request)).dry_run(
         payload["condition"],
@@ -124,20 +84,14 @@ async def dry_run_auto_approval_rule(request: Request):
         request,
         SETTINGS_AUTO_APPROVAL,
         dry_run=auto_approval_dry_run(result),
+        rule_draft=rule_draft(form, 'auto-approval'),
     )
 
 
 @router.post("/auto-approval-rules/{rule_id}/toggle")
 async def toggle_auto_approval_rule(rule_id: int, request: Request):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    await deps.database(request).set_auto_approval_rule_enabled(
-        rule_id, form.get("enabled") == "on"
-    )
-    return settings_redirect(request, SETTINGS_AUTO_APPROVAL)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'auto-approval', 'toggle', rule_id=rule_id)
 
 
 @router.get("/auto-approval-rules/{rule_id}/edit")
@@ -175,6 +129,8 @@ async def edit_auto_approval_rule(rule_id: int, request: Request):
         edit_rule_id=rule_id,
         edit_rule={
             "rule_id": rule.rule_id,
+            "rule_uuid": rule.rule_uuid,
+            "expected_revision": rule.version,
             "name": rule.name,
             "priority": rule.priority,
             "enabled": rule.enabled,
@@ -188,23 +144,8 @@ async def edit_auto_approval_rule(rule_id: int, request: Request):
 
 @router.post("/auto-approval-rules/{rule_id}/delete")
 async def delete_auto_approval_rule(rule_id: int, request: Request):
-    """Delete a rule for good.
-
-    A POST behind `ui.confirm`, because it is the one action on this tab that
-    cannot be undone from the interface -- 停用 is the reversible half and is
-    deliberately still its own button, so an operator parking a rule for an
-    afternoon is never pushed toward deleting it.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    try:
-        await deps.database(request).delete_auto_approval_rule(rule_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="规则不存在") from None
-    return settings_redirect(request, SETTINGS_AUTO_APPROVAL)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'auto-approval', 'delete', rule_id=rule_id)
 
 
 @router.post("/auto-approval-rules/{rule_id}/preview")

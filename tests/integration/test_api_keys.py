@@ -8,6 +8,8 @@ at any time, and changing the administrator password does not touch it.
 
 from __future__ import annotations
 
+from tests.settings_commands import save_then_read_preferences
+from tests.credential_commands import observed_credentials
 import re
 import sqlite3
 from pathlib import Path
@@ -64,16 +66,15 @@ def complete_first_run(client: TestClient, settings: Settings) -> None:
 
 
 def generate_key(client: TestClient) -> str:
-    """Generate a key, follow the reveal redirect, and return the plaintext."""
+    """Generate using observed conditions and read its sole plaintext response."""
     page = client.get("/settings/passwords")
     response = client.post(
         "/settings/api-keys/generate",
-        data={"csrf_token": page.context["csrf_token"]},
+        data={"csrf_token": page.context["csrf_token"], **observed_credentials(client, 'api-key-generate')},
         follow_redirects=False,
     )
-    assert response.status_code == 303
-    reveal = client.get(response.headers["location"])
-    match = _KEY_PATTERN.search(reveal.text)
+    assert response.status_code == 200
+    match = _KEY_PATTERN.search(response.text)
     assert match is not None, "the reveal page did not show a key"
     return match.group(0)
 
@@ -160,7 +161,7 @@ class TestKeyLifecycle:
             page = client.get("/settings/passwords")
             revoked = client.post(
                 "/settings/api-keys/revoke",
-                data={"csrf_token": page.context["csrf_token"]},
+                data={"csrf_token": page.context["csrf_token"], **observed_credentials(client, 'api-key-revoke')},
                 follow_redirects=False,
             )
             after = client.get("/api/v1/meta", headers=bearer(key))
@@ -182,7 +183,7 @@ class TestKeyLifecycle:
             page = client.get("/settings/passwords")
             client.post(
                 "/settings/api-keys/revoke",
-                data={"csrf_token": page.context["csrf_token"]},
+                data={"csrf_token": page.context["csrf_token"], **observed_credentials(client, 'api-key-revoke')},
                 follow_redirects=False,
             )
             replacement = generate_key(client)
@@ -282,7 +283,7 @@ class TestTokenTtlSettings:
         with TestClient(create_app(settings)) as client:
             complete_first_run(client, settings)
             page = client.get("/settings/system")
-            saved = client.post(
+            saved = save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={
                     "csrf_token": page.context["csrf_token"],
@@ -307,7 +308,7 @@ class TestTokenTtlSettings:
         with TestClient(create_app(settings)) as client:
             complete_first_run(client, settings)
             page = client.get("/settings/system")
-            response = client.post(
+            response = save_then_read_preferences(client, 'post',
                 "/settings/system",
                 data={
                     "csrf_token": page.context["csrf_token"],

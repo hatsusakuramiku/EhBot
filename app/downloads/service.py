@@ -61,7 +61,6 @@ class DownloadService:
         telegraph_download=None,
         torrent_push=None,
         torrent_abandon=None,
-        torrent_verify=None,
         torrent_stop=None,
         stop_pack=None,
         cleanup_removals=None,
@@ -77,6 +76,7 @@ class DownloadService:
         exhentai_source=None,
         manual_enqueue=None,
         reclaim_pack=None,
+        sync_metadata=None,
     ) -> None:
         self._database = database
         self._queue_control = QueueControl(database, switch_preflight=self._preflight_switch)
@@ -92,13 +92,10 @@ class DownloadService:
         self._exhentai_preflight = exhentai_preflight
         self._telegraph_preflight = telegraph_preflight
         # Pushing hands the transfer to qBittorrent; abandoning takes it back
-        # out when the operator cancels or switches sources. Verifying asks the
-        # torrent service whether a finished payload is already readable on
-        # disk so a retry can complete without a fresh push. Auto-pack hands a
+        # out when the operator cancels or switches sources. Auto-pack hands a
         # finished download to the conversion queue.
         self._torrent_push = torrent_push
         self._torrent_abandon = torrent_abandon
-        self._torrent_verify = torrent_verify
         self._torrent_stop = torrent_stop
         self._stop_pack = stop_pack
         self._cleanup_removals = cleanup_removals
@@ -108,6 +105,7 @@ class DownloadService:
         self._exhentai_source = exhentai_source
         self._manual_enqueue = manual_enqueue
         self._reclaim_pack = reclaim_pack
+        self._sync_metadata = sync_metadata
         self._last_reconcile = 0.0
         self._auto_pack = auto_pack
         self._auto_pack_enabled = auto_pack_enabled
@@ -137,6 +135,11 @@ class DownloadService:
         redownload: bool = False,
         automatic_match=None,
     ) -> DownloadEnqueueResult:
+        key, details = await self._prepare_telegram_download(candidate_id, attachment)
+        return await self._enqueue(candidate_id, PROVIDER_TELEGRAM, key, details,
+                                   redownload=redownload, automatic_match=automatic_match)
+
+    async def _prepare_telegram_download(self, candidate_id, attachment):
         file_id = str(attachment.get("file_id") or "")
         if not file_id:
             raise DownloadError(
@@ -155,14 +158,7 @@ class DownloadService:
         }
         if self._account_scope is not None:
             await run_sync(self._validate_telegram_source_sync, candidate_id, details, "TG_BOT")
-        return await self._enqueue(
-            candidate_id,
-            PROVIDER_TELEGRAM,
-            idempotency_key,
-            json.dumps(details, separators=(",", ":")),
-            redownload=redownload,
-            automatic_match=automatic_match,
-        )
+        return idempotency_key, json.dumps(details, separators=(",", ":"))
 
     async def enqueue_telegram_user_download(
         self,
@@ -179,6 +175,11 @@ class DownloadService:
         for the user route on the same candidate, and a shared key would make
         that a no-op that looks like nothing happened.
         """
+        key, details = await self._prepare_telegram_user_download(candidate_id, attachment)
+        return await self._enqueue(candidate_id, PROVIDER_TELEGRAM_USER, key, details,
+                                   redownload=redownload, automatic_match=automatic_match)
+
+    async def _prepare_telegram_user_download(self, candidate_id, attachment):
         file_unique_id = str(attachment.get("file_unique_id") or "")
         chat_id = attachment.get("chat_id")
         message_id = attachment.get("message_id")
@@ -213,14 +214,21 @@ class DownloadService:
                 raise DownloadError(exc.code, exc.public_message) from exc
         elif attachment.get("account_kind") == "TG_USER":
             details["download_file_unique_id"] = attachment.get("file_unique_id")
-        return await self._enqueue(
-            candidate_id,
-            PROVIDER_TELEGRAM_USER,
-            f"telegram-user:{candidate_id}:{file_unique_id or message_id}",
-            json.dumps(details, separators=(",", ":")),
-            redownload=redownload,
-            automatic_match=automatic_match,
-        )
+        return f"telegram-user:{candidate_id}:{file_unique_id or message_id}", json.dumps(details, separators=(",", ":"))
+
+    async def prepare_work_download(self, candidate_id, provider, attachment=None):
+        """Resolve source/network inputs before a versioned approval transaction."""
+        if provider == PROVIDER_TELEGRAM:
+            key, details = await self._prepare_telegram_download(candidate_id, attachment or {})
+        elif provider == PROVIDER_TELEGRAM_USER:
+            key, details = await self._prepare_telegram_user_download(candidate_id, attachment or {})
+        else:
+            prefixes = {PROVIDER_EH_TORRENT: 'torrent', PROVIDER_TELEGRAPH: 'telegraph', PROVIDER_EXHENTAI: 'exhentai'}
+            if provider not in prefixes:
+                raise DownloadError('PROVIDER_UNSUPPORTED', '不支持的下载来源')
+            key, details = f'{prefixes[provider]}:{candidate_id}', '{}'
+        pack = await self._auto_pack_enabled() if self._auto_pack_enabled is not None else None
+        return {'provider': provider, 'idempotency_key': key, 'details_json': details, 'pack_requested': pack}
 
     @staticmethod
     def _source_binding(attachment: dict) -> dict:
@@ -345,9 +353,12 @@ class DownloadService:
         redownload: bool = False,
         automatic_match=None,
         pack_requested=None,
+        connection=None,
     ) -> DownloadEnqueueResult:
-        with self._database.connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        owns_connection = connection is None
+        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
+            if owns_connection:
+                connection.execute("BEGIN IMMEDIATE")
             if self._account_scope is not None and provider in {PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER}:
                 self._validate_telegram_source_sync(candidate_id, json.loads(details_json),
                     "TG_BOT" if provider == PROVIDER_TELEGRAM else None, connection)
@@ -768,6 +779,8 @@ class DownloadService:
                 self._announce(operation["legacy_job_id"], operation["candidate_id"])
             if self._cleanup_removals is not None:
                 await self._cleanup_removals()
+            if self._sync_metadata is not None:
+                await self._sync_metadata()
             from app.candidates.references import process_reference_changes
             for result in await run_sync(process_reference_changes, self._database):
                 self._announce(None, result['result_candidate_id'] or result['candidate_id'])

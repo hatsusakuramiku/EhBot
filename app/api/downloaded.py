@@ -27,13 +27,11 @@ from fastapi import APIRouter, Request
 from app.api import deps
 from app.api.contracts import ApiError, PageParams
 from app.api.events import EVENT_DOWNLOAD
-from app.archive.service import PATH_SOURCE_AI
 from app.api.serializers import downloaded_work as serialize_work
 from app.api.status import (
     DOWNLOADED_TAB_STATUS,
     downloaded_tab_view,
 )
-from app.conversion.naming import LibraryPathError
 from app.db.database import (
     DOWNLOADED_PACK_FILTERS,
     DOWNLOADED_SORT_ORDERS,
@@ -41,6 +39,9 @@ from app.db.database import (
 )
 from app.downloads.dedup import apply_dedup, build_dedup_plan
 from app.search.query import PAGE_DOWNLOADED, parse_query
+from app.review.batches import ReviewBatches
+from app.review.commands import WorkCommandError
+from app.review.application import rename_work
 
 
 router = APIRouter(tags=["downloaded"])
@@ -181,82 +182,11 @@ def _translate(exc: Exception) -> Exception:
     code = getattr(exc, "code", None)
     message = getattr(exc, "public_message", None)
     if code and message:
+        if isinstance(exc, WorkCommandError):
+            return ApiError(str(code), str(message), status_code=exc.status_code, details=exc.details)
         status = 404 if str(code).endswith("_NOT_FOUND") else 400
         return ApiError(str(code), str(message), status_code=status)
     return exc
-
-
-async def _refile_for_repack(
-    archived_service,
-    conversion_service,
-    candidate_id: int,
-    *,
-    operator_name: str,
-) -> None:
-    """Point one work at the path the current layout template gives it.
-
-    Why a batch repack recomputes at all. The layout template is a setting an
-    operator changes, and the books already in the library were filed under
-    whatever it said at the time. 「批量打包时优先使用最新路径配置为每个
-    作品生成最新的归档路径与文件名」 is the instruction; without it a repack
-    reads the pin the *last* pack wrote and the new template never reaches the
-    books that predate it.
-
-    Three things it deliberately does not do:
-
-    * **It does not touch a path the operator typed.** `is_manual` on the pin is
-      the same guard `is_manual` is over metadata: a template is a default, and a
-      default must never overwrite a decision. An operator who named one book by
-      hand and then batch-packs fifty keeps that name.
-    * **It does not refuse the batch when one path is unusable.** The work is
-      left exactly as it was -- old pin, old file, nothing moved -- and the
-      packing job is parked in `CONVERSION_WAITING_PATH` carrying the reason, so
-      it lands in 需干预 with 「为什么」 attached rather than vanishing from a
-      flash message. That is what makes the outcome answerable tomorrow.
-    * **It does not move the file itself.** The pack is what publishes to the new
-      path, and it lands there because it reads the pin. Moving first would leave
-      a book at a path no artifact row names if the pack then failed.
-    """
-    if await archived_service.has_manual_path_pin(candidate_id):
-        return
-    # Before reading it, not after. Everything below derives a name from this
-    # metadata and then pins that name, and `_library_target` prefers a pin
-    # over the template -- so a batch that computed a path while the gallery
-    # was still unread filed the book as `Candidate 57.cbz` and made it
-    # permanent, where the single-work path (which enriches inside the job)
-    # got the real title. Same entry point as the packer's own, so the two
-    # cannot disagree about when metadata is fetched.
-    await conversion_service.ensure_metadata(candidate_id)
-    metadata = await conversion_service.metadata_for(candidate_id)
-    if await conversion_service.path_source() == PATH_SOURCE_AI:
-        # A batch repack re-files; it does not re-ask. If the cached answer is
-        # still current, pin it so the pack lands exactly where the model said.
-        # If it is not -- never generated, or the prompt/chain/metadata moved --
-        # nothing is pinned, and the packing job asks the model itself, which is
-        # the only place a request is allowed to happen.
-        cached = await conversion_service.current_ai_path(candidate_id, metadata)
-        if cached is not None:
-            await archived_service.pin_computed_path(
-                candidate_id, cached.as_posix(), operator_name=operator_name
-            )
-        return
-    title = conversion_service.title_of(metadata, candidate_id)
-    try:
-        relative = await conversion_service.planned_library_path(
-            candidate_id, title, metadata
-        )
-    except LibraryPathError as exc:
-        # Park the packing task with the reason instead of moving anything. The
-        # job has to exist for the reason to be visible, so it is enqueued first
-        # and then parked -- `enqueue_for_candidate` is idempotent, and the
-        # caller's own enqueue afterwards finds the row already parked.
-        await archived_service.park_for_invalid_path(
-            candidate_id, exc.code, exc.public_message
-        )
-        raise
-    await archived_service.pin_computed_path(
-        candidate_id, relative.as_posix(), operator_name=operator_name
-    )
 
 
 async def apply_downloaded_batch(
@@ -268,20 +198,11 @@ async def apply_downloaded_batch(
     delete_files: bool = False,
     repack: bool = False,
     operator_name: str = "admin",
+    versions: dict | None = None,
+    idempotency_key: str | None = None,
     announce: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
-    """Run one action against a selection of downloaded works.
-
-    One work at a time, for the reason `apply_review_batch` acts per candidate:
-    all-or-nothing over a selection means one already-removed book refuses the
-    other forty-nine, and a replay must be able to finish what a half-failed
-    first attempt started. Each refusal is reported under `skipped` with the
-    reason the service gave.
-
-    A genuine fault -- anything without a code/message pair -- is re-raised
-    rather than folded into `skipped`: a broken filesystem must not read as
-    「49 已执行，1 跳过」.
-    """
+    """Thin adapter to fixed work outcomes; replay never repeats a finished task."""
     if action not in DOWNLOADED_BATCH_ACTIONS:
         raise ApiError(
             "ACTION_UNKNOWN",
@@ -289,72 +210,19 @@ async def apply_downloaded_batch(
             details={"allowed": sorted(DOWNLOADED_BATCH_ACTIONS)},
         )
 
-    if action == "repack":
-        # Packaging is the conversion service's own entry point, and it is the
-        # same one the work detail page's 重新打包 posts to -- there is no second
-        # path that could disagree about what re-packing means.
-        #
-        # Before enqueueing, each work's archive path is recomputed from the
-        # *current* layout template and pinned, so a batch started after a
-        # template change re-files every selected book instead of leaving the
-        # ones packed under the old template where they were. A work whose
-        # recomputed path is unusable is left completely alone -- see
-        # `_refile_for_repack`.
-        async def run(candidate_id: int):
-            await _refile_for_repack(
-                archived_service,
-                conversion_service,
-                candidate_id,
-                operator_name=operator_name,
-            )
-            return await conversion_service.enqueue_for_candidate(candidate_id)
-
-    elif action == "remove":
-
-        async def run(candidate_id: int):
-            return await archived_service.remove_work(
-                candidate_id,
-                delete_files=delete_files,
-                operator_name=operator_name,
-            )
-
-    else:
-
-        async def run(candidate_id: int):
-            return await archived_service.redownload_work(
-                candidate_id, repack=repack
-            )
-
-    applied: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for candidate_id in candidate_ids:
-        try:
-            result = await run(candidate_id)
-        except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
-            translated = _translate(exc)
-            if not isinstance(translated, ApiError):
-                raise translated from exc
-            skipped.append(
-                {
-                    "candidate_id": candidate_id,
-                    "code": translated.code,
-                    "message": translated.message,
-                }
-            )
-            continue
-        applied.append({"candidate_id": candidate_id, "result": result})
+    command = 'remove-files' if action == 'remove' and delete_files else action
+    try:
+        result = await ReviewBatches(archived_service._database, archived=archived_service,
+            conversion=conversion_service).run(command, candidate_ids, versions, idempotency_key,
+                                                operator_name, repack=repack)
+    except WorkCommandError as exc:
+        raise _translate(exc) from exc
+    for item in result['applied']:
         if announce is not None:
-            announce(candidate_id)
-
-    return {
-        "action": action,
-        "requested": len(candidate_ids),
-        "applied": applied,
-        "skipped": skipped,
-        # Echoed back so a client can tell a records-only removal from one that
-        # took the files with it without re-reading its own request.
-        "delete_files": bool(delete_files) if action == "remove" else False,
-    }
+            announce(item['candidate_id'])
+    return {**result, 'action': action,
+            'applied': [{'candidate_id': item['candidate_id'], 'result': item} for item in result['applied']],
+            'delete_files': bool(delete_files) if action == 'remove' else False}
 
 
 @router.get("/removals/{removal_id}")
@@ -404,6 +272,7 @@ async def downloaded_batch(request: Request) -> dict[str, Any]:
     payload = await request.json()
     if not isinstance(payload, dict):
         raise ApiError("BODY_INVALID", "请求体必须是 JSON 对象")
+    payload = deps.command_payload(request, payload)
     return await apply_downloaded_batch(
         deps.archived_work_service(request),
         deps.conversion_service(request),
@@ -411,7 +280,9 @@ async def downloaded_batch(request: Request) -> dict[str, Any]:
         _work_ids(payload.get("candidate_ids")),
         delete_files=bool(payload.get("delete_files")),
         repack=bool(payload.get("repack")),
-        operator_name=str(request.session.get("username") or "admin"),
+        operator_name=await deps.operator_name(request),
+        versions=payload.get('versions'),
+        idempotency_key=payload.get('idempotency_key'),
         announce=lambda candidate_id: request.app.state.event_bus.publish(
             EVENT_DOWNLOAD, candidate_id=candidate_id
         ),
@@ -436,15 +307,19 @@ async def downloaded_dedup(request: Request) -> dict[str, Any]:
     """Run the whole dedup pass: one winner per gallery, the rest removed."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    return await apply_dedup(
-        deps.database(request),
-        deps.archived_work_service(request),
-        deps.download_service(request),
-        operator_name=str(request.session.get("username") or "admin"),
-        announce=lambda candidate_id: request.app.state.event_bus.publish(
-            EVENT_DOWNLOAD, candidate_id=candidate_id
-        ),
-    )
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise ApiError('BODY_INVALID', '请求体必须是 JSON 对象')
+    payload = deps.command_payload(request, payload)
+    try:
+        return await apply_dedup(
+            deps.database(request), deps.archived_work_service(request), deps.download_service(request),
+            plan_id=payload.get('plan_id'), idempotency_key=payload.get('idempotency_key'),
+            operator_name=await deps.operator_name(request),
+            announce=lambda candidate_id: request.app.state.event_bus.publish(EVENT_DOWNLOAD, candidate_id=candidate_id),
+        )
+    except WorkCommandError as exc:
+        raise _translate(exc) from exc
 
 
 @router.post("/downloaded/{candidate_id}/rename")
@@ -466,6 +341,16 @@ async def rename_downloaded(request: Request, candidate_id: int) -> dict[str, An
     the file on disk is rebuilt at the name that was just chosen rather than
     keeping the old one until the next pack.
     """
+    return await _change_downloaded_path(request, candidate_id, strict=False)
+
+
+@router.post('/works/{candidate_id}/archive-path')
+async def set_work_archive_path(request: Request, candidate_id: int) -> dict[str, Any]:
+    """Set an exact path before or after packaging, with one atomic command."""
+    return await _change_downloaded_path(request, candidate_id, strict=True)
+
+
+async def _change_downloaded_path(request, candidate_id, *, strict):
     await deps.require_session(request)
     deps.require_csrf(request)
     try:
@@ -476,22 +361,12 @@ async def rename_downloaded(request: Request, candidate_id: int) -> dict[str, An
         payload = {}
     if not isinstance(payload, dict):
         raise ApiError("BODY_INVALID", "请求体必须是 JSON 对象")
-    filename = str(payload.get("filename") or "").strip() or None
-    directory = str(payload.get("directory") or "").strip() or None
-    repack = bool(payload.get("repack"))
-    operator = str(request.session.get("username") or "admin")
+    payload = deps.command_payload(request, payload)
+    operator = await deps.operator_name(request)
     service = deps.archived_work_service(request)
     try:
-        result = await service.rename_work(
-            candidate_id,
-            filename=filename,
-            directory=directory,
-            operator_name=operator,
-        )
-        if repack:
-            await deps.conversion_service(request).enqueue_for_candidate(
-                candidate_id
-            )
+        result = await rename_work(deps.database(request), service, deps.conversion_service(request),
+                                   candidate_id, payload, operator, strict=strict)
     except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
         # Same rule as the rest of this file's actions: a refusal that knows how
         # to describe itself is reported verbatim; anything else is a genuine
@@ -499,17 +374,9 @@ async def rename_downloaded(request: Request, candidate_id: int) -> dict[str, An
         message = getattr(exc, "public_message", None)
         if message is None:
             raise
-        raise ApiError(str(getattr(exc, "code", "RENAME_FAILED")), str(message)) from exc
+        raise _translate(exc) from exc
     request.app.state.event_bus.publish(EVENT_DOWNLOAD, candidate_id=candidate_id)
-    return {
-        "candidate_id": candidate_id,
-        # `moved` is false when the name was already the one asked for: the
-        # client tells that apart from a failure and says「文件名未变更」, as the
-        # page does.
-        "moved": bool(result["moved"]),
-        "relative_path": result["relative_path"],
-        "repacked": repack,
-    }
+    return result
 
 
 __all__ = [

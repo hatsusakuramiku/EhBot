@@ -17,6 +17,7 @@ from app.downloads.archived import ArchivedWorkService
 from app.main import create_app
 from app.review.models import editable_metadata_field
 from app.review.service import ReviewService
+from tests.work_commands import observed_work
 from tests.integration.test_api_domains import seed, csrf_token
 from tests.integration.test_api_v1 import make_settings, log_in
 
@@ -164,7 +165,7 @@ def test_page_and_api_read_real_values_and_share_archive_edits(tmp_path):
         assert 'name="field_name" value="PageCount"' not in page.text
         token = csrf_token(client)
         edited = client.patch("/api/v1/works/1/metadata", headers={CSRF_HEADER: token},
-                              json={"fields": {"Series": "New series", "Translator": "New translator", "ShelfLabel": "Private label"}})
+                              json={**observed_work(client), "fields": {"Series": "New series", "Translator": "New translator", "ShelfLabel": "Private label"}})
         assert edited.status_code == 200
         assert edited.json()["archive_synced"] is True
         assert edited.json()["sync_skipped"] is None
@@ -176,7 +177,7 @@ def test_page_and_api_read_real_values_and_share_archive_edits(tmp_path):
             assert root.findtext("Translator") == "New translator"
             assert root.find("ShelfLabel") is None
         posted = client.post("/candidates/1/metadata", follow_redirects=False,
-                             data={"csrf_token": token, "field_name": "Summary", "field_value": "Updated summary"})
+                             data={**observed_work(client), "csrf_token": token, "field_name": "Summary", "field_value": "Updated summary"})
         assert posted.status_code == 303
         page = client.get(posted.headers["location"])
         assert "归档文件已同步" in page.text

@@ -36,6 +36,16 @@ from app.credentials import (
 #: without each caller remembering to add a form field.
 CSRF_HEADER = "X-CSRF-Token"
 
+
+def command_payload(request: Request, payload: dict) -> dict:
+    """Normalize an HTTP idempotency header to the shared HTTP/WS body field."""
+    header = request.headers.get('Idempotency-Key')
+    if header is not None:
+        if payload.get('idempotency_key', header) != header:
+            raise ApiError('IDEMPOTENCY_CONFLICT', '请求头与请求体的幂等键不一致', status_code=409)
+        payload = {**payload, 'idempotency_key': header}
+    return payload
+
 #: `last_used_at` is rewritten at most this often, so a busy mobile client does
 #: not turn every read into a database write just to keep one timestamp warm.
 TOUCH_INTERVAL_SECONDS = 60
@@ -142,6 +152,14 @@ async def require_bearer(request: Request) -> ApiCredential:
     if credential is None:
         raise ApiError("NOT_AUTHENTICATED", "请先登录", status_code=401)
     return credential
+
+
+async def operator_name(request: Request) -> str:
+    """Resolve the sole administrator's current name after authentication."""
+    admin = await database(request).get_administrator()
+    if admin is None:
+        raise ApiError("NOT_AUTHENTICATED", "请先登录", status_code=401)
+    return admin.username
 
 
 def require_csrf(request: Request) -> None:

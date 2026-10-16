@@ -16,7 +16,22 @@ JSON layer raises `ApiError`).
 
 from __future__ import annotations
 
+import asyncio
 from fastapi import Request
+
+from app.logging import apply_runtime_log_level
+
+
+async def refresh_system(request: Request, service) -> None:
+    """Refresh cached preferences in order, including after receipt replay."""
+    state = request.app.state
+    if not hasattr(state, 'settings_refresh_lock'):
+        state.settings_refresh_lock = asyncio.Lock()
+    async with state.settings_refresh_lock:
+        snapshot = await service.snapshot()
+        state.display_timezone = snapshot['timezone']
+        state.download_source_priority = tuple(snapshot['download_source_priority'])
+        apply_runtime_log_level(snapshot['log_level'])
 
 
 async def refresh_display_timezone(request: Request, service) -> str:

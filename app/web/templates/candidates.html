@@ -84,7 +84,7 @@
     {% if selectable %}
     <td data-label="选择">
       <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ item.candidate_id }}"
-             aria-label="选择「{{ item.display_title }}」">
+             aria-label="选择「{{ item.display_title }}」" {% if batch_draft and item.candidate_id in batch_draft.candidate_ids %}checked{% endif %}>
     </td>
     {% endif %}
     <td data-label="候选">
@@ -201,15 +201,32 @@
       {% endif %}
     </div>
 
-    {% if candidates %}
+    {% if candidates or batch_draft %}
     {#- One form around both views. The selection count is recomputed from the
         checkboxes on every change rather than bound per input, so the keyboard
         toggles, the select-all tools and a plain click all agree on it. -#}
     <form data-candidate-form id="candidate-batch" method="post" action="/candidates/batch-review"
-          x-data="{ selected: 0 }"
+          x-data="{ selected: {{ batch_draft.candidate_ids | length if batch_draft else 0 }} }"
           @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="tab" value="{{ tab }}">
+      <input type="hidden" name="idempotency_key" value="{{ batch_draft.idempotency_key if batch_draft else new_command_key() }}">
+      {% for item in candidates %}
+      {% set observed = batch_draft.versions.get(item.candidate_id|string, item) if batch_draft else item %}
+      <input type="hidden" name="work_id_{{ item.candidate_id }}" value="{{ observed.work_id }}">
+      <input type="hidden" name="expected_revision_{{ item.candidate_id }}" value="{{ observed.get('expected_revision', observed.revision) }}">
+      <input type="hidden" name="idempotency_key_{{ item.candidate_id }}" value="{{ observed.get('idempotency_key', new_command_key()) }}">
+      {% endfor %}
+      {% if batch_draft %}
+      {% set visible_ids = candidates | map(attribute='candidate_id') | list %}
+      {% for candidate_id in batch_draft.candidate_ids if candidate_id not in visible_ids %}
+      {% set observed = batch_draft.versions[candidate_id|string] %}
+      <label class="ui-table-secondary"><input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ candidate_id }}" checked>
+        作品 #{{ candidate_id }} 已离开当前列表，保留原批次选择；重发仍返回原结果。</label>
+      <input type="hidden" name="work_id_{{ candidate_id }}" value="{{ observed.work_id }}">
+      <input type="hidden" name="expected_revision_{{ candidate_id }}" value="{{ observed.expected_revision }}">
+      {% endfor %}
+      {% endif %}
 
       {% if view == "list" %}
       {#- No sortable column headers: sorting is a query parameter the sidebar
@@ -231,6 +248,7 @@
                 status=item.status,
                 selectable=bulk_selectable,
                 value=item.candidate_id,
+                selected=batch_draft and item.candidate_id in batch_draft.candidate_ids,
                 tag_hrefs=tag_hrefs) %}
             {{ candidate_actions(item) }}
             {% if item.warnings %}<div class="ui-card-flags">{{ candidate_flags(item) }}</div>{% endif %}

@@ -33,19 +33,7 @@ from app.api.status import (
     SETTINGS_SECTIONS,
 )
 from app.connections.models import ProviderConnectionError
-from app.credentials import KIND_API_KEY, hash_secret, new_token
-from app.settings.archive import limits_submission, torrent_submission
-from app.settings import ai as ai_submission
 from app.settings.forms import checkbox, form_values
-from app.settings.parse import (
-    candidate_admission,
-    parse_rules_submission,
-)
-from app.settings.paths import (
-    ai_path_submission,
-    path_rule_payload,
-    template_payload,
-)
 from app.settings.sources import (
     SourceFieldError,
     parse_source,
@@ -54,37 +42,76 @@ from app.settings.sources import (
     selected_source_ids,
 )
 from app.settings.source_commands import SourceCommands, SourceCommandError
+from app.settings.commands import SettingsCommands, ACTION_SCOPES
+from app.settings.credential_commands import CredentialCommands
+from app.settings import runtime
+from app.review.commands import WorkCommandError
 from app.auto_approval.rules import (
     RuleValidationError,
     editor_rows,
     validate_rule_ast,
 )
 from app.auto_approval.service import AutomaticApprovalService
-from app.ai.prompt import DEFAULT_CANDIDATE_PROMPT
 from app.web.rule_forms import parse_rule_condition
-from app.archive.rearchive import rearchive_works
+from app.archive.maintenance import RearchiveCommands
+from app.archive.preview import template_preview
 from app.archive.service import (
-    TITLE_SOURCE_JAPANESE,
-    TITLE_SOURCES,
     ArchiveSettingsError,
 )
 from app.downloads.models import AUTO_DOWNLOAD_PROVIDERS
 from app.conversion.naming import (
-    CBZ_SUFFIX,
-    LibraryLimits,
     LibraryTemplateError,
-    detect_library_limits,
-    render_library_path,
-    validate_library_template,
 )
-from app.logging import apply_runtime_log_level
-from app.review.models import field_label
-from app.settings.service import SystemSettingsError
 from app.torrent.models import TorrentError
 from app.web import deps
 from app.web.settings_view import render_settings, settings_redirect
+from app.web.rule_commands import rule_form, rule_draft
 
 router = APIRouter()
+
+
+def _settings_draft(action, values):
+    draft = dict(values)
+    if action == 'torrent':
+        draft.pop('password', None)
+    return {'action': action, 'scope': ACTION_SCOPES[action], 'values': draft}
+
+
+async def _preference_form(request, action, section, *, values=None):
+    """Keep plain forms on the same command and preserve rejected drafts."""
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get('csrf_token') or ''))
+    raw = form_values(form)
+    if raw.get('confirmed_command'):
+        try:
+            confirmed = json.loads(str(raw['confirmed_command']))
+            raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+        except (ValueError, KeyError, TypeError):
+            return await render_settings(request, section, error='保存确认无效，请重新核对草稿', status_code=400,
+                                         settings_draft=_settings_draft(action, raw))
+    payload = dict(raw if values is None else values)
+    try:
+        payload['expected_revision'] = int(str(raw.get('expected_revision') or ''))
+    except ValueError:
+        payload['expected_revision'] = None
+    payload['idempotency_key'] = raw.get('idempotency_key')
+    if action == 'limits':
+        payload['keep_original'] = checkbox(raw.get('keep_original'))
+    if action == 'torrent':
+        for name in ('keep_seeding', 'auto_pack'):
+            payload[name] = checkbox(raw.get(name))
+    try:
+        await SettingsCommands(deps.database(request), deps.system_settings_service(request),
+            deps.archive_settings_service(request)).execute(action, payload)
+    except WorkCommandError as exc:
+        return await render_settings(request, section, error=exc.public_message, status_code=exc.status_code,
+                                     settings_draft=_settings_draft(action, raw))
+    if action == 'system':
+        await runtime.refresh_system(request, deps.system_settings_service(request))
+    return settings_redirect(request, section)
 
 
 @router.get("/sources")
@@ -409,39 +436,14 @@ async def archive_settings_page(request: Request):
 async def save_auto_pack_after_download(
     request: Request, csrf_token: str = Form()
 ):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    await deps.archive_settings_service(request).save_auto_pack_after_download(
-        form.get("enabled") == "on"
-    )
-    return settings_redirect(request, SETTINGS_ARCHIVE)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'auto-pack', SETTINGS_ARCHIVE)
 
 
 @router.post("/archive-settings/paths")
 async def save_archive_paths(request: Request, csrf_token: str = Form()):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.archive_settings_service(request).save_paths(
-            {
-                "library_path": str(form.get("library_path") or ""),
-                "work_path": str(form.get("work_path") or ""),
-            }
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_PATHS,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_PATHS)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'paths', SETTINGS_PATHS)
 
 
 def _rearchive_notice(result: dict) -> str:
@@ -509,100 +511,49 @@ async def rearchive_archive_paths(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    result = await rearchive_works(
-        deps.database(request),
-        deps.archived_work_service(request),
-        deps.conversion_service(request),
-        force=force is not None,
-        dry_run=dry_run is not None,
-        operator_name=str(request.session.get("username") or "admin"),
-    )
+    return await _maintenance_form(request, 'rearchive')
+
+
+async def _maintenance_form(request, action):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get('csrf_token') or ''))
+    raw = form_values(form)
+    scope = 'rearchive' if action == 'rearchive' else 'path-cache'
+    draft = {'action': action, 'scope': scope, 'values': raw}
+    try:
+        if raw.get('confirmed_command'):
+            try:
+                confirmed = json.loads(str(raw['confirmed_command']))
+                raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+            except (ValueError, KeyError, TypeError):
+                raise WorkCommandError('BODY_INVALID', '操作确认无效，请重新核对草稿') from None
+        try:
+            revision = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            revision = None
+        payload = {**raw, 'expected_revision': revision, 'force': checkbox(raw.get('force')),
+                   'dry_run': checkbox(raw.get('dry_run'))}
+        if action == 'rearchive':
+            result = await RearchiveCommands(deps.database(request), deps.archived_work_service(request),
+                deps.conversion_service(request)).execute(payload, (await deps.database(request).get_administrator()).username)
+        else:
+            result = await SettingsCommands(deps.database(request), deps.system_settings_service(request),
+                deps.archive_settings_service(request)).execute(action, payload)
+    except WorkCommandError as exc:
+        return await render_settings(request, SETTINGS_PATHS, error=exc.public_message,
+                                     status_code=exc.status_code, settings_draft=draft)
     # The event is a signal, not a payload: a page subscribed to `download`
     # re-reads the snapshot whatever it carries, so this one tells the open
     # tabs that the library moved without naming a work.
     request.app.state.event_bus.publish(EVENT_DOWNLOAD)
-    return await render_settings(
-        request,
-        SETTINGS_PATHS,
-        notice=_rearchive_notice(result),
-        rearchive=result,
-    )
-
-
-#: The book a layout template is previewed against. Fixed rather than taken
-#: from the queue, for two reasons: a preview has to be reproducible, and the
-#: interesting half of the answer is what happens to characters a filesystem
-#: will not take. So the English sample title carries a colon and a slash on
-#: purpose -- those are the characters that make a real upload's English title
-#: unusable as a filename, and an operator who sees them come back replaced has
-#: learned both the sanitising and why 日文标题 is the default.
-LIBRARY_TEMPLATE_SAMPLE: dict[str, str] = {
-    "category": "同人志",
-    "artist": "示例作者",
-    "japanese_title": "サンプル作品",
-    "english_title": "Sample Work: Vol.1/2",
-}
-
-
-def _render_template_preview(
-    template: str,
-    title_source: str,
-    limits: LibraryLimits,
-) -> dict[str, object]:
-    """Render the sample book's path, exactly as the packer would.
-
-    `limits` is threaded in for the same reason `title_source` is: the preview
-    has to answer the way the packer will, and the packer fits the name to the
-    filesystem the library sits on.
-
-    `title_source` is threaded in rather than defaulted because the preview's
-    whole job is to be the packer's answer: `{title}` resolves through the same
-    preference at pack time, and a preview that assumed one language would show
-    a path the packer does not produce as soon as the operator picks the other.
-
-    The suffix is appended rather than substituted for the same reason the
-    packer appends it: `with_suffix` would read 「Vol. 1」 as a name with a
-    `. 1` extension and publish the book as `Vol.cbz`. Reproducing the
-    packer's own two lines here keeps the preview from being a second,
-    prettier answer.
-    """
-    values = dict(LIBRARY_TEMPLATE_SAMPLE)
-    preferred = (
-        values["japanese_title"]
-        if title_source == TITLE_SOURCE_JAPANESE
-        else values["english_title"]
-    )
-    relative = render_library_path(
-        template,
-        {**values, "title": preferred},
-        title_fallback="candidate-1",
-        limits=limits,
-    )
-    rendered = (relative.parent / f"{relative.name}{CBZ_SUFFIX}").as_posix()
-    return {
-        "template": template,
-        "rendered": rendered,
-        "sample": [
-            {
-                "label": field_label("Category"),
-                "value": LIBRARY_TEMPLATE_SAMPLE["category"],
-            },
-            {
-                "label": field_label("Artist"),
-                "value": LIBRARY_TEMPLATE_SAMPLE["artist"],
-            },
-            {
-                "label": field_label("JapaneseTitle"),
-                "value": LIBRARY_TEMPLATE_SAMPLE["japanese_title"],
-                "note": "当前 {title}" if title_source == TITLE_SOURCE_JAPANESE else None,
-            },
-            {
-                "label": field_label("Title"),
-                "value": LIBRARY_TEMPLATE_SAMPLE["english_title"],
-                "note": None if title_source == TITLE_SOURCE_JAPANESE else "当前 {title}",
-            },
-        ],
-    }
+    if action == 'rearchive':
+        return await render_settings(request, SETTINGS_PATHS, notice=_rearchive_notice(result), rearchive=result)
+    removed = result['removed']
+    return await render_settings(request, SETTINGS_PATHS,
+        notice=f'已清除 {removed} 条 AI 路径缓存；再次打包时会重新询问模型。' if removed else '缓存本来就是空的，没有可清除的 AI 路径记录。')
 
 
 @router.post("/archive-settings/paths/template/preview")
@@ -620,164 +571,41 @@ async def preview_library_template(request: Request, csrf_token: str = Form()):
         return redirect
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
-    raw = str(form.get("library_template") or "")
+    draft = _settings_draft('template', form_values(form))
     try:
-        template = validate_library_template(raw)
+        preview = await template_preview(deps.archive_settings_service(request), request.app.state.settings.library_path, form)
     except LibraryTemplateError as exc:
         return await render_settings(
             request,
             SETTINGS_PATHS,
             error=exc.public_message,
             status_code=400,
+            settings_draft=draft,
         )
-    service = deps.archive_settings_service(request)
-    # The filesystem the preview has to fit is the one the *stored* library path
-    # points at -- the form being previewed is the template, not the root.
-    library_path = (
-        await service.library_path() or request.app.state.settings.library_path
-    )
-    # The radio as submitted, falling back to what is stored, so previewing a
-    # preference change shows its effect before it is saved.
-    submitted = str(form.get("title_source") or "").strip().lower()
-    title_source = (
-        submitted
-        if submitted in TITLE_SOURCES
-        else await service.title_source()
-    )
     return await render_settings(
         request,
         SETTINGS_PATHS,
-        template_preview=_render_template_preview(
-            template, title_source, detect_library_limits(library_path)
-        ),
+        template_preview=preview,
+        settings_draft=draft,
     )
 
 
 @router.post("/archive-settings/paths/template")
 async def save_library_template(request: Request, csrf_token: str = Form()):
-    """Store the layout template and the title preference together.
-
-    One endpoint because they are one form: the template says where a book goes
-    and the preference says what `{title}` resolves to, and previewing one
-    without the other would show a path the packer would not produce. The
-    preference is written first so a template refusal does not silently discard
-    it -- both are validated independently, and neither can be stored in a state
-    the other contradicts.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    # The reading half is `app/settings/paths.py`'s, shared with
-    # `PUT /api/v1/settings/paths/template` (R78).
-    template_form = template_payload(form_values(form))
-    try:
-        if "title_source" in template_form:
-            await deps.archive_settings_service(request).save_title_source(
-                str(template_form["title_source"])
-            )
-        await deps.archive_settings_service(request).save_library_template(
-            str(template_form["library_template"])
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_PATHS,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_PATHS)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'template', SETTINGS_PATHS)
 
 
 @router.post("/archive-settings/paths/ai")
-async def save_ai_path_settings(request: Request, csrf_token: str = Form()):
-    """Store the 路径来源 choice and the AI sub-panel in one write.
-
-    One endpoint because it is one form: the radio says whether the model or the
-    template decides a path, and the prompt and the toggles only mean anything
-    under the AI choice. The numbers are written first because they are the field
-    that realistically fails validation, so a rejected value aborts before the
-    mode is changed -- the same ordering the archive tab uses for its limits.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    service = deps.archive_settings_service(request)
-    # The reading half is `app/settings/paths.py`'s, shared with
-    # `PUT /api/v1/settings/paths/ai` (R80).
-    ai_path = ai_path_submission(form_values(form))
-    # 「仅 AI 可用时才有效」 (R83 §3.7): refusing before any write keeps the rest
-    # of the form from being applied when the one field the operator asked for
-    # cannot be. The page greys the box out too, so this is the server's copy of
-    # the same rule rather than the only guard.
-    if bool(ai_path["auto_series"]):
-        reason = await _ai_series_refusal(request)
-        if reason is not None:
-            return await render_settings(
-                request,
-                SETTINGS_PATHS,
-                error=reason,
-                status_code=400,
-            )
-    try:
-        # Numbers first: they are the field that realistically fails validation,
-        # so a rejected value aborts before the mode is changed.
-        await service.save_ai_batch_size(ai_path["ai_batch_size"])
-        await service.save_ai_concurrency(ai_path["ai_concurrency"])
-        await service.save_path_source(str(ai_path["path_source"]))
-        await service.save_ai_prompt(str(ai_path["ai_prompt"]))
-        await service.save_ai_fallback_to_rules(
-            bool(ai_path["ai_fallback_to_rules"])
-        )
-        await service.save_ai_stream(bool(ai_path["ai_stream"]))
-        await service.save_ai_default_include_current(
-            bool(ai_path["ai_default_include_current"])
-        )
-        await service.save_auto_series(bool(ai_path["auto_series"]))
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_PATHS,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_PATHS)
-
-
-async def _ai_series_refusal(request: Request) -> str | None:
-    """Why 「自动添加系列」 cannot be switched on now, or None when it can.
-
-    The switch asks a model at pack time, so it needs both the AI master switch
-    and a non-empty archive-path chain. Checked here rather than in the archive
-    settings service because only this layer can see the AI services.
-    """
-    if not await deps.system_settings_service(request).ai_enabled():
-        return "AI 总开关关闭，无法开启「自动添加系列」"
-    ai_service = deps.optional_service(request, "ai_service")
-    if ai_service is None:
-        return "还没有配置 AI 供应商，无法开启「自动添加系列」"
-    if not await ai_service.effective_chain(CHAIN_SCOPE_ARCHIVE_PATH):
-        return "还没有可用的模型链，无法开启「自动添加系列」"
-    return None
+async def save_ai_path_settings(request: Request):
+    """Save the whole panel atomically and retain rejected drafts."""
+    return await _preference_form(request, 'path-ai', SETTINGS_PATHS)
 
 
 @router.post("/archive-settings/paths/ai/prompt-default")
-async def reset_ai_prompt(request: Request, csrf_token: str = Form()):
-    """Restore the reference prompt. Stores blank, which reads back as default.
-
-    Blank rather than a copy of the text: the default lives in
-    `app.ai.prompt`, and writing a snapshot of it into the database would freeze
-    today's wording for a deployment that upgrades to a better one tomorrow.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    await deps.archive_settings_service(request).save_ai_prompt("")
-    return settings_redirect(request, SETTINGS_PATHS)
+async def reset_ai_prompt(request: Request):
+    """Store blank to follow the shipped default prompt."""
+    return await _preference_form(request, 'path-ai-prompt', SETTINGS_PATHS, values={'prompt': ''})
 
 
 @router.post("/archive-settings/paths/ai/cache/clear")
@@ -792,16 +620,7 @@ async def clear_ai_path_cache(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    removed = await deps.database(request).clear_ai_path_suggestions()
-    return await render_settings(
-        request,
-        SETTINGS_PATHS,
-        notice=(
-            f"已清除 {removed} 条 AI 路径缓存；再次打包时会重新询问模型。"
-            if removed
-            else "缓存本来就是空的，没有可清除的 AI 路径记录。"
-        ),
-    )
+    return await _maintenance_form(request, 'path-cache-clear')
 
 
 def _error_text(exc: Exception) -> str:
@@ -818,43 +637,8 @@ def _error_text(exc: Exception) -> str:
 
 @router.post("/archive-settings/paths/rules")
 async def save_archive_path_rule(request: Request):
-    """Create a routing rule, or overwrite the one `path_rule_id` names.
-
-    One endpoint for both because it is one form: the editor renders with the
-    fields filled when editing and blank when creating, and the only difference
-    on the wire is a hidden `path_rule_id`. The condition is the same row-based
-    DSL the auto-approval tab uses (`parse_rule_condition`), validated through
-    the engine's own `validate_rule_ast`; the path template is validated the
-    same way as the global one (`validate_library_template`, inside the service),
-    so a rule that could not render is refused while the operator is watching
-    the page rather than at pack time.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    try:
-        # The validation half is `app/settings/paths.py`'s, shared with
-        # `POST /api/v1/settings/paths/rules` (R78).
-        await deps.archive_settings_service(request).save_path_rule(
-            **path_rule_payload(
-                form_values(form), condition=parse_rule_condition(form)
-            )
-        )
-    except LookupError:
-        # The rule was deleted between the page render and the save. Reported as
-        # a 404 rather than re-created under its old id, which would resurrect a
-        # rule the operator had removed.
-        raise HTTPException(status_code=404, detail="规则不存在") from None
-    except (ArchiveSettingsError, RuleValidationError, ValueError, json.JSONDecodeError) as exc:
-        return await render_settings(
-            request,
-            SETTINGS_PATHS,
-            error=_error_text(exc),
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_PATHS)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'paths', 'save')
 
 
 @router.post("/archive-settings/paths/rules/dry-run")
@@ -882,6 +666,7 @@ async def dry_run_archive_path_rule(request: Request):
             SETTINGS_PATHS,
             error=str(exc),
             status_code=400,
+            rule_draft=rule_draft(form, 'paths'),
         )
     result = await AutomaticApprovalService(deps.database(request)).dry_run(
         condition, case_sensitive=form.get("case_sensitive") == "on"
@@ -890,6 +675,7 @@ async def dry_run_archive_path_rule(request: Request):
         request,
         SETTINGS_PATHS,
         dry_run=auto_approval_dry_run(result),
+        rule_draft=rule_draft(form, 'paths'),
     )
 
 
@@ -934,6 +720,8 @@ async def edit_archive_path_rule(rule_id: int, request: Request):
             "group_operator": group_operator,
             "case_sensitive": rule.case_sensitive,
             "path_template": rule.path_template,
+            "rule_uuid": rule.rule_uuid,
+            "expected_revision": rule.version,
             "rows": list(rows),
         },
     )
@@ -941,100 +729,32 @@ async def edit_archive_path_rule(rule_id: int, request: Request):
 
 @router.post("/archive-settings/paths/rules/{rule_id}/toggle")
 async def toggle_archive_path_rule(rule_id: int, request: Request):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    await deps.database(request).set_archive_path_rule_enabled(
-        rule_id, form.get("enabled") == "on"
-    )
-    return settings_redirect(request, SETTINGS_PATHS)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'paths', 'toggle', rule_id=rule_id)
 
 
 @router.post("/archive-settings/paths/rules/{rule_id}/delete")
 async def delete_archive_path_rule(rule_id: int, request: Request):
-    """Delete a routing rule for good.
-
-    A POST behind `ui.confirm`, because it is the one action on this panel that
-    cannot be undone from the interface -- 停用 is the reversible half and is
-    deliberately still its own button, so an operator parking a rule for an
-    afternoon is never pushed toward deleting it.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    try:
-        await deps.database(request).delete_archive_path_rule(rule_id)
-    except LookupError:
-        raise HTTPException(status_code=404, detail="规则不存在") from None
-    return settings_redirect(request, SETTINGS_PATHS)
+    """Apply the shared rule command, preserving the original draft."""
+    return await rule_form(request, 'paths', 'delete', rule_id=rule_id)
 
 
 @router.post("/settings/parse")
 async def save_parse_rules(request: Request):
-    """Store the candidate-admission parse scheme.
-
-    Every checkbox is read explicitly rather than defaulted through: an
-    unchecked box sends nothing, so absence means off, and letting the
-    validator fill in a default for an omitted key would make unchecking a rule
-    silently keep it on.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    # The reading half is `app/settings/parse.py`'s, shared with
-    # `PUT /api/v1/settings/parse` (R75).
-    raw = parse_rules_submission(form_values(form))
-    try:
-        await deps.system_settings_service(request).save_parse_rules(raw)
-    except SystemSettingsError as exc:
-        return await render_settings(
-            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
-        )
-    return settings_redirect(request, SETTINGS_PARSE)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'parse', SETTINGS_PARSE)
 
 
 @router.post("/settings/parse/reset")
 async def reset_parse_rules(request: Request, csrf_token: str = Form()):
-    """Put the shipped scheme back, so a bad experiment is one click from gone."""
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    await deps.system_settings_service(request).reset_parse_rules()
-    return settings_redirect(request, SETTINGS_PARSE)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'parse-reset', SETTINGS_PARSE)
 
 
 @router.post("/settings/parse/ai")
 async def save_candidate_admission(request: Request):
-    """Store the AI candidate gate's switches and prompt.
-
-    A prompt submitted byte-identical to the shipped default is stored as an
-    empty string, i.e. 「use the default」: otherwise virtually every save of
-    this form would pin the default text as an override, and the page could
-    never say whether the operator had actually customised it.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    form = await request.form()
-    deps.validate_csrf(request, str(form.get("csrf_token") or ""))
-    try:
-        await deps.system_settings_service(request).save_candidate_admission(
-            candidate_admission(
-                form_values(form), default_prompt=DEFAULT_CANDIDATE_PROMPT
-            )
-        )
-    except SystemSettingsError as exc:
-        return await render_settings(
-            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
-        )
-    return settings_redirect(request, SETTINGS_PARSE)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'admission', SETTINGS_PARSE)
 
 
 #: The 系统 tab's only writer, and the one settings endpoint with no legacy
@@ -1089,6 +809,7 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
                 SETTINGS_SYSTEM,
                 error="下载来源优先级必须是 1–4 且每个来源各一个顺位",
                 status_code=400,
+                settings_draft=_settings_draft('system', form_values(form)),
             )
         ranks[rank] = code
     if ranks:
@@ -1098,50 +819,19 @@ async def save_system_settings(request: Request, csrf_token: str = Form()):
                 SETTINGS_SYSTEM,
                 error="每个下载来源都要选一个顺位",
                 status_code=400,
+                settings_draft=_settings_draft('system', form_values(form)),
             )
         values["download_source_priority"] = ",".join(
             ranks[rank] for rank in range(1, len(ranks) + 1)
         )
-    try:
-        await deps.system_settings_service(request).save(values)
-    except SystemSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_SYSTEM,
-            error=exc.public_message,
-            status_code=400,
-        )
-    await deps.refresh_display_timezone(request)
-    await deps.refresh_download_source_priority(request)
-    apply_runtime_log_level(
-        await deps.system_settings_service(request).log_level()
-    )
-    return settings_redirect(request, SETTINGS_SYSTEM)
+    return await _preference_form(request, 'system', SETTINGS_SYSTEM, values=values)
 
 
 @router.post("/archive-settings/torrent")
 async def save_torrent_client_settings(
     request: Request, csrf_token: str = Form()
 ):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        # The reading half is `app/settings/archive.py`'s, shared with
-        # `PUT /api/v1/settings/archive/torrent` (R77).
-        await deps.archive_settings_service(request).save_torrent_client(
-            torrent_submission(form_values(form))
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_ARCHIVE,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_ARCHIVE)
+    return await _preference_form(request, 'torrent', SETTINGS_ARCHIVE)
 
 
 @router.post("/archive-settings/torrent-test")
@@ -1169,32 +859,8 @@ async def test_torrent_client(request: Request, csrf_token: str = Form()):
 
 @router.post("/archive-settings/limits")
 async def save_archive_limits(request: Request, csrf_token: str = Form()):
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        # Limits are typed by hand and are the field that realistically
-        # fails validation, so they are stored first: a rejected number
-        # aborts before the quality level is touched.
-        await deps.archive_settings_service(request).save_limits(
-            limits_submission(form_values(form))
-        )
-        await deps.archive_settings_service(request).save_keep_original(
-            form.get("keep_original") == "on"
-        )
-        await deps.archive_settings_service(request).save_image_quality(
-            str(form.get("image_quality") or "")
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_ARCHIVE,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_ARCHIVE)
+    """Apply the shared preference command, preserving conflicts as editable drafts."""
+    return await _preference_form(request, 'limits', SETTINGS_ARCHIVE)
 
 
 @router.post("/archive-settings/profiles/{name}")
@@ -1206,31 +872,24 @@ async def save_archive_tool_profile(
         return redirect
     deps.validate_csrf(request, csrf_token)
     form = await request.form()
-    timeout_raw = str(form.get("timeout_seconds") or "").strip()
+    raw = form_values(form)
     try:
-        timeout_seconds = int(timeout_raw) if timeout_raw else None
-    except ValueError:
-        return await render_settings(
-            request,
-            SETTINGS_ARCHIVE,
-            error="超时时长必须是整数",
-            status_code=400,
-        )
-    executable_raw = str(form.get("executable_path") or "").strip()
-    try:
-        await deps.archive_settings_service(request).set_profile_state(
-            name,
-            enabled=form.get("enabled") == "on",
-            executable_path=executable_raw or None,
-            timeout_seconds=timeout_seconds,
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_ARCHIVE,
-            error=exc.public_message,
-            status_code=400,
-        )
+        if raw.get('confirmed_command'):
+            try:
+                confirmed = json.loads(str(raw['confirmed_command']))
+                raw.update({field: confirmed[field] for field in ('expected_revision', 'idempotency_key')})
+            except (ValueError, KeyError, TypeError):
+                raise WorkCommandError('CONFIRMATION_INVALID', '保存确认无效，请重新核对草稿') from None
+        payload = {**raw, 'enabled': checkbox(raw.get('enabled'))}
+        try:
+            payload['expected_revision'] = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            payload['expected_revision'] = None
+        from app.settings.profile_commands import ProfileCommands
+        await ProfileCommands(deps.database(request)).execute(name, payload)
+    except WorkCommandError as exc:
+        return await render_settings(request, SETTINGS_ARCHIVE, error=exc.public_message, status_code=exc.status_code,
+                                     profile_draft={'name': name, 'values': raw})
     return settings_redirect(request, SETTINGS_ARCHIVE)
 
 
@@ -1242,16 +901,38 @@ async def install_archive_toolchain(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    raw = form_values(form)
     try:
-        await deps.archive_settings_service(request).install_toolchain(force=True)
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_ARCHIVE,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_ARCHIVE)
+        if raw.get('confirmed_command'):
+            try:
+                confirmed = json.loads(str(raw['confirmed_command']))
+                raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+            except (ValueError, KeyError, TypeError):
+                raise WorkCommandError('CONFIRMATION_INVALID', '安装确认无效，请重新核对') from None
+        try:
+            revision = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            revision = None
+        result = await request.app.state.toolchain_commands.submit({
+            'expected_revision': revision, 'idempotency_key': raw.get('idempotency_key'), 'force': True})
+    except WorkCommandError as exc:
+        return await render_settings(request, SETTINGS_ARCHIVE, error=exc.public_message, status_code=exc.status_code,
+                                     toolchain_draft=raw)
+    return await render_settings(request, SETTINGS_ARCHIVE, notice='工具安装已受理，可离开页面后查询结果。',
+        status_code=202, toolchain_operation=await request.app.state.toolchain_commands.result(result['toolchain_operation_id']))
+
+
+@router.get('/archive-settings/toolchain/operations/{operation_id}')
+async def toolchain_operation_page(request: Request, operation_id: str):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    try:
+        operation = await request.app.state.toolchain_commands.result(operation_id)
+    except WorkCommandError as exc:
+        return await render_settings(request, SETTINGS_ARCHIVE, error=exc.public_message, status_code=exc.status_code)
+    return await render_settings(request, SETTINGS_ARCHIVE, toolchain_operation=operation)
 
 
 @router.post("/archive-settings/passwords")
@@ -1260,32 +941,7 @@ async def add_archive_password(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    priority_raw = str(form.get("priority") or "100").strip()
-    try:
-        priority = int(priority_raw)
-    except ValueError:
-        return await render_settings(
-            request,
-            SETTINGS_PASSWORDS,
-            error="优先级必须是整数",
-            status_code=400,
-        )
-    try:
-        await deps.archive_settings_service(request).add_password(
-            name=str(form.get("name") or ""),
-            password=str(form.get("password") or ""),
-            priority=priority,
-            enabled=form.get("enabled") == "on",
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request,
-            SETTINGS_PASSWORDS,
-            error=exc.public_message,
-            status_code=400,
-        )
-    return settings_redirect(request, SETTINGS_PASSWORDS)
+    return await _credential_form(request, 'add')
 
 
 #: The single mobile API key. It shares the 密码库 tab with the archive
@@ -1298,21 +954,7 @@ async def generate_api_key(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    database = deps.database(request)
-    token, public_id, secret = new_token(KIND_API_KEY)
-    # One transaction: revoke the old key and insert the new one together, so
-    # the partial unique index can never see two valid keys (a double-submitted
-    # form would otherwise lose the race with a constraint error).
-    await database.replace_api_key(
-        label="移动端",
-        public_id=public_id,
-        secret_hash=hash_secret(secret),
-    )
-    # Shown once, by the GET that follows this redirect; see
-    # `app/web/settings_view.py`. Never in the cookie, the URL or the database.
-    request.app.state.pending_api_key = token
-    target = request.url_for("settings_section", section=SETTINGS_PASSWORDS)
-    return RedirectResponse(f"{target.path}?reveal=1", status_code=303)
+    return await _credential_form(request, 'api-key-generate')
 
 
 @router.post("/settings/api-keys/revoke")
@@ -1321,8 +963,7 @@ async def revoke_api_key(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    await deps.database(request).revoke_active_api_key()
-    return settings_redirect(request, SETTINGS_PASSWORDS)
+    return await _credential_form(request, 'api-key-revoke')
 
 
 @router.post("/archive-settings/passwords/{password_id}/delete")
@@ -1333,25 +974,47 @@ async def delete_archive_password(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    await deps.archive_settings_service(request).delete_password(password_id)
-    return settings_redirect(request, SETTINGS_PASSWORDS)
+    return await _credential_form(request, 'delete', password_id=password_id)
+
+
+async def _credential_form(request, action, *, password_id=None):
+    raw = form_values(await request.form())
+    raw['action'] = action
+    if password_id is not None:
+        raw['password_id'] = password_id
+    if action == 'add':
+        raw['enabled'] = raw.get('enabled') == 'on'
+    try:
+        if raw.get('confirmed_command'):
+            try:
+                confirmed = json.loads(str(raw['confirmed_command']))
+                raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+            except (ValueError, TypeError, KeyError):
+                raise WorkCommandError('CONFIRMATION_INVALID', '确认无效，请重新核对原操作') from None
+        try:
+            revision = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            revision = None
+        _, plaintext = await CredentialCommands(deps.database(request), deps.archive_settings_service(request)).execute(
+            action, {**raw, 'expected_revision': revision})
+    except (WorkCommandError, ArchiveSettingsError) as exc:
+        raw.pop('password', None)
+        response = await render_settings(request, SETTINGS_PASSWORDS, error=exc.public_message,
+            status_code=getattr(exc, 'status_code', 400), credential_draft=raw)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    if action == 'api-key-generate':
+        response = await render_settings(request, SETTINGS_PASSWORDS, api_key_plaintext=plaintext,
+            notice=None if plaintext else '原生成操作已完成，明文不会再次返回；当前状态以页面为准。未收到密钥时请核对后明确重新生成。')
+    else:
+        response = settings_redirect(request, SETTINGS_PASSWORDS)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 # ---------------------------------------------------------------------------
 #  AI 供应商 (SETTINGS_AI)
 # ---------------------------------------------------------------------------
-
-def _ai_form_values(form) -> dict[str, object]:
-    """The provider form as the service's validator wants it.
-
-    The translation is `app/settings/ai.py`'s, shared with
-    `POST /api/v1/settings/ai/providers` (R79): the refusals live in the service
-    so the page, the JSON client and the chain editor all enforce one set of
-    rules, and `enabled` being a checkbox (absence is 「off」) is one of the few
-    things that has to be read the same way twice.
-    """
-    return ai_submission.provider_submission(form_values(form))
-
 
 def _ai_location(provider_id: object = None) -> str:
     """The AI tab, optionally with one provider selected.
@@ -1386,16 +1049,7 @@ async def save_ai_provider(request: Request, csrf_token: str = Form()):
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        provider = await deps.ai_service(request).save_provider(
-            _ai_form_values(form)
-        )
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(
-        _ai_location(provider.provider_id), status_code=303
-    )
+    return await _ai_provider_form(request, 'save')
 
 
 @router.post("/settings/ai/providers/{provider_id}/delete")
@@ -1406,11 +1060,42 @@ async def delete_ai_provider(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
+    return await _ai_provider_form(request, 'delete', provider_id=provider_id)
+
+
+async def _ai_provider_form(request, action, *, provider_id=None):
+    from app.settings.ai_commands import AiProviderCommands
+    raw = form_values(await request.form())
+    if provider_id is not None:
+        raw['provider_id'] = provider_id
     try:
-        await deps.ai_service(request).delete_provider(provider_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+        if raw.get('confirmed_command'):
+            try:
+                confirmed = json.loads(str(raw['confirmed_command']))
+                raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+                if action == 'delete':
+                    raw.update({name: confirmed[name] for name in ('keys_revision', 'models_revision')})
+            except (ValueError, KeyError, TypeError):
+                raise WorkCommandError('CONFIRMATION_INVALID', '保存确认无效，请重新核对草稿') from None
+        try:
+            revision = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            revision = None
+        children = {}
+        if action == 'delete':
+            for name in ('keys_revision', 'models_revision'):
+                try:
+                    children[name] = int(str(raw.get(name) or ''))
+                except ValueError:
+                    children[name] = None
+        result = await AiProviderCommands(deps.database(request), deps.archive_settings_service(request)).execute(
+            action, {**raw, **children, 'expected_revision': revision}, provider_id=provider_id)
+    except (WorkCommandError, AiError) as exc:
+        return await render_settings(request, SETTINGS_AI, error=exc.public_message,
+            status_code=getattr(exc, 'status_code', 400), ai_provider_draft={'action': action, 'values': raw})
+    location = (_ai_location(result['provider_id']) + '&provider_uuid=' + result['provider_uuid']
+                if action == 'save' else _ai_location())
+    return RedirectResponse(location, status_code=303)
 
 
 @router.post("/settings/ai/providers/{provider_id}/keys")
@@ -1420,21 +1105,13 @@ async def add_ai_provider_key(
     """Store one or more API keys from a textarea, one per line.
 
     The field is a plain textarea and its value is never echoed back: not in
-    the list, not in a value attribute, and (`_ai_refused` renders the page
-    fresh) not in an error message either.
+    the list, not in a value attribute, and not in an error-page draft either.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.ai_service(request).add_keys(
-            provider_id, str(form.get("api_keys") or "")
-        )
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(provider_id), status_code=303)
+    return await _ai_catalogue_form(request, 'keys-add', provider_id)
 
 
 @router.post("/settings/ai/keys/{key_id}/toggle")
@@ -1445,14 +1122,7 @@ async def toggle_ai_provider_key(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.ai_service(request).set_key_enabled(
-            key_id, str(form.get("enabled") or "") == "on"
-        )
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+    return await _ai_catalogue_form(request, 'key-toggle', key_id)
 
 
 @router.post("/settings/ai/keys/{key_id}/reset")
@@ -1463,11 +1133,7 @@ async def reset_ai_provider_key(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    try:
-        await deps.ai_service(request).reset_key_cooldown(key_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+    return await _ai_catalogue_form(request, 'key-reset', key_id)
 
 
 @router.post("/settings/ai/keys/{key_id}/delete")
@@ -1478,11 +1144,7 @@ async def delete_ai_provider_key(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    try:
-        await deps.ai_service(request).delete_key(key_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+    return await _ai_catalogue_form(request, 'key-delete', key_id)
 
 
 @router.post("/settings/ai/providers/{provider_id}/models")
@@ -1499,42 +1161,45 @@ async def add_ai_provider_models(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    names = [str(raw) for raw in form.getlist("model_name")]
-    try:
-        await deps.ai_service(request).add_models(provider_id, names)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(provider_id), status_code=303)
+    return await _ai_catalogue_form(request, 'models-add', provider_id)
 
 
-@router.post("/settings/ai/providers/{provider_id}/models/fetch")
-async def fetch_ai_provider_models(
-    request: Request, provider_id: int, csrf_token: str = Form()
-):
-    """`GET /v1/models`, rendered as a checklist for the operator to pick from.
-
-    Fetched names are not added, and not tested: a listing says a model exists,
-    not that this deployment can talk to it.
-    """
+async def _ai_network_form(request, action, *, target_id=None):
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
-    deps.validate_csrf(request, csrf_token)
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get('csrf_token') or ''))
+    names = ('expected_revision', 'provider_revision', 'keys_revision', 'models_revision',
+             'provider_uuid', 'model_uuid', 'idempotency_key')
+    raw = {name: form[name] for name in names if name in form}
+    if form.get('confirmed_command'):
+        try:
+            confirmation = json.loads(str(form['confirmed_command']))
+            raw.update({name: confirmation[name] for name in names if not name.endswith('_uuid') and name in confirmation})
+        except (ValueError, TypeError):
+            return await render_settings(request, SETTINGS_AI, error='操作确认无效，请重新核对配置', status_code=400,
+                ai_network_draft={'action': action, 'target_id': target_id, 'values': raw})
+    body = dict(raw)
+    for name in names[:4]:
+        if name in body:
+            try:
+                body[name] = int(str(body[name]))
+            except ValueError:
+                body[name] = None
     try:
-        names = await deps.ai_service(request).list_remote_models(provider_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    if not names:
-        return await render_settings(
-            request, SETTINGS_AI, notice="供应商没有返回任何模型名称。"
-        )
-    return await render_settings(
-        request,
-        SETTINGS_AI,
-        notice=f"拉到 {len(names)} 个模型名称，勾选后点「添加所选」。",
-        discovered={"provider_id": provider_id, "names": list(names)},
-    )
+        receipt = await request.app.state.ai_network_commands.submit(action, body, target_id=target_id)
+    except WorkCommandError as exc:
+        return await render_settings(request, SETTINGS_AI, error=exc.public_message, status_code=exc.status_code,
+            ai_network_draft={'action': action, 'target_id': target_id, 'values': raw})
+    return RedirectResponse(request.url_for('settings_section', section='ai').path +
+                            '?ai_operation=' + receipt['ai_operation_id'], status_code=303)
+
+
+@router.post("/settings/ai/providers/{provider_id}/models/fetch")
+async def fetch_ai_provider_models(request: Request, provider_id: int):
+    """Admit a listing; its result can be reopened without sending it again."""
+    return await _ai_network_form(request, 'fetch', target_id=provider_id)
 
 
 @router.post("/settings/ai/models/{model_id}/toggle")
@@ -1545,14 +1210,7 @@ async def toggle_ai_provider_model(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.ai_service(request).set_model_enabled(
-            model_id, str(form.get("enabled") or "") == "on"
-        )
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+    return await _ai_catalogue_form(request, 'model-toggle', model_id)
 
 
 @router.post("/settings/ai/models/{model_id}/params")
@@ -1563,14 +1221,7 @@ async def save_ai_provider_model_params(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.ai_service(request).save_model_params(
-            model_id, form.get("params")
-        )
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+    return await _ai_catalogue_form(request, 'model-params', model_id)
 
 
 @router.post("/settings/ai/models/{model_id}/delete")
@@ -1581,80 +1232,57 @@ async def delete_ai_provider_model(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
+    return await _ai_catalogue_form(request, 'model-delete', model_id)
+
+
+async def _ai_catalogue_form(request, action, target_id):
+    from app.settings.ai_commands import AiCatalogueCommands
+    form = await request.form()
+    raw = form_values(form)
+    if action == 'models-add':
+        raw['model_name'] = form.getlist('model_name')
     try:
-        await deps.ai_service(request).delete_model(model_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return RedirectResponse(_ai_location(), status_code=303)
+        if raw.get('confirmed_command'):
+            try:
+                confirmation = json.loads(str(raw['confirmed_command']))
+                raw.update({name: confirmation[name] for name in ('expected_revision', 'idempotency_key')})
+                if action == 'key-reset':
+                    raw['expected_health_revision'] = confirmation['expected_health_revision']
+            except (ValueError, KeyError, TypeError):
+                raise WorkCommandError('CONFIRMATION_INVALID', '操作确认无效，请重新核对草稿') from None
+        payload = dict(raw)
+        for name in ('expected_revision', 'expected_health_revision'):
+            try:
+                payload[name] = int(str(raw.get(name) or ''))
+            except ValueError:
+                payload[name] = None
+        result = await AiCatalogueCommands(deps.database(request), deps.archive_settings_service(request)).execute(
+            action, target_id, payload)
+    except (WorkCommandError, AiError) as exc:
+        raw.pop('api_keys', None)
+        return await render_settings(request, SETTINGS_AI, error=exc.public_message,
+            status_code=getattr(exc, 'status_code', 400),
+            ai_catalogue_draft={'action': action, 'target_id': target_id, 'values': raw},
+            ai_catalogue_retry_url=request.url.path)
+    return RedirectResponse(_ai_location(result['provider_id']) + '&provider_uuid=' + result['provider_uuid'], status_code=303)
 
 
 @router.post("/settings/ai/models/{model_id}/verify")
-async def verify_ai_provider_model(
-    request: Request, model_id: int, csrf_token: str = Form()
-):
-    """Send the minimal chat request and store what came back.
-
-    A failure answers 400 with the provider's own words, the same shape the
-    qBittorrent 连通测试 uses: the operator asked a question, and the answer is
-    「不，原因是 …」 rather than a redirect that hides it.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        verification = await deps.ai_service(request).verify_model(model_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    if not verification.ok:
-        return await render_settings(
-            request,
-            SETTINGS_AI,
-            error=f"验证失败：{verification.message}",
-            status_code=400,
-        )
-    return await render_settings(request, SETTINGS_AI, notice=verification.message)
+async def verify_ai_provider_model(request: Request, model_id: int):
+    """Admit a single-model probe using its observed configuration."""
+    return await _ai_network_form(request, 'model', target_id=model_id)
 
 
 @router.post("/settings/ai/providers/{provider_id}/verify")
-async def verify_ai_provider_models(
-    request: Request, provider_id: int, csrf_token: str = Form()
-):
-    """Test every enabled model of one provider, in order."""
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        results = await deps.ai_service(request).verify_all(provider_id)
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return await render_settings(
-        request, SETTINGS_AI, notice=_verify_summary(results)
-    )
+async def verify_ai_provider_models(request: Request, provider_id: int):
+    """Admit a fixed provider/model/key snapshot for sequential verification."""
+    return await _ai_network_form(request, 'provider', target_id=provider_id)
 
 
 @router.post("/settings/ai/verify")
-async def verify_all_ai_models(request: Request, csrf_token: str = Form()):
-    """Test every enabled model of every provider, in order."""
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    try:
-        results = await deps.ai_service(request).verify_all()
-    except AiError as exc:
-        return await _ai_refused(request, exc)
-    return await render_settings(
-        request, SETTINGS_AI, notice=_verify_summary(results)
-    )
-
-
-def _verify_summary(results) -> str:
-    ok = sum(1 for item in results if item.ok)
-    if not results:
-        return "没有启用的模型可测试。"
-    return f"测试完成：{ok}/{len(results)} 个模型通过。"
+async def verify_all_ai_models(request: Request):
+    """Admit the observed catalogue once."""
+    return await _ai_network_form(request, 'all')
 
 
 @router.post("/settings/ai/master")
@@ -1666,19 +1294,7 @@ async def save_ai_master_switch(request: Request, csrf_token: str = Form()):
     where the operator left them, so turning it back on restores the exact
     configuration that was there before.
     """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    await deps.system_settings_service(request).save_ai_enabled(
-        form.get("ai_enabled") == "on"
-    )
-    return settings_redirect(request, SETTINGS_AI)
-
-
-async def _chain_model_id(request: Request, form) -> int:
-    return ai_submission.chain_model_id(form_values(form))
+    return await _preference_form(request, 'ai-master', SETTINGS_AI)
 
 
 @router.post("/settings/ai/chain/primary")
@@ -1758,28 +1374,9 @@ async def remove_ai_candidate_chain_model(request: Request, csrf_token: str = Fo
 
 
 @router.post("/settings/parse/model-source")
-async def save_ai_candidate_model_source(request: Request, csrf_token: str = Form()):
-    """Choose where the AI candidate gate gets its models from.
-
-    The same two values and the same wording as the archive-path switch:
-    「跟随全局默认」 reads the AI tab's list, 「本页单独指定」 reads the one edited
-    on this tab. The choice is stored rather than inferred from 「列表是不是空的」
-    so an intentionally empty custom list stays a loud error.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.system_settings_service(
-            request
-        ).save_ai_candidate_model_source(str(form.get("ai_model_source") or ""))
-    except SystemSettingsError as exc:
-        return await render_settings(
-            request, SETTINGS_PARSE, error=exc.public_message, status_code=400
-        )
-    return settings_redirect(request, SETTINGS_PARSE)
+async def save_ai_candidate_model_source(request: Request):
+    """Save the gate model source with its observed version."""
+    return await _preference_form(request, 'candidate-model-source', SETTINGS_PARSE)
 
 
 #: Which settings tab owns each chain scope. One table instead of a ternary in
@@ -1806,57 +1403,31 @@ async def _chain_action(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    service = deps.ai_service(request)
+    raw = form_values(await request.form())
     section = _CHAIN_SECTIONS.get(scope, SETTINGS_AI)
+    from app.settings.ai_commands import AiChainCommands
     try:
-        if action == "shift":
-            delta = int(str(form.get("delta") or "").strip())
-            await service.shift_chain(
-                await _chain_model_id(request, form), delta, scope
-            )
-        elif action == "remove":
-            await service.remove_from_chain(
-                await _chain_model_id(request, form), scope
-            )
-        elif action == "primary":
-            await service.set_chain_primary(
-                await _chain_model_id(request, form), scope
-            )
-        else:
-            await service.append_to_chain(
-                await _chain_model_id(request, form), scope
-            )
-    except (AiError, ValueError) as exc:
-        message = exc.public_message if isinstance(exc, AiError) else "移动方向无效"
-        return await render_settings(
-            request, section, error=message, status_code=400
-        )
+        if raw.get('model_identity'):
+            raw['model_id'], raw['model_uuid'] = str(raw['model_identity']).split(':', 1)
+        if raw.get('confirmed_command'):
+            confirmed = json.loads(str(raw['confirmed_command']))
+            raw.update({name: confirmed[name] for name in ('expected_revision', 'idempotency_key')})
+        payload = dict(raw, action=action)
+        try:
+            payload['expected_revision'] = int(str(raw.get('expected_revision') or ''))
+        except ValueError:
+            payload['expected_revision'] = None
+        await AiChainCommands(deps.database(request)).execute(scope, payload)
+    except (AiError, WorkCommandError, ValueError, KeyError, TypeError) as exc:
+        message = exc.public_message if isinstance(exc, (AiError, WorkCommandError)) else '操作确认无效，请重新核对原操作'
+        return await render_settings(request, section, error=message, status_code=getattr(exc, 'status_code', 400),
+            ai_chain_draft={'scope': scope, 'action': action, 'values': raw}, ai_chain_retry_url=request.url.path)
     if scope == CHAIN_SCOPE_DEFAULT:
         return RedirectResponse(_ai_location(), status_code=303)
     return RedirectResponse(f"/settings/{section}", status_code=303)
 
 
 @router.post("/archive-settings/paths/ai/models")
-async def save_ai_model_source(request: Request, csrf_token: str = Form()):
-    """Choose where the archive-path feature gets its models from.
-
-    Two values and nothing else: 「跟随全局默认」 reads the list on the AI tab,
-    「本页单独指定」 reads the one edited here. Storing the choice rather than
-    inferring it from 「列表是不是空的」 keeps an intentionally empty custom list
-    from silently turning into the default.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-    form = await request.form()
-    try:
-        await deps.archive_settings_service(request).save_ai_model_source(
-            str(form.get("ai_model_source") or "")
-        )
-    except ArchiveSettingsError as exc:
-        return await render_settings(
-            request, SETTINGS_PATHS, error=str(exc), status_code=400
-        )
-    return settings_redirect(request, SETTINGS_PATHS)
+async def save_ai_model_source(request: Request):
+    """Save the path model source with its observed version."""
+    return await _preference_form(request, 'path-model-source', SETTINGS_PATHS)

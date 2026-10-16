@@ -34,10 +34,12 @@ import sqlite3
 from fastapi import FastAPI, HTTPException
 import httpx
 
-from app.api.events import EVENT_CANDIDATE, EVENT_CONNECTION, EVENT_CONVERSION, EVENT_DOWNLOAD, EventBus
+from app.api.events import EVENT_CANDIDATE, EVENT_CONNECTION, EVENT_CONVERSION, EVENT_DOWNLOAD, EVENT_REFRESH, EventBus
 from app.ai.models import CHAIN_SCOPE_CANDIDATE
 from app.ai.service import AiProviderService
 from app.archive.service import ArchiveSettingsService
+from app.settings.toolchain_commands import ToolchainCommands
+from app.settings.ai_network_commands import AiNetworkCommands
 from app.bootstrap import (
     format_bootstrap_banner,
     remove_bootstrap_password,
@@ -204,6 +206,8 @@ def seed_state(app: FastAPI, app_settings, database) -> None:
     app.state.conversion_service = None
     app.state.archived_work_service = None
     app.state.archive_settings_service = None
+    app.state.toolchain_commands = None
+    app.state.ai_network_commands = None
     app.state.exhentai_service = None
     app.state.telegraph_service = None
     app.state.torrent_service = None
@@ -326,6 +330,10 @@ def build_lifespan(
         async def close_services():
             if worker_session is not None:
                 worker_session.stopping = True
+            if application.state.toolchain_commands is not None:
+                await application.state.toolchain_commands.stop()
+            if application.state.ai_network_commands is not None:
+                await application.state.ai_network_commands.stop()
             if connection_manager is not None:
                 await connection_manager.stop()
             download_service = application.state.download_service
@@ -597,11 +605,6 @@ def build_lifespan(
                         application, "torrent_service", TORRENT_UNAVAILABLE
                     ).abandon(job_id)
                 ),
-                torrent_verify=(
-                    lambda job_id: _required(
-                        application, "torrent_service", TORRENT_UNAVAILABLE
-                    ).complete_if_ready(job_id)
-                ),
                 torrent_stop=(
                     lambda operation: _required(
                         application, "torrent_service", TORRENT_UNAVAILABLE
@@ -609,6 +612,7 @@ def build_lifespan(
                 ),
                 stop_pack=(lambda task_id: application.state.conversion_service.stop_attempt(task_id)),
                 cleanup_removals=(lambda: application.state.archived_work_service.process_removals()),
+                sync_metadata=(lambda: application.state.archived_work_service.process_metadata_syncs()),
                 account_scope=connection_manager.use_kind,
                 telegram_user_source=connection_manager.resolve_telegram_user_source,
                 telegram_bot_source=connection_manager.resolve_telegram_bot_source,
@@ -638,6 +642,8 @@ def build_lifespan(
             )
             application.state.download_service = download_service
             application.state.archive_settings_service = archive_settings_service
+            application.state.toolchain_commands = ToolchainCommands(database, archive_settings_service,
+                notify=lambda **data: application.state.event_bus.publish(EVENT_REFRESH, **data))
             # Always constructed, even with AI mode off: the settings tab has
             # to be reachable to configure it, and the service is inert until a
             # chain is saved. One dedicated client with no cookies and no
@@ -652,6 +658,8 @@ def build_lifespan(
                 archive_settings_service,
                 http_client=ai_client,
             )
+            application.state.ai_network_commands = AiNetworkCommands(database, application.state.ai_service,
+                notify=lambda **data: application.state.event_bus.publish(EVENT_REFRESH, **data))
             # The candidate gate's 「跟随全局 / 本页单独指定」 switch. Registered
             # here because the system settings service owns that key and the
             # provider service has no business importing it; the archive-path
@@ -674,7 +682,7 @@ def build_lifespan(
             # Linux and Docker images ship no archiver, so fetch the pinned
             # official 7-Zip build once per version if it is missing.
             if app_settings.archive_toolchain_auto_install:
-                await archive_settings_service.ensure_toolchain()
+                await application.state.toolchain_commands.ensure()
             conversion_service = ConversionService(
                 database,
                 app_settings.work_path,

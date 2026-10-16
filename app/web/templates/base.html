@@ -55,13 +55,13 @@
       page with the reason on it and answers 400, and the default rule would leave
       the old markup on screen as though nothing had been pressed.
 
-      So 400 and 422 are swapped and are still errors -- `error: true` keeps
+      So 400, 409, 422 and 428 are swapped and are still errors -- `error: true` keeps
       `htmx:responseError` firing, so nothing that listens for a failure stops
       hearing about one. 401 is deliberately NOT in the list: the session is gone
       and the response is a login redirect, which belongs in the address bar and
       not inside the content column. 5xx keeps the default too -- a stack trace is
       not a page. -#}
-  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "400", "swap": true, "error": true}, {"code": "422", "swap": true, "error": true}, {"code": "[45]..", "swap": false, "error": true}]}'>
+  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "400", "swap": true, "error": true}, {"code": "409", "swap": true, "error": true}, {"code": "422", "swap": true, "error": true}, {"code": "428", "swap": true, "error": true}, {"code": "[45]..", "swap": false, "error": true}]}'>
   <link rel="stylesheet" href="{{ url_for('static', path='/ui.css') }}">
   <script defer src="{{ url_for('static', path='/vendor/htmx-2.0.4.min.js') }}"></script>
   <script defer src="{{ url_for('static', path='/vendor/alpine-3.14.8.min.js') }}"></script>

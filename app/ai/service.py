@@ -8,8 +8,7 @@ It owns three things:
   configuration out of the database;
 * *which* key and *which* model answers a request, rotating on a 401/429 and
   walking the fallbacks on a timeout or a 5xx;
-* the connectivity check the settings page insists on before a model may enter
-  the chain.
+* explicit connectivity checks; configuration does not require a network probe.
 
 It does not own the prompt, the metadata payload or the path parsing; those
 belong to the caller, so a change to what we ask the model never has to touch
@@ -37,6 +36,7 @@ from app.ai.client import (
     OpenAiCompatibleClient,
 )
 from app.ai.errors import (
+    AI_CONFIGURATION_CHANGED,
     AI_CHAIN_DUPLICATE,
     AI_CHAIN_EMPTY,
     AI_CHAIN_ENTRY_MISSING,
@@ -199,6 +199,15 @@ class AiProviderService:
         the same reason: a typo found here is a line on a form, the same typo
         found at pack time is a book stuck in 需干预.
         """
+        prepared = self.provider_values(values)
+        try:
+            return await self._database.save_ai_provider(**prepared)
+        except LookupError as exc:
+            raise AiError(AI_PROVIDER_NAME_TAKEN, f"供应商名称「{prepared['name']}」已被占用") from exc
+
+    @classmethod
+    def provider_values(cls, values: dict[str, Any]) -> dict[str, Any]:
+        """Validate one provider locally, reusable inside a versioned command."""
         raw_id = str(values.get("provider_id") or "").strip()
         provider_id = int(raw_id) if raw_id.isdigit() else None
         name = str(values.get("name") or "").strip()
@@ -227,36 +236,25 @@ class AiProviderService:
                 AI_PROVIDER_INVALID,
                 "基础 API 地址必须是以 http:// 或 https:// 开头的完整地址",
             )
-        timeout_seconds = self._int_field(
+        timeout_seconds = cls._int_field(
             values.get("timeout_seconds"),
             default=DEFAULT_TIMEOUT_SECONDS,
             minimum=MIN_TIMEOUT_SECONDS,
             maximum=MAX_TIMEOUT_SECONDS,
             label="超时",
         )
-        max_retries = self._int_field(
+        max_retries = cls._int_field(
             values.get("max_retries"),
             default=DEFAULT_MAX_RETRIES,
             minimum=0,
             maximum=MAX_RETRIES,
             label="重试次数",
         )
-        custom_headers = self.parse_headers(values.get("custom_headers"))
-        default_params = self.parse_params(values.get("default_params"))
-        try:
-            return await self._database.save_ai_provider(
-                provider_id=provider_id,
-                name=name,
-                code=code,
-                base_url=base_url,
-                timeout_seconds=timeout_seconds,
-                max_retries=max_retries,
-                enabled=bool(values.get("enabled")),
-                custom_headers=custom_headers,
-                default_params=default_params,
-            )
-        except LookupError as exc:
-            raise AiError(AI_PROVIDER_NAME_TAKEN, f"供应商名称「{name}」已被占用") from exc
+        return dict(provider_id=provider_id, name=name, code=code, base_url=base_url,
+                    timeout_seconds=timeout_seconds, max_retries=max_retries,
+                    enabled=bool(values.get('enabled')),
+                    custom_headers=cls.parse_headers(values.get('custom_headers')),
+                    default_params=cls.parse_params(values.get('default_params')))
 
     @staticmethod
     def parse_headers(raw: Any) -> dict[str, str]:
@@ -369,10 +367,18 @@ class AiProviderService:
         and the plaintext never leaves this method.
         """
         await self._require_provider(provider_id)
+        entries = self.key_values(raw)
+        master = await self._archive_settings.master_key()
+        encrypted = [(label, await asyncio.to_thread(encrypt_password, master, secret))
+                     for label, secret in entries]
+        return await self._database.add_ai_provider_keys(provider_id, encrypted)
+
+    @staticmethod
+    def key_values(raw: str) -> tuple[tuple[str, str], ...]:
+        """Validate the pasted key block locally; keep plaintext only in memory."""
         text = str(raw or "")
         if not text.strip():
             raise AiError(AI_KEY_INVALID, "API Key 不能为空")
-        master = await self._archive_settings.master_key()
         entries: list[tuple[str, str]] = []
         for number, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
@@ -393,11 +399,10 @@ class AiProviderService:
                     AI_KEY_INVALID,
                     f"第 {number} 行的备注不能超过 {MAX_KEY_LABEL_LENGTH} 个字符",
                 )
-            cipher = await asyncio.to_thread(encrypt_password, master, secret)
-            entries.append((cleaned_label, cipher))
+            entries.append((cleaned_label, secret))
         if not entries:
             raise AiError(AI_KEY_INVALID, "API Key 不能为空")
-        return await self._database.add_ai_provider_keys(provider_id, entries)
+        return tuple(entries)
 
     async def reset_key_cooldown(self, key_id: int) -> None:
         """Make a parked key a candidate again.
@@ -422,14 +427,21 @@ class AiProviderService:
         except LookupError as exc:
             raise AiError(AI_KEY_INVALID, f"API Key {key_id} 不存在") from exc
 
-    async def _key_plaintext(self, key_id: int) -> str | None:
+    async def _key_plaintext(
+        self, key_id: int, *, expected: AiProviderKey | None = None,
+        provider: AiProvider | None = None,
+    ) -> str | None:
         """Decrypt one key for one request, or None when it cannot be opened.
 
         A ciphertext the master key can no longer open is reported the same way
         a missing key is -- skipped -- because both mean 「这把用不了」 and the
         alternative is failing the whole request over one bad row.
         """
-        cipher = await self._database.ai_provider_key_cipher(key_id)
+        cipher = await self._database.ai_provider_key_cipher(key_id, expected=expected, provider=provider)
+        return await self._decrypt_key(cipher)
+
+    async def _decrypt_key(self, cipher: str | None) -> str | None:
+        """Open one captured envelope without reading a replacement credential."""
         if not cipher:
             return None
         master = await self._archive_settings.master_key()
@@ -453,6 +465,12 @@ class AiProviderService:
                 provider_id, usable_only=True
             )
         )
+        if not keys:
+            return []
+        return self.rotate_keys(provider_id, keys)
+
+    def rotate_keys(self, provider_id, keys):
+        """Use the same round-robin order for live and admitted key snapshots."""
         if not keys:
             return []
         start = self._cursors.get(provider_id, 0) % len(keys)
@@ -486,6 +504,11 @@ class AiProviderService:
     ) -> tuple[AiProviderModel, ...]:
         """Register a checklist of model names in one submit."""
         await self._require_provider(provider_id)
+        return await self._database.add_ai_provider_models(provider_id, self.model_values(names))
+
+    @staticmethod
+    def model_values(names: Sequence[str]) -> tuple[str, ...]:
+        """Validate/deduplicate names without requiring a supplier request."""
         cleaned: list[str] = []
         for raw in names:
             name = str(raw or "").strip()
@@ -500,7 +523,7 @@ class AiProviderService:
                 cleaned.append(name)
         if not cleaned:
             raise AiError(AI_MODEL_INVALID, "没有选择任何模型")
-        return await self._database.add_ai_provider_models(provider_id, cleaned)
+        return tuple(cleaned)
 
     async def set_models_enabled(
         self, model_ids: Sequence[int], enabled: bool
@@ -555,19 +578,26 @@ class AiProviderService:
     async def list_remote_models(self, provider_id: int) -> tuple[str, ...]:
         """`GET /v1/models`, as names, for the 「拉取模型」 button.
 
-        Not registration and not verification: a name that appears here still
-        has to be added and then pass the chat check before it can enter the
-        chain, because a listing endpoint says nothing about whether the model
-        can answer.
+        Names must be registered explicitly. A listing says nothing about whether
+        a model can answer; the separate chat check reports that diagnosis.
         """
         provider = await self._require_provider(provider_id)
-        keys = await self._ordered_keys(provider_id)
+        return await self.list_captured_models(provider)
+
+    async def list_captured_models(self, provider, key_envelopes=None) -> tuple[str, ...]:
+        """List models using admitted configuration and envelopes when supplied."""
+        provider_id = provider.provider_id
+        if key_envelopes is not None:
+            key_envelopes = self.rotate_keys(provider_id, list(key_envelopes))
+        envelopes = dict((key.key_id, cipher) for key, cipher in key_envelopes) if key_envelopes is not None else None
+        keys = [key for key, _ in key_envelopes] if key_envelopes is not None else await self._ordered_keys(provider_id)
         if not keys:
             raise AiError(AI_NO_KEY, f"供应商「{provider.name}」没有可用的 API Key")
         last: AiError | None = None
         url = f"{provider.base_url}/models"
         for key in keys:
-            plaintext = await self._key_plaintext(key.key_id)
+            plaintext = (await self._decrypt_key(envelopes[key.key_id]) if envelopes is not None
+                         else await self._key_plaintext(key.key_id, expected=key, provider=provider))
             if not plaintext:
                 continue
             try:
@@ -581,13 +611,13 @@ class AiProviderService:
                 continue
             if response.status_code in (401, 403):
                 await self._database.record_ai_key_failure(
-                    key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES
+                    key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES, expected=key, provider=provider
                 )
                 last = AiError(AI_AUTH, "AI 供应商拒绝了这把 API Key")
                 continue
             if response.status_code == 429:
                 await self._database.record_ai_key_failure(
-                    key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES
+                    key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES, expected=key, provider=provider
                 )
                 last = AiError(AI_RATE_LIMIT, "AI 供应商限流或额度用尽")
                 continue
@@ -608,7 +638,7 @@ class AiProviderService:
             except (ValueError, TypeError, KeyError, AttributeError):
                 last = AiError(AI_BAD_RESPONSE, "AI 供应商的模型列表无法解析")
                 continue
-            await self._database.mark_ai_key_used(key.key_id)
+            await self._database.mark_ai_key_used(key.key_id, expected=key, provider=provider)
             return names[:MAX_DISCOVERED_MODELS]
         raise last or AiError(AI_NO_KEY, f"供应商「{provider.name}」没有可用的 API Key")
 
@@ -682,17 +712,13 @@ class AiProviderService:
         self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
     ) -> tuple[AiModelChainEntry, ...]:
         ids = [entry.model.model_id for entry in await self.chain(scope)]
-        if model_id not in ids:
-            ids.append(model_id)
-        return await self.save_chain(ids, scope)
+        return await self.save_chain(self.chain_order(ids, 'append', model_id), scope)
 
     async def remove_from_chain(
         self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
     ) -> tuple[AiModelChainEntry, ...]:
         ids = [entry.model.model_id for entry in await self.chain(scope)]
-        if model_id not in ids:
-            raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型列表里")
-        return await self.save_chain([mid for mid in ids if mid != model_id], scope)
+        return await self.save_chain(self.chain_order(ids, 'remove', model_id), scope)
 
     async def set_chain_primary(
         self, model_id: int, scope: str = CHAIN_SCOPE_DEFAULT
@@ -704,10 +730,7 @@ class AiProviderService:
         it *and* promotes it, because 「主力」 is the reason it was ticked.
         """
         ids = [entry.model.model_id for entry in await self.chain(scope)]
-        if model_id not in ids:
-            ids.append(model_id)
-        ids = [model_id] + [mid for mid in ids if mid != model_id]
-        return await self.save_chain(ids, scope)
+        return await self.save_chain(self.chain_order(ids, 'primary', model_id), scope)
 
     async def shift_chain(
         self, model_id: int, delta: int, scope: str = CHAIN_SCOPE_DEFAULT
@@ -719,13 +742,25 @@ class AiProviderService:
         carry without a second source of truth in the browser.
         """
         ids = [entry.model.model_id for entry in await self.chain(scope)]
-        if model_id not in ids:
+        return await self.save_chain(self.chain_order(ids, 'shift', model_id, delta), scope)
+
+    @staticmethod
+    def chain_order(model_ids, action, model_id, delta=0):
+        """Apply the shared primary/append/remove/clamped-shift ordering rule."""
+        ids = list(model_ids)
+        if action in ('remove', 'shift') and model_id not in ids:
             raise AiError(AI_CHAIN_ENTRY_MISSING, "该模型不在模型列表里")
-        index = ids.index(model_id)
-        target = max(0, min(len(ids) - 1, index + delta))
-        if target != index:
+        if action == 'remove':
+            ids.remove(model_id)
+        elif action == 'shift':
+            index = ids.index(model_id)
+            target = max(0, min(len(ids) - 1, index + delta))
             ids.insert(target, ids.pop(index))
-        return await self.save_chain(ids, scope)
+        elif action == 'primary':
+            ids = [model_id] + [mid for mid in ids if mid != model_id]
+        elif model_id not in ids:
+            ids.append(model_id)
+        return tuple(ids)
 
     # ------------------------------------------------------------------
     #  Verification
@@ -747,6 +782,11 @@ class AiProviderService:
         provider = await self._database.get_ai_provider(model.provider_id)
         if provider is None:
             raise AiError(AI_PROVIDER_NOT_FOUND, "模型所属的供应商不存在")
+        return await self.verify_captured(provider, model)
+
+    async def verify_captured(self, provider, model, key_envelopes=None, *, operation_id=None) -> AiVerification:
+        """Verify an admitted configuration; late results cannot touch its replacement."""
+        model_id = model.model_id
         try:
             answer = await self._ask(
                 provider,
@@ -762,26 +802,27 @@ class AiProviderService:
                 # the second click from 「鉴权失败」 into 「没有可用的 Key」, hiding
                 # the reason they are trying to read.
                 park_key_faults=False,
+                key_envelopes=key_envelopes,
             )
         except AiError as exc:
-            message = exc.public_message
-            await self._database.mark_ai_model_verified(
-                model_id, ok=False, error=f"{exc.code}: {message}"
-            )
-            return AiVerification(ok=False, code=exc.code, message=message)
-        try:
-            extract_json_object(answer.text)
-        except AiError as exc:
-            await self._database.mark_ai_model_verified(
-                model_id, ok=False, error=f"{exc.code}: {exc.public_message}"
-            )
-            return AiVerification(ok=False, code=exc.code, message=exc.public_message)
-        await self._database.mark_ai_model_verified(model_id, ok=True, error=None)
-        return AiVerification(
-            ok=True,
-            code=AI_VERIFY_OK,
-            message=f"验证通过（{answer.provider_name} / {answer.model_name}）",
+            result = AiVerification(ok=False, code=exc.code, message=exc.public_message)
+        else:
+            try:
+                extract_json_object(answer.text)
+            except AiError as exc:
+                result = AiVerification(ok=False, code=exc.code, message=exc.public_message)
+            else:
+                result = AiVerification(ok=True, code=AI_VERIFY_OK,
+                    message=f"验证通过（{answer.provider_name} / {answer.model_name}）")
+        stored = await self._database.mark_ai_model_verified(
+            model_id, ok=result.ok,
+            error=None if result.ok else (result.code if operation_id else f'{result.code}: {result.message}'),
+            expected=model, provider=provider, operation_id=operation_id,
         )
+        if not stored:
+            return AiVerification(ok=False, code=AI_CONFIGURATION_CHANGED,
+                message='验证期间 AI 配置已变更；此结果未写入当前配置，请核对后重新验证')
+        return result
 
     # ------------------------------------------------------------------
     #  Running a request
@@ -895,6 +936,7 @@ class AiProviderService:
         params: AiRequestParams | None = None,
         stream: bool = False,
         park_key_faults: bool = True,
+        key_envelopes=None,
     ) -> AiAnswer:
         """One request through one provider/model, rotating its keys.
 
@@ -907,14 +949,18 @@ class AiProviderService:
         caller that only wants to ask a question does not have to know that
         request parameters exist.
         """
-        keys = await self._ordered_keys(provider.provider_id)
+        if key_envelopes is not None:
+            key_envelopes = self.rotate_keys(provider.provider_id, list(key_envelopes))
+        envelopes = dict((key.key_id, cipher) for key, cipher in key_envelopes) if key_envelopes is not None else None
+        keys = [key for key, _ in key_envelopes] if key_envelopes is not None else await self._ordered_keys(provider.provider_id)
         if not keys:
             raise AiError(
                 AI_NO_KEY, f"供应商「{provider.name}」没有可用的 API Key"
             )
         last: AiError | None = None
         for key in keys:
-            plaintext = await self._key_plaintext(key.key_id)
+            plaintext = (await self._decrypt_key(envelopes[key.key_id]) if envelopes is not None
+                         else await self._key_plaintext(key.key_id, expected=key, provider=provider))
             if not plaintext:
                 continue
             client = self._client_factory(
@@ -940,10 +986,10 @@ class AiProviderService:
                 last = exc
                 if exc.key_fault and park_key_faults:
                     await self._database.record_ai_key_failure(
-                        key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES
+                        key.key_id, cooldown_minutes=KEY_COOLDOWN_MINUTES, expected=key, provider=provider
                     )
                 continue
-            await self._database.mark_ai_key_used(key.key_id)
+            await self._database.mark_ai_key_used(key.key_id, expected=key, provider=provider)
             return AiAnswer(
                 text=text,
                 provider_id=provider.provider_id,

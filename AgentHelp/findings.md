@@ -1,5 +1,14 @@
 # Findings And Decisions
 
+## P10 接续 2026-10-16
+
+- 已下载命令已接共享作品CAS/固定回执；列表改名与详情精确归档路径复用P8移动日志，路径/可选任务/回执同事务，真实进程退出恢复已验证。
+- P5已合并旧重复并强制画廊唯一索引；旧去重测试不能继续构造正常库重复。异常修复场景在测试库显式移除索引，产品约束不变。
+- 去重确认固定持久预览plan_id，删除事务核对保留项及待删项；原批次/逐项回执复用，中断重发不重算。29条合同通过，当前2806 collect-only / 646个当前节点最新结果通过，非整库。
+- 手动新增已在原P5发布事务固定持久成功回执，同键重发不重复网络；拒绝固定FAILED，未知/取消/旧会话为UNKNOWN，须显式核实。HTTP/WS/表单共享，Web跳转核对稳定身份，编号复用返回410。35条核心/旧入口合同及10条最终HTTP/核心合同通过，组间重叠不相加；下一步设置保存区原子版本命令。
+- 七个设置保存区已复用原验证服务的隔离缓冲，最终CAS/全部写入/回执同事务，修复命名模板后字段拒绝留下前字段的问题。设置快照必须读前后核对版本，否则旧值配新版本会绕过CAS；系统缓存按序重读，预检/广播/模板预览不偷换原草稿版本。最终三文件14/0，DOM root/proxy通过，旧入口回归在跑；其余配置域仍待接通。
+- 上行回归已完成：旧入口180/0、运行时99/0；最终草稿四文件16/0，DOM root/proxy包含冲突响应后再广播。错误响应要换入服务器确认控件，并把新表单继续标dirty，否则下一次广播会丢草稿。当前2829 collect-only / 57XML当前节点942 distinct passed，非整库；所有会话终态，P10仍未验收。
+
 ## Requirements
 - Build a new project from scratch.
 - Subscribe to Telegram channels and accept direct private shares.
@@ -487,3 +496,63 @@ P5 本地提交 2ea49f2，只含 031；共 447 个不同用例最新通过。新
 全局请求额度须在账号等待之后取得，且取得后重查版本/停止/session；真实等待合同复现了旧请求越过停用的竞态并已修正。监听与普通/传输分池，TG FloodWait/429 是账号级持久事实，取消不能丢掉服务端限流。远端下载槽与本地槽分开，未知推送和未确认停止保留额度，完成后做种单独计算。初值保守，未声称性能最优。
 
 最终 454 个不同相关用例通过，2710 collect-only，未运行整库；实际 037 升级、快速重启、长请求、未知文件隔离和 Windows 硬退出有合同。Linux guardian 仅静态检查，实跑是 P12 未完成项。见 R96_COMPLETION_AUDIT 与 progress；无真实供应商/库升级。
+
+### P10 版本和回执裁决接续（进行中）
+
+数据库数字 ID 会重用，因此作品命令使用 work_versions 稳定 UUID，删除后保留墓碑；编辑版本不跟随下载进度/心跳。先读固定回执再做 CAS，HTTP/WS/不同管理员设备共用同一作用域。主动元数据抓取必须先持久操作、锁外网络、最终事务再次 CAS 并同时提交 metadata/torrents/cover/规则/结果；只请求入口检查版本仍会发布迟到结果。旧回执不得附新快照供客户端自动采用，否则草稿基础版本被悄悄推进。
+
+审核使用同一事务完成审批/审计/入队/打包意图和回执；网络准备锁外，准备失败前重查同键回执，避免原请求已成功但重试返回误导错误。批量还需固定父/子结果，不能将重发后已审批状态重算成 skip。当前元数据闭环与审核新核心已验证，旧审核入口待切换；2749 collect-only，258 distinct passed，非整库。ComicInfo 写锁和同步失败扫描饥饿仍待 P11；实际证据及失败过程见 progress 最新 P10 小节。
+
+P10 接续：上述旧审核入口和批次已接通。仅保存批次最终 JSON 不足以覆盖中途退出；每项成功/拒绝必须先形成不可变回执，失败保存事务再次查询同键成功，防止准备中的第二请求把已执行结果记为 skip。未知 UUID 的失败回执不应创建假作品。来源下载/打包也必须回执先于预检及 CAS，否则丢响应重试会复活后来失败/取消的原任务；入队与回执同事务保证失败不留半个任务。六旧 Web 入口复用相同应用服务，网络等待在锁外；任务版本与作品版本明确区分。当前 2772 collect-only / 439 distinct passed，非整库；完整失败/修复及证据在 progress。下一步删除/已下载/手动新增和配置/v2 等未完成范围。
+
+P10 删除接续：原持久removal支持外部短事务即可复用，不必另造停止/清理器。作品CAS、业务删除、停止操作、墓碑及回执必须同提交；返回固定“已受理”，实时清理通过removal资源读取，避免同键回执随进度漂移。批量原成功/拒绝在删除重加后仍保持原结果。错误页保留原选择/版本/key，已离开列表项仍可重发原批次；管理员显式筛选才释放选择，后台广播不能悄悄推进依据。2782 collect-only/472 distinct passed；下一步已下载管理/手动/配置/v2，P10未验收。
+
+P10 规则接续（2026-10-16）：原规则version只随保存增长，启停缺少版本裁决，数字ID又可复用。039新增稳定rule_uuid并保留原version，触发器覆盖内部内容变化/启停；公开命令按单条身份/版本裁决，与原DB保存共事务写固定回执。相同键重放先于当前存在性/版本，删除重加不会改写原回执或影响新规则。不同规则不共用集合版本。路径模板校验提取原服务纯校验供两入口复用。冲突及试跑保留条件行/原版本/key；删除拒绝表单即使新快照没有原规则也必须保留。最终78/0、旧入口237/0、DOM root/proxy通过；2846 collect-only，当前节点1015 distinct passed，非整库。qBittorrent改配置与原实例的交错仍待核对，不能把配置CAS等同执行安全。
+
+P10 qBittorrent接续：正常poller已核对原instance/hash/attempt标签，不重复添加防护。不可变config使一次push/poll保持同一快照；新增推送中改实例测试确认原请求/资源URL不变，新实例不触发旧资源删除，恢复原地址并修正凭据/映射可继续停止。complete_if_ready注入到从未读取的_torrent_verify，暂无可达调用，不能作为当前漏洞或恢复旧工作流。配置保存复用SettingsCommands隔离准备和短事务CAS，秘密内容用私有主密钥HMAC而非裸SHA；首次主密钥生成须覆盖所有准备副本的线程竞争。浏览器密码保留为DOM属性，不由服务器回填、不写HTML属性/回执。最新150个不同相关用例最终通过、旧API2/0及DOM root/proxy；2855 collect-only/1116 distinct passed，P10未验收。
+
+P10工具profile接续：原记录有数字id/唯一name但无版本，两者删除后均可复用。039回填稳定profile_uuid与逐条revision，内部实际改动也推进版本；ProfileCommands复用原setter的外部事务接缝，不重写验证。新API/WS/旧表单共用回执，接收无变化也消费原版本，名称/编号复用拒绝旧身份，旧成功回执不影响新记录。最新五文件118/0、加强迁移/回执2/0、DOM root/proxy通过；2863 collect-only/1193 distinct passed，非整库。安装器仍有固定.incoming、同步Web网络调用与to_thread退出问题，持久操作及实际安装互斥未实现；后续不能仅凭profile通过声明工具域完整。
+
+P10工具安装/身份接续（2026-10-16，覆盖上行安装缺口）：锁内判重时固定作品UUID，不能到失败写回才按数字ID补查；正式测试覆盖判重→删除重用→保存失败回执。已显示的链接也携带UUID并在打开时核对。profile删除原生错误页的草稿只进入渲染上下文，不伪造数据库记录或采用同名新身份。
+
+工具安装持久受理和版本递增必须原子，但单靠数据库受理不能保护CLI/复制服务的.incoming文件；实际installer另加OS目录锁。提交协程需要覆盖commit→dispatch断线间隙；安装线程取消收束前不能释放RUNNING记录。停机先拒绝新命令、等待真实线程，最后停止worker会话。新worker将未完成记录标UNKNOWN；自动安装若以新键再次执行同样会违反“未知先核实”，现已显式阻止。文件替换失败回退.previous，中断留下的旧目录在下一次安装下载前恢复。工具安装核心31/0、关联54/0、最终生命周期16/0和DOM root/proxy通过；2875 collect-only/1264 distinct passed，非整库。继续AI配置/独立网络动作、密码库/API Key、v2与全域审计；P10未验收，不提前提交。
+
+P10 AI总开关接续：原PUT没有版本仍200，已正式复现。直接复用SettingsCommands/SettingsDraft与原save_ai_enabled，第九独立scope ai-master；内部改值也推进版本，候选功能等其他保存区不影响它。HTTP/WS/原表单返回安全固定回执，旧表单省略复选框与JSON enabled=false归一，冲突保留原值/版本/key，明确确认后才新命令。相关15/0、加强4/0，DOM复选框root/proxy通过；2877 collect-only/1266 distinct passed，非整库。
+
+AI后续源码证据：供应商编辑在AiProviderService.save_provider验证后调用Database._save_ai_provider_sync；当前没有外部connection接缝，需要复用验证/原DB写入并把CAS与回执置于同一事务。add_models只登记，不做网络验证；verify_model才请求供应商，随后仅按数字model_id写健康结果，存在配置变更/删除重用后的迟到写回缺口。供应商/Key/模型编辑版本应与last_used/failures/cooldown/last_verify_*分离；网络操作须捕获原稳定身份与配置/凭据，不能在执行中拼接后来修改的参数。自定义header解析已拒绝authorization/content-type；不要未读源码就宣称这些字段可直接写入该框。
+
+P10 AI身份/供应商接续（2026-10-16，覆盖上行已处理项）：8个事件门闩交错正式复现迟到验证成功与旧Key健康污染新编号。039新增稳定身份和内容版本，读密文/健康回写同时绑定原Key与供应商；模型验证最后原子核对原供应商/凭据/模型版本。健康不增加配置版本，配置变动清空旧验证，避免新页面继续展示旧成功。链的JOIN/DTO切片必须与追加字段一起改，不能只改常量。
+
+供应商删除是复合操作：仅核对供应商revision仍可能删掉另一端新加的Key/模型。现在Key和模型分别维护父级集合版本，删除额外校验两个所见版本；元数据编辑保持逐供应商独立，不把全集epoch作为编辑锁。ai-catalogue只保护多次读取构成的设置快照；健康变化不触发。新增用ai-providers集合版本，所有CAS/写入/回执同事务，接受无变化也消费编辑版本。Provider验证提取为纯方法，原服务调用继续复用，不在锁内发网络。跨通道摘要先归一数字/复选框/默认值再HMAC，避免JSON与原表单语义相同却幂等冲突。旧成功回执跳转也携带provider_uuid，不默认打开复用编号的新对象。
+
+最终核心97/0、旧入口22/0和DOM root/proxy通过；2895 collect-only，90XML按当前完整节点最新1276 distinct passed，零失败/错误/跳过，非整库。统计须直接用节点清单（pytest需-o addopts=''避免重复-q仅输出文件计数），不能拿文件计数当完整节点或在历史累计数上加组数。公开Key/模型/链/参数和网络持久受理仍未完成，不将供应商CAS当作全AI域交付。
+
+P10 Key/模型/链接续（2026-10-16，覆盖上行对应待处理项）：取消冷却不能仅核对配置revision，否则旧页可清掉后来出现的新冷却。039新增health_revision，实际失败/冷却/用量变化推进健康版本，reset额外CAS它且只消费健康版本；原回执重放不重复reset。Key内容校验提取纯key_values、模型登记提取model_values，原服务和新命令共用；加密锁外，保存与固定安全回执原子提交。错误context剔除api_keys，浏览器只以textarea.value恢复，不能将秘密写回HTML属性。
+
+三张模型链分别使用ai-chain:<scope>，不使用ai-catalogue全局epoch裁决排序编辑。原排序提取纯chain_order，原整链DB保存复用外部connection；最终在锁内读链/CAS/排序/保存/回执，不能继续服务端读后另开事务写入。删除模型时原DB会删链成员，SQL触发器必须覆盖这条旧路径并推进受影响scope；健康与模型参数不消耗排序版本。无JS下拉项直接提交编号:UUID，避免服务端代补当前身份。冲突确认只更换链版本/键，不换原模型UUID；原对象删除后仍保留草稿节点。
+
+最终合并86/0、排序及原AI单元93/0、旧入口46/0、相邻设置/API80/0、独立版本加强1/0，DOM root/proxy通过；2967 collect-only，103XML当前节点最新1356 distinct passed、0failure/error/skip，非整库。首次HTTP夹具把Key的keyword-only参数按位置调用，首次原生表单选择误用含query的action.endsWith(path)，均修正测试后对应节点最终通过。路径AI参数/prompt/model-source、持久网络动作、密码库/v2等仍未完成，P10不验收、不提交，039不冻结。
+
+P10路径AI接续（2026-10-16，覆盖上行对应待补项）：多字段“先写数字”并不保证原子性，合法batch_size后无效concurrency/path_source仍可能留下前项。现原服务写入SettingsDraft，最终CAS/实际设置/固定回执一次事务；独立prompt与面板写同字段，共用path-ai版本但独立form/key，草稿按action匹配，避免重置错误页面清空面板。两个model-source各自独立版本；JSON缺路径来源入口，已补PUT /settings/paths/ai/models。Series前置条件必须最终事务重查，准备时检查不足以防同时关闭总开关、删链或改模型来源。实际读取默认/自定义链与原effective_chain语义一致，不新增启停/验证门禁。
+
+正式新合同两文件24条；最终设置/HTTP/038升级五文件38/0、旧入口90/0，真实HTMX/Alpine root/proxy通过，2991 collect-only / 107XML当前完整节点最新1380 distinct passed，零failure/error/skip，非整库。初跑核心4个夹具错误和DOM变量重名已修复，记录见progress。下步持久AI网络动作：现_ask仍执行时读Key、verify_all逐次读模型，不满足“原始输入捕获”；须受理固定供应商/模型/凭据，并避免客户端断线取消受理派发及同键重复网络。重启UNKNOWN不可自动重发。P10未验收/暂存/提交，HEAD=f60412b，039未冻结，027–038未改，总目标active。
+
+P10 AI网络接续（2026-10-16，覆盖上行待补项）：受理原配置/凭据捕获必须同时覆盖provider参数、model参数、可用Key信封以及批量中尚未发送的模型，最终写回屏障不能替代输入捕获。AiNetworkCommands通过持久操作与model/listing claim保证同key固定202、重叠网络互斥，配置编辑revision不被测试消耗；断线继续派发、停机真实收束，重启UNKNOWN不重发。普通操作只存安全code与身份/版本，不存供应商原始错误或凭据。
+
+只在GET渲染时核对拉取结果仍不足：真实HTTP/原生先复现展示后改Key/端点，旧清单继续200/303接受。现models-add携带discovery_operation_id，在保存事务与集合CAS共同核对原COMPLETED fetch/原provider版本/Key版本；过期409，不消费集合版本。选择与原操作保留，已成功添加的安全回执仍可优先重放。全局测试原按default_chain显隐也不符其实际“所有enabled模型”语义，改有模型即可测试，不新增验证门禁。
+
+六文件134/0、最后三文件29/0、旧页面/合同42/0及目录/HTTP51/0，真实HTMX/Alpine root/proxy通过；3019 collect-only，120XML当前完整节点/报告mtime最新1408 distinct passed，零failure/error/skip，非整库。下一步密码库/API Key：原PUT/原生写者仍无CAS；app.state.pending_api_key为跨会话全局明文槽，另端可消费，且丢响应重试会替换Key，须与安全回执/一次明文恢复一起处理。然后v2/全域审计，P10未验收/提交，039未冻结，HEAD=f60412b，总目标active。
+
+P10凭据接续（2026-10-16，覆盖上行密码库待接项）：单管理员不等于单设备，进程全局pending_api_key不能充当一次明文响应。现原生生成直接200显示本响应，HTTP/WS/表单共享原子安全回执，只有首次提交者得到明文；同key重试、DB重新initialize和提交后取消均不生成新Key。丢明文必须核对后明确新key/当前版本替换。另真实密码登录会话不能读回，API Key自身不能管理Key。后台刷新须保留同public_id的当前明文，否则通知会吞掉唯一可复制机会；真实HTMX验证更换/导航清除。
+
+密码按name原本upsert，vault集合版本保护它，删除另用UUID/条目版本；两个scope独立，内部写者同样触发版本。原_save_archive_password_sync误用lastrowid判断upsert结果会查错，现按name返回真实ID。解压输入必须与原UUID/revision同次读取，不能完成后只按数字ID记成功；conversion捕获ArchivePasswordAttempt（repr不含明文），最终更新核对UUID/版本/启用状态，修改或重建的迟到结果被忽略。真实038夹具保留旧密文/health/Key，DDL失败整体回滚与重复初始化通过。
+
+公开/旧设置200/0、核心/迁移/归档46/0、相邻43/0、DOM根路径与前缀通过；3039 collect-only，126XML当前完整节点/mtime最新1439 distinct passed，零failure/error/skip，非整库。P10未验收/提交，039未冻结，HEAD=f60412b；下一步v2及全域审计。继续按整阶段验收→暂存审查→本地提交→核对记录SHA→下一阶段，不拆切片提交。
+
+P10维护与原生接续（2026-10-16）：逐路由比对补了全库重新归档/AI缓存清理/规则试跑/模板预览的JSON映射。重新归档不能只是逐件调用旧接口：先用范围版本验证规划一致，再固定作品UUID/版本/输入产物和路径策略，逐件提交与回执一起落盘。规划禁用隐式元数据网络，缺失交给后台任务；只读回执不执行剩余项，INCOMPLETE须明确原键续作。另一个相同键调用遇到PREPARED移动只能返回临时冲突，不能抢先保存永久失败；真实线程交错已验证。125件合同覆盖批次不截断与后到作品不混入，回执失败覆盖文件回滚/pin/入队全回滚，配置/元数据/答案/编号复用均拒绝迟到写。
+
+path-cache独立版本在空清理也消费；removed必须用DELETE rowcount而非total_changes（039维护版本触发器会放大后者）。旧清理回执不删后来缓存。维护表单应使用实际settings_command_fields并设置data-settings-action，否则随机生成的key使广播无法匹配原草稿。root/proxy真实DOM通过。原生WS原本过滤为api.*，新增v2目录不能自动对原生可用；现mobile与desktop均允许api/v2、排除web/reveal，Bearer跨通道任务回放已验。五文件57/0、归档等七文件214/0、旧维护12/0，3071 collect-only/142XML最新1579 distinct passed，非整库；P10全新增合同集中组运行中，已有一失败待XML定位，不先验收/提交。
+
+P10最终核对（2026-10-16）：不能把WS业务失败与socket上下文退出取消混为一谈；确定性取消测试先复现，再在finally shield/gather所有socket子任务，集中612/0证实。维护PREPARED移动的重复请求应为临时409，不能被第二调用抢先冻结为永久拒绝。手动来源的三个旧Web写入口也必须使用对象CAS/回执；合并还涉及目标作品，目标UUID/revision必须从明确确认一直保护到旧源停止后合并，持久guard不能只存在HTTP内存里。原P5内部关联没有该人工guard，保持兼容。
+
+来源最终组82pass/1fail是页面/API的未打包ComicInfo预览Added跨秒，固定测试时钟后完整详情39/0；保留完整快照断言。曾83/0却默认pytest临时目录清理权限错误导致进程非零，不能直接声称exit0；改任务独立basetemp。最终3088 collect-only/152XML按当前完整节点最新1623 distinct passed，不把组数相加、不称整库。rc13/039验收后按整阶段stage/review/local commit/核实SHA，P11/P12及Linux guardian真实运行继续。

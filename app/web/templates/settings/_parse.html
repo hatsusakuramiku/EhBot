@@ -17,7 +17,7 @@
   whether this page follows the global default or carries its own list; a chain
   that fails completely never falls back to the global one.
 #}
-{% from "settings/_model_chain.html" import model_chain %}
+{% from "settings/_model_chain.html" import model_chain with context %}
 <div class="ui-settings-layout">
   <div class="ui-settings-col">
     <section class="ui-panel">
@@ -26,13 +26,14 @@
         决定哪些监听消息会被解析成候选。默认「只解析含 ExHentai / e-hentai
         画廊链接的消息」，其余消息在抓取元数据之前就会被忽略。
       </p>
-      <form class="ui-form" method="post" action="{{ url_for('save_parse_rules') }}"
+      <form data-settings-action="parse" {% if settings_draft and settings_draft.action == 'parse' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_parse_rules') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('parse', 'parse') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
         <label class="ui-checkline">
           <input class="ui-checkbox" name="require_gallery_link" type="checkbox"
-                 {% if parse_rules.require_gallery_link %}checked{% endif %}>
+                 {% if preference_value('parse', 'require_gallery_link', parse_rules.require_gallery_link, check=true) %}checked{% endif %}>
           <span>必须包含画廊链接</span>
         </label>
         <small class="ui-hint">
@@ -42,17 +43,17 @@
 
         <label class="ui-checkline" style="margin-top: var(--s-3)">
           <input class="ui-checkbox" name="accept_photo" type="checkbox"
-                 {% if parse_rules.accept_photo %}checked{% endif %}>
+                 {% if preference_value('parse', 'accept_photo', parse_rules.accept_photo, check=true) %}checked{% endif %}>
           <span>接受纯图片预览消息</span>
         </label>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="accept_archive" type="checkbox"
-                 {% if parse_rules.accept_archive %}checked{% endif %}>
+                 {% if preference_value('parse', 'accept_archive', parse_rules.accept_archive, check=true) %}checked{% endif %}>
           <span>接受压缩包附件消息</span>
         </label>
         <label class="ui-checkline">
           <input class="ui-checkbox" name="accept_preview" type="checkbox"
-                 {% if parse_rules.accept_preview %}checked{% endif %}>
+                 {% if preference_value('parse', 'accept_preview', parse_rules.accept_preview, check=true) %}checked{% endif %}>
           <span>接受 telegra.ph / graph.org 预览页消息</span>
         </label>
 
@@ -63,7 +64,7 @@
               <label class="ui-checkline">
                 <input class="ui-checkbox" name="archive_formats" type="checkbox"
                        value="{{ format }}"
-                       {% if format in parse_rules.archive_formats %}checked{% endif %}>
+                       {% if format in preference_value('parse', 'archive_formats', parse_rules.archive_formats) %}checked{% endif %}>
                 <span>{{ format|upper }}</span>
               </label>
             {% endfor %}
@@ -77,7 +78,8 @@
           保存后新到的消息立即按新规则判断，已入库的候选不受影响。
         </small>
       </form>
-      <form class="ui-form" method="post" action="{{ url_for('reset_parse_rules') }}">
+      <form data-settings-action="parse-reset" {% if settings_draft and settings_draft.action == 'parse-reset' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('reset_parse_rules') }}">
+        {{ settings_command_fields('parse-reset', 'parse') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-form-actions">
           <button class="ui-btn" data-size="sm" type="submit">恢复默认解析规则</button>
@@ -103,13 +105,14 @@
       {% if not candidate_admission.enabled_overridden %}
         <p class="ui-hint">当前为默认值：关闭。</p>
       {% endif %}
-      <form class="ui-form" method="post" action="{{ url_for('save_candidate_admission') }}"
+      <form data-settings-action="admission" {% if settings_draft and settings_draft.action == 'admission' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_candidate_admission') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('admission', 'admission') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
         <label class="ui-checkline">
           <input class="ui-checkbox" name="ai_candidate_enabled" type="checkbox"
-                 {% if candidate_admission.enabled %}checked{% endif %}>
+                 {% if preference_value('admission', 'ai_candidate_enabled', candidate_admission.enabled, check=true) %}checked{% endif %}>
           <span>开启 AI 候选判定</span>
         </label>
         <small class="ui-hint">
@@ -122,7 +125,7 @@
           <select class="ui-select" id="ai-candidate-fallback" name="ai_candidate_fallback">
             {% for fallback in candidate_fallbacks %}
               <option value="{{ fallback }}"
-                      {% if fallback == candidate_admission.fallback %}selected{% endif %}>
+                      {% if fallback == preference_value('admission', 'ai_candidate_fallback', candidate_admission.fallback) %}selected{% endif %}>
                 {% if fallback == "reject" %}拒绝（默认，失败即不入候选）{% else %}放行（失败时按解析规则继续）{% endif %}
               </option>
             {% endfor %}
@@ -135,7 +138,7 @@
 
         <label class="ui-checkline">
           <input class="ui-checkbox" name="ai_candidate_override_parse_rules" type="checkbox"
-                 {% if candidate_admission.override_parse_rules %}checked{% endif %}>
+                 {% if preference_value('admission', 'ai_candidate_override_parse_rules', candidate_admission.override_parse_rules, check=true) %}checked{% endif %}>
           <span>AI 通过即完全覆盖解析规则</span>
         </label>
         <small class="ui-hint">
@@ -146,7 +149,7 @@
         <div class="ui-field">
           <label for="ai-candidate-prompt">判定提示词</label>
           <textarea class="ui-input" id="ai-candidate-prompt" name="ai_candidate_prompt"
-                    rows="12">{{ candidate_admission.prompt }}</textarea>
+                    rows="12">{{ preference_value('admission', 'ai_candidate_prompt', candidate_admission.prompt) }}</textarea>
           <small>
             会随每条消息的正文、来源名称、链接与附件名一起发给模型。留空或提交默认文本
             即恢复默认提示词。
@@ -173,15 +176,17 @@
           不会偷偷回退全局默认。
         </p>
         <form class="ui-form" method="post"
-              action="{{ url_for('save_ai_candidate_model_source') }}">
+              action="{{ url_for('save_ai_candidate_model_source') }}" data-settings-action="candidate-model-source"
+              {% if settings_draft and settings_draft.action == 'candidate-model-source' %}data-dirty="true"{% endif %}>
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          {{ settings_command_fields('candidate-model-source', 'candidate-model-source') }}
           <fieldset class="ui-fieldset">
             <legend>本页使用哪份模型列表</legend>
             {% for option in candidate_ai.model_sources %}
               <label class="ui-checkline" data-layout="stack">
                 <input class="ui-radio" type="radio" name="ai_model_source"
                        value="{{ option.code }}"
-                       {% if option.code == candidate_ai.model_source %}checked{% endif %}>
+                       {% if option.code == preference_value('candidate-model-source', 'ai_model_source', candidate_ai.model_source) %}checked{% endif %}>
                 <span>{{ option.label }}<small>{{ option.hint }}</small></span>
               </label>
             {% endfor %}
@@ -195,7 +200,7 @@
              {% if candidate_ai.model_source != "custom" %}data-muted="true"{% endif %}>
           <h4 class="ui-section-title">本页的模型列表{% if candidate_ai.model_source != "custom" %}（未启用）{% endif %}</h4>
           {{ model_chain(candidate_ai.own_chain, candidate_ai.selectable_models, "/settings/parse/chain", csrf_token,
-                         "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。") }}
+                         "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。", scope='candidate_admission') }}
         </div>
       </div>
     </section>

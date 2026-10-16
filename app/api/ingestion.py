@@ -11,9 +11,21 @@ from app.api.events import EVENT_CANDIDATE
 from app.api.status import INGEST_OPERATION_ERRORS, ingest_operation_payload
 from app.candidates.entries import IngestError
 from app.candidates.operations import get_operation, retry_operation
+from app.review.manual import manual_result
+from app.review.commands import WorkCommandError
 
 
 router = APIRouter(tags=['ingestion'])
+
+
+@router.get('/manual-add-operations/{operation_id}')
+async def api_manual_add_operation(request: Request, operation_id: str):
+    await deps.require_session(request)
+    try:
+        result = await manual_result(deps.database(request), operation_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code) from exc
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
 
 def operation_error(exc):
@@ -54,5 +66,5 @@ async def api_ingest_operation(request: Request, operation_id: str):
 async def api_ingest_retry(request: Request, operation_id: str):
     await deps.require_session(request)
     deps.require_csrf(request)
-    result = await retry_ingest_operation(request, operation_id, await _json_body(request))
+    result = await retry_ingest_operation(request, operation_id, deps.command_payload(request, await _json_body(request)))
     return JSONResponse(result, status_code=202, headers={'Cache-Control': 'no-store'})

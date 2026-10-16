@@ -20,6 +20,7 @@ from tests.integration.test_api_auth import (
     NEW_PASSWORD, ROTATED_PASSWORD, bearer, complete_first_run, make_settings,
 )
 from tests.integration.test_realtime import call, hello
+from tests.credential_commands import observed_credentials
 
 
 def login(client, username='admin'):
@@ -119,7 +120,8 @@ def test_api_password_change_revokes_other_devices_but_keeps_initiator_and_key(t
         login(b)
         page = a.get('/settings/passwords')
         csrf = page.context['csrf_token']
-        assert a.post('/settings/api-keys/generate', data={'csrf_token': csrf}).status_code == 200
+        assert a.post('/settings/api-keys/generate', data={'csrf_token': csrf,
+            **observed_credentials(a, 'api-key-generate')}).status_code == 200
         # The key is an independent row, never revoked by a password transaction.
         key = a.portal.call(app.state.database.active_api_key)
         assert key is not None
@@ -213,7 +215,7 @@ async def test_migration_026_preserves_identity_and_is_repeatable(tmp_path):
     admin = await db.get_administrator()
     assert (admin.id, admin.username, admin.revision, admin.auth_epoch) == (1, 'Owner', 0, 0)
     with db.connection() as conn:
-        assert conn.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == 26
+        assert conn.execute('SELECT COUNT(*) FROM schema_migrations').fetchone()[0] == 39
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO admin_users (username, password_hash) VALUES ('second', 'test-hash')")
 

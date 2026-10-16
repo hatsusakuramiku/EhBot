@@ -1,5 +1,5 @@
 {% from "settings/_rule_row.html" import condition_row %}
-{% from "settings/_model_chain.html" import model_chain %}
+{% from "settings/_model_chain.html" import model_chain with context %}
 {#
   路径 tab: where files live, and how a book's own path inside the library is
   composed.
@@ -63,21 +63,23 @@
     AI 供应商」里配置的模型链读取作品元数据决定存放位置与文件名，下方的模板与规则不再生效。
   </p>
   <form class="ui-form" method="post" action="{{ url_for('save_ai_path_settings') }}"
+        data-settings-action="path-ai" {% if settings_draft and settings_draft.action == 'path-ai' %}data-dirty="true"{% endif %}
         style="margin-top: var(--s-4)">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ settings_command_fields('path-ai', 'path-ai') }}
     <fieldset class="ui-fieldset">
       <legend>使用哪种方式决定归档路径</legend>
       {% for option in path_sources %}
         <label class="ui-checkline" data-layout="stack">
           <input class="ui-radio" type="radio" name="path_source"
                  value="{{ option.code }}" data-ai-mode
-                 {% if option.code == path_source %}checked{% endif %}>
+                 {% if option.code == preference_value('path-ai', 'path_source', path_source, action='path-ai') %}checked{% endif %}>
           <span>{{ option.label }}<small>{{ option.hint }}</small></span>
         </label>
       {% endfor %}
     </fieldset>
 
-    <div data-ai-panel {% if path_source != "ai" %}hidden{% endif %}>
+    <div data-ai-panel {% if preference_value('path-ai', 'path_source', path_source, action='path-ai') != "ai" %}hidden{% endif %}>
       <p class="ui-hint" data-field="ai-control-chain">
         总开关：{{ "开" if ai_enabled else "关" }} · 本功能：{{ "开" if path_source == "ai" else "关" }} ·
         <strong>全部模型失败时不回退全局默认</strong>，按「路径来源」下方的兜底开关处理。
@@ -96,23 +98,16 @@
       <div class="ui-field">
         <label for="ai-prompt">提示词（prompt）</label>
         <textarea class="ui-input" id="ai-prompt" name="ai_prompt" rows="14"
-                  spellcheck="false">{{ ai.prompt }}</textarea>
+                  spellcheck="false">{{ preference_value('path-ai', 'ai_prompt', ai.prompt, action='path-ai') }}</textarea>
         <small>
           全文参与指纹：改动一次，全库作品都会被视为「需要新答案」。用
           <code>{{ "{{metadata}}" }}</code> 占位符可把元数据 JSON 就地插入；不写时，元数据会作为用户消息追加在提示词之后。
           作品详情页与已下载列表会给 AI 生成的路径标注「AI 生成」。
         </small>
       </div>
-      <div class="ui-form-actions">
-        {#- Same field, a different destination: the reset posts the form but
-            stores blank, which `ai_prompt` reads back as the default. -#}
-        <button class="ui-btn" type="submit"
-                formaction="{{ url_for('reset_ai_prompt') }}">恢复默认提示词</button>
-      </div>
-
       <label class="ui-checkline" data-layout="stack">
         <input class="ui-checkbox" name="ai_fallback_to_rules" type="checkbox"
-               {% if ai.fallback_to_rules %}checked{% endif %}>
+               {% if preference_value('path-ai', 'ai_fallback_to_rules', ai.fallback_to_rules, check=true, action='path-ai') %}checked{% endif %}>
         <span>AI 不可用时回退到规则匹配
           <small>勾选后，模型链全部失败的作品改用下方「兜底模板」入库；不勾选则停在「待定归档路径」等待处理（默认）。</small>
         </span>
@@ -120,14 +115,14 @@
 
       <label class="ui-checkline" data-layout="stack">
         <input class="ui-checkbox" name="auto_series" type="checkbox"
-               {% if ai.auto_series %}checked{% endif %}
-               {% if not ai_usable %}disabled{% endif %}>
+               {% if preference_value('path-ai', 'auto_series', ai.auto_series, check=true, action='path-ai') %}checked{% endif %}
+               {% if not ai_usable and not (settings_draft and settings_draft.action == 'path-ai') %}disabled{% endif %}>
         <span>自动添加系列（Series）
           <small>
             打包时把系列名写进 ComicInfo 的 <code>&lt;Series&gt;</code> 字段：先看元数据的「系列」值，
             没有就交给 AI 判断（AI 归档路径下直接用作品所在文件夹名，不再多问一次模型）。
             仅 AI 可用时有效；开启后 AI 不可用会让首次打包停在「待定归档路径」、重新打包直接中止。
-            默认关闭。{% if not ai_usable %}当前 AI 不可用，此项已置灰。{% endif %}
+            默认关闭。{% if not ai_usable %}{% if settings_draft and settings_draft.action == 'path-ai' %}当前 AI 不可用，请关闭此项或恢复模型配置后再保存。{% else %}当前 AI 不可用，此项已置灰。{% endif %}{% endif %}
           </small>
         </span>
       </label>
@@ -138,26 +133,26 @@
           <label for="ai-batch-size">每批处理数量</label>
           <input class="ui-input" id="ai-batch-size" name="ai_batch_size" type="number"
                  min="{{ ai.bounds.batch_size.minimum }}" max="{{ ai.bounds.batch_size.maximum }}"
-                 value="{{ ai.batch_size }}">
-          <small>整库重排时每批准备的作品数；一次运行仍覆盖全部范围内作品，分批只是避免一次性读入整库并让页面保持响应（{{ ai.bounds.batch_size.minimum }}–{{ ai.bounds.batch_size.maximum }}，默认 20）。</small>
+                 value="{{ preference_value('path-ai', 'ai_batch_size', ai.batch_size, action='path-ai') }}">
+          <small>整库重排时每批准备的作品数；一次运行仍覆盖全部范围内作品，分批限制同时准备的数量（{{ ai.bounds.batch_size.minimum }}–{{ ai.bounds.batch_size.maximum }}，默认 20）。</small>
         </div>
         <div class="ui-field">
           <label for="ai-concurrency">并发数</label>
           <input class="ui-input" id="ai-concurrency" name="ai_concurrency" type="number"
                  min="{{ ai.bounds.concurrency.minimum }}" max="{{ ai.bounds.concurrency.maximum }}"
-                 value="{{ ai.concurrency }}">
-          <small>同一批内并发拉取作品元数据的数量（{{ ai.bounds.concurrency.minimum }}–{{ ai.bounds.concurrency.maximum }}，默认 2）。模型调用发生在打包队列里，始终逐件进行。</small>
+                 value="{{ preference_value('path-ai', 'ai_concurrency', ai.concurrency, action='path-ai') }}">
+          <small>同一批内同时规划的作品数（{{ ai.bounds.concurrency.minimum }}–{{ ai.bounds.concurrency.maximum }}，默认 2）。计划只读本地元数据与缓存，缺失信息交给后台任务处理。</small>
         </div>
         <label class="ui-checkline" data-layout="stack">
           <input class="ui-checkbox" name="ai_stream" type="checkbox"
-                 {% if ai.stream %}checked{% endif %}>
+                 {% if preference_value('path-ai', 'ai_stream', ai.stream, check=true, action='path-ai') %}checked{% endif %}>
           <span>使用流式输出
             <small>以流式（SSE）方式请求模型：只改变传输方式，结果完全相同；部分自建端点只支持非流式，默认关闭。</small>
           </span>
         </label>
         <label class="ui-checkline" data-layout="stack">
           <input class="ui-checkbox" name="ai_default_include_current" type="checkbox"
-                 {% if ai.default_include_current %}checked{% endif %}>
+                 {% if preference_value('path-ai', 'ai_default_include_current', ai.default_include_current, check=true, action='path-ai') %}checked{% endif %}>
           <span>默认重排时也重算「已按当前提示词定好路径」的作品
             <small>只影响默认的「一键重新归档」；<strong>强制</strong>始终处理全库，不受此项影响。默认不纳入。</small>
           </span>
@@ -174,6 +169,13 @@
     </div>
   </form>
 
+  <form method="post" action="{{ url_for('reset_ai_prompt') }}" data-settings-action="path-ai-prompt"
+        {% if settings_draft and settings_draft.action == 'path-ai-prompt' %}data-dirty="true"{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ settings_command_fields('path-ai-prompt', 'path-ai') }}
+    <button class="ui-btn" type="submit">恢复默认提示词</button>
+  </form>
+
   {#- 路径决策模型：AI 页面拥有「全局默认」，这里只决定本页是跟随它还是自建一张。
       单独一个表单：链编辑器自己带若干 form，嵌在上面的大表单里会被浏览器丢弃。 -#}
   <section class="ui-panel" style="margin-top: var(--s-5)">
@@ -182,15 +184,17 @@
       默认<strong>跟随全局默认</strong>——在「设置 → AI 供应商」页配置的主力 + 备用列表。
       想让路径决策用别的模型（例如用一个更便宜/更快的模型专门做路径），选「本页单独指定」并编辑下面的列表。
     </p>
-    <form class="ui-form" method="post" action="{{ url_for('save_ai_model_source') }}">
+    <form class="ui-form" method="post" action="{{ url_for('save_ai_model_source') }}" data-settings-action="path-model-source"
+          {% if settings_draft and settings_draft.action == 'path-model-source' %}data-dirty="true"{% endif %}>
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ settings_command_fields('path-model-source', 'path-model-source') }}
       <fieldset class="ui-fieldset">
         <legend>本页使用哪份模型列表</legend>
         {% for option in ai.model_sources %}
           <label class="ui-checkline" data-layout="stack">
             <input class="ui-radio" type="radio" name="ai_model_source"
                    value="{{ option.code }}"
-                   {% if option.code == ai.model_source %}checked{% endif %}>
+                   {% if option.code == preference_value('path-model-source', 'ai_model_source', ai.model_source) %}checked{% endif %}>
             <span>{{ option.label }}<small>{{ option.hint }}</small></span>
           </label>
         {% endfor %}
@@ -203,16 +207,17 @@
     <div style="margin-top: var(--s-4)" {% if ai.model_source != "custom" %}data-muted="true"{% endif %}>
       <h3 class="ui-section-title">本页的模型列表{% if ai.model_source != "custom" %}（未启用）{% endif %}</h3>
       {{ model_chain(ai.path_chain, ai.selectable_models, "/settings/paths/chain", csrf_token,
-                     "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。") }}
+                     "还没有模型：先在「设置 → AI 供应商」添加供应商与模型，再回到这里加入列表。", scope='archive_path') }}
     </div>
   </section>
 
   {#- 清除缓存 is its own form: a nested form is ignored by HTML, and this one
       writes nothing the big form owns -- it only drops the answer cache, and the
       next pack asks again. -#}
-  <form method="post" action="{{ url_for('clear_ai_path_cache') }}"
-        style="margin-top: var(--s-4)">
+  <form method="post" action="{{ url_for('clear_ai_path_cache') }}" data-settings-action="path-cache-clear"
+        style="margin-top: var(--s-4)" {% if settings_draft and settings_draft.action == 'path-cache-clear' %}data-dirty="true"{% endif %}>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ settings_command_fields('path-cache-clear', 'path-cache') }}
     <div class="ui-form-actions">
       <button class="ui-btn" type="submit">清除 AI 路径缓存（{{ ai.cache_count }} 条）</button>
     </div>
@@ -241,12 +246,13 @@
     在作品详情页手动指定过路径的作品默认保持原样。
   </p>
   {% endif %}
-  <form class="ui-form" method="post"
+  <form class="ui-form" method="post" data-settings-action="rearchive"
         action="{{ url_for('rearchive_archive_paths') }}"
-        style="margin-top: var(--s-4)">
+        style="margin-top: var(--s-4)" {% if settings_draft and settings_draft.action == 'rearchive' %}data-dirty="true"{% endif %}>
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ settings_command_fields('rearchive', 'rearchive') }}
     <label class="ui-checkline" data-layout="stack">
-      <input class="ui-checkbox" name="force" value="on" type="checkbox">
+      <input class="ui-checkbox" name="force" value="on" type="checkbox" {% if preference_value('rearchive', 'force', false, check=true) %}checked{% endif %}>
       <span>强制重新归档所有作品
         {% if path_source == "ai" %}
         <small>除上述作品外，缓存已是当前答案的作品也一并重新询问模型；手动指定的路径同样会被覆盖。
@@ -257,7 +263,7 @@
       </span>
     </label>
     <label class="ui-checkline" data-layout="stack">
-      <input class="ui-checkbox" name="dry_run" value="on" type="checkbox">
+      <input class="ui-checkbox" name="dry_run" value="on" type="checkbox" {% if preference_value('rearchive', 'dry_run', false, check=true) %}checked{% endif %}>
       <span>试跑（只列出会做什么，不移动文件、不入队、不调用模型）
         <small>计划阶段本来就不会询问模型；勾选后连「入队」与「移动」也一并跳过，
           因此可以安全地先看一遍范围，尤其是强制全库之前。</small>
@@ -328,8 +334,9 @@
     <section class="ui-panel">
       <h2 class="ui-section-title">运行目录</h2>
       <p class="ui-hint">修改后下一个任务即使用新目录；已发布的文件不会自动迁移。</p>
-      <form class="ui-form" method="post" action="{{ url_for('save_archive_paths') }}"
+      <form data-settings-action="paths" {% if settings_draft and settings_draft.action == 'paths' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_archive_paths') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('paths', 'directories') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
           <label for="path-data">数据目录</label>
@@ -338,13 +345,13 @@
         </div>
         <div class="ui-field">
           <label for="path-library">书库目录</label>
-          <input class="ui-input" id="path-library" name="library_path" value="{{ paths.library }}"
+          <input class="ui-input" id="path-library" name="library_path" value="{{ preference_value('directories', 'library_path', paths.library) }}"
                  placeholder="{{ default_paths.library }}">
           <small>CBZ 发布位置{% if paths.library_overridden %}（已自定义，默认 {{ default_paths.library }}）{% else %}（当前为默认值）{% endif %}。</small>
         </div>
         <div class="ui-field">
           <label for="path-work">工作目录</label>
-          <input class="ui-input" id="path-work" name="work_path" value="{{ paths.work }}"
+          <input class="ui-input" id="path-work" name="work_path" value="{{ preference_value('directories', 'work_path', paths.work) }}"
                  placeholder="{{ default_paths.work }}">
           <small>下载与解压的临时位置{% if paths.work_overridden %}（已自定义，默认 {{ default_paths.work }}）{% else %}（当前为默认值）{% endif %}。</small>
         </div>
@@ -364,13 +371,14 @@
                       detail="下面的模板与规则在 AI 模式下不生效；只有在勾选「AI 不可用时回退到规则匹配」且模型链全部失败时，才会用到「兜底模板」。") }}
       {% endif %}
       <p class="ui-hint">每本书在书库目录内的相对路径。用 <code>/</code> 分层，最后一层是文件名（<code>.cbz</code> 自动追加）。</p>
-      <form class="ui-form" method="post" action="{{ url_for('save_library_template') }}"
+      <form data-settings-action="template" {% if settings_draft and settings_draft.action == 'template' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_library_template') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('template', 'template') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
           <label for="library-template">模板</label>
           <input class="ui-input" id="library-template" name="library_template"
-                 value="{{ library_template }}" placeholder="{{ template.default }}"
+                 value="{{ preference_value('template', 'library_template', library_template) }}" placeholder="{{ template.default }}"
                  spellcheck="false" data-template-input required>
           <small>必须包含 <code>{title}</code>、<code>{japanese_title}</code> 或 <code>{english_title}</code>，不能以 <code>/</code> 开头，不能包含 <code>..</code>。长度上限由运行这台服务的文件系统决定，不在
             本服务里写死：本机每个名字（目录或文件名，含 <code>.cbz</code>）最多
@@ -382,7 +390,7 @@
           {% for option in title_sources %}
             <label class="ui-checkline" data-layout="stack">
               <input class="ui-radio" type="radio" name="title_source" value="{{ option.code }}"
-                     {% if option.code == title_source %}checked{% endif %}>
+                     {% if option.code == preference_value('template', 'title_source', title_source) %}checked{% endif %}>
               <span>{{ option.label }}<small>{{ option.hint }}</small></span>
             </label>
           {% endfor %}
@@ -437,11 +445,13 @@
                       detail="它包含嵌套的条件组，而编辑器只表达一层。可以试跑或删除后重建，避免保存时把规则改成别的意思。") }}
       {% endif %}
       <form class="ui-form" method="post" action="{{ url_for('save_archive_path_rule') }}"
-            data-rule-editor style="margin-top: var(--s-4)">
+            data-rule-editor data-rule-command data-settings-action="rule-paths-editor"
+            {% if rule_draft and rule_draft.action == 'save' %}data-dirty="true"{% endif %} style="margin-top: var(--s-4)">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {{ rule_command_fields(edit_rule, rule_current) }}
         {#- Present only when editing, so the same endpoint inserts or updates
             without the page having to choose a different action. -#}
-        {% if edit_rule %}
+        {% if edit_rule and edit_rule.rule_id %}
         <input type="hidden" name="path_rule_id" value="{{ edit_rule.rule_id }}">
         {% endif %}
         <div class="ui-form-grid">
@@ -571,6 +581,7 @@
             <a class="ui-btn" href="{{ url_for('edit_archive_path_rule', rule_id=rule.rule_id).path }}">编辑</a>
             <form method="post" action="{{ url_for('toggle_archive_path_rule', rule_id=rule.rule_id) }}">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              {{ rule_command_fields(rule) }}
               <input type="hidden" name="enabled" value="{{ 'off' if rule.enabled else 'on' }}">
               <button class="ui-btn" type="submit">{{ '停用' if rule.enabled else '启用' }}</button>
             </form>
@@ -581,7 +592,8 @@
                           "规则会被移除，之后的作品不再受它影响。手动指定的归档路径不受影响。",
                           confirm_label="确认删除",
                           action=url_for('delete_archive_path_rule', rule_id=rule.rule_id).path,
-                          csrf_token=csrf_token, size="sm", key=rule.rule_id) }}
+                          csrf_token=csrf_token, size="sm", key=rule.rule_id,
+                          hidden={'rule_uuid': rule.rule_uuid, 'expected_revision': rule.revision, 'idempotency_key': new_command_key()}) }}
           </div>
         </article>
       {% else %}

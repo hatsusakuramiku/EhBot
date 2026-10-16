@@ -487,11 +487,49 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] 27 个相关文件按最新节点 590 个不同用例通过；2687 collect-only；README/USAGE/API/交接同步。
 - [x] 本地阶段提交 89ef4b9；37 blobs、空暂存区、027–037 已核实；接 P9–P12。
 
-## R96 / P9 已验收，待立即提交（rc12/038）
+## R96 / P9 已验收并本地提交（rc12/038）
 
 - [x] OS 文件锁先于迁移；worker_session/心跳/真实活动与 dispatch 窗口保护；第二后台启动失败，取消启动释放锁。
 - [x] 周期恢复逐项隔离、游标轮转，未知文件失败保留 journal；自动中断恢复最多 3 次，显式重试重新开始。
 - [x] 本地下载/打包/远端占用分开，远端未知/STOPPING 保留；账号请求与监听分别有全局/单账号限制，等待后复核停止/版本。
 - [x] TG 限流持久化，重启不绕过；到期恢复启动监听；停机先阻止领取/新请求。
 - [x] 迁移/进程树/账号/供应商/摄取等 454 个不同相关用例最终通过，2710 collect-only；文档与 R96 audit 同步。Linux 新守护路径尚未实跑，P12 单独验证。
-- [ ] rc12/038 随本次提交冻结；立即本地提交/核验 SHA，再进入 P10；models.py 既有 BOM 排除。
+- [x] 本地提交 f60412b，37 blobs/空暂存区/027–038 已核实，038 冻结；TEMP 精确清理剩余 0。models.py 既有 BOM 排除。
+
+## P10 进行中（未验收、未提交）
+
+- [x] 元数据原子编辑/抓取、操作查询、旧表单/JS 前置条件与草稿保留、HTTP↔WS 共享回执。
+- [x] 审核原子核心与新 review API；入队失败整体回滚、网络前后版本核对、同键并发重发。
+- [x] 旧单项/批量审核 API/Web 接入共享核心，持久固定父/子结果及拒绝；并发/中断恢复/跨通道重发通过。
+- [x] 来源下载/打包 API/Web 接原子所见版本/任务/回执，锁外预检后 CAS；旧任务终态后重发不复活，精确产物保持。
+- [x] 候选单项/批量删除复用持久 removal，最终 CAS/原受理回执同事务；HTTP↔WS/旧表单重放、真实停止与批量冲突保留通过。主动筛选释放选择，HTMX 显示 409/428。
+- [x] 已下载重下/重包/移除、列表改名/详情精确路径与固定去重预览；任务/pin/回执原子提交，真实移动恢复、HTTP↔WS/旧表单与草稿保留通过。
+- [x] 手动新增持久回执/取消UNKNOWN/跨通道重发及编号复用检查，35条核心/旧入口合同及10条最终HTTP/核心合同通过（重叠不相加）。
+- [x] 七个设置保存区原子CAS/回执、读快照版本一致、旧表单草稿/显式确认及模板预览保留；最终三文件14/0及DOM root/proxy通过。
+- [x] settings-legacy-fixed180/0、settings-runtime99/0、settings-draft-final16/0，DOM根路径与前缀通过；2829 collect-only / 57XML当前节点942 distinct passed，0failure/error/skip，非整库。
+- [x] 逐条审批/路径规则稳定身份、独立版本、原子回执与HTTP/WS/原表单；冲突/试跑/后续广播保留草稿。规则最终78/0、旧页面等237/0、DOM root/proxy通过，2846 collect-only / 63XML当前节点1015 distinct passed，非整库。
+- [x] qBittorrent第八设置区CAS/HMAC安全回执、首次并发主密钥、JSON部分编辑、HTTP/WS/旧表单与浏览器密码草稿；改实例在途推送/恢复原实例停止确认通过。七文件150个不同用例最终通过，旧API2/0、DOM root/proxy；2855 collect-only / 68XML当前节点1116 distinct passed，非整库。
+- [x] 工具profile逐条稳定身份/版本、原DB验证与原子回执、API/WS/旧表单及显式冲突确认；最新五文件118/0、加强两条2/0、DOM root/proxy通过。2863 collect-only / 71XML当前节点1193 distinct passed，非整库。
+- [x] 手动新增重复失败回执/提示链接固定原作品身份；profile删除原生错误页保留草稿；身份五文件47/0，数据库旧测试两条修复复验2/0。
+- [x] 工具安装持久受理/固定回执、独立revision、HTTP/WS/旧表单与显式确认、跨进程文件锁、替换失败/中断恢复、丢响应及停机真实线程收束；重启UNKNOWN阻止自动重装。核心31/0、关联54/0、最终16/0，DOM root/proxy；2875 collect-only / 79XML当前节点1264 distinct passed，非整库。
+- [x] AI总开关独立ai-master保存区、内部变化版本、HTTP/WS/原表单固定回执、冲突复选框/版本/key保留与明确确认。相关15/0、加强4/0、DOM root/proxy；2877 collect-only / 81XML当前节点1266 distinct passed，非整库。
+- [x] AI稳定UUID/独立编辑版本、迟到验证与Key健康屏障；供应商新增/编辑/删除共享HTTP/WS/原表单CAS/安全回执。删除核对子配置版本，原对象消失保留草稿；最新核心97/0、旧入口22/0、DOM root/proxy通过。2895 collect-only，90XML当前完整节点最新1276 distinct passed，非整库。
+- [x] Key/模型八种本地操作共享CAS/HMAC安全回执，新增集合版本/逐项版本/冷却健康版本；原表单及冲突草稿、密钥浏览器DOM保留。三scope模型链CAS、原排序复用、删除触发scope版本、HTTP/WS/原表单与显式确认通过。最终合并86/0、排序及原单元93/0、相邻80/0、旧入口46/0、独立版本加强1/0、DOM root/proxy；2967 collect-only / 103XML当前节点1356 distinct passed，非整库。
+- [x] 路径AI参数/prompt/model-source公开命令接HTTP/WS/原表单；面板/重置共用版本，模型来源独立，Series最终事务复查。五文件38/0、旧入口90/0、DOM root/proxy通过；2991 collect-only / 107XML当前节点最新1380 distinct passed，非整库。
+- [x] AI单项/供应商/全局验证和模型拉取持久受理，固定原配置/Key信封、互斥claim、断线继续、停机收束、重启UNKNOWN；HTTP/WS/原表单共享202回执，结果页/最近10项恢复。拉取清单添加在保存事务复查配置，拒绝过期选择并保留草稿。六文件134/0、最后三文件29/0、旧页面/合同42/0、DOM root/proxy；3019 collect-only / 120XML当前完整节点最新1408 distinct passed，非整库。
+- [x] 密码库/API Key独立版本、原子写入/安全回执、HTTP/WS/原表单及冲突草稿；原生直接200显示首次明文，删除全局pending_api_key，同键重放不旋转/不再回明文，密码登录专属管理Key。迟到解压成功核对原UUID/版本；真实038升级/DDL回滚/重启与取消后查回执通过。旧入口200/0、核心/迁移/归档46/0、相邻43/0、DOM root/proxy；3039 collect-only /126XML当前节点最新1439 distinct passed，非整库。
+- [x] v2任务/作品控制、账号别名与能力目录，共享入队同来源复用/异来源先停、HTTP幂等头/改名后审计；移除不可达complete_if_ready/_torrent_verify。维护四入口补共享JSON/WS/原表单、固定范围/逐件CAS/精确输入/回执、只读查询/显式续作与缓存回放；原生mobile/desktop放行api/v2。五文件57/0、归档等七文件214/0、旧维护12/0、DOM root/proxy。
+- [ ] 收尾全P10新增合同及旧设置/API/身份/账号/队列集中回归，逐路由和阶段差异最终核验。3071 collect-only/142XML当前最新1579 distinct passed，非整库；P10未验收/暂存/提交，HEAD仍f60412b，不把切片冒充阶段交付。
+- [ ] 全阶段验收后立即暂存代码/正式测试/同步文档、本地提交并核实 SHA；rc12 不提前提升，039 不冻结。
+
+## R97 / P10 整阶段验收（2026-10-16，待本地提交）
+
+- [x] 全域共享命令/对象CAS/持久回执，旧HTTP与Web、WS/native和v2任务域共用领域实现。
+- [x] 三类手动来源补共享PUT/表单；画廊合并目标版本贯穿真实停止，目标变化不合并也不重试旧意图。
+- [x] 真实038升级保留旧reference、失败039 DDL整体回滚及guard重新初始化保留；027–038不改。
+- [x] WS取消修前复现/修后收束；集中612/0、相邻76/0、来源组82pass/1时间夹具失败后完整详情39/0，真实DOM root/proxy通过。
+- [x] 3088 collect-only；152XML最新当前节点1623 distinct passed、0failure/error/skip；compileall/CodeGraph/diff-check及用户文档同步。
+- [ ] 立即整阶段暂存、审查、本地提交并核实记录SHA；039随提交冻结，不拆P10切片。仅排除models.py既有BOM。
+- [ ] P11与P12按原范围继续；Linux guardian实跑尚未完成，总目标active。
+
+上文P10“进行中/未验收”和旧计数均为历史快照，本节及P10审计顶部为当前事实。

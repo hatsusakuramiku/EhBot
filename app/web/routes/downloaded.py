@@ -41,8 +41,11 @@ from app.api.downloaded import (
     downloaded_snapshot,
 )
 from app.api.events import EVENT_DOWNLOAD
+from app.review.application import downloaded_task, rename_work
+from app.review.commands import WorkCommandError
+from app.web.routes.candidates import review_preconditions
 from app.api.status import downloaded_tab_view
-from app.downloads.dedup import apply_dedup, build_dedup_plan
+from app.downloads.dedup import apply_dedup, build_dedup_plan, read_dedup_plan
 from app.db.database import (
     DOWNLOADED_PACK_FILTERS,
     DOWNLOADED_SORT_ORDERS,
@@ -108,6 +111,9 @@ async def _render_downloaded(
     *,
     error: str | None = None,
     notice: str | None = None,
+    status_code: int = 200,
+    batch_draft: dict | None = None,
+    rename_draft: dict | None = None,
 ):
     """Render one tab of the 已下载内容 page.
 
@@ -149,6 +155,7 @@ async def _render_downloaded(
     return deps.templates(request).TemplateResponse(
         request=request,
         name="downloaded.html",
+        status_code=status_code,
         context={
             # The snapshot goes in first so the page's own keys win every name
             # they share. `tab` is the one that matters: the snapshot carries it
@@ -213,6 +220,8 @@ async def _render_downloaded(
             "empty_hint": current["empty_hint"],
             "error": error,
             "notice": notice,
+            "batch_draft": batch_draft,
+            "rename_draft": rename_draft,
             "layout": deps.page_layout(request),
         },
     )
@@ -330,18 +339,24 @@ def _summarise(result: dict) -> tuple[str | None, str | None]:
 async def downloaded_dedup_preview(request: Request):
     """The dedup plan as a page the operator reads before anything moves.
 
-    A GET that writes nothing, so a reload or a prefetch can never remove a
-    book; the removal is the POST below, from a real form with a CSRF token.
+    A GET records only an immutable preview. Removal requires the explicit
+    POST below, from a real form with a CSRF token and preview identifier.
     """
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
     plan = await build_dedup_plan(deps.database(request))
+    return _render_dedup(request, plan)
+
+
+def _render_dedup(request, plan, *, error=None, status_code=200, key=None):
     return deps.templates(request).TemplateResponse(
         request=request,
         name="dedup.html",
+        status_code=status_code,
         context={
             **plan,
+            'error': error, 'idempotency_key': key,
             "csrf_token": request.session["csrf_token"],
             "layout": deps.page_layout(request),
         },
@@ -358,26 +373,36 @@ async def downloaded_dedup_run(
     if redirect:
         return redirect
     deps.validate_csrf(request, csrf_token)
-    result = await apply_dedup(
+    form = await request.form()
+    try:
+        result = await apply_dedup(
         deps.database(request),
         deps.archived_work_service(request),
         deps.download_service(request),
+        plan_id=form.get('plan_id'), idempotency_key=form.get('idempotency_key'),
         operator_name=str(request.session.get("username") or "admin"),
         announce=lambda candidate_id: request.app.state.event_bus.publish(
             EVENT_DOWNLOAD, candidate_id=candidate_id
         ),
-    )
+        )
+    except WorkCommandError as exc:
+        try:
+            plan = (await read_dedup_plan(deps.database(request), form['plan_id']) if form.get('plan_id')
+                    else await build_dedup_plan(deps.database(request)))
+        except WorkCommandError:
+            return await _render_downloaded(request, 'all', error=exc.public_message, status_code=exc.status_code)
+        return _render_dedup(request, plan, error=exc.public_message, status_code=exc.status_code,
+                             key=form.get('idempotency_key'))
     removed = len(result["removed"])
     pending = sum(item["cleanup_status"] == "PENDING" for item in result["removed"])
     skipped = result["skipped"]
-    if not skipped:
-        if pending:
-            return _redirect("all", notice=f"已移除 {removed} 件重复作品记录，{pending} 件等待后台停止与文件清理")
-        return _redirect("all", notice=f"去重完成：移除 {removed} 件重复作品")
-    return _redirect(
-        "all",
-        error=f"已移除 {removed} 件，{len(skipped)} 件跳过：{skipped[0]['message']}",
-    )
+    if skipped:
+        plan = await read_dedup_plan(deps.database(request), result['plan_id'])
+        return _render_dedup(request, plan, error=f"已受理 {removed} 件，{len(skipped)} 件跳过：{skipped[0]['message']}",
+                             status_code=409, key=form.get('idempotency_key'))
+    if pending:
+        return _redirect("all", notice=f"已移除 {removed} 件重复作品记录，{pending} 件等待后台停止与文件清理")
+    return _redirect("all", notice=f"去重完成：移除 {removed} 件重复作品")
 
 
 @router.post("/downloaded/batch")
@@ -420,22 +445,31 @@ async def downloaded_batch_action(
         return _redirect(tab, error=f"未知的作品动作：{action}")
     if not candidate_ids:
         return _redirect(tab, error="请至少选择一件作品")
+    form = await request.form()
+    candidate_ids = list(dict.fromkeys(candidate_ids))
+    versions = {str(candidate_id): review_preconditions(form, candidate_id) for candidate_id in candidate_ids}
+    draft = {'candidate_ids': candidate_ids, 'versions': versions, 'idempotency_key': form.get('idempotency_key')}
     try:
         result = await apply_downloaded_batch(
             deps.archived_work_service(request),
             deps.conversion_service(request),
             action,
-            list(dict.fromkeys(candidate_ids)),
+            candidate_ids,
             delete_files=wants_files or delete_files is not None,
             repack=repack is not None,
             operator_name=str(request.session.get("username") or "admin"),
+            versions=versions,
+            idempotency_key=form.get('idempotency_key'),
             announce=lambda candidate_id: request.app.state.event_bus.publish(
                 EVENT_DOWNLOAD, candidate_id=candidate_id
             ),
         )
     except ApiError as exc:
-        return _redirect(tab, error=exc.message)
+        return await _render_downloaded(request, tab, error=exc.message, status_code=exc.status_code,
+                                         batch_draft=draft)
     error, notice = _summarise(result)
+    if any(item['code'] in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT'} for item in result['skipped']):
+        return await _render_downloaded(request, tab, error=error, status_code=409, batch_draft=draft)
     return _redirect(tab, error=error, notice=notice)
 
 
@@ -463,12 +497,20 @@ async def repack_downloaded_work(
     deps.validate_csrf(request, csrf_token)
     if tab not in DOWNLOADED_PACK_FILTERS:
         tab = "all"
+    form = await request.form()
+    payload = review_preconditions(form, candidate_id)
     try:
-        await deps.conversion_service(request).enqueue_for_candidate(candidate_id)
+        await downloaded_task(deps.database(request), deps.archived_work_service(request),
+            deps.conversion_service(request), candidate_id, 'repack', payload,
+            str(request.session.get('username') or 'admin'))
     except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
         message = getattr(exc, "public_message", None)
         if message is None:
             raise
+        if isinstance(exc, WorkCommandError):
+            return await _render_downloaded(request, tab, error=str(message), status_code=exc.status_code,
+                batch_draft={'candidate_ids': [candidate_id], 'versions': {str(candidate_id): payload},
+                             'idempotency_key': form.get('idempotency_key')})
         return _redirect(tab, error=str(message))
     request.app.state.event_bus.publish(
         EVENT_DOWNLOAD, candidate_id=candidate_id
@@ -498,21 +540,17 @@ async def rename_downloaded_work(
     deps.validate_csrf(request, csrf_token)
     if tab not in DOWNLOADED_PACK_FILTERS:
         tab = "all"
+    form = await request.form()
+    payload = {**review_preconditions(form), 'filename': filename, 'directory': directory, 'repack': repack is not None}
     try:
-        result = await deps.archived_work_service(request).rename_work(
-            candidate_id,
-            filename=filename or None,
-            directory=directory or None,
-        )
-        if repack is not None:
-            await deps.conversion_service(request).enqueue_for_candidate(
-                candidate_id
-            )
+        result = await rename_work(deps.database(request), deps.archived_work_service(request),
+            deps.conversion_service(request), candidate_id, payload, str(request.session.get('username') or 'admin'))
     except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
         message = getattr(exc, "public_message", None)
         if message is None:
             raise
-        return _redirect(tab, error=str(message))
+        return await _render_downloaded(request, tab, error=str(message),
+            status_code=getattr(exc, 'status_code', 400), rename_draft={'candidate_id': candidate_id, **payload})
     request.app.state.event_bus.publish(
         EVENT_DOWNLOAD, candidate_id=candidate_id
     )

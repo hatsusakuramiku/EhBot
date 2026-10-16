@@ -1,5 +1,9 @@
 """R87: rendered requests, public-origin TCP WS and actual archive saves."""
 import asyncio
+
+from tests.work_commands import observed_work
+from tests.rule_commands import observed_rule
+from tests.integration.test_work_review_http import Forms
 from contextlib import contextmanager
 from dataclasses import replace
 from html import unescape
@@ -49,16 +53,19 @@ def network_server(app, trust_proxy=False):
 def test_actual_rule_forms_toggle_and_delete_instead_of_api_405(tmp_path):
     with signed_client(tmp_path) as (client, app):
         token = client.get("/settings/auto-approval").context["csrf_token"]
-        client.post("/auto-approval-rules", data={"csrf_token": token, "name": "test", "priority": "100",
+        client.post("/auto-approval-rules", data={**observed_rule(client, 'auto-approval'), "csrf_token": token, "name": "test", "priority": "100",
                     "enabled": "on", "condition_field": "Title", "condition_operator": "=", "condition_value": "fixture"})
         page = client.get("/settings/auto-approval")
         toggle = unescape(re.search(r'<form method="post" action="([^"]+/toggle)"', page.text)[1])
         assert toggle.startswith("/auto-approval-rules/")
-        assert client.post(toggle, data={"csrf_token": token, "enabled": "off"}).status_code == 200
+        toggle_fields = next(form['fields'] for form in Forms(page.text).forms if form['action'] == toggle)
+        assert client.post(toggle, data=toggle_fields).status_code == 200
         with app.state.database.connection() as db:
             assert db.execute("SELECT enabled FROM auto_approval_rules").fetchone()[0] == 0
+        page = client.get('/settings/auto-approval')
         delete = unescape(re.search(r'<form[^>]*action="([^"]+/delete)"', page.text)[1])
-        assert client.post(delete, data={"csrf_token": token}).status_code == 200
+        delete_fields = next(form['fields'] for form in Forms(page.text).forms if form['action'] == delete)
+        assert client.post(delete, data=delete_fields).status_code == 200
         with app.state.database.connection() as db:
             assert db.execute("SELECT COUNT(*) FROM auto_approval_rules").fetchone()[0] == 0
 
@@ -131,7 +138,7 @@ def test_same_origin_assets_and_metadata_redirect_with_prefix(tmp_path):
         assert 'src="/ehbot/static/realtime.js"' in page.text
         assert 'connect-src \'self\' wss://ui.example' in page.headers["content-security-policy"]
         response = client.post("/candidates/1/metadata", follow_redirects=False,
-                               data={"csrf_token": page.context["csrf_token"], "field_name": "Series", "field_value": "Edited"})
+                               data={**observed_work(client), "csrf_token": page.context["csrf_token"], "field_name": "Series", "field_value": "Edited"})
         assert response.headers["location"].startswith("/ehbot/works/1?")
 
 
@@ -172,7 +179,7 @@ def test_fetch_creates_nonmanual_draft_and_only_save_writes_archive(tmp_path, mo
         monkeypatch.setattr(service, "_fetch_metadata", fetch)
         token = client.get("/works/1").context["csrf_token"]
         before = path.read_bytes()
-        fetched = client.post("/api/v1/works/1/fetch-metadata", headers={"X-CSRF-Token": token}).json()["metadata_editor"]
+        fetched = client.post("/api/v1/works/1/fetch-metadata", json=observed_work(client), headers={"X-CSRF-Token": token}).json()["metadata_editor"]
         assert path.read_bytes() == before
         assert fetched["fetched_fields"]["Title"] == "Fetched title"
         assert "Series" not in fetched["fetched_fields"]
@@ -180,7 +187,7 @@ def test_fetch_creates_nonmanual_draft_and_only_save_writes_archive(tmp_path, mo
         title = next(field for field in fetched["fields"] if field["field_name"] == "Title")
         assert title["field_value"] == ("File title" if packed else "Fetched title")
         result = client.patch("/api/v1/works/1/metadata", headers={"X-CSRF-Token": token},
-                              json={"fetched_fields": fetched["fetched_fields"]})
+                              json={**observed_work(client), "fetched_fields": fetched["fetched_fields"]})
         assert result.status_code == 200
         assert result.json()["archive_synced"] == packed
         with database.connection() as db:
@@ -203,7 +210,7 @@ def test_progressive_detail_form_only_records_changed_fields(tmp_path):
         page = client.get("/works/1")
         assert page.text.count("data-metadata-editor ") == 1
         assert "归档文件（ComicInfo.xml）" not in page.text
-        response = client.post("/works/1/metadata", data={"csrf_token": page.context["csrf_token"],
+        response = client.post("/works/1/metadata", data={**observed_work(client), "csrf_token": page.context["csrf_token"],
                                "field__Title": "File title", "original__Title": "File title",
                                "field__Series": "Changed series", "original__Series": "File series"})
         assert response.status_code == 200
@@ -214,7 +221,7 @@ def test_progressive_detail_form_only_records_changed_fields(tmp_path):
         with database.connection() as db:
             assert db.execute("SELECT is_manual FROM metadata_values WHERE field_name='Title'").fetchone()[0] == 0
         token = page.context["csrf_token"]
-        invalid = client.post("/works/1/metadata", data={"csrf_token": token, "new_field": "PageCount", "new_value": "999"})
+        invalid = client.post("/works/1/metadata", data={**observed_work(client), "csrf_token": token, "new_field": "PageCount", "new_value": "999"})
         assert invalid.status_code == 400
 
 
@@ -224,10 +231,10 @@ def test_fetched_save_respects_new_manual_protection_and_generated_fields(tmp_pa
         log_in(client, settings)
         token = client.get("/works/1").context["csrf_token"]
         headers = {"X-CSRF-Token": token}
-        first = client.patch("/api/v1/works/1/metadata", headers=headers, json={"fields": {"Title": "Manual title"}})
+        first = client.patch("/api/v1/works/1/metadata", headers=headers, json={**observed_work(client), "fields": {"Title": "Manual title"}})
         assert first.json()["archive_synced"] is True
         before = path.read_bytes()
-        second = client.patch("/api/v1/works/1/metadata", headers=headers, json={"fetched_fields": {"Title": "Stale fetched title"}})
+        second = client.patch("/api/v1/works/1/metadata", headers=headers, json={**observed_work(client), "fetched_fields": {"Title": "Stale fetched title"}})
         assert second.json()["sync_skipped"] == "NO_ARCHIVE_CHANGES"
         assert path.read_bytes() == before
         invalid = client.patch("/api/v1/works/1/metadata", headers=headers, json={"fetched_fields": {"PageCount": "99"}})

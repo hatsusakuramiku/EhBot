@@ -1,14 +1,7 @@
-"""Reading the 归档与工具 tab's writes, once, for the page and the JSON API.
+"""Shared archive submission fields for every client.
 
-Three of that tab's forms are things a phone can sensibly change: the qBittorrent
-client, the safety limits, and whether a finished download packs itself. The
-tool profiles and the toolchain install stay on the page -- they name executables
-and paths on the *server*, and a value typed on a phone cannot be checked against
-a filesystem the operator is not looking at.
-
-What is shared is only how a submission is read. Every refusal is the archive
-settings service's, so a limit the page would refuse is refused through the API
-by the same code.
+Validation of server paths belongs to the backend regardless of the client.
+Preference commands reuse the archive service's validation before atomic CAS.
 """
 
 from __future__ import annotations
@@ -36,14 +29,15 @@ TORRENT_CLIENT_FIELDS: tuple[str, ...] = (
 def torrent_submission(values: Mapping[str, Any]) -> dict[str, Any]:
     """The qBittorrent client settings.
 
-    The two switches are read with `checkbox` so an unchecked box (absent field)
-    means off in both worlds rather than 「whatever the other caller meant」.
+    Missing JSON fields retain their stored values. Plain forms explicitly add
+    false for unchecked switches before calling the same command.
     """
     payload: dict[str, Any] = {
-        key: values.get(key) for key in TORRENT_CLIENT_FIELDS
+        key: str(values[key] or '') for key in TORRENT_CLIENT_FIELDS if key in values
     }
-    payload["keep_seeding"] = checkbox(values.get("keep_seeding"))
-    payload["auto_pack"] = checkbox(values.get("auto_pack"))
+    for key in ("keep_seeding", "auto_pack"):
+        if key in values:
+            payload[key] = checkbox(values[key])
     return payload
 
 

@@ -1,8 +1,10 @@
 # 实时 API：ehbot-realtime.v1（R86 / R87）
 
 本契约已在服务端和 WebUI 实现。EhBot-Mobile 后续接入本协议，本轮不修改移动端代码。
-服务端版本号仍为 `0.3.0rc3`，判断能力应请求 `GET /api/v1/realtime`，不能仅凭版本号判断。
+判断能力应请求 `GET /api/v1/realtime` 与 `GET /api/v2/capabilities`，不能仅凭应用版本号判断。
 此接口需认证，返回协议、带部署前缀的 WebSocket 路径、命令目录、epoch、sequence 和心跳间隔。
+
+P10 已交付认证后的 `GET /api/v2/capabilities`；任务/作品控制和账号别名以 `v2.*` 命名进入同一动态目录，例如 `v2.downloads.cancel`、`v2.works.download`。使用目录公布的参数/路径，任务 UUID 为路径参数，JSON body 仍携带 expected_revision/idempotency_key；v1↔v2↔WS 共用原业务回执。HTTP 可用 Idempotency-Key 头，头体不一致409；WS用 body 字段。账号 reveal（含v2别名）继续只走HTTP，不进入目录或广播。协议仍为 ehbot-realtime.v1，无重放；command.accepted 不表示持久受理。
 
 ## 连接与认证
 
@@ -19,7 +21,7 @@
 {"type":"hello","protocol":"ehbot-realtime.v1","client":"mobile","logs":false}
 ```
 
-浏览器另加 `"csrf_token":"页面 token"` 和 `"client":"web"`。`logs:true` 同时订阅日志。
+桌面端使用 `"client":"desktop"`，与移动端共用 JSON 命令。浏览器另加 `"csrf_token":"页面 token"` 和 `"client":"web"`。`logs:true` 同时订阅日志。
 服务端回复：
 
 ```json
@@ -27,31 +29,32 @@
 ```
 
 实际 commands 包含全部已注册的有限 JSON 操作和快照；WebUI 还包括 `web.*` 表单/片段命令。
-认证、流、缩略图和文件传输不作为命令，继续使用 HTTP。原生客户端只能使用 `api.*`。
+认证、流、缩略图和文件传输不作为命令，继续使用 HTTP。原生客户端可使用 `api.*` 与 `v2.*`，不提供 `web.*`。
 命令目录来自明确注册的业务路由，无法传入任意 URL、方法、模块或函数。命令名属于 v1 契约，改名须同步契约及客户端。
 
 ## 提交操作与读取快照
 
 ```json
-{"type":"command","request_id":"pack-42-1","name":"api.convert_work","payload":{"params":{"candidate_id":"42"}}}
+{"type":"command","request_id":"pack-42-1","name":"api.convert_work","payload":{"params":{"candidate_id":"42"},"body":{"work_id":"11111111-1111-4111-8111-111111111111","expected_revision":4,"idempotency_key":"pack-42-intent-1","input_artifact_id":"22222222-2222-4222-8222-222222222222"}}}
 ```
 
 审核示例：
 
 ```json
-{"type":"command","request_id":"review-1","name":"api.api_batch_review","payload":{"body":{"action":"approve","candidate_ids":[42,43]}}}
+{"type":"command","request_id":"review-1","name":"api.api_batch_review","payload":{"body":{"action":"approve","candidate_ids":[42,43],"idempotency_key":"review-intent-1","versions":{"42":{"work_id":"11111111-1111-4111-8111-111111111111","expected_revision":4},"43":{"work_id":"33333333-3333-4333-8333-333333333333","expected_revision":2}}}}}
 ```
 
 元数据与队列快照示例：
 
 ```json
-{"type":"command","request_id":"edit-42","name":"api.patch_metadata","payload":{"params":{"candidate_id":"42"},"body":{"fields":{"Series":"系列名称"}}}}
+{"type":"command","request_id":"edit-42","name":"api.patch_metadata","payload":{"params":{"candidate_id":"42"},"body":{"work_id":"11111111-1111-4111-8111-111111111111","expected_revision":4,"idempotency_key":"edit-42-intent-1","fields":{"Series":"系列名称"}}}}
 {"type":"command","request_id":"queue-1","name":"api.get_queue","payload":{"query":[["page_size","100"]]}}
 ```
 
 `payload.params` 必须完整对应目录中的 params，值使用字符串；单个参数不可包含路径分隔符。
 `body` 对 JSON 命令使用原 HTTP API 请求体；`query` 使用字符串二元组数组，支持重复筛选条件。
 API 的字段、状态视图、批量限制、审核/删除/文件门禁及错误码与 HTTP 相同。
+示例 UUID、版本和幂等键仅示意；实际使用刚读取的作品/产物身份和版本。同一操作重发保留原业务幂等键，每次传输使用新的 request_id。
 WebUI 的 `body` 使用表单二元组数组，服务器注入可信 CSRF，`context` 保存当前筛选查询；移动端无需这些 HTML 细节。
 
 服务端先回复已接收，再回复结果或错误：
@@ -67,6 +70,7 @@ WebUI 的 `body` 使用表单二元组数组，服务器注入可信 CSRF，`con
 无 HTTP 响应的协议错误只包含 `request_id`（关联命令时）、`error.code/message/details`，status/data 可缺省。
 
 连接内命令依次执行，最多积压 8 条；`COMMAND_BUSY` 表示未入队。
+连接关闭或命令协程被取消时，服务端等待该连接的子任务收束再释放连接资源；已经持久化受理的后台操作按其业务合同继续，重连后查询原回执或操作状态。
 每条 request_id 为 1–128 字符的非空字符串，在同一连接最近 4096 条内重复会收到 `COMMAND_DUPLICATE`，不会再次执行。
 不同连接及缓存窗口之外不提供持久化幂等保证。客户端应生成唯一 request_id，**断线/超时后不自动重发写操作**；先读取业务快照确认状态，再由用户决定下一步。
 帧大小上限 256 KiB，二进制帧、无效 JSON 和未知协议被拒绝。
@@ -166,6 +170,14 @@ fields 使用 `field_name/field_label/field_value/editable/source/is_manual/is_l
 
 ## 验证命令
 
+元数据命令契约：`api.patch_metadata`、`api.fetch_work_metadata` 的 JSON body 必须包含从编辑快照读取的 `work_id`、`expected_revision` 与本次 `idempotency_key`。HTTP 与 WS 重发共享同一回执；缺版本 428、旧版本 409、同键变内容 409。抓取返回持久 `metadata_fetch_operation_id`，运行中重发为 202；`GET /api/v1/metadata-fetches/{operation_id}` 只读状态，重启中断不自动重放网络请求。编辑器草稿保留原作品身份、版本和重试键；广播不替换这些值。`snapshot_changed=true` 时禁止自动按后来的快照重置草稿。原 HTML 元数据入口同样要求前置条件。
+
+P10 工作区审核契约：`api.review_work`（POST /api/v1/works/{id}/review）以 `payload.params.candidate_id` 指定作品，body 包含 action（approve/reject/requeue）、work_id、expected_revision、idempotency_key，可带 note。旧 `api.requeue_work` 使用相同前置条件与回执；无论 HTTP/WS/普通表单均不代补当前版本。缺失 428，版本冲突或非法转换 409。单项审核回执包含原 work_id/revision、job_ids、task_ids；审核与任务意图原子提交。
+
+`api.api_batch_review` 的 approve/reject/delete/delete-files body 包含 action、candidate_ids、批次 idempotency_key，以及 versions（以字符串 candidate_id 为键，值为 work_id/expected_revision）。批次及每项结果持久固定，重发返回原 applied/skipped；中断后继续尚未完成项，不能按后来状态将原成功重算为跳过。同键不同选择/顺序/动作/版本 409。原 Web 批量表单带每行所见版本，同样调用共享命令。批量冲突保留原选择/版本/key，实时广播不重置；管理员主动筛选才释放旧选择。
+
+`api.delete_work` 对应 `POST /api/v1/works/{id}/delete`：params.candidate_id 指定作品，body 包含 work_id、expected_revision、idempotency_key，可带 mode=delete/delete-files。HTTP/WS/旧 Web 删除共用回执；202 的 removal_id、operation_ids、cleanup_status=PENDING 是固定受理结果。使用 `api.api_removal`（GET /api/v1/removals/{removal_id}）读实时清理状态，不能用重放回执推断文件已删。旧数字编号被重用也不会把旧命令作用到新作品；缺版本428、过期版本409。原表单冲突保留删除模式和前置条件，HTMX 显示409/428错误。
+
 P2 / schema 028（任务契约从 027 引入）：`api.job_action`、`api.set_priority`、`api.switch_source` 的 `payload.body` 必须包含
 `task_id`、`expected_revision`（正整数）、`idempotency_key`（1–200 字符）。读取 `/api/v1/queue`、作品详情或
 `/api/v1/tasks/{task_id}` 得到任务身份与版本，不能使用旧整数编号代替 UUID；HTTP、WS、普通表单共享相同裁决。
@@ -224,8 +236,131 @@ P6 来源命令（032 已冻结；Cookie/CSRF、Bearer 和 WS 共用同一核心
 
 P7 / 036 已冻结：归档/认证种子复用任务命令和操作查询，不新增平行下载接口。task.attempts 的 details_json 保留 account_id、credential_revision、有限账号池；原始错误保留在各次 attempt。GP/认证明确失败可生成新的 attempt；共享限流不轮换。费用结果不明返回 EH_ARCHIVE_RESULT_UNKNOWN，普通 retry/restart 只读核实原申请，不能以新账号绕过未知费用。收费意图的公开字段不包含 Cookie 或私有定位 URL；eh_archive_intent_id 只是不可推导的定位标识。
 
-P8 / 037：`POST /api/v1/works/{id}/convert` 可传 `{"input_artifact_id":"<uuid>"}` 固定原档版本；空请求体或 `{}` 仍选择当前已完成的原档。ID 必须是非空字符串并属于该作品的原档；新下载尚未完成且未明确选择旧版时返回 `ARCHIVE_NOT_READY`，已有不同输入/不同类型的活动打包返回 `PACK_INPUT_CONFLICT`。显式输入保存在任务与 attempt 的 details_json，重试不临时选择另一版。最终 v2/CAS/幂等收口按 P10。
+P8 / 037 的精确打包输入在 P10 补齐命令合同：`api.convert_work`（POST /api/v1/works/{id}/convert）和 `api.pull_work_source`（POST /api/v1/works/{id}/sources/{provider}）的 body 必须包含 work_id、expected_revision、idempotency_key；原 Web 来源/打包表单同样校验。缺失 428、版本冲突 409；网络准备后再做短事务 CAS，任务与回执一起提交。相同键跨 HTTP/WS 重发只返回原任务，即使它后来完成/失败/取消，也不重新入队；明确重做需新版本和新键。响应 revision/task_revision 属于任务，work_revision 属于作品。
+
+convert 可另带 `input_artifact_id` 固定原档；未指定时选择当前已完成的原档。ID 必须是非空字符串并属于该作品的原档；新下载尚未完成且未明确选择旧版时返回 `ARCHIVE_NOT_READY`，已有不同输入/不同类型的活动打包返回 `PACK_INPUT_CONFLICT`。显式输入保存在任务与 attempt 的 details_json，重试不临时选择另一版。空请求体/`{}` 不再满足 P10 前置条件。
 
 `GET /api/v1/tasks/{task_id}` 增加 `pack_intent`（pack_requested、input_artifact_id、pack_task_id、status），`artifacts`（版本 ID、类型、生产 attempt、路径/摘要/大小/页数），以及安全摘要 `publications` 和 `relocations`。打包意图状态为 WAITING/READY/QUEUED/CANCELLED；发布和移动状态为 PREPARED/COMMITTED/ROLLED_BACK/RECOVERY_REQUIRED。历史产物的 producer_attempt_id 为 null，不伪造生产者；移动摘要不含内部恢复副本路径。`PUBLICATION_RECOVERY_REQUIRED` 需先核实文件，不自动覆盖或清理未知内容。下载完成与打包通知仍复用现有事件，持久意图负责补偿丢失通知。
 
 P9 / 038（本地定向验收通过，未发布）：attempt 的 lease_owner 为后台 session UUID；心跳续约不推进任务编辑 revision，旧 session 的完成写入被拒绝。历史 attempt 的 INTERRUPTED / WORKER_SESSION_LOST 表示进程或派发失联，自动恢复最多 3 次；WORKER_RECOVERY_EXHAUSTED 需核对原因后显式重试。停止和远端确认仍复用 operation，不因后台重启返回虚假的完成状态。TG 账号 runtime health 在冷却中返回 error 状态、固定脱敏说明、error_code 和 retry_at（UTC）；凭据与会话不进入该响应。客户端按权威快照刷新，不能用定时进度覆盖编辑草稿。
+
+P10 已下载域：`api.downloaded_batch` 的 body 包含 action/candidate_ids/批次 idempotency_key/逐项 versions；每项提交 work_id/expected_revision。重发返回固定原任务或移除受理，不能复活后来终态任务。`api.rename_downloaded` 与 `api.set_work_archive_path` 同样要求所见身份/版本/key，并接受 filename/directory/布尔repack；路径移动、pin、可选打包与回执共用P8恢复日志/最终事务。旧表单与HTTP↔WS共享结果；409保留草稿/原版本/key，广播不替换基础版本。
+
+`api.downloaded_dedup_plan` 返回固定预览plan_id，`api.downloaded_dedup` 的body必须提交plan_id/idempotency_key。确认不重算当前库，删除事务核对保留项和待删项，逐项成功/拒绝固定；中断重发继续未完成项，后来出现的重复不加入旧计划。运行清理状态仍查GET /removals/{id}。
+
+手动新增 `POST /api/v1/candidates/manual`（WS使用命令目录中的同一路由）提交 url/idempotency_key，缺key为428，同键不同链接为409；同键重放先读回执，不再抓取或检查当前连接。RUNNING返回202，其余成功查询返回200；GET /api/v1/manual-add-operations/{operation_id} 返回固定 COMPLETED/FAILED/UNKNOWN 或当前 RUNNING，均 no-store，不含原链接或凭据。COMPLETED含原 candidate_id/work_id/revision；删除重加后仍为原回执，客户端须核对稳定身份。FAILED重放原错误，UNKNOWN需核实而不自动重发。旧表单也保留原链接/key；Web操作查询检查身份，原作品已删除返回410。
+
+设置命令：GET /api/v1/settings/{section} 的 settings_versions 提供各保存区版本；数据读取前后核对版本，连续三次变化返回409 SETTINGS_BUSY。以下写入口需body中的整数expected_revision/idempotency_key，缺失428、旧版本409、同键不同命令409；成功返回固定{scope, revision, status: COMPLETED}，界面数据另行GET，不再随重放返回后来的快照。WS命令从同一路由目录取得，旧表单走同一核心。
+
+| 写入口 | section / scope |
+|---|---|
+| PUT /api/v1/settings/system | system / system |
+| PUT /api/v1/settings/parse、POST /api/v1/settings/parse/reset | parse / parse |
+| PUT /api/v1/settings/parse/ai | parse / admission |
+| PUT /api/v1/settings/archive/limits | archive / archive-limits |
+| PUT /api/v1/settings/archive/torrent | archive / torrent |
+| PUT /api/v1/settings/archive/auto-pack | archive / auto-pack |
+| PUT /api/v1/settings/paths/template | paths / template |
+| PUT /api/v1/settings/paths/directories | paths / directories |
+| PUT /api/v1/settings/ai/master | ai / ai-master |
+| PUT /api/v1/settings/paths/ai | paths / path-ai |
+| PUT /api/v1/settings/paths/ai/prompt | paths / path-ai |
+| PUT /api/v1/settings/paths/ai/models | paths / path-model-source |
+| PUT /api/v1/settings/parse/model-source | parse / candidate-model-source |
+
+同区修改、版本与安全回执同事务，路径可写预检在锁外并在提交时再CAS；接受无变化的保存也消费旧版本。运行状态或无关维护字段不推进这些编辑版本。系统运行时缓存提交后按序重读；重复回执也可补偿遗漏刷新。表单409/428保留原草稿/基础版本/key，后台广播保留原DOM，显式确认采用当前版本会生成新的可重放命令。密码库/API Key合同见下。
+
+`PUT /api/v1/settings/passwords` 的四个 action 共用 HTTP/WS/旧表单命令核心。GET 快照包含 `settings_versions.vault`、`settings_versions.api-key`；add（按名称新增或更新）使用 vault 集合版本，generate/revoke 使用 api-key 版本。delete 提交 `password_id/password_uuid/expected_revision`（条目版本），编号复用或原对象删除返回410。所有动作提交独立 `idempotency_key`，缺条件428、旧版本409；写入/版本/安全回执同事务，认证 touch 与解压成功时间不推进编辑版本。
+
+成功返回固定安全回执 `action/scope/status/revision`，密码操作另含条目身份/版本，生成另含 `public_id`。仅首次成功生成的响应附 `api_key_plaintext`，不进入持久回执或广播；同键重放只返回安全回执，不重新生成。断线后以原键重发查回执，再GET当前配置；明确替换必须使用新键和当前版本。原生页面直接200显示首次结果，不再使用跳转后的明文读取槽。密码派生 Cookie/access token 可管理 Key；API Key 自身调用生成/撤销返回403 `PASSWORD_LOGIN_REQUIRED`。响应均 no-store。
+
+路径 AI 大表单提交 `path_source/ai_prompt/ai_batch_size/ai_concurrency/ai_fallback_to_rules/ai_stream/ai_default_include_current/auto_series`，数字必须合法，开关省略为 false；全部校验后一次事务保存。独立 prompt 命令提交 `prompt`，空字符串恢复随版本更新的默认提示词，与大表单共用 `path-ai` 版本，使用独立幂等键。两种模型来源命令提交 `model_source`（`default` 或 `custom`），各自独立版本；旧表单 `ai_model_source` 与 JSON 归一。开启 `auto_series` 时在最终写事务内复查总开关和当前选择的有效链，前置条件已变化则返回 `SERIES_AI_UNAVAILABLE`，不保存任何面板字段。命令仅返回固定 `scope/revision/status`，当前设置另 GET；HTTP/WS/原表单同键重发共享回执。
+
+qBittorrent 命令的 JSON 未提交字段保持原值，密码空值与省略均保留已保存密码，拒绝把 `********` 当成新密码。敏感命令内容以私有主密钥的 HMAC 裁决，普通回执只有 scope/revision/status，不保存密码或可离线猜测的裸摘要。原表单将未勾选开关显式转换为 false；跨通道重发须使用同一组已规范化字段。原实例与 attempt 的远端归属保护独立于配置编辑版本，保存配置不会绕过停止确认。
+
+`GET /api/v1/settings/archive` 中的 profiles 各自返回 profile_uuid/revision。`PUT /api/v1/settings/archive/profiles/{name}` 修改已登记的工具，需 profile_uuid、整数expected_revision及idempotency_key，可部分提交enabled/executable_path/timeout_seconds。启停与字段保存共用逐条版本；缺条件428，过期409，原配置删除或名称/编号复用410；成功只返回固定{name, profile_uuid, revision, status: COMPLETED}，当前值另GET。原 `/archive-settings/profiles/{name}` 表单使用同一处理器，不补最新版本；WS从相同路由目录取得命令。
+
+审批/路径规则共用同一命令核心。POST `/api/v1/settings/auto-approval/rules`、`/api/v1/settings/paths/rules`，以及其 `/{rule_id}/toggle` PUT 和 `/{rule_id}` DELETE，在HTTP和WS均提交JSON body。新增要求 `expected_revision=0/idempotency_key`；已有规则要求列表所读 `rule_uuid/expected_revision/idempotency_key`，编辑沿用 `rule_id` 或 `path_rule_id`。成功返回固定 `domain/rule_id/rule_uuid/revision/action/status`，列表另GET。缺条件428，版本过期409，原规则删除或数字编号复用410；先读持久回执再查当前版本，同键重发不重新执行。各条规则独立版本，启停也推进版本；试跑不写规则、不消耗版本。旧表单复用相同核心并保留条件草稿、原版本与键，显式核对新版本才产生新命令。
+
+路径维护提供以下共享 JSON/WS 入口（原 Web 表单复用相同命令）：
+
+作品手动来源修改使用 PUT `/api/v1/works/{id}/eh-ref`、`/preview`、`/torrent`，各带 `work_id/expected_revision/idempotency_key` 及 `ex_gid`（完整画廊URL）、`preview_url` 或 `magnet`。WS使用动态目录中的同一路由，原表单复用相同SourceCommands。已有画廊合并另需目标 `target_work_id/target_revision`，冲突409 `MERGE_TARGET_CHANGED` 返回安全目标身份供明确确认；等待旧下载停止期间目标变化则操作失败 `INGEST_REFERENCE_TARGET_CHANGED`，不能重试旧合并意图。返回 `operation_id` 时通过原摄取操作查询，原键重放不重新修改来源；缺条件428、旧版本409。
+
+| 路由 | 条件与结果 |
+|---|---|
+| POST `/api/v1/settings/paths/rearchive` | `expected_revision=settings_versions.rearchive`、`idempotency_key`；可选布尔 `force/dry_run`，默认 false；返回固定 `scanned/force/dry_run/queued/refiling/moved/unchanged/skipped` |
+| GET `/api/v1/settings/paths/rearchive?idempotency_key=...` | 只读回执：`status=INCOMPLETE/COMPLETED`、`requested/completed/outcomes/result`；无回执404，查询不继续执行 |
+| POST `/api/v1/settings/paths/ai/cache/clear` | `expected_revision=settings_versions['path-cache']`、`idempotency_key`；返回固定设置回执及 `removed`，旧回执不会再次清除新答案 |
+| POST `/api/v1/settings/paths/rules/dry-run` | 规则 AST `condition`、可选 `case_sensitive`；返回 `dry_run`，与 Web 复用原校验和试跑服务，不写规则 |
+| POST `/api/v1/settings/paths/template/preview` | `library_template/title_source`；返回 `template_preview`，与 Web 使用同一样例与文件系统限制，不保存设置 |
+
+重新归档先以全局范围版本检查规划前后的一致性，再固定各作品 UUID/revision、精确输入 artifact 和路径策略。规划只读本地数据，不调用 EH 或模型；每个子项提交再次核对原作品、配置和 AI 答案，失败逐件记录，已完成子项优先回放。移动复用文件日志，入队/pin/安全回执同事务；运行中断后可明确以原版本/键/内容重发继续。临时文件移动阻塞409 `PUBLICATION_RECOVERY_REQUIRED` 不冻结为永久子项失败。整批完成后重放始终返回原最终报告；回执查询不返回内部规划或供应商载荷。试跑也保存固定报告，但没有执行子项（`completed=0`）。写入缺条件428、过期409；所有维护回执响应 no-store。WS 命令名从动态目录读取。
+
+手动新增的 `CANDIDATE_DUPLICATE` 回执在判重事务中固定 `existing_candidate_id/existing_work_id`，重发不查询后来复用该编号的作品。旧回执缺少稳定身份时不能推定其属于当前编号。Web重复提示和成功跳转携带 `?work_id=`，详情页在打开时再次核对；原作品删除返回410。profile原生保存错误页即使已无该记录也保留原草稿/身份/版本/key，不允许确认采用同名新记录的身份。
+
+工具安装从 `GET /api/v1/settings/archive` 的 `toolchain.revision` 读取所见版本。`POST /api/v1/settings/archive/toolchain/install` 提交整数 `expected_revision`、`idempotency_key` 与可选布尔 `force`（默认true）。受理/版本递增同事务，返回202固定 `{toolchain_operation_id, status: ACCEPTED, revision}`；同键同内容重发仍返回原受理，缺条件428，旧版本/键冲突/另一个安装在执行均409。profile编辑版本与安装版本互不影响，运行健康和操作完成不推进安装版本。
+
+AI总开关从 `GET /api/v1/settings/ai` 的 `settings_versions['ai-master']` 读取版本，PUT提交 `enabled/expected_revision/idempotency_key`；返回固定 `scope/revision/status`，当前开关值另GET。复用SettingsCommands的原子提交与安全回执，原内部save_ai_enabled变化也推进该区版本，其他功能设置和健康用量不推进它。旧表单继续使用ai_enabled复选框，省略为false，与JSON的enabled=false归一；冲突不自动换版本，草稿明确确认才形成新命令。
+
+AI供应商的POST `/api/v1/settings/ai/providers` 返回固定安全回执，当前值另GET。新增使用
+`settings_versions['ai-providers']` 作为 `expected_revision`；编辑另提交所读 `provider_id/provider_uuid`，
+`expected_revision` 使用该供应商自己的 `revision`。两者均需 `idempotency_key`。DELETE
+`/api/v1/settings/ai/providers/{provider_id}` 的JSON body还必须带所读 `keys_revision/models_revision`，
+防止连带删除新子配置。缺条件428，过期409，原UUID不存在或数字ID复用410。同键重放先查回执，
+配置/版本/回执同事务；回执只含action、provider_id、provider_uuid、revision、keys_revision、models_revision、
+collection_revision及status，不包含地址、请求头、参数或秘密。摘要使用私有主密钥HMAC。
+
+原Web表单和WS复用供应商命令，字段归一后可跨通道重放；冲突保留原草稿，明确确认才用当前版本与新键。
+原供应商已删除时不能确认采用新对象身份。保存跳转附带provider_uuid，旧回执链接不会选择复用编号的新对象。
+供应商/Key/模型均投影稳定UUID及独立revision；供应商另有子配置版本，健康/用量/冷却/验证不推进编辑版本。
+`ai-catalogue`仅用于快照前后核对，不能用作其他保存区的编辑版本。验证写回核对原供应商与凭据配置版本、
+模型UUID/版本；变化时返回AI_CONFIGURATION_CHANGED，跳过写回。配置变更清除旧验证标记，迟到Key健康结果也不能写复用编号。
+Key/模型/链及路径AI参数/模型来源公开编辑和验证/拉取模型持久操作已接通。
+
+AI 网络操作使用下列 POST 路由（前缀 `/api/v1/settings/ai`），HTTP 与 WS 使用同一核心：
+
+| 路由 | body 中所见条件（均另需 idempotency_key） |
+|---|---|
+| `/models/{model_id}/verify` | model_uuid / expected_revision=模型revision / provider_uuid / provider_revision / keys_revision |
+| `/providers/{provider_id}/verify` | provider_uuid / expected_revision=供应商revision / keys_revision / models_revision |
+| `/providers/{provider_id}/models/fetch` | provider_uuid / expected_revision=供应商revision / keys_revision |
+| `/verify` | expected_revision=settings_versions['ai-catalogue'] |
+
+条件版本为整数。缺条件428、配置过期409、原对象移除或编号复用410；同一模型的单项和批量测试互斥，重叠返回409 `AI_NETWORK_BUSY`。
+不同模型可并发，拉取仅对同一供应商的其他拉取互斥。操作不消耗配置编辑版本；全局测试固定目录中所有启用模型，包括停用供应商下的启用模型。
+受理事务固定原供应商/模型配置及原Key信封，随后锁外网络；信封、地址、请求头和参数不写入普通操作表或回执。
+同键相同规范内容始终返回202 `{ai_operation_id, status: 'ACCEPTED', result_url}`，即使原对象已删除；同键不同内容409。
+`GET /api/v1/settings/ai/operations/{operation_id}` 鉴权后返回 `action/target/status/result/error_code`，状态为 RUNNING、COMPLETED、FAILED、UNKNOWN；受理及查询均no-store。
+拉取结果为 `{names:[...]}`，测试结果为 `{entries:[{model_uuid,provider_uuid,ok,code}],ok,total}`；批量中各模型失败在entries表示，单模型失败状态为FAILED。
+结果只含安全code，不包含供应商原始错误文本。配置变化时迟到测试返回 `AI_CONFIGURATION_CHANGED`，不更新当前模型的验证结果。
+客户端断线不取消已受理执行；重启将原RUNNING标UNKNOWN、释放探测claim，不自动重发。旧表单受理303跳结果页；最近10项在AI快照的network_operations中提供，GET及刷新不会重发。
+
+从拉取清单添加模型时，`POST /providers/{id}/models` 在原models-add条件外另带 `discovery_operation_id`。
+保存事务要求它仍为原供应商配置/Key版本的已完成fetch，否则409 `AI_DISCOVERY_STALE`，不添加模型或消费集合版本。
+原表单自动带此字段，错误页保留原操作与选择，不确认采用已过期的清单；需要重新拉取。成功回执仍优先重放，不因后来的配置变化失效。
+
+Key/模型命令同样从 `/api/v1/settings/ai` 读取条件：
+
+| 写入口（均在 `/api/v1/settings/ai` 下） | 身份与 expected_revision |
+|---|---|
+| POST `/providers/{id}/keys` | provider_uuid / keys_revision |
+| POST `/providers/{id}/models` | provider_uuid / models_revision |
+| PUT `/keys/{id}/toggle`；POST `/keys/{id}/reset`；DELETE `/keys/{id}` | key_uuid / Key 的 revision |
+| PUT `/models/{id}/toggle`、`/models/{id}/params`；DELETE `/models/{id}` | model_uuid / 模型的 revision |
+
+每项都需 idempotency_key；reset 还提交所读整数 expected_health_revision。健康变化返回409
+HEALTH_REVISION_CONFLICT，不能用旧页面清掉新产生的冷却。reset只推进健康版本；其他编辑与接受无变化的操作
+消费配置版本。成功回执仅含安全身份、版本和动作，新增返回 entries 身份列表；不回传 Key、密文或参数。
+同键跨HTTP/WS/原表单重放返回原结果，重放reset不会再次清掉后来出现的冷却。缺条件428、过期409、原身份不存在410。
+冲突页保留原身份/版本/key与非敏感草稿；服务器不回显 api_keys，实时页面仅通过DOM属性保留当前输入。
+无JavaScript或重新打开页面时须重新粘贴Key。原对象删除后草稿仍可查看，不接受同编号新UUID。
+
+PUT `/api/v1/settings/ai/chain/{scope}` 的scope为 default、archive_path、candidate_admission。
+从对应ai/paths/parse设置快照的 `settings_versions['ai-chain:' + scope]` 读取expected_revision，
+提交model_id/model_uuid/action/idempotency_key；action为primary、append、shift、remove，shift另传整数delta
+（负数上移、正数下移，超出范围移到端点）。CAS、原排序规则、整链保存与固定安全回执同事务；
+返回scope/action/model_id/model_uuid/revision/status，列表另GET。不同scope独立，健康与模型参数不推进排序版本，
+内部保存和模型删除导致的列表变化会推进它。原模型身份失效410，排序过期409；先查回执，已成功原操作重放不再次排序。
+旧页面表单提交同一核心；下拉框的model_identity携带编号与UUID，冲突确认只更换所见链版本和操作键，不更换模型身份。
+
+`GET /api/v1/settings/archive/toolchain/operations/{operation_id}` 返回当前 `RUNNING/COMPLETED/FAILED/UNKNOWN`、受理revision、当时安装目标version及安全error_code，均no-store。HTTP与WS使用同一路由目录，原安装表单复用同一处理器并保留冲突版本/key，明确核对后才能新建命令。断线不会取消已受理安装；优雅停机等待真实线程退出。重启将未完成操作记为UNKNOWN，不自动重发，启动自动安装也等待管理员核对；需要新安装时用新键和当前版本明确受理。实际文件操作另有跨线程/进程的目录锁，保护CLI、启动及Web安装；普通操作回执不包含路径、下载内容或凭据。

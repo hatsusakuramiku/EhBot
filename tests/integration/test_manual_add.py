@@ -8,6 +8,8 @@ behaviour a URL-shape check alone cannot give.
 """
 
 import asyncio
+from uuid import uuid4
+from urllib.parse import urlsplit, parse_qs
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -53,6 +55,7 @@ def _authenticate(client: TestClient, settings: Settings) -> None:
 def _post(client: TestClient, url: str, data: dict) -> TestClient:
     page = client.get("/manual-add")
     data["csrf_token"] = page.context["csrf_token"]
+    data['idempotency_key'] = page.context.get('draft', {}).get('idempotency_key') if page.context.get('draft') else uuid4().hex
     return client.post(url, data=data, follow_redirects=False)
 
 
@@ -243,11 +246,13 @@ def test_a_valid_eh_link_creates_an_approved_candidate_with_metadata(
             data={
                 "input": "https://exhentai.org/g/987654/appletoken99/",
                 "csrf_token": page.context["csrf_token"],
+                'idempotency_key': uuid4().hex,
             },
             follow_redirects=False,
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/works/1"
+        assert urlsplit(response.headers['location']).path == '/works/1'
+        assert parse_qs(urlsplit(response.headers['location']).query)['work_id']
         # One fetch, for the gallery that was pasted.
         assert fetched == [(987654, "appletoken99")]
 
@@ -277,7 +282,7 @@ def test_a_preview_link_is_accepted_by_manual_add(tmp_path, monkeypatch) -> None
         )
         assert response.status_code == 303
         candidate_id = int(
-            response.headers["location"].rstrip("/").rsplit("/", 1)[-1]
+            urlsplit(response.headers["location"]).path.rstrip("/").rsplit("/", 1)[-1]
         )
         database = Database(settings.data_path / "ehbot.db")
         candidate = asyncio.run(database.get_candidate(candidate_id))
@@ -299,7 +304,7 @@ def test_pasting_the_same_gallery_twice_is_refused_with_a_link(
         first = _post(client, "/manual-add", {"input": url})
         assert first.status_code == 303
         candidate_id = int(
-            first.headers["location"].rstrip("/").rsplit("/", 1)[-1]
+            urlsplit(first.headers["location"]).path.rstrip("/").rsplit("/", 1)[-1]
         )
 
         second = _post(client, "/manual-add", {"input": url})
@@ -349,7 +354,7 @@ def test_a_refused_duplicate_leaves_the_existing_candidate_untouched(
         url = "https://exhentai.org/g/987654/appletoken99/"
         first = _post(client, "/manual-add", {"input": url})
         candidate_id = int(
-            first.headers["location"].rstrip("/").rsplit("/", 1)[-1]
+            urlsplit(first.headers["location"]).path.rstrip("/").rsplit("/", 1)[-1]
         )
         database = Database(settings.data_path / "ehbot.db")
         before = asyncio.run(database.get_candidate(candidate_id))
@@ -374,7 +379,7 @@ def _api_headers(client: TestClient) -> dict[str, str]:
 
 def _manual_api(client: TestClient, url: str, headers: dict[str, str]):
     return client.post(
-        "/api/v1/candidates/manual", json={"url": url}, headers=headers
+        "/api/v1/candidates/manual", json={"url": url, 'idempotency_key': uuid4().hex}, headers=headers
     )
 
 

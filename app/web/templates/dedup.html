@@ -26,6 +26,7 @@
     <p class="ui-subtitle">同一个画廊 ID 只保留一件作品。保留顺序：已完成打包的优先，其次页数较多者，再次最早入库者；其余记录与文件会被移除，且不可恢复。</p>
   </div>
 </div>
+{% if error %}{{ ui.callout(error, tone="danger") }}{% endif %}
 
 {% if group_count == 0 %}
 {{ ui.empty_state("没有发现重复作品", "每个画廊 ID 只对应一条候选，无需处理") }}
@@ -39,6 +40,8 @@
 
 <form id="dedup-form" method="post" action="/downloaded/dedup">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="plan_id" value="{{ plan_id }}">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key or new_command_key() }}">
 
   {% for group in groups %}
   <section class="ui-section" aria-labelledby="dedup-group-{{ group.ex_gid }}">

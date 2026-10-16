@@ -277,6 +277,10 @@ class DownloadedWork:
     filter_result: str | None = None
     filter_reason: str | None = None
 
+    #: The work identity and edit version read with this row's state.
+    work_id: str | None = None
+    revision: int | None = None
+
     @property
     def archive_relative_path(self) -> str | None:
         """Where this book's CBZ belongs, newest answer first.

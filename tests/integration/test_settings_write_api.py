@@ -13,6 +13,9 @@ the same coverage rather than more of it.
 
 from __future__ import annotations
 
+from tests.settings_commands import save_then_read_preferences
+from tests.ai_commands import save_then_read_provider, save_then_read_catalogue, save_then_read_chain
+from tests.rule_commands import observed_rule
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -99,7 +102,7 @@ def test_a_cadence_is_stored_and_read_back(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             SYSTEM,
             json={"poll_interval_ms": "5000"},
             headers={CSRF_HEADER: csrf},
@@ -117,8 +120,8 @@ def test_only_the_fields_that_were_sent_are_touched(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         headers = {CSRF_HEADER: csrf}
-        client.put(SYSTEM, json={"poll_interval_ms": "5000"}, headers=headers)
-        client.put(SYSTEM, json={"source_concurrency": "2"}, headers=headers)
+        save_then_read_preferences(client, 'put', SYSTEM, json={"poll_interval_ms": "5000"}, headers=headers)
+        save_then_read_preferences(client, 'put', SYSTEM, json={"source_concurrency": "2"}, headers=headers)
         snapshot = client.get("/api/v1/settings/system").json()["system"]
 
     # The second write must not have reset the first: an absent field is left
@@ -131,7 +134,7 @@ def test_an_out_of_range_cadence_is_refused(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             SYSTEM,
             json={"poll_interval_ms": "1"},
             headers={CSRF_HEADER: csrf},
@@ -149,7 +152,7 @@ def test_an_empty_body_says_what_could_have_been_sent(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(SYSTEM, json={}, headers={CSRF_HEADER: csrf})
+        response = save_then_read_preferences(client, 'put', SYSTEM, json={}, headers={CSRF_HEADER: csrf})
 
     assert response.status_code == 400
     error = response.json()["error"]
@@ -169,7 +172,7 @@ def test_saving_the_timezone_recaches_it_on_app_state(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             SYSTEM,
             json={"timezone": "Asia/Tokyo"},
             headers={CSRF_HEADER: csrf},
@@ -184,7 +187,9 @@ PASSWORDS = "/api/v1/settings/passwords"
 
 
 def _put_passwords(client: TestClient, csrf: str, body: dict):
-    return client.put(PASSWORDS, json=body, headers={CSRF_HEADER: csrf})
+    from tests.credential_commands import observed_credentials
+    return client.put(PASSWORDS, json={**observed_credentials(client, body['action'], body.get('password_id')), **body},
+                      headers={CSRF_HEADER: csrf})
 
 
 def test_an_archive_password_is_added_and_never_read_back(
@@ -198,9 +203,9 @@ def test_an_archive_password_is_added_and_never_read_back(
             csrf,
             {"action": "add", "name": "常用", "password": "s3cret", "priority": 5},
         )
+        payload = client.get(PASSWORDS).json()
 
     assert response.status_code == 200
-    payload = response.json()
     assert [entry["name"] for entry in payload["passwords"]] == ["常用"]
     # The whole point of the store: the value is not in the response, only the
     # fact that an entry exists.
@@ -214,13 +219,14 @@ def test_a_deleted_password_is_gone_from_the_section(tmp_path: Path) -> None:
         added = _put_passwords(
             client, csrf, {"action": "add", "name": "常用", "password": "s3cret"}
         )
-        password_id = added.json()["passwords"][0]["password_id"]
+        password_id = added.json()["password_id"]
         response = _put_passwords(
             client, csrf, {"action": "delete", "password_id": password_id}
         )
+        snapshot = client.get(PASSWORDS).json()
 
     assert response.status_code == 200
-    assert response.json()["passwords"] == []
+    assert snapshot["passwords"] == []
 
 
 def test_a_password_id_is_required_to_delete(tmp_path: Path) -> None:
@@ -240,7 +246,7 @@ def test_generating_the_api_key_returns_the_plaintext_exactly_once(
 
     It exists nowhere else once this response is gone, so a client that misses it
     has to mint a replacement -- which is why it is returned here rather than
-    stashed for a later read, the way the page's one-shot reveal does.
+    stashed for a later read.
     """
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
@@ -251,7 +257,7 @@ def test_generating_the_api_key_returns_the_plaintext_exactly_once(
 
     assert generated.status_code == 200
     assert plaintext.startswith("ehk_")
-    assert generated.json()["api_key"]["configured"] is True
+    assert generated.json()["public_id"] == plaintext.split('.')[0]
     # A later read reports the key, never its plaintext.
     assert later["api_key"]["configured"] is True
     assert "api_key_plaintext" not in later
@@ -266,9 +272,10 @@ def test_revoking_the_api_key_leaves_the_section_unconfigured(
         csrf = _authenticate(client, settings)
         _put_passwords(client, csrf, {"action": "api-key-generate"})
         response = _put_passwords(client, csrf, {"action": "api-key-revoke"})
+        snapshot = client.get(PASSWORDS).json()
 
     assert response.status_code == 200
-    assert response.json()["api_key"]["configured"] is False
+    assert snapshot["api_key"]["configured"] is False
 
 
 def test_an_unknown_password_action_lists_the_allowed_ones(
@@ -544,7 +551,7 @@ def test_the_parse_scheme_is_stored_and_read_back(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PARSE,
             json={
                 "require_gallery_link": True,
@@ -571,7 +578,7 @@ def test_an_unlisted_format_is_dropped_not_stored(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        client.put(
+        save_then_read_preferences(client, 'put',
             PARSE,
             json={"accept_archive": True, "archive_formats": ["zip", "tar"]},
             headers={CSRF_HEADER: csrf},
@@ -586,12 +593,12 @@ def test_reset_puts_the_shipped_scheme_back(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         shipped = client.get(PARSE).json()["parse_defaults"]
-        client.put(
+        save_then_read_preferences(client, 'put',
             PARSE,
             json={"accept_photo": True, "archive_formats": ["rar"]},
             headers={CSRF_HEADER: csrf},
         )
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             PARSE + "/reset", json={}, headers={CSRF_HEADER: csrf}
         )
         rules = response.json()["parse_rules"]
@@ -609,12 +616,12 @@ def test_the_default_prompt_is_stored_as_use_the_default(
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         default = client.get(PARSE).json()["candidate_prompt_default"]
-        shipped = client.put(
+        shipped = save_then_read_preferences(client, 'put',
             PARSE + "/ai",
             json={"ai_candidate_prompt": default, "ai_candidate_fallback": "reject"},
             headers={CSRF_HEADER: csrf},
         ).json()["candidate_admission"]
-        custom = client.put(
+        custom = save_then_read_preferences(client, 'put',
             PARSE + "/ai",
             json={"ai_candidate_prompt": "只看有压缩包的", "ai_candidate_fallback": "reject"},
             headers={CSRF_HEADER: csrf},
@@ -632,7 +639,7 @@ def test_the_gate_switches_travel_with_the_prompt(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        admission = client.put(
+        admission = save_then_read_preferences(client, 'put',
             PARSE + "/ai",
             json={
                 "ai_candidate_enabled": True,
@@ -653,7 +660,7 @@ def test_an_unknown_fallback_is_refused_by_the_service(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PARSE + "/ai",
             json={"ai_candidate_fallback": "explode"},
             headers={CSRF_HEADER: csrf},
@@ -671,7 +678,7 @@ def test_the_parse_writes_need_the_same_gates_as_any_other(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(PARSE, json={"accept_photo": True})
+        response = save_then_read_preferences(client, 'put', PARSE, json={"accept_photo": True})
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
@@ -693,6 +700,7 @@ def _condition() -> dict:
 
 def _rule(**overrides) -> dict:
     body = {
+        "expected_revision": 0, "idempotency_key": str(uuid4()),
         "name": "中文的自动通过",
         "priority": 50,
         "enabled": True,
@@ -734,7 +742,7 @@ def test_an_edit_overwrites_by_rule_id(tmp_path: Path) -> None:
         rule_id = _rules(client)[0]["rule_id"]
         client.post(
             RULES,
-            json=_rule(rule_id=rule_id, name="改过的名字"),
+            json=_rule(**observed_rule(client, 'auto-approval', rule_id), rule_id=rule_id, name="改过的名字"),
             headers={CSRF_HEADER: csrf},
         )
         rules = _rules(client)
@@ -746,16 +754,16 @@ def test_an_edit_overwrites_by_rule_id(tmp_path: Path) -> None:
     assert rules[0]["version"] > 1
 
 
-def test_editing_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+def test_editing_a_rule_that_is_gone_is_a_410(tmp_path: Path) -> None:
     """Not a silent create under the old id: that resurrects a deleted rule."""
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         response = client.post(
-            RULES, json=_rule(rule_id=999), headers={CSRF_HEADER: csrf}
+            RULES, json=_rule(rule_id=999, rule_uuid='removed-rule', expected_revision=1), headers={CSRF_HEADER: csrf}
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 410
     assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
 
 
@@ -836,30 +844,32 @@ def test_toggling_and_deleting_a_rule(tmp_path: Path) -> None:
         rule_id = _rules(client)[0]["rule_id"]
         parked = client.put(
             f"{RULES}/{rule_id}/toggle",
-            json={"enabled": False},
+            json={**observed_rule(client, 'auto-approval', rule_id), "enabled": False},
             headers={CSRF_HEADER: csrf},
-        ).json()["rules"][0]["enabled"]
-        removed = client.delete(
-            f"{RULES}/{rule_id}", headers={CSRF_HEADER: csrf}
         )
-        rules = removed.json()["rules"]
+        assert parked.status_code == 200
+        parked = _rules(client)[0]['enabled']
+        removed = client.request('DELETE',
+            f"{RULES}/{rule_id}", headers={CSRF_HEADER: csrf}, json=observed_rule(client, 'auto-approval', rule_id)
+        )
+        rules = _rules(client)
 
     assert parked is False
     assert removed.status_code == 200
     assert rules == []
 
 
-def test_toggling_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+def test_toggling_a_rule_that_is_gone_is_a_410(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         response = client.put(
             f"{RULES}/999/toggle",
-            json={"enabled": False},
+            json={"enabled": False, 'rule_uuid': 'removed-rule', 'expected_revision': 1, 'idempotency_key': 'stale'},
             headers={CSRF_HEADER: csrf},
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 410
     assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
 
 
@@ -889,7 +899,7 @@ def test_the_torrent_client_is_stored_without_echoing_the_password(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             ARCHIVE + "/torrent",
             json={
                 "base_url": "http://127.0.0.1:8080",
@@ -916,7 +926,7 @@ def test_clearing_the_host_leaves_the_client_unconfigured(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             ARCHIVE + "/torrent",
             json={"base_url": "   "},
             headers={CSRF_HEADER: csrf},
@@ -947,7 +957,7 @@ def test_a_limit_out_of_range_is_refused_by_the_service(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             ARCHIVE + "/limits",
             json={"max_total_bytes": "not a number"},
             headers={CSRF_HEADER: csrf},
@@ -961,12 +971,12 @@ def test_the_auto_pack_switch_round_trips(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        on = client.put(
+        on = save_then_read_preferences(client, 'put',
             ARCHIVE + "/auto-pack",
             json={"enabled": True},
             headers={CSRF_HEADER: csrf},
         ).json()["auto_pack_after_download"]
-        off = client.put(
+        off = save_then_read_preferences(client, 'put',
             ARCHIVE + "/auto-pack",
             json={"enabled": False},
             headers={CSRF_HEADER: csrf},
@@ -982,7 +992,7 @@ def test_the_archive_writes_need_the_same_gates_as_any_other(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(ARCHIVE + "/auto-pack", json={"enabled": True})
+        response = save_then_read_preferences(client, 'put', ARCHIVE + "/auto-pack", json={"enabled": True})
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "CSRF_INVALID"
@@ -995,6 +1005,7 @@ PATHS = "/api/v1/settings/paths"
 
 def _path_rule(**overrides) -> dict:
     body = {
+        "expected_revision": 0, "idempotency_key": str(uuid4()),
         "name": "同人志单独放",
         "priority": 20,
         "enabled": True,
@@ -1021,7 +1032,7 @@ def test_the_layout_template_and_title_source_round_trip(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/template",
             json={
                 "library_template": "{category}/{title}",
@@ -1042,7 +1053,7 @@ def test_a_template_that_walks_out_of_the_library_is_refused(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/template",
             json={"library_template": "../{title}"},
             headers={CSRF_HEADER: csrf},
@@ -1061,10 +1072,10 @@ def test_a_routing_rule_is_stored_and_overwritten_by_id(
         created = client.post(
             PATHS + "/rules", json=_path_rule(), headers={CSRF_HEADER: csrf}
         )
-        rule_id = created.json()["path_rules"][0]["rule_id"]
+        rule_id = created.json()["rule_id"]
         client.post(
             PATHS + "/rules",
-            json=_path_rule(path_rule_id=rule_id, name="改过的名字"),
+            json=_path_rule(**observed_rule(client, 'paths', rule_id), path_rule_id=rule_id, name="改过的名字"),
             headers={CSRF_HEADER: csrf},
         )
         rules = _paths(client)["path_rules"]
@@ -1104,17 +1115,17 @@ def test_a_rule_with_no_condition_is_refused(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "RULE_INVALID"
 
 
-def test_editing_a_path_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+def test_editing_a_path_rule_that_is_gone_is_a_410(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
         response = client.post(
             PATHS + "/rules",
-            json=_path_rule(path_rule_id=999),
+            json=_path_rule(path_rule_id=999, rule_uuid='removed-rule', expected_revision=1),
             headers={CSRF_HEADER: csrf},
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 410
     assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
 
 
@@ -1126,27 +1137,31 @@ def test_toggling_and_deleting_a_routing_rule(tmp_path: Path) -> None:
         rule_id = _paths(client)["path_rules"][0]["rule_id"]
         parked = client.put(
             f"{PATHS}/rules/{rule_id}/toggle",
-            json={"enabled": False},
+            json={**observed_rule(client, 'paths', rule_id), "enabled": False},
             headers={CSRF_HEADER: csrf},
-        ).json()["path_rules"][0]["enabled"]
-        removed = client.delete(
-            f"{PATHS}/rules/{rule_id}", headers={CSRF_HEADER: csrf}
         )
+        assert parked.status_code == 200
+        parked = _paths(client)['path_rules'][0]['enabled']
+        removed = client.request('DELETE',
+            f"{PATHS}/rules/{rule_id}", headers={CSRF_HEADER: csrf}, json=observed_rule(client, 'paths', rule_id)
+        )
+        remaining = _paths(client)['path_rules']
 
     assert parked is False
     assert removed.status_code == 200
-    assert removed.json()["path_rules"] == []
+    assert remaining == []
 
 
-def test_deleting_a_rule_that_is_gone_is_a_404(tmp_path: Path) -> None:
+def test_deleting_a_rule_that_is_gone_is_a_410(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.delete(
-            f"{PATHS}/rules/999", headers={CSRF_HEADER: csrf}
+        response = client.request('DELETE',
+            f"{PATHS}/rules/999", headers={CSRF_HEADER: csrf},
+            json={'rule_uuid': 'removed-rule', 'expected_revision': 1, 'idempotency_key': 'stale'}
         )
 
-    assert response.status_code == 404
+    assert response.status_code == 410
     assert response.json()["error"]["code"] == "RULE_NOT_FOUND"
 
 
@@ -1156,7 +1171,7 @@ def test_the_path_writes_need_the_same_gates_as_any_other(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/template", json={"library_template": "{title}"}
         )
 
@@ -1191,12 +1206,12 @@ def test_a_provider_is_stored_and_read_back_without_its_key(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        created = client.post(
+        created = save_then_read_provider(client, 'POST',
             AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf}
         )
         section = _ai(client)
         provider_id = section["providers"][0]["provider_id"]
-        with_key = client.post(
+        with_key = save_then_read_catalogue(client, 'POST',
             f"{AI}/providers/{provider_id}/keys",
             json={"api_keys": "sk-secret-value"},
             headers={CSRF_HEADER: csrf},
@@ -1220,7 +1235,7 @@ def test_a_provider_without_a_name_is_refused_by_the_service(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.post(
+        response = save_then_read_provider(client, 'POST',
             AI + "/providers",
             json=_provider(name="  "),
             headers={CSRF_HEADER: csrf},
@@ -1234,15 +1249,15 @@ def test_a_model_is_added_and_toggled(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        save_then_read_provider(client, 'POST', AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
         provider_id = _ai(client)["providers"][0]["provider_id"]
-        added = client.post(
+        added = save_then_read_catalogue(client, 'POST',
             f"{AI}/providers/{provider_id}/models",
             json={"model_name": ["llama3", "qwen2"]},
             headers={CSRF_HEADER: csrf},
         )
         model_id = added.json()["providers"][0]["models"][0]["model_id"]
-        parked = client.put(
+        parked = save_then_read_catalogue(client, 'PUT',
             f"{AI}/models/{model_id}/toggle",
             json={"enabled": False},
             headers={CSRF_HEADER: csrf},
@@ -1260,18 +1275,18 @@ def test_a_model_can_be_removed_and_the_provider_deleted(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        save_then_read_provider(client, 'POST', AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
         provider_id = _ai(client)["providers"][0]["provider_id"]
-        client.post(
+        save_then_read_catalogue(client, 'POST',
             f"{AI}/providers/{provider_id}/models",
             json={"model_name": ["llama3"]},
             headers={CSRF_HEADER: csrf},
         )
         model_id = _ai(client)["providers"][0]["models"][0]["model_id"]
-        after_model = client.delete(
+        after_model = save_then_read_catalogue(client, 'DELETE',
             f"{AI}/models/{model_id}", headers={CSRF_HEADER: csrf}
         ).json()
-        after_provider = client.delete(
+        after_provider = save_then_read_provider(client, 'DELETE',
             f"{AI}/providers/{provider_id}", headers={CSRF_HEADER: csrf}
         ).json()
 
@@ -1283,11 +1298,13 @@ def test_deleting_a_provider_that_is_gone_is_refused(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.delete(
-            f"{AI}/providers/999", headers={CSRF_HEADER: csrf}
+        response = client.request('DELETE',
+            f"{AI}/providers/999", headers={CSRF_HEADER: csrf},
+            json={'provider_uuid': 'original-gone', 'expected_revision': 1, 'idempotency_key': 'gone',
+                  'keys_revision': 1, 'models_revision': 1}
         )
 
-    assert response.status_code == 400
+    assert response.status_code == 410
     assert response.json()["error"]["code"] == "AI_PROVIDER_NOT_FOUND"
 
 
@@ -1295,10 +1312,10 @@ def test_the_master_switch_round_trips(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        on = client.put(
+        on = save_then_read_preferences(client, 'PUT',
             AI + "/master", json={"enabled": True}, headers={CSRF_HEADER: csrf}
         ).json()["ai_enabled"]
-        off = client.put(
+        off = save_then_read_preferences(client, 'PUT',
             AI + "/master", json={"enabled": False}, headers={CSRF_HEADER: csrf}
         ).json()["ai_enabled"]
 
@@ -1312,15 +1329,15 @@ def test_a_chain_verb_moves_a_model_and_an_unknown_scope_is_refused(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        client.post(AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
+        save_then_read_provider(client, 'POST', AI + "/providers", json=_provider(), headers={CSRF_HEADER: csrf})
         provider_id = _ai(client)["providers"][0]["provider_id"]
-        client.post(
+        save_then_read_catalogue(client, 'POST',
             f"{AI}/providers/{provider_id}/models",
             json={"model_name": ["llama3"]},
             headers={CSRF_HEADER: csrf},
         )
         model_id = _ai(client)["providers"][0]["models"][0]["model_id"]
-        primary = client.put(
+        primary = save_then_read_chain(client, 'PUT',
             f"{AI}/chain/default",
             json={"action": "primary", "model_id": model_id},
             headers={CSRF_HEADER: csrf},
@@ -1371,7 +1388,7 @@ def test_the_ai_path_panel_round_trips(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/ai",
             json={
                 "path_source": "AI",
@@ -1402,7 +1419,7 @@ def test_auto_series_is_refused_through_the_api_without_a_chain(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/ai",
             json={"path_source": "template", "auto_series": True},
             headers={CSRF_HEADER: csrf},
@@ -1419,7 +1436,7 @@ def test_a_bad_number_aborts_before_the_mode_changes(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/ai",
             json={"path_source": "ai", "ai_batch_size": 0},
             headers={CSRF_HEADER: csrf},
@@ -1435,12 +1452,12 @@ def test_an_empty_prompt_means_use_the_shipped_one(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        custom = client.put(
+        custom = save_then_read_preferences(client, 'put',
             PATHS + "/ai/prompt",
             json={"prompt": "按作者分目录"},
             headers={CSRF_HEADER: csrf},
         ).json()["ai"]["prompt"]
-        shipped = client.put(
+        shipped = save_then_read_preferences(client, 'put',
             PATHS + "/ai/prompt",
             json={"prompt": ""},
             headers={CSRF_HEADER: csrf},
@@ -1457,7 +1474,7 @@ def test_the_candidate_model_source_round_trips(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PARSE + "/model-source",
             json={"model_source": "custom"},
             headers={CSRF_HEADER: csrf},
@@ -1473,7 +1490,7 @@ def test_the_ai_panel_writes_need_the_same_gates_as_any_other(
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         csrf = _authenticate(client, settings)
-        response = client.put(
+        response = save_then_read_preferences(client, 'put',
             PATHS + "/ai", json={"path_source": "ai", "ai_batch_size": 10}
         )
 

@@ -32,6 +32,7 @@ from fastapi import APIRouter, Request
 
 from app.api import deps
 from app.api.contracts import ApiError
+from app.review.commands import WorkCommandError, WorkCommands
 from app.api.serializers import (
     filter_origin,
     job_summary,
@@ -441,6 +442,10 @@ async def work_snapshot(
     between a JSON error and an HTML 404 -- the two are the same fact reported in
     two grammars, and raising here would force one of them.
     """
+    try:
+        version = await WorkCommands(database).version(candidate_id)
+    except WorkCommandError:
+        return None
     candidate = await database.get_candidate(candidate_id)
     if candidate is None:
         return None
@@ -478,6 +483,7 @@ async def work_snapshot(
 
     return {
         "candidate_id": candidate.candidate_id,
+        **version,
         "status": status_payload(candidate.status),
         "stage": work_stage_view(stage).to_payload(),
         "title": candidate.title,

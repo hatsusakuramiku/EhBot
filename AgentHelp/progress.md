@@ -7639,3 +7639,249 @@ regression 十四完整文件 219 条有 2 fail（109.504 秒），均旧 FIFO �
 **验证。** accept 六完整文件 46/0（12.846 秒）；collect-only 2710。final 十二完整文件 155 条 3 fail（82.050 秒）：迁移数仍断言 37，显式 retry/restart 后旧 pack_intent 合法变 CANCELLED；修正后 corrected 两完整文件 50/0，旧任务/attempt 其余完整 DTO 保持不变。按所有 XML 的 classname/name 取最新结果，454 个不同用例通过，0 failure/error/skip，非整库运行。此前中间失败与挂起已终态，未计入通过。Windows 实际硬退出/进程树合同通过；Linux 新 guardian 仅静态检查，实跑留 P12，不能称跨平台验收。R96 audit 列出实现/合同/限制。
 
 **交付。** 027–037 不改写，038 随本阶段提交冻结；源码 rc12，非发布。README/USAGE/REALTIME_API/PHASES/计划/task_plan/findings/AGENTS 同步；无环境变量/配置字段变更。立即暂存本阶段代码、正式测试及文档，本地单行标题提交并核实 SHA 后才进 P10。models.py 既有 BOM 排除。TEMP/ehbot-p9-recovery-20261015-a 在结果留痕/提交核验后精确清理；无 .scratch、真实供应商、真实库升级、推送、发布或部署。P10–P12/总目标 active。
+
+**P9 提交核实。** 本地提交 f60412b749ec1438d53decc240f628d6a0fc6ef7，37 个提交 blobs 与验收工作文件规范化内容逐项相同；暂存区为空，027–037 与上阶段一致，038 已冻结。提交前辅助检查误将新增 038 包含在旧迁移不变断言，已按 027–037 修正并完成提交后核验；没有据失败脚本声称预先清单验证通过。corrected 两文件 50/0/0/0（12.105 秒）。所有已知测试会话终态；TEMP 绝对路径及无重解析点已核对，共 2438 文件/676167314 字节，精确清理后剩余 0；无 .scratch。SHA/清理留痕随 P10 纳入，不另拆文档提交。
+
+### P10 元数据切片接续（进行中、未验收，2026-10-15）
+
+新增未冻结 039：作品稳定身份/编辑版本、共享回执、元数据文件同步意图和主动抓取操作。字段、锁定、规则重算与回执在一次事务提交；后台元数据/来源/任务状态/产物变化推进作品版本，进度和心跳不推进。JSON 与两个旧编辑表单已进入共享领域应用；文件同步由既有 operations loop 恢复。主动抓取已增加网络后版本核对与原子元数据/种子/封面提交，旧抓取表单和 JS、操作状态/查询仍待接通，最近新增抓取代码尚未验证。
+
+测试：work-core 首跑 24/8 fail，strict async fixture 标注错误，改 pytest_asyncio.fixture 后 24/0；metadata 28/1 fail（24.601 秒），唯一失败为原 HTML 正向测试未提供新前置条件，待更新测试合同并保留缺版本拒绝验证。这些结果先于最新抓取实现，不表示当前代码全通过。正式用例在 tests/integration/test_work_commands.py（8）和 test_work_metadata_commands.py（4）；TEMP 仅 ehbot-p10-api-20261015-a，现有测试工具会话均终态。
+
+已知缺口：当前 ComicInfo 同步仍长持数据库写锁，必须在 P11 协同 P8 发布机制修复；pending 同步扫描需防失败项饥饿。P10 其余审核/下载/打包/已下载、设置/规则/AI、v2 和全域 Web/WS 草稿尚未完成。rc12 不提升、039 不冻结；不提交未验收阶段。每阶段验收后立即暂存该阶段代码、正式测试和同步文档、本地提交并核实 SHA 再进入下一阶段；不夹带 models.py 既有 BOM 差异。总目标仍 active。
+
+### P10 元数据闭环与审核核心接续（覆盖上述旧待接项，仍未验收）
+
+元数据 API/旧表单/JS 均提交所见 work UUID/revision/key；编辑字段/锁定/规则及同步意图同事务。主动抓取持久受理后锁外访问供应商，网络后再次核对身份、版本、停止/session；元数据/种子/封面/规则与结果一次提交。只首次 dispatch 访问供应商；RUNNING 重放 202，FAILED/UNKNOWN 保留原公开结果，GET metadata-fetches 可查询。取消线程先排空，再仅终止自身操作。后来快照不同或数字 ID 重用时，旧回执不附新 editor 自动覆盖草稿。WS/HTMX 保留真实节点、输入、原基础版本/key 与 JS 缓存属性。
+
+审核新增 WorkCommands.review/inspect_review、ReviewOrchestrator.work_command 和 POST /api/v1/works/{id}/review。审批事实、审计、原状态转换、任务/后续打包意图、最终版本/回执同事务；入队失败整笔回滚。网络准备在锁外，最终再次 CAS；准备期间另一同键请求成功时返回其原回执。旧自动审核/内部下载不改语义。旧单项/批量 API 和 Web 尚未切换，是下一动作，不能声称审核全域完成。
+
+正式验证：metadata-session 六完整文件 **66/0/0/0，49.522 秒**；metadata-legacy 四完整文件 **128/0/0/0，211.411 秒**；review-core 四完整文件 **74/0/0/0，45.638 秒**；最终 work-ws-fixed 四完整 work 文件 **39/0/0/0，24.934 秒**。全部工具会话 exit0，compileall、git diff --check 通过。collect.log 按文件计数合计 **2749 collected，仅收集**。13 份 XML 按 classname/name 取最新结果共 **258 个不同用例通过**，0 failure/error/skip；组间不累加、未跑整库。metadata/realtime 两个 Node DOM 脚本 exit0，真实 HTMX/Alpine 根路径及 /ehbot 均通过。
+
+失败留痕：fetch 首跑 36/1fail/7error，新夹具误用 ex_token，改为真实 ex_gallery_token 后 8/0（2.561 秒）；metadata-contracts 39/1fail，测试假设 bs4 存在，改标准库 HTMLParser，随后 64/0（48.451 秒）、加取消/停机后最终 66/0。work-ws 37/3fail，测试误用 payload.path，改为实际 payload.params.candidate_id 后扩展并发审核，最终 39/0。npm offline ENOTCACHED 后经工具审批仅在具名 TEMP 安装 jsdom@30.1.2，未改项目依赖。
+
+当前 TEMP 为 ehbot-p10-api-20261015-a，阶段未完，保留至阶段留痕/会话终态/提交核验后精确清理。P9 task_plan 已纠正为提交 f60412b/038 冻结。P10 rc12 不提升、039 不冻结；继续旧审核入口与固定批量结果，再处理其余域，不提交未验收阶段。P11 两项元数据同步缺口仍在；P12 Linux 实跑缺环境，单独记未验证。
+
+### P10 审核批次与来源下载/打包接续（仍未验收，2026-10-15）
+
+**审核接通。** 旧单项 Web、旧 requeue API、批量 JSON/Web 改走共享原子审核。候选列表 SQL 同时读取稳定 UUID/版本和行状态，列表快速通过携带本行前置条件，不逐行补查。039 新增 work_review_batches 与固定子拒绝回执；子成功/拒绝均先查固定回执、再在短事务裁决，不因原请求已成功但另一个准备失败而报告矛盾结果。批次中断后重发从原子回执继续，不将原成功按当前状态重算 skip；未知 UUID 拒绝不伪造作品记录。批次键与单项作品键互斥。Web 单项冲突保留原条件；列表已有选择时实时更新保留原状态/版本并提示。
+
+**任务接通。** WorkCommands.enqueue 和 review.application.enqueue_work 支持按来源下载/convert；回执先于可用性和网络准备，锁外准备后最终 CAS/原队列入队/回执一起提交。转换只从原 enqueue_for_candidate 提取 prepare_enqueue，已有内部流水线不强加客户端版本。API、六个旧 Web 入口、HTTP/WS 重发统一；原任务即使已完成/失败/取消，同键只返回原任务，不复活它。明确重做读新作品版本、用新键；响应 revision/task_revision 仍是任务版本，work_revision 是作品版本。原档 UUID 和 P8 精确输入不变，Web 版本冲突保留原条件。
+
+**验证。** review-batches 两文件 **20/0/0/0，4.761 秒**；review-contracts 首次 **12/2/0/0，6.754 秒**，测试把同键成功误当冲突、误用不存在的 /candidates/pending。修正后 HTTP **4/0/0/0，6.202 秒**；最终审核/批次/HTTP/真实 038→039 升级四文件 **25/0/0/0，11.784 秒**。迁移测试在副本注入 039 中途失败，DDL/迁移记录整笔回滚，重试 UUID 稳定、完整性/外键通过，不改真实库或冻结迁移。
+
+旧审核四文件 **137/10/0/0，243.440 秒**：八个新测试 helper 漏导入、两个旧快速通过缺版本。补导入/版本后复验 **18/2/0/0，28.363 秒**，余下两个来源未知的旧夹具此前没有在 P10 元数据组覆盖，需使用真实已注册的合成 Bot 和受控 transport；最终两条 **2/0/0/0，3.153 秒**。没有放宽产品账号/来源合同。真实 HTMX/Alpine DOM 增加已选列表保留原节点/状态/版本/key 场景，root/proxy 两场景 exit0。
+
+enqueue-core 初次 **19/2/0/0，7.283 秒**：两条测试给下载/编辑复用了默认 edit 键，正确返回 IDEMPOTENCY_CONFLICT；改独立键。最终入队领域/HTTP 两完整文件 **10/0/0/0，5.643 秒**。API/作品/入队三完整文件 **97/0/0/0，164.226 秒**；下载/Bot用户/Telegraph/种子四完整文件 **83/3/0/0，68.645 秒**，三条 Telegraph 旧审批没版本，补齐后完整文件 **12/0/0/0，6.034 秒**。原打包工作流/产物流水线两完整文件 **44/0/0/0，28.629 秒**。这些新失败均已修正且进程终态。
+
+**当前基线与接手。** 26 份 XML 按 classname/name 取最新结果，**439 个不同用例通过**，0 failure/error/skip，非整组/整库运行；**2772 collected，仅收集**。第一次 Python 读最新 PowerShell collect 日志误按 UTF-8，实际重定向为 UTF-16 BOM，按 BOM 重读得到精确计数；不据失败解析声称成功。compileall、CodeGraph sync 与 git diff --check 通过（仅常规 CRLF 告警）。README/USAGE/REALTIME_API/PHASES/计划/task_plan/findings/P10 audit 同步。
+
+P10 下一步：候选删除/已下载管理（复用持久 removal 和 P8 journal）、手动新增、设置/规则/AI/密码库/v2 与全域草稿。039 仍可实验性扩展，rc12 不提升；原迁移数断言仍须在阶段验收时收口。所有本轮测试/Node 工具会话已终态，TEMP 仍只 ehbot-p10-api-20261015-a，阶段未完不提前清理/提交；models.py 既有 BOM 排除。每阶段验收后立即暂存该阶段代码/正式测试/同步文档、本地提交并核实 SHA，再进下一阶段。总目标 P3–P12 active；P11/P12 未开始，无供应商实请求、真实库升级、推送、发布、部署。
+
+### P10 候选删除与冲突页面接续（仍未验收，2026-10-15）
+
+**实现。** WorkCommands.remove / review.application.remove_work 将所见作品身份/版本与原 ArchivedWorkService 持久 removal/停止操作/墓碑/固定回执放进同一事务；旧 _begin_removal_sync 只增加可选外部事务。准备在锁外，最终重查版本；同键回执先于作品存在性与目录查询。新 POST /api/v1/works/{id}/delete、旧 Web 删除及原候选批量删除都接通，HTTP↔WS 同一结果；原内部 purge/remove 仍供后台工作流使用，未冒充已下载域改造完成。
+
+单项返回202与固定 cleanup_status=PENDING；既有后台操作循环负责真实停止/清理，GET /removals/{id} 查询实时结果。重复命令不随清理进度改变，也不删除后来复用整数编号的新作品。批次复用 work_review_batches/子回执，不另建一套批次表；中断后保留已执行结果/原拒绝。单项冲突保留删除模式/身份/版本/key，批量冲突409保留选择及版本，已离开当前列表的项仍可按原批次重发；错误页不触发自动审核。
+
+**补收上一轮验证。** 工具会话66411与78051已终态exit0，review-filter-dom通过、work-fallback三文件18/0。显式筛选释放旧选择并读取新列表，后台广播仍保留原选择/状态/版本；base.html HTMX允许409/428错误页交换。
+
+**本轮验证。** 新正式删除领域6条/HTTP4条（含空原Tab冲突保留）；removal-core三文件17/0/0/0，5.912秒；removal-physical五文件30/0/0/0，27.582秒；removal-web三文件86/0/0/0，154.856秒。真实阻塞下载/迟到写屏障回归已改走新删除命令，保持“停止前文件不删/槽不释放”的合同。旧正向删除夹具明确GET获取版本；缺版本负向测试保留，旧删文件测试显式排空清理后才断言文件消失。上述组均首跑全通过，进程终态；最后realtime/log DOM root/proxy也exit0。compileall通过。
+
+**基线。** 2782 collected，仅收集；30份JUnit按classname/name取最新共472个不同用例通过，0failure/error/skip，非整组或整库运行。README/USAGE/REALTIME_API/P10 audit/PHASES/计划/task_plan同步。接续已下载管理（重下/重包/改名/去重与草稿）、手动新增、配置/规则/AI/v2；P11/P12仍未开始。rc12保持，039未冻结，P10未验收/暂存/提交；阶段验收后立即本地提交核实SHA再进入P11。TEMP仍ehbot-p10-api-20261015-a，本轮所有测试/DOM会话终态，阶段未完不清理。不读真实private、不改真实库、不请求供应商、不推送/发布/部署。
+
+### P10 已下载、归档路径及去重接续（未验收，2026-10-16）
+
+**实现。** 重下/重包/批量移除复用WorkCommands/ReviewBatches，下载投影与版本同SQL读取；最终精确原档入队/计算pin/任务/回执同事务。手工pin不重算；路径错误持久停车一次，锁外准备后再CAS。列表改名和详情精确归档路径复用P8 relocation journal，两个短事务核对版本，最终移动/路径/pin/可选重包/回执原子提交；SQL失败恢复原文件，真实进程退出后先恢复再按原命令重试。首次打包前只提交pin/任务/回执。JSON、旧表单、HTTP↔WS共享结果，409保留路径草稿/重包选项/原版本/key；真实抽屉与已下载选择root/proxy通过。
+
+去重GET只持久保存固定预览plan_id，POST必须提交plan_id/idempotency_key，不重算当前库。逐项删除事务同时核对保留项与待删项身份/版本；固定父/子成功及拒绝，中断重发续未完成项，后来新增项不加入旧计划。复用原持久移除与批次回执表，039仅增加计划表和路径pin版本触发器。旧库P5已自动合并且有唯一索引，去重测试现在明确模拟索引损坏的异常库；没有放宽产品约束。
+
+**验证与失败。** downloaded-contracts43/0，6.331秒；downloaded-legacy111条有5条旧重复gid夹具在构造时触发唯一约束；迁移后dedup-contracts20/0，7.972秒，首轮旧暂停去重测试需显式drain后断言清理审计，已补。rename-core5/0，1.503秒；rename-http12条有2条误重复enter已启动TestClient，修正后5条余1条parser只采隐藏字段却读取文本字段的断言；修正后rename-path排除去重108/0，79.829秒。最终rename-contracts21/0，11.219秒；dedup-http五文件29/0，12.609秒。原Fake去重/已下载模拟测试已迁为真实DB/队列回滚与竞争合同，纯排名/状态测试保留。所有上述进程终态；realtime/log DOM root/proxy两次均exit0。
+
+**当前基线。** 2806 collected仅收集；44份JUnit按当前仍存在节点过滤、取最新结果共646个不同相关用例通过，0failure/error/skip，非整组/整库。第一次collect加-q叠加项目addopts只显示每文件计数，不能据此过滤节点；覆盖addopts后子进程输出默认GB编码导致UTF-8解析失败，设置PYTHONIOENCODING后正确得到节点清单。diff --check通过，仅常规CRLF提示。README/USAGE/REALTIME_API/PHASES/计划/task_plan/P10 audit同步；编译/最终CodeGraph接续核对。
+
+P10下一步手动新增持久受理/重发，再配置/规则/AI/密码库/API Key/v2及全域草稿。rc12保持，039未冻结，models.py新增UUID/revision为正式改动，仅既有BOM差异不提交。HEAD仍f60412b，暂存区空，未提前验收/提交P10；P11/P12未开始，阶段验收后立即本地提交核实SHA再进入下一阶段。TEMP仍ehbot-p10-api-20261015-a，不创建.scratch、不读真实private/升级真实库/请求真实供应商/推送/发布/部署。
+
+### P10 手动新增与设置保存区接续（未验收，2026-10-16）
+
+**手动新增。** manual_work_requests把成功回执放进原P5候选/元数据/下载意图发布事务；同键并发、丢响应重发均不重复网络。供应商拒绝固定FAILED，取消/失效会话/未知故障固定UNKNOWN；发布后后续失败不覆盖成功。HTTP/WS/旧表单共享并可查询操作；广播保留链接/key，换链接须显式新建另一操作。Web成功跳转核对稳定work_id，原作品删除/编号复用返回410，JSON保留原成功回执。manual-core18/0（5.982秒）、manual-contracts35/0（33.112秒）、manual-http10/0（5.671秒）、加入真实purge/编号复用后的manual-final10/0（5.51秒）；组间重叠不相加。manual-web首次16条3fail，是旧错误文案/一个正向POST漏key，修复后已覆盖35条最终组。补编号复用时误按位置传remove_work参数，改为真实purge_work关键字调用后通过。
+
+**设置核心。** 新SettingsCommands复用原服务验证，用独立SettingsDraft缓冲system/archive设置写入；复制的服务仅替换其数据库接缝，原服务及运行时读者不被临时修改。目录预检不持写锁，最终短事务再CAS、写全部设置、推进版本并保存安全回执；验证/回执失败全回滚，无变化保存也消费版本。七个区为system、parse、admission、archive-limits、auto-pack、template、directories；039未冻结，新增配置版本、字段归属、回执及实际变化触发器。内部设置修改也推进相应版本，不相干维护字段不推进。GET快照读前后核对版本，三次竞争返回SETTINGS_BUSY，防止旧值配新版本。系统缓存提交后串行重读，回执重放补偿未刷新。
+
+**跨端/UI。** JSON写入成功改为固定scope/revision/status，值另GET；旧表单/WS同核心，缺版本/key428，旧版本409。同区冲突保留原值/版本/key，模板预览也保留；只有显式“已核对，采用当前版本保存草稿”采用当前版本和新键，确认命令可重发。实时广播按data-settings-action匹配并保留原DOM。README/USAGE/REALTIME_API/P10 audit/PHASES/计划/task_plan/findings同步；未增环境变量，.env.example无需改。
+
+**验证与留痕。** settings-core9/0（1.01秒），首次settings-http12条1fail（测试错误拼出EXHENTAI_TORRENT，改用真实DEFAULT_DOWNLOAD_SOURCE_PRIORITY），settings-contracts13/0（6.62秒）；加强重启/预览及038配置保留/DDL回滚后的settings-final-contracts14/0（6.90秒）。realtime/log真实HTMX/Alpine DOM根路径与/ehbot均通过；compileall、CodeGraph sync、diff --check通过。一次npm被PowerShell执行策略阻止，改npm.cmd；实际DOM复用既有具名TEMP的dom/node_modules/jsdom，没有重新安装依赖。初轮settings-legacy六文件251条37fail/0error（378.427秒），主要旧测试遗漏前置条件/从保存响应取快照，另有旧WS打包漏作品版本；已逐入口显式迁移先读版本/保存/再读快照，不放宽产品门禁。最后两组settings-legacy-fixed及settings-runtime仍在运行，结果待核实，不宣称最终全部通过。
+
+**接手。** 仍P10未验收/暂存/提交；HEAD f60412b、rc12/038、039实验性，P11/P12未开始。先核实回归会话12863（settings-legacy-fixed）及72949（settings-runtime），JUnit/文本均在TEMP/ehbot-p10-api-20261015-a；随后重算collect/current-node最新通过数。再继续qBittorrent/profile、规则、AI供应商/Key/模型/chain/参数、密码库/API Key、安全回执与v2/能力目录及全域入口核验。models.py保留正式UUID/revision字段，仅原BOM差异排除。每阶段验收后立即暂存本阶段代码/正式测试/同步文档，检查暂存diff、本地提交并核实SHA后再进入下一阶段；仅暂存不算交付，不提前提交未完成P10。TEMP阶段未完保留，不创建.scratch，不读真实private/升级真实库/请求供应商/推送/发布/部署。
+
+**最终补验与覆盖（上述待核实会话已完成）。** settings-legacy-fixed180/0/0/0（305.041秒），settings-runtime99/0/0/0（106.797秒），两会话exit0。最后发现服务器错误响应若仍保留原dirty节点，会丢失显式确认控件；换入服务器表单后若未继续标dirty，后续广播又会覆盖草稿。设置错误/预览与手动表单均补dirty，realtime在这些表单失败时换入服务器控件；广播仍保留原版本/key。settings-draft-final四文件16/0（9.32秒），新增真实DOM“冲突→出现确认控件→再次广播保留”场景root/proxy通过（会话8551 exit0）；首次DOM旧状态断言期待“实时已连接”，当前带草稿时应显示设置变化/原版本提示，修正后通过。2829 collected仅收集；57份JUnit按当前仍存在节点过滤取最新，942个不同相关用例通过，0failure/error/skip，非整库。CodeGraph sync/diff --check通过，未增加生产依赖，所有测试/Node会话终态。
+
+当前下一动作按P10 audit：剩余归档配置、逐记录规则、AI、密码库/API Key、v2与全域入口核验。9.7A已明确规则等独立记录各自版本，不引入整组版本导致无关规则互相冲突。qBittorrent每轮读当前配置且停止已有instance_url不符拒绝，配置命令需同时核对原实例/领取/完成交错；本轮仅调查，未改它的保存或执行代码。阶段仍未验收/暂存/提交，P11/P12未开始，不以当前已通过的切片提前阶段提交。
+
+### P10 逐条审批/路径规则接续（未验收，2026-10-16）
+
+**实现。** 039为两种规则回填稳定rule_uuid，原version即逐条revision；UUID不可改，内部内容变化和启停也推进版本。RuleCommands在短事务先读固定回执，再核对数字ID/UUID/版本，调用原DB保存并写回执；删除后旧回执保留，编号复用拒绝旧身份。原DB保存/读取只增加外部事务接缝，内容和版本同SQL读取。路径模板校验提取原服务纯函数复用。成功回执仅domain/rule_id/rule_uuid/revision/action/status，读取当前值另GET；新增expected_revision=0，编辑/启停/删除需原身份/版本，缺失428、过期409、删除或编号复用410。
+
+**入口与草稿。** JSON/WS/旧表单全部接同核心，同键重发不重新创建/修改/删除；表单空UUID与JSON未带UUID规范为同一新增请求。各规则独立版本，接受无变化操作也消费原版本。冲突和试跑保留原名称/条件行/路径/版本/key，显式确认采用当前版本与新键；再次并发仍会冲突。实时刷新复用settings表单匹配，已消失规则的拒绝操作也保留真实节点。旧测试明确先GET版本后写入、保存后另读快照，正式并发合同直接检查真实端点，不放宽产品门禁。
+
+**验证与失败。** rules-core首组9条8fail：新夹具误用小写language，改用项目实际Title词汇后9/0（0.972秒）。rules-http三文件16条6fail：误把不返回值的认证helper当CSRF，改从实际页面读取后HTTP六条6/0（8.197秒）。随后补无变化启停、删除回执失败回滚、真实038规则升级回填/DDL失败整笔回滚；rules-final六文件78/0/0/0（33.678秒），rules-legacy五文件237/0/0/0（315.219秒），工具会话22348/81876均exit0。一次补丁hunk顺序倒置导致校验失败，无部分修改；按顺序拆分后应用。首轮pytest默认临时根退出清理权限告警，后续统一指定具名TEMP下basetemp，不删除其他会话目录。realtime/log真实HTMX/Alpine DOM增加规则冲突→确认控件→再次广播与原规则消失的拒绝操作保留，根路径和/ehbot均exit0（会话90616）。compileall、diff检查通过；CodeGraph最终同步接续核对。
+
+**基线与接手。** 2846 collected仅收集；63份JUnit按当前仍存在节点过滤并取最新共1015 distinct passed，0failure/error/skip，非整组/整库。README/USAGE/REALTIME_API/PHASES/计划/task_plan/findings/P10 audit已同步；无环境变量变化，.env.example无需改。P10仍未验收/暂存/提交，HEAD=f60412b，rc12保持、039未冻结，027–038不改写。所有测试/DOM工具会话终态；TEMP仅ehbot-p10-api-20261015-a，阶段未完保留，无.scratch。下一步qBittorrent/工具profile、AI配置与网络动作、密码库/API Key安全回执、v2/能力目录及全域核验；P11/P12未开始。阶段全部验收后立即暂存本阶段代码/正式测试/同步文档，审查暂存diff、本地提交并核实SHA再进入下一阶段；总目标P3–P12继续active，无真实库升级/供应商请求/推送/发布/部署。
+
+### P10 qBittorrent配置与执行交错接续（未验收，2026-10-16）
+
+**实现。** torrent成为第八个SettingsCommands保存区，039登记真实torrent_client_*等八个存储键；复用原服务验证、隔离准备与最终CAS/加密写入/固定安全回执。JSON省略字段保留、空密码保留，拒绝掩码。敏感内容使用archive私有主密钥HMAC，不在普通回执写明文或裸SHA。首次主密钥读/生成通过进程共享线程锁，覆盖并发to_thread及服务副本；沿用单调度进程约束与原私有原子文件写入。HTTP、WS与原表单同核心；表单明确转换未勾选开关。
+
+**执行与草稿。** 正常poller原已有原实例/hash/attempt标签核对，不重复添加防护。新增MockTransport交错证明：推送中修改配置，原请求仍用捕获的不可变配置、持久资源仍绑原实例；新地址无法确认旧停止/释放槽；恢复原实例并修正凭据/目录后可确认。complete_if_ready只被注入从未调用的_torrent_verify，没有当前可达调用；不把遗留实现当线上漏洞、不恢复旧工作流，留全域核验清理判断。服务器错误响应不回填密码，保留非敏感草稿/原版本/key/显式确认；浏览器在新控件换入后将当前密码保留为DOM属性，不写入HTML属性。无脚本失败时提示重新填写想修改的密码，空值保留现有密码。README/USAGE/REALTIME_API同步，修正USAGE仍称共享种子可附着及P3未验收的旧事实。
+
+**验证与失败。** torrent-settings-core首组18条17pass/1fail（5.06秒）：Forms只解析隐藏字段，新测试误用它读取文本输入；改断言实际HTML后torrent-settings-final四文件32/0（7.97秒）。torrent-contracts七文件150条首跑148pass/2fail（86.13秒），旧队列页面测试遗漏新版配置前置条件导致保存428；显式先读取设置版本后，torrent-legacy-final两条2/0（6.73秒），按节点取最新共150个不同用例通过。另torrent-legacy-api两条2/0（2.89秒，73 deselected）。含新在途改实例合同、038真实升级与DDL失败整笔回滚、原种子流水线、原AI凭据服务与设置合同。realtime/log真实HTMX/Alpine DOM根路径和/ehbot通过（会话83946已exit0），验证密码只在浏览器属性保留而服务器冲突控件正常显示。所有测试进程终态。
+
+**基线与接手。** 2855 collected仅收集；68份XML按当前仍存在节点过滤并取最新1116 distinct passed、0failure/error/skip，非单次整组/整库。统计文件仍在具名TEMP ehbot-p10-api-20261015-a，阶段未完成保留。P10未验收/暂存/提交，HEAD=f60412b，rc12不提升、039未冻结；027–038不改写。阶段规则已核实：全部验收后立即暂存代码/正式测试/同步文档，审查暂存diff并本地提交，核实记录SHA再进入下一阶段。本次无环境变量变更，.env.example无需调整。下一步工具profile/安装、AI配置与网络动作、密码库/API Key安全回执、v2/能力目录与全域入口/草稿核验，另核对手动新增FAILED回执existing_candidate_id编号复用。P11/P12未开始；P3–P12总目标保持active，无真实库升级/供应商请求/推送/发布/部署。
+
+### P10工具profile逐条命令接续（未验收，2026-10-16）
+
+**实现。** 039为archive_tool_profiles回填profile_uuid/独立revision；UUID、id与name不可变，内部真实内容/启停变更推进版本。模型/读取与序列化同SQL带身份/版本，原DB setter只增加可选外部事务。ProfileCommands复用原验证，在同一短事务先查安全回执，再校验稳定身份/版本、保存与登记结果；无变化接受也消费旧版本。不同profile独立编辑，删除重加后旧成功回执保持原结果，新操作的旧身份返回410且不修改新记录。新增PUT /api/v1/settings/archive/profiles/{name}，原Web表单与WS共用相同核心；JSON可部分提交，冲突保留路径/超时/启停草稿及原版本/key，明确确认再采用当前版本。后台广播即使不再返回原profile也保留浏览器草稿节点；原生错误响应在原profile已删除时的草稿仍须最终补验。
+
+**验证。** profile-core九条9/0（2.55秒）；profile-contracts五文件118/0（34.94秒，包含原归档流水线、profile命令、qBittorrent设置、038迁移与归档处理单元）；增强删除重加后原成功回执及真实038升级/失败DDL整体回滚/重复initialize身份不变后，profile-final两条2/0（0.76秒）。realtime/log真实DOM根路径与/ehbot通过（会话85567已exit0），新增已消失profile的草稿身份/原版本/路径保留。Python compileall通过，CodeGraph同步完成。一次工具检查错误临时指定core.autocrlf=false，使现有CRLF被当成整文件尾空白输出；这不是源码空白错误，不转换现有文件行尾，随后恢复项目Git配置重新执行diff --check核对。
+
+**基线与接手。** 2863 collected仅收集；71份XML按当前节点取最新1193 distinct passed、0failure/error/skip，非单次整组/整库。所有测试/DOM会话终态；TEMP仍仅ehbot-p10-api-20261015-a，阶段未完成不清除证据；无.scratch。README/USAGE/REALTIME_API/PHASES/AGENTS/处理计划/task_plan/findings/P10核对表同步，无环境变量变更。P10未验收/暂存/提交，HEAD=f60412b，rc12保持、039未冻结、027–038不改写。下一步工具安装持久操作（旧同步Web入口/固定.incoming/线程退出及实际文件互斥尚未处理），AI供应商/Key/模型/chain/参数及网络动作、密码库/API Key安全回执、v2与全域入口/草稿核验；另核对手动新增失败回执existing_candidate_id编号复用及profile原生删除错误页草稿。complete_if_ready无可达调用，遗留接口清理留最终核验，不恢复旧流程。P11/P12未开始；阶段全部验收后立即暂存本阶段代码/测试/文档、审查暂存diff、本地提交并核实记录SHA，再进入P11。总目标继续active，无真实供应商/真实库升级/推送/发布/部署。
+
+### P10 稳定失败身份与工具安装持久操作接续（未验收，2026-10-16）
+
+**范围与实现。** 上一目标轮只核对阶段提交规则，归类为no progress；本轮已实际实现并验证。重复异常在判重事务携带作品UUID，删除多余的事务外数字ID预查，复用原锁内claim；手动失败回执固定数字ID/UUID，渲染标题同SQL核对身份。成功跳转及重复提示携带work_id，详情打开时核对原对象；原回执缺稳定身份不猜当前编号。正式测试覆盖判重后、失败保存前删除重用，以及已经显示的旧链接稍后打开。profile原生错误响应在原记录已无时保留仅供页面渲染的草稿行；不写数据库、不采用同名新身份。
+
+ToolchainCommands与039新增独立toolchain_version/toolchain_operations。安装受理、版本递增与固定202回执同事务，另一端过期/并行安装明确拒绝；同键重发不再次下载，结果另GET。原Web、JSON/WS、启动自动安装同核心；表单冲突保留原版本/key，确认才形成新命令。提交协程用shield覆盖commit→dispatch间隙，后台安装复用原ArchiveSettingsService与run_sync收束真实线程；停机先拒绝新受理、等待执行，再停止worker会话。启动将遗留RUNNING标UNKNOWN，旧后台派发核对会话/状态；UNKNOWN时自动安装也不另造新键重装。实际installer使用OS文件锁，覆盖线程/服务副本/CLI；替换失败恢复.previous，中断的旧目录在下次下载前恢复。回执只含安全状态/当时目标版本，不记录异常内容或路径。
+
+**验证与失败。** duplicate-before正式用例先复现缺existing_work_id；profile-deleted-before两条1pass/1fail，证实原生删除页丢草稿。identity首组37条32pass/5fail（39.62秒）：新测试的连接替身缺telegram_user，四个旧测试仍把带查询参数的跳转当数字ID；修正测试读取URL路径和替身后五文件47/0（46.40秒）。identity-contracts数据库/详情/迁移65条63pass/2fail（73.82秒）：旧测试写死38，以及用sqlite3裸连接关闭外键后删除导致work_versions悬挂；改为039基线与原database.connection，最终两条2/0（0.39秒），未削弱产品约束。
+
+toolchain-core集成/真实归档单元两文件31/0（2.59秒），含跨线程/独立子进程互斥、真实替换失败回退、断线继续派发、取消/停机等待线程。toolchain-contracts归档/profile/038升级/worker四文件54/0（36.15秒）；加强失败回执写入前编号重用、038升级回滚及跨通道明确确认后toolchain-final三条3/0（2.47秒）。最后补“启动自动安装也不能重发UNKNOWN”与旧派发阻止，toolchain-lifecycle-final三文件16/0（5.66秒）。realtime/log DOM新增工具安装草稿与原版本/key经后续广播保留，根路径及/ehbot通过（会话16100 exit0）。compileall通过；所有测试/DOM会话终态。
+
+**基线与接手。** 2875 collect-only；79XML按当前节点（含class名）取最新1264 distinct passed、0failure/error/skip，非单次整组/整库。中间统计漏将测试class并入classname而少计，已纠正；只以上述最终过滤统计为准。README/USAGE/REALTIME_API/PHASES/AGENTS/处理计划/task_plan/findings/P10核对表同步，无环境变量变更，.env.example无需改。HEAD仍f60412b、rc12保持、039未冻结、027–038不改写；P10未验收/暂存/提交，P11/P12未开始。TEMP仍仅具名ehbot-p10-api-20261015-a，无.scratch。下一步AI供应商/Key/模型/chain/参数、健康用量与编辑版本分离、独立持久网络操作；再密码库/API Key安全回执、v2能力与全域入口/草稿审计。complete_if_ready遗留清理留最终核验。整阶段验收后立即暂存代码/正式测试/同步文档，审查暂存diff、本地提交并核实记录SHA，再进入P11。总目标继续active，无真实供应商/真实库升级/推送/发布/部署。
+
+### P10 AI总开关接续（未验收，2026-10-16）
+
+**实现与证据。** 审计确认AI供应商CRUD、模型登记/启停/参数、模型链、网络验证/拉取等仍走旧入口。先完成总开关的真实缺口：新正式用例复现无版本PUT仍200并改值。ai-master为第九个独立SettingsCommands保存区，复用SettingsDraft与原save_ai_enabled，039登记真实ai_enabled键。CAS/写入/回执同事务，内部实际改值也推进版本；健康/用量及其他功能保存区不影响它。JSON/WS/原表单共用固定回执，当前值另GET；原表单缺复选框与JSON enabled=false归一，冲突保留复选框/原版本/key，明确确认才用新键和当前版本保存。测试旧入口显式read/save/read，不放宽前置条件。
+
+**验证。** ai-master-before单用例按预期失败（200而非428）；接入后ai-master-core四文件15/0（6.63秒），覆盖真实并发仅一端成功、其他设置独立、固定回执、写回失败回滚及原功能控制链。增加内部写版本、真实038升级保留旧关闭值与新scope、旧JSON读保存读之后，ai-master-final四条4/0（3.42秒）。realtime/log DOM增加总开关复选框草稿及原版本/key随广播保留，根路径和/ehbot通过（78775 exit0）。compileall通过。最终2877 collect-only；81XML按当前节点取最新1266 distinct passed、0failure/error/skip，非整组/整库。
+
+**下一步。** 供应商保存/删除稳定身份和原子回执：AiProviderService.save_provider集中验证，Database._save_ai_provider_sync需要最小外部事务接缝；再Key/模型/chain/参数及持久网络动作。当前add_models只登记不验证，不能恢复旧“添加必须测试通过”的门禁。verify_model先读provider/model再网络，最后仅按数字model_id写last_verify_*，必须解决不可变配置/凭据捕获与迟到身份检查。健康/用量不能增加编辑revision。密码库/API Key、v2、全域入口与草稿审计仍待完成；P11/P12未开始。文档与接续入口已同步，无环境变量变更。P10未验收/暂存/提交，HEAD=f60412b，rc12保持、039未冻结、027–038不改写；整阶段验收后立即审查暂存diff、本地提交并核实SHA，不以总开关切片冒充阶段交付。总目标继续active，无真实供应商/真实库升级/推送/发布/部署。
+
+### P10 AI稳定身份与供应商共享命令接续（未验收，2026-10-16）
+
+**实现。** 新正式事件门闩测试先复现8个迟到写回问题：供应商/模型/Key删除后复用数字ID、修改参数或停用Key后，旧请求仍把验证成功写到当前对象；旧Key请求还会增加新Key的失败/冷却/用量。039回填AI三类稳定UUID和独立revision，供应商另有keys_revision/models_revision；内部旧写者同样由触发器推进配置版本，健康/用量/冷却/验证不推进。配置修改清除旧验证。模型验证最终短写核对原供应商UUID/编辑版本/凭据版本与模型UUID/编辑版本，变化返回AI_CONFIGURATION_CHANGED且不写当前配置；密文读取和Key健康写入绑定原Key与供应商身份/版本。链JOIN投影、两处DTO切片及序列化同步扩展。
+
+AiProviderCommands复用提取的原本地校验及DB可选外部connection接缝，CAS/保存/删除/固定安全回执同事务。新增使用ai-providers集合版本，编辑逐供应商；删除额外核对Key与模型子配置版本，避免连带删除另一端刚加的配置，纯元数据编辑仍独立。ai-catalogue为快照前后核对epoch，不是全局编辑锁。语义归一后HMAC摘要，普通回执无配置/秘密。同键回放先于当前对象查询，接受无变化也消费编辑版本。HTTP/WS/原表单同核心；冲突、删除及同编号新对象下保留原草稿/版本/key，明确确认才用当前版本与新键；跳转携带provider_uuid防旧回执选择新对象。浏览器后续广播保留原供应商表单DOM，即使新快照已经无此记录。
+
+**验证与修正。** ai-identity-red八条全部按预期失败。identity-core新交错加AI提供商单元86/0（20.336秒）；identity-contracts四文件191/0（207.830秒），含真实038升级整体DDL回滚、重复initialize身份不变及原配置/健康保留。provider-core3/0；HTTP首轮3pass/3fail为隐藏字段parser误查文本name，改为隐藏字段加HTML值检查。provider-contracts109条106pass/3fail：一处辅助函数误用于路径规则、漏一处创建前置条件、TestClient.delete不接受json；修回原路径规则调用、显式read/save/read与request('DELETE')后相关节点通过。补子配置删除冲突/明确确认、配置健康版本隔离、选择Key后替换但尚未读密文的交错，最终ai-catalogue-final五文件97/0（27.008秒），legacy-final22/0（25.338秒）。DOM根路径与/ehbot通过（64965 exit0）；compileall通过。没有未终态测试/DOM进程。
+
+**基线/交接。** 2895 collect-only（1.06秒）；90XML按当前完整节点去重取最新1276 distinct passed、零failure/error/skip，非单次整组/整库，不在历史1266上简单加新增/组数。首次统计因项目addopts的-q叠加只得到文件计数，统计为0，已用-o addopts=''重取完整节点后重算；中间0不作为测试结论。README/USAGE/REALTIME_API/PHASES/AGENTS/处理计划/task_plan/findings/P10核对表同步，无环境变量变更。下一步公开Key/模型/chain/参数命令，以及验证/模型拉取的独立持久操作、原始配置捕获与重启UNKNOWN；后续密码库/API Key/v2/全域审计。P10未验收/暂存/提交，HEAD=f60412b，rc12保持、039实验且未冻结，027–038不改写，P11/P12未开始；整阶段验收后立即暂存代码/正式测试/同步文档，审查暂存diff、本地提交核实SHA再进入下一阶段。原models.py仅既有BOM差异排除，UUID/revision正式改动保留。具名TEMP仍ehbot-p10-api-20261015-a，无.scratch，无真实供应商/真实库升级/推送/发布/部署；总目标保持active。
+
+### P10 Key/模型与三scope模型链接续（未验收，2026-10-16）
+
+**范围与实现。** 上一目标轮只核对阶段提交约定，归类为no progress；本轮实际完成Key/模型公开命令与模型链。AiCatalogueCommands八种本地操作共用HTTP/WS/原表单：新增用父keys_revision/models_revision，Key/模型启停、删除及模型参数用稳定UUID/独立revision。取消冷却额外要求所见health_revision，健康变化返回409；成功reset只消费健康版本，同键重放不清掉后续冷却。039为Key补健康版本和实际变化触发器。原服务提取key_values/model_values纯校验，原DB八个写方法加外部connection，CAS/原写入/安全回执同事务；加密锁外，敏感内容私有主密钥HMAC，回执不含Key/密文/参数。接受无变化也消费相应版本；删除/编号复用不接受旧身份，原成功回执仍返回原对象结果。
+
+原生页面所有操作补所见条件和稳定data-settings-action，删除确认使用独立具名form避免嵌套。错误页独立草稿面板保留原动作/非敏感值/身份/版本/key，包括已消失对象；明确确认才形成新版本/键。多选模型名保留全部条目。错误context剔除api_keys，HTML中的Key输入始终为空；实时拒绝只用textarea.value保留当前输入并采用服务器的新冲突控件。后续广播保留草稿DOM；无JS或重新打开页面需重新粘贴。原供应商错误/重放跳转仍带UUID。
+
+AiChainCommands使用ai-chain:default/archive_path/candidate_admission独立版本。原服务的主力/备用/移出/端点截断排序提取chain_order，原DB整链保存加可选外部connection，最终锁内读链/核对身份和scope版本/排序/保存/回执。内部旧保存、模型或供应商删除导致成员变化均经触发器推进受影响scope；模型参数与健康不推进排序版本。接受无变化也消费版本，不承诺递增恰为1。ai-catalogue仍仅是快照epoch；paths/parse读取也核对相关scope和catalogue，不用全局编辑锁。三个共用页面编辑器提交稳定模型身份；下拉项携带编号:UUID，服务端不能代补最新UUID。冲突保留原动作/步数/模型/版本/key，确认只更新链版本和键；原模型删除/编号复用后没有采用新对象的确认。移除本轮替换后已无调用的_ai_call/_ai_section_of/_chain_model_id与无用导入。
+
+**验证与失败留痕。** 上轮未写文档的ai-items-core两文件26/0（7.132秒）包括8种回执写入失败整体回滚。新增HTTP首跑因夹具把Key的keyword-only参数按位置传而1fail，改partial显式命名后15/0（21.77秒）。加强真实页面条件后首跑24条16pass/8fail，原因是测试用action.endsWith(path)漏掉?provider查询参数；改urlsplit只匹配路径，最终原生八动作和038迁移9/0（11.58秒）。旧页面/JSON入口已显式read/save/read，未放宽产品门禁：Key/模型旧入口46/0（71.33秒）。链核心加原AI单元93/0（19.71秒），含scope独立、真实CAS一赢家、固定回放、重启、编号复用、参数/健康不动排序版本、删除推进版本、回执失败整体回滚、端点排序；HTTP/WS/三个原页面18/0（26.55秒）。链旧入口46/0（57.39秒）。
+
+最终ai-items-chain-final七文件86/0（83.91秒），覆盖实际038升级保留Key失败数/加密信封/原链、DDL失败新列/表整体回滚、重复初始化身份/版本不变，及删除推进受影响scope；ai-chain-adjacent五文件80/0（95.18秒），含设置核心/HTTP、profile、规则HTTP和原API域；加强模型参数不推进链版本1/0（0.48秒）。realtime/log真实HTMX/Alpine在root及/ehbot均通过（93143 exit0），新增Key明文只在DOM属性、模型参数及链选择/原版本/key/明确确认随广播保留。compileall通过，CodeGraph同步完成，diff --check=0。所有测试/DOM工具进程终态。
+
+**当前接手。** 2967 collect-only（1.16秒）；103XML按当前完整节点（包括class）和报告mtime取最新1356 distinct passed、0failure/error/skip，非单次整组/整库；统计保存具名TEMP的current-latest-counts.txt。README/USAGE/REALTIME_API及PHASES/AGENTS/处理计划/task_plan/findings/P10核对表同步，无环境变量变化。HEAD=f60412b，暂存区空，027–038无改动，rc12保持，039实验未冻结，P10未验收/提交，P11/P12未开始，无.scratch。整阶段验收后再暂存本阶段代码/正式测试/文档，审查暂存diff、本地提交并核实记录SHA，再进入P11；仅排除models.py既有BOM差异。
+
+下一步路径AI参数/prompt/model-source公开保存区与原子回执：当前PUT /settings/paths/ai多次原服务save仍可能部分写入，Web同样未接CAS；独立prompt reset与两个model-source旧入口也须覆盖，不能只改一个JSON端点。然后验证/拉取模型持久网络受理（原始配置/凭据捕获、网络锁外、丢响应不重发、重启UNKNOWN）、密码库/API Key安全回执、v2能力与全域旧入口/草稿核验。candidate admission参数已在SettingsCommands，model-source是另一个保存区，别将前者重做。complete_if_ready遗留接口清理留最终核验；Linux guardian实跑仍留P12。无真实供应商/真实库升级/推送/发布/部署，总目标继续active。
+
+### P10 路径AI参数、提示词与模型来源接续（未验收，2026-10-16）
+
+**本轮实际进度。** 上一目标轮仅核对阶段提交规则，属于no progress；本轮实际接通路径AI保存区。上轮遗留的SettingsCommands/039改动经核对后补齐全部旧入口。path-ai复用原save_ai_*与save_path_source校验，SettingsDraft缓冲八字段，在一次短事务中核对版本、写设置和固定回执。独立path-ai-prompt与大面板共用path-ai版本；path-model-source/candidate-model-source分别独立，旧内部写者由039字段映射和触发器推进对应版本。受理无变化也消费旧版本。Series开启先保持原错误优先级，再在最终写事务内复查当前总开关、按当前模型来源选择的有效链；准备期间关闭AI/删除模型/切到空自定义链均整体拒绝，准备不持写锁。
+
+HTTP四种动作与WS/原表单共用SettingsCommands，新增PUT /api/v1/settings/paths/ai/models补原来只有Web的路径模型来源。模型来源JSON model_source与表单ai_model_source归一。重置提示词改独立非嵌套form和独立幂等键，共用面板版本；preference_value增加可选action过滤，重置错误草稿不会把大表单的其他字段显示成空。原生错误页保留radio/prompt/数字/checkbox及原版本/key，明确确认才更换版本和新key，Series拒绝后保留勾选并允许取消。原回执重放不重写后来的提示词，后台广播保留未保存面板及重置/来源表单。
+
+**验证与错误留痕。** 初跑path-ai-core十二条8pass/4fail（1.597秒），均为测试夹具错误：误调用不存在的ai_path_settings reader，以及Database.save_ai_provider的default_params错误传dict；修正为查存储值与None后path-ai-public两文件22/0（20.176秒）。另补模型来源CAS一赢家、跨通道归一及无效输入版本不动，两文件共24条。最终path-ai-final五文件38/0（32.741秒），包括设置核心/HTTP和真实038升级；升级保留全部旧AI字段、初始三个scope=1、DDL失败整迁移回滚、重复initialize不改版本。path-ai-legacy旧Web两个类及完整settings_write_api文件90/0（160.899秒），全部显式read/save/read，未放宽产品前置条件。
+
+DOM新增面板prompt/数字/checkbox、reset原条件及model-source radio，真实HTMX/Alpine在root和/ehbot均通过（59268 exit0）。初次DOM因新增sourceKey与既有变量重名在解析阶段失败，改为modelSourceKey后通过。compileall通过；2991 collect-only，107XML按当前完整节点（含class）和报告mtime取最新1380 distinct passed、0failure/error/skip，非整库，不在旧累计数上加组数。所有测试/DOM句柄终态。
+
+**接手。** README/USAGE/REALTIME_API、PHASES/AGENTS/处理计划/task_plan/findings/P10核对表同步。HEAD=f60412b、暂存区空、冻结027–038未改、rc12保持、039实验未冻结；P10未验收/提交，P11/P12未开始，无.scratch。整阶段验收后再暂存代码/正式测试/同步文档、审查暂存diff、本地提交并核实记录SHA，再进入P11；仅排除downloads/models.py既有BOM差异。临时报告保留于具名TEMP ehbot-p10-api-20261015-a供P10最终验收，不创建仓库临时目录。
+
+下一步验证/拉取模型的独立持久网络受理：包含单模型、供应商全部/全局全部验证和模型列表拉取，受理捕获原供应商/模型/凭据身份与配置，锁外网络、断线后继续受理执行、同键不重发，重启未完成标UNKNOWN且不自动重发。现verify_model已有最终身份/配置写回屏障，但_ask仍在执行时查当前Key，verify_all执行时逐个再查模型，不能将现有屏障当作完整原始输入捕获；list_remote_models同样须接持久操作。复用既有ToolchainCommands/元数据持久操作的提交→派发屏蔽、后台收束与worker_session恢复方式。随后密码库/API Key安全回执及丢明文响应恢复语义、v2能力目录、全域旧Web/API/WS入口和草稿核验；complete_if_ready/_torrent_verify遗留接口最终审计决定移除，Linux guardian实跑留P12。无真实供应商/真实库升级/推送/发布/部署，总目标继续active。
+
+### P10 AI验证与模型拉取持久操作接续（未验收，2026-10-16）
+
+**进度分类。** 上一目标轮仅核对阶段提交规则，没有推进实现，属于no progress。本轮核对既有AI网络核心并补齐公开入口验收、拉取清单保存屏障、正式测试与全部接手文档；不是P10整阶段验收。没有在本轮启动子agent或创建.scratch。
+
+**核心与接线。** 新AiNetworkCommands/039操作与claim表覆盖fetch/model/provider/all。BEGIN IMMEDIATE短事务优先核对同键回执，再检查worker session、原UUID、配置/凭据/子列表版本，固定原provider/model及可用Key密文信封；网络锁外运行，不执行时重读后来的Key或逐个查新模型。普通操作表只存身份/版本及安全结果，不存地址/请求头/参数/明文/密文信封。同模型单项与批量操作通过model UUID claim互斥，不同模型可并行；拉取独立listing claim，不与模型验证争全局锁。原全局verify_all语义保持：所有enabled模型，包括disabled provider下的enabled模型。验证不消耗编辑版本。
+
+原AI service提取list_captured_models/verify_captured、信封解密与共享Key轮询，普通业务调用仍复用原服务。数据库最终模型验证除原配置/Key/模型身份版本外再核对operation RUNNING和worker session LIVE，迟到结果不能写当前或替换模型。普通结果/模型持久错误仅存安全code，页面为已知错误提供固定中文处理说明，不持久回填供应商原始错误文本。Key健康仍记录实际原请求事实，沿用原稳定身份屏障。
+
+受理commit→dispatch屏蔽客户端取消，同键相同内容跨HTTP/WS/原表单固定202 ACCEPTED/同ai_operation_id，同键不同内容409；缺条件428、配置冲突409、原对象消失/编号复用410、重叠探测409 AI_NETWORK_BUSY。返回安全result_url，另GET/no-store/鉴权读RUNNING/COMPLETED/FAILED/UNKNOWN，GET不重发。旧页面303跳结果页，最近10项可重开；API函数前缀api_避免与原Web url_for重名。原生拒绝保留UUID/版本/key，确认只更新版本/key，不采用替换UUID。停机先拒绝新请求并等待已受理真实网络，重启RUNNING→UNKNOWN/释放claim，不自动重发。
+
+**补查并修复。** 全局测试按钮原受default_chain控制，目录有模型但尚未入链时完全无表单，改按selectable_models展示。拉取结果初步仅在渲染时核对provider UUID/revision/keys_revision，仍存在“展示后另端改Key/端点，旧页面提交清单”的竞态：正式HTTP与原生测试先分别证明错误200/303。现勾选添加带discovery_operation_id；AiCatalogueCommands在原models-add CAS/保存/回执同一事务核对该操作为原配置的COMPLETED fetch，变化409 AI_DISCOVERY_STALE，不写模型/不消费集合版本。错误草稿保留选择/原操作，不提供确认过期清单；原已成功添加回执优先重放，后来编辑不使它失效。手动添加模型保留原独立集合版本语义。
+
+**测试与失败留痕。** 前一未写回文档的网络核心首跑97条88pass/9fail是新增夹具将add_key的keyword-only参数按位置传，修api_key/label后9/0；核心/038升级/worker21/0，均已终态。本轮public首跑漏必填label而10error；显式label后9pass/1fail，暴露全局测试表单被空链隐藏，修后通过。CodeGraph一次误传不支持的--depth，改原命令成功；扩大测试一次误写不存在tests/unit/test_ai_service.py，未执行用例，核对实际test_ai_providers.py后成功，不将失败调用算通过。
+
+新增核心交错验证两实例同key一网络、单/provider/all重叠、删除/数字ID复用后捕获原host/Key/model、第二模型在首请求受阻时被删/替换仍只发原输入、不同模型并行与独立拉取、回执/claim失败整体回滚、commit后断线继续、停机等待与拒绝新操作、真实WorkerSession重启UNKNOWN及旧会话迟到屏障、取消释放claim、安全错误不落明文。公开14条覆盖四action真实原生条件/正确Web URL、HTTP↔WS↔原表单同键、结果页与最近操作重开无网络、鉴权/no-store、冲突草稿/明确确认、编号复用拒绝，以及拉取选择保存时Key/端点变化拒绝与成功回执重放。真实038夹具补两表DDL失败整体回滚和重复initialize保留RUNNING操作/claim，恢复由WorkerSession负责。
+
+ai-network-final四文件42/0（57.812秒，包含旧TestAISettings），ai-discovery-contracts三文件51/0（76.901秒）；最新network/catalogue/038/worker/原AI单元六文件134/0（68.712秒），最后身份/HTTP/迁移三文件29/0（35.359秒）。各组有重叠，不相加。真实HTMX/Alpine DOM root和/ehbot通过，新增已删除模型的网络冲突草稿/原UUID/版本/key/确认控件保留，同时结果面板照常刷新。compileall通过；所有pytest/DOM进程终态。
+
+**基线与接手。** 3019 collect-only（1.13秒）；120XML按当前完整节点（包括class）及报告mtime取最新1408 distinct passed、0failure/error/skip，非整库。报告仍在具名TEMP ehbot-p10-api-20261015-a，current-latest-counts.txt可重算；统计不直接叠加旧基线与新组数。README/USAGE/REALTIME_API及PHASES/AGENTS/处理计划/task_plan/findings/P10审计同步，无环境变量变化。HEAD=f60412b、暂存区空、冻结027–038未改、rc12保持、039实验未冻结；P10未验收/提交，P11/P12未开始。整阶段验收后暂存代码/正式测试/同步文档，审查暂存diff、本地提交并核实记录SHA，再进入P11；仅排除downloads/models.py既有BOM差异。
+
+下一步密码库/API Key安全命令及一次明文丢响应恢复。当前PUT /settings/passwords与四个原生入口仍无CAS/持久回执，重试api-key-generate会替换原有效Key；pending_api_key为app.state全局一次槽，其他管理员会话可用?reveal=1消费，不能保留。应将原DB密码/凭据写者接入最终短事务、只存安全固定回执，明文仅发起请求一次；响应丢失时按合同核对后明确重新生成，不能重放时暗中替换或将明文写入通用回执/广播。原生展示须绑定实际发起会话，不能继续全局槽。然后v2能力目录、全域旧API/Web/WS/草稿核验、complete_if_ready/_torrent_verify不可达遗留清理裁决；P11其余缺陷、P12最终验收与Linux guardian实跑缺口保持原范围。无真实供应商/真实库升级/推送/发布/部署，总目标保持active。
+
+本轮结束核对：CodeGraph同步9个文件，compileall通过；标准git diff --check退出0，无检查错误（仅64行既有LF/CRLF及Git全局ignore权限警告，详情在具名TEMP/diff-check.txt）。曾为减少警告临时对单条检查加core.autocrlf=false，导致Windows CRLF被当作尾空白的假阳性；未改任何Git配置或批量转行尾，恢复项目原配置后的标准检查通过。暂存区空、HEAD=f60412b，027–038无diff，.scratch=False；所有工具测试/DOM进程已终态。
+
+### P10 密码库/API Key 接续（未验收，2026-10-16）
+
+**实现。** CredentialCommands四动作复用原DB写者/校验，锁外加密与生成，最终短事务CAS/写入/安全回执一起提交。039增加vault/api-key独立设置版本、密码UUID/编辑版本与实际内部写触发器；last_success和认证touch不推进配置版本。add保留按name upsert；delete核对原UUID/条目版本，删除或数字编号复用410。修复原密码upsert误用lastrowid导致查错ID。私有密钥HMAC处理含秘密输入的请求摘要，回执只存安全身份/版本/动作。
+
+**公开入口及明文。** HTTP/WS/四个原表单共享核心，缺条件428/旧版本409。API Key只有真正提交者的首次响应包含明文；同key重放固定安全回执，不再次生成，提交后取消会等待真实线程退出。DB重新initialize后原key仍可查回执。原生生成直接200/no-store显示本响应，删除main.py全局pending_api_key及settings_view.py的GET reveal读取；真实另一个密码派生登录无法读回。API Key bearer不能生成/撤销Key（403 PASSWORD_LOGIN_REQUIRED），密码Cookie/access bearer可以。丢响应先查安全回执及当前状态，再明确新key/当前版本替换。
+
+冲突保留名称、优先级、启停与原身份/版本/key；服务器不回填密码，实时提交只恢复浏览器DOM属性，无JS需重填。真实HTMX/Alpine下，同public_id后台刷新保留当前首次明文，Key变更/撤销/显式导航清除；删除的凭据草稿仍保留原条件和确认控件。
+
+**迟到健康回写。** 原conversion仅按数字password_id记上次成功，会错标后来修改或删除重建的条目。现同次读出密文和UUID/revision，解密后用ArchivePasswordAttempt捕获原输入（repr隐藏明文），conversion传同一组密码给processor，结果回写核对原UUID/版本/仍启用。修改/编号复用的旧结果不记成功；当前版本成功仍正常记录。
+
+**验证与失败。** 新核心13条含两实例同key只有一明文、多端同版本一赢家、独立scope、四动作回执失败整体回滚、原对象重放/编号复用、同名upsert、准备→提交CAS、真实重新initialize、提交后取消查回执、迟到健康与真实conversion传播。新公开7条含四action HTTP↔WS↔原表单、真实条件/428/no-store、第二密码登录/Key bearer权限、冲突草稿显式确认及删除编号复用。真实038升级夹具验证旧密文/health/有效Key保留、UUID回填、DDL失败整体回滚、重复initialize身份/版本不变。旧测试显式读取版本及成功后另GET快照，不伪造响应、不放宽产品门禁。
+
+首轮公开3fail是测试夹具未先生成可撤销Key、误用已失效初始密码、Forms解析器只读hidden；修正后200/0。生命周期首轮55pass/1fail是旧密码新增表单测试缺版本，补读后修复，另将原删除测试“新增未成功仍断言列表为空”的假阳性改为检查新增/删除实际成功。一次文档多文件patch因progress尾行空格不匹配整体拒绝，核实无部分落盘，改精确上下文后写回。
+
+最新公开/旧设置四文件200/0（304.32秒）；核心/真实038迁移/归档三文件46/0（22.93秒）；相邻公开/打包取消/转换日志/数据库四文件43/0（14.75秒）；DOM root及/ehbot通过。3039 collect-only（1.12秒），126XML按当前完整节点/报告mtime取最新1439 distinct passed、0failure/error/skip，非整库，组间不叠加。具名TEMP报告继续保留供P10验收，不建.scratch。
+
+**接手。** README/USAGE/REALTIME_API、PHASES/AGENTS/处理计划/task_plan/findings/P10核对同步。P10未验收/暂存/提交，HEAD=f60412b，rc12/冻结027–038保持、039实验未冻结；P11/P12未开始。接续v2任务域/能力目录及旧映射、全域旧入口/草稿和不可达complete_if_ready/_torrent_verify清理裁决。整阶段验收后才暂存代码/正式测试/同步文档、审查暂存diff、本地提交并核实记录SHA，再进入P11；仅排除downloads/models.py既有BOM差异。Linux guardian实跑留P12，无真实供应商/真实库升级/推送/发布/部署，总目标active。
+
+### P10 接续：v2任务域与全域遗漏入口（2026-10-16，未验收/未提交）
+
+v2任务列表/详情及七种任务控制、作品下载/精确产物打包/remove/purge、操作查询与原账号函数别名已挂载。task_id路径固定身份；v1/v2/WS共用应用命令/回执，列表/详情在同一SQLite读快照内，不公开provider原始载荷和内部资源地址。capabilities读取账号注册表/安全运行状态和qB配置，区分支持/已配置/当前可用，明确运行暂停/切源/WS接受与重放能力边界。HTTP幂等头归一覆盖各业务域，头体冲突409；Bearer审计名读取唯一管理员当前名。Web原validate_session已刷新名字，无需平行修复。
+
+活动同来源/同打包意图复用；异打包意图409；另一支持来源调用既有QueueControl的停止/切源操作。网络预检在锁外，事务复核task版本/来源引用并写操作+作品版本+回执；STOPPING期间不启动B，真实停止确认后才入队目标，打包意图随操作传递。打包任务不允许切下载来源。不可达complete_if_ready/torrent_verify注入及其专用方法/import已删除，未恢复旧直接种子完成路径。
+
+原v2相关六文件106/0（76.38秒）。扩展v2/入队三文件首轮新核心两fail为测试误调不存在process_pending_operations、复用edit幂等键；按真实process_operations和独立键修正后19/0（14.710秒）。最新v2/管理员/账号/队列五文件复验仍在运行，结果待收尾。
+
+全域比对发现尚未接P10合同的Web独有入口：全库重新归档、AI路径缓存清理、路径规则试跑/模板预览。前两者需要共享版本/回执命令，重新归档须固定范围及逐件结果、保留移动日志和精确输入；只读试跑/预览补JSON适配且复用原校验。继续完成这些缺口及文档/测试/最终审计，P10不提前验收或提交；rc12/039未冻结、027–038保持、HEAD=f60412b，总目标active。
+
+### P10 接续：维护命令、只读回执与原生 v2（2026-10-16，未验收/未提交）
+
+**维护核心。** 新增 archive/maintenance.py，复用 ReviewBatches 的父请求/逐件回执、WorkCommands 的 UUID/revision 与 relocation journal。规划前后核对全局 rearchive 范围版本，固定作品集、逐件身份/版本/精确输入产物、路径策略与 AI 答案；规划使用 conversion 副本禁用元数据 enricher，不进行 EH/模型网络。逐件提交再次 CAS，pin/精确入队/回执同事务；真实文件移动最终事务核对原版本、回执失败恢复原 CBZ。无效路径在实际子命令中原子写 WAITING_PATH，试跑仅报告。批次中断原键续作复用已经提交的子项；GET ?idempotency_key 只读回执，不继续执行，INCOMPLETE 表示最终报告未完成。125 件测试覆盖超过100项的全范围、不纳入受理后新作品。
+
+**交错与缓存。** 另一同键请求遇到 PREPARED 移动不能先冻结永久失败；PUBLICATION_RECOVERY_REQUIRED 返回可重试409，原请求仍可提交成功。受控线程暂停于准备日志提交后验证重复调用不写拒绝，释放后原结果可回放。逐件配置/元数据/AI答案/删除后编号复用均固定拒绝，不修改原文件。缓存清理使用 path-cache 独立版本、同事务 DELETE rowcount/固定 removed，不能使用含触发器变更的 total_changes；原回执不清除后来新答案。039 新增 rearchive/path-cache 触发器，进度/心跳不推进范围；实际038升级保留旧缓存/秘密/身份，DDL回滚/重复初始化通过，027–038未改。
+
+**入口与草稿。** JSON补重新归档/缓存清理/路径规则试跑/模板预览及只读回执，WS自动目录映射。模板预览提取同一样例/文件系统校验。旧维护表单使用共享设置宏，携带版本/key，force/dry_run冲突保留，明确确认才采用新条件；data-settings-action接入已有广播DOM保留。旧测试12处改为先读公开版本再提交，未恢复无条件写入。发现原生WS仅api.*过滤，新增v2.*对mobile不可用；现mobile/desktop共用api/v2且无web/reveal，真实Bearer WS任务控制与旧HTTP固定回放通过。
+
+**失败与验证。** 首次维护公开组5pass/4fail：三个调用了不存在的preference_command_fields，改为现有settings_command_fields；一个规则AST夹具缺kind/operator，改真实condition/LIKE合同。修后9/0。扩展核心/038/原规划四文件63/0（9.322秒）；旧维护12/0（17.094秒）。新增只读WS查询首次17/1，原因复用request_id=1，改独立ID；原生五文件55/1，旧断言仍要求全为api.*，改api/v2并补desktop/mobile双合同后最终57/0（66.265秒）。归档/元数据/移动恢复/取消/旧设置写API/DB/原规划七文件214/0（125.790秒）；真实HTMX/Alpine root和/ehbot维护草稿通过。compileall/CodeGraph/标准diff-check通过。一次脚本预计13处旧测试提交，实际12处，断言在写入前中止；核对后按12处修改，无部分落盘。首次collect重复-q只输出逐文件计数，已改-o addopts=取得完整节点后再统计。
+
+**当前基线与接手。** 3071 collect-only；142XML按当前完整节点/报告mtime取最新1579 distinct passed、0failure/error/skip，非整库。README/USAGE/REALTIME_API及PHASES/AGENTS/计划/task_plan/findings/P10审计同步。全P10新增正式合同与旧设置/API/身份/账号/队列集中组正在运行；日志目前有一失败，不能宣称全绿，须收尾实际句柄和XML。单独复验model-params跨通道用例1/0，不据此解释或掩盖整组失败。HEAD=f60412b、暂存区空，rc12保持、039实验未冻结；P10整阶段尚未验收/提交，P11/P12未开始，总目标active。仅排除models.py既有BOM，正式UUID/revision改动必须提交。所有报告保留在具名TEMP，不建.scratch；无真实供应商/真实库升级/推送/发布/部署。
+
+## R97 — P10 全域共享 API 与多端并发合同（0.3.0rc13 / schema039，2026-10-16）
+
+**交付范围。** WorkCommands/review.application统一作品元数据、审核、来源下载、精确打包和移除；固定作品UUID/编辑revision，版本/允许动作/原领域写者/持久回执在同一短事务提交，昂贵预检在锁外且最终复查。ReviewBatches固定父请求和逐件成功/拒绝；已下载改名、精确路径、重新归档复用P8移动journal，文件失败恢复原文件。去重固定预览，手动新增持久受理与UNKNOWN恢复，旧回执不打开复用数字ID的新作品。
+
+设置按独立保存区原子CAS，规则/profile/AI供应商/Key/模型分别有稳定身份/版本，健康和用量不推进配置版本。工具安装受理与真实文件OS锁/线程收束接通；AI测试/拉取捕获原供应商/模型/凭据，独立网络claim，断线继续、重启UNKNOWN不重发；过期拉取清单在保存事务再次拒绝。密码库/API Key共享安全HMAC回执，明文只在首次响应，没有跨会话全局槽；解压迟到健康核对原密码UUID/版本。v2任务/作品控制与账号别名、能力目录、v1兼容映射、HTTP幂等头、原生mobile/desktop的api/v2 WS均共享原业务。所有冲突保留草稿和原条件，显式确认才换版本/键。
+
+**最终补漏。** 逐Web写入口核对补齐手动画廊/预览/磁力三PUT和原表单SourceCommands。画廊合并还须确认目标UUID/revision；guard持久保存在reference operation，等待原路径停止期间目标变化固定失败且不允许旧意图重试。原P5内部调用没有guard，语义保持。039实际038升级覆盖旧reference NULL guard、失败DDL无残留和重复初始化保留新guard；027–038未修改。
+
+**集中失败与修复。** 原584条582pass/2fail：AI model-params失败点实际是WS退出CancelledError，修前新增确定性复现；finally用shield收束所有socket子任务，取消作为连接结束处理。维护并发测试按已有PREPARED合同允许可重试409，退出后原键回放且只移动一次。随后四文件76/0（89.668秒）、全P10新增合同及旧设置/API/身份/账号/队列/实时集中612/0（765.424秒）。不能用此前孤立1/0掩盖集中失败。
+
+来源首组23条20pass/3fail：测试未清审计FK及guard误插_read，修正为_validate_retry；公开67条64pass/3fail是parser仅读hidden，改为读取来源文本。83条曾全通过，但默认pytest清理pytest-current权限错误使退出非零，后续全部用具名任务basetemp。该复验83条82pass/1fail（95.146秒），确认页面/API预览Added跨秒使整份快照比较偶发失败；只固定该合同测试时钟，完整详情39/0（75.949秒，exit0），未放宽产品门禁或删除断言。真实HTMX/Alpine来源草稿/原身份版本key在root和/ehbot通过。一次USAGE多文件补丁因长段落上下文不匹配整体拒绝，核对后分块成功，无部分写入。
+
+**基线与边界。** 3088 collect-only；152份JUnit按当前完整节点（含class）和mtime取最新，共1623个不同相关用例通过，0failure/error/skip，非整库。compileall/CodeGraph/标准diff-check通过。README/USAGE/REALTIME_API、PHASES/AGENTS/处理计划/task_plan/findings/P10审计同步，无环境变量变更。039随本阶段本地提交冻结，rc13为本地验收版本。完整P10现在验收；立即精确暂存代码/正式测试/同步文档、审查暂存diff、单行本地提交并核实记录SHA再进入P11。保留models.py正式UUID/revision，仅排除原有BOM差异。P10具名TEMP在提交核对和留痕后精确清理，不建.scratch。
+
+P11仍需审批LIMIT饥饿、ComicInfo长写锁、缩略图PENDING竞态与pending元数据同步公平；P12最终合同、真实本地HTTP/WS/CBZ/迁移恢复和Linux guardian实跑仍待完成。没有运行全库测试、真实供应商、真实数据库升级、推送、发布或部署，总目标保持active。

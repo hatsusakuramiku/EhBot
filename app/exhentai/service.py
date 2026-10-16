@@ -114,11 +114,40 @@ class ExHentaiService:
         return resolved or self._work_path
 
     @_account_request
-    async def fetch_metadata_for_candidate(self, candidate_id: int) -> dict:
+    async def fetch_metadata_for_candidate(self, candidate_id: int, *, operation_id=None) -> dict:
         gid, token = await self._candidate_gid_token(candidate_id)
         metadata, gallery = await self._fetch_metadata(gid, token)
-        await self.persist_gallery_metadata(candidate_id, metadata, gallery)
+        if operation_id is None:
+            await self.persist_gallery_metadata(candidate_id, metadata, gallery)
+        else:
+            await run_sync(self._commit_metadata_fetch, candidate_id, operation_id, metadata, gallery)
         return metadata
+
+    def _commit_metadata_fetch(self, candidate_id, operation_id, metadata, gallery):
+        from app.review.commands import WorkCommandError, require_work_version, work_version
+        with self._database.connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            operation = connection.execute('SELECT work_id, revision, status, session_id FROM work_metadata_fetches '
+                                          'WHERE operation_id = ?', (operation_id,)).fetchone()
+            session = getattr(self._database, 'worker_session', None)
+            if (operation is None or operation[2] != 'RUNNING' or
+                    (operation[3] is not None and (session is None or session.session_id != operation[3]
+                        or session.stopping or connection.execute(
+                            "SELECT 1 FROM worker_sessions WHERE session_id = ? AND status = 'LIVE'",
+                            (operation[3],)).fetchone() is None))):
+                raise WorkCommandError('METADATA_FETCH_STALE', '元数据抓取操作已失效', status_code=409)
+            require_work_version(connection, candidate_id, operation[0], operation[1])
+            self._write_metadata(connection, candidate_id, metadata)
+            if gallery is not None:
+                self._write_torrents(connection, candidate_id, gallery)
+                self._write_cover(connection, candidate_id, gallery)
+            self._database._re_evaluate_candidate_metadata_rules_sync(candidate_id, connection)
+            if work_version(connection, candidate_id)['revision'] == operation[1]:
+                connection.execute('UPDATE work_versions SET revision = revision + 1 WHERE candidate_id = ?',
+                                   (candidate_id,))
+            result = {**work_version(connection, candidate_id), 'fetched_names': sorted(metadata)}
+            connection.execute("UPDATE work_metadata_fetches SET status = 'COMPLETED', result_json = ? "
+                               'WHERE operation_id = ?', (json.dumps(result), operation_id))
 
     @_account_request
     async def fetch_metadata_for_gallery(
@@ -177,6 +206,10 @@ class ExHentaiService:
             # Manual publication starts APPROVED; source metadata rules do not
             # undo that explicit approval (the normal reevaluator skips it).
             connection.execute("INSERT INTO manual_download_intents(candidate_id) VALUES(?)", (candidate_id,))
+            from app.review.manual import current_manual_request
+            request = current_manual_request.get()
+            if request is not None:
+                request.complete(connection, candidate_id)
             return candidate_id
 
     async def enrich_candidates_for_review(self, candidates: list) -> int:

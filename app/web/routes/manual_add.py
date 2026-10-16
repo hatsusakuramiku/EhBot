@@ -19,9 +19,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
 from app.candidates import manual as manual_ingest
-from app.db.database import DuplicateCandidateError, DuplicateGalleryCandidate
-from app.exhentai.service import ExHentaiDownloadError
-from app.review.service import ReviewError
+from app.review.commands import WorkCommandError, WorkCommands
+from app.review.manual import add_manual_work, manual_result
 from app.web import deps
 
 router = APIRouter()
@@ -39,27 +38,15 @@ def _exhentai_configured(request: Request) -> bool:
     )
 
 
-async def _ingest_manual_link(request: Request, raw: str) -> int:
-    """The shared ingest, with this layer's services.
-
-    The sequence itself (shape, duplicate, gallery) lives in
-    `app.candidates.manual` so the JSON API runs the identical code.
-    """
-    return await manual_ingest.ingest_manual_link(
-        raw,
-        database=deps.database(request),
-        exhentai_service=deps.exhentai_service(request),
-        orchestrator=deps.review_orchestrator(request),
-        download_service=deps.download_service(request),
-    )
-
-
 async def _render_manual_add(
     request: Request,
     *,
     error: str | None = None,
     status_code: int = 200,
     existing_candidate_id: int | None = None,
+    existing_work_id: str | None = None,
+    draft: dict | None = None,
+    operation: dict | None = None,
 ):
     """Render the form, with the two outcome blocks it can carry.
 
@@ -74,13 +61,19 @@ async def _render_manual_add(
         "not_configured_message": NOT_CONFIGURED_MESSAGE,
         "existing_candidate_id": existing_candidate_id,
         "existing_candidate_title": None,
+        "existing_work_id": existing_work_id,
+        'draft': draft, 'operation': operation,
+        'layout': deps.page_layout(request),
     }
     if existing_candidate_id is not None:
         existing = await deps.database(request).get_candidate(
             existing_candidate_id
         )
-        if existing is not None:
+        if existing_work_id and existing is not None and existing.work_id == existing_work_id:
             context["existing_candidate_title"] = existing.display_title
+        else:
+            context['existing_candidate_id'] = None
+            context['error'] = '原作品已被删除或无法核实身份，请重新查询作品列表。'
     return deps.templates(request).TemplateResponse(
         request=request,
         name="manual_add.html",
@@ -97,6 +90,38 @@ async def manual_add_page(request: Request):
     return await _render_manual_add(request)
 
 
+@router.get('/manual-add/operations/{operation_id}')
+async def manual_add_operation(request: Request, operation_id: str):
+    redirect = deps.require_authenticated(request)
+    if redirect:
+        return redirect
+    try:
+        result = await manual_result(deps.database(request), operation_id)
+    except WorkCommandError as exc:
+        return await _render_manual_add(request, error=exc.public_message, status_code=exc.status_code)
+    if result['status'] == 'COMPLETED':
+        return await _completed_result(request, result)
+    details = result.get('error', {}).get('details', {})
+    return await _render_manual_add(request, operation=result,
+        existing_candidate_id=details.get('existing_candidate_id'), existing_work_id=details.get('existing_work_id'),
+        error=result.get('error', {}).get('message'), status_code=200)
+
+
+async def _completed_result(request: Request, result: dict):
+    """Follow the original work identity even when its numeric row was reused."""
+    try:
+        current = await WorkCommands(deps.database(request)).version(result['candidate_id'])
+    except WorkCommandError as exc:
+        if exc.status_code != 404:
+            raise
+        current = None
+    if current is None or current['work_id'] != result['work_id']:
+        return await _render_manual_add(request, error='原操作已完成，但原作品已被删除；不会跳转到复用编号的新作品。',
+                                        status_code=410)
+    return RedirectResponse(request.url_for('work_detail', candidate_id=result['candidate_id']).path
+                            + '?work_id=' + result['work_id'], status_code=303)
+
+
 @router.post("/manual-add")
 async def manual_add_submit(request: Request):
     redirect = deps.require_authenticated(request)
@@ -105,30 +130,16 @@ async def manual_add_submit(request: Request):
     form = await request.form()
     deps.validate_csrf(request, str(form.get("csrf_token") or ""))
     raw = str(form.get("input") or "").strip()
-    # Checked before the link is even looked at, so a deployment with no
-    # connection is told what to fix rather than that its link is unreadable.
-    if not _exhentai_configured(request):
-        return await _render_manual_add(
-            request, error=NOT_CONFIGURED_MESSAGE, status_code=400
-        )
+    draft = {'url': raw, 'idempotency_key': form.get('idempotency_key')}
     try:
-        candidate_id = await _ingest_manual_link(request, raw)
-    except DuplicateCandidateError as exc:
-        # Not an error to fix: the work is already here. Stop at the form and
-        # offer the existing candidate, rather than redirecting, so the paste
-        # visibly did nothing.
-        return await _render_manual_add(
-            request,
-            existing_candidate_id=exc.existing_candidate_id,
-            status_code=409,
-        )
-    except (ReviewError, ExHentaiDownloadError) as exc:
-        return await _render_manual_add(
-            request,
-            error=str(getattr(exc, "public_message", exc)),
-            status_code=400,
-        )
-    return RedirectResponse(
-        request.url_for("work_detail", candidate_id=candidate_id).path,
-        status_code=303,
-    )
+        result = await add_manual_work(deps.database(request), deps.exhentai_service(request),
+            deps.review_orchestrator(request), deps.download_service(request), draft,
+            configured=_exhentai_configured(request))
+    except WorkCommandError as exc:
+        return await _render_manual_add(request, error=exc.public_message, status_code=exc.status_code,
+            existing_candidate_id=exc.details.get('existing_candidate_id'),
+            existing_work_id=exc.details.get('existing_work_id'), draft=draft)
+    if result['status'] != 'COMPLETED':
+        return await _render_manual_add(request, draft=draft, operation=result,
+                                        status_code=202 if result['status'] == 'RUNNING' else 409)
+    return await _completed_result(request, result)

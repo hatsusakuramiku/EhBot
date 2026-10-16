@@ -226,7 +226,15 @@
   /* Re-render with the same Jinja template. Untouched keyed rows are retained;
    * dirty forms survive through hx-preserve, and selections/focus/scroll are
    * restored after HTMX/Alpine finish adopting changed markup. */
-  function swap(html, submitted, writingResponse) {
+  function swap(html, submitted, writingResponse, preserveSecretDraft) {
+    // A rejected settings response never echoes a password. Keep only the
+    // browser's current input, alongside the server's new conflict controls.
+    var torrentPassword = preserveSecretDraft && submitted && submitted.matches('[data-settings-action="torrent"]')
+      ? submitted.elements.password.value : null;
+    var aiKeys = preserveSecretDraft && submitted && submitted.matches('[data-ai-catalogue-command="keys-add"]')
+      ? submitted.elements.api_keys.value : null;
+    var vaultPassword = preserveSecretDraft && submitted && submitted.matches('[data-credential-command="add"]')
+      ? submitted.elements.password.value : null;
     closeMenu();
     var main = document.getElementById("main");
     if (!main || !window.htmx) return;
@@ -234,8 +242,22 @@
       connectionStatus("来源配置有更新，未保存草稿已保留；提交时将校验原版本");
       return;
     }
+    if (!writingResponse && main.querySelector("[data-settings-action][data-dirty]")) {
+      connectionStatus("设置有更新，未保存草稿已保留；提交时将校验原版本");
+    }
+    if (!writingResponse && main.querySelector('[data-candidate-form] input[name="candidate_ids"]:checked, [data-downloaded-form] input[name="candidate_ids"]:checked') &&
+        main.querySelector('[data-candidate-form] input[name^="expected_revision_"], [data-downloaded-form] input[name^="expected_revision_"]')) {
+      connectionStatus("列表有更新，已保留当前选择与原版本；提交时将校验冲突");
+      return;
+    }
     var parsed = new DOMParser().parseFromString(html, "text/html");
     var fragment = parsed.getElementById("main") || parsed.body;
+    var revealedKey = !writingResponse && main.querySelector('[data-api-key-reveal][data-one-time-secret]');
+    var freshReveal = fragment.querySelector('[data-api-key-reveal]');
+    if (revealedKey && freshReveal && revealedKey.dataset.publicId === freshReveal.dataset.publicId) {
+      freshReveal.id = revealedKey.id;
+      freshReveal.setAttribute("hx-preserve", "true");
+    }
     var checked = Array.from(main.querySelectorAll('input[name="candidate_ids"]:checked,input[name="job_ids"]:checked')).map(function (node) {
       return [node.name, node.value];
     });
@@ -251,6 +273,9 @@
       freshDrawer.setAttribute("hx-preserve", "true");
     }
     function formKey(form) {
+      if (form.hasAttribute("data-work-source")) return "work-source:" + form.getAttribute("data-work-source");
+      if (form.hasAttribute("data-settings-action")) return "settings:" + form.getAttribute("data-settings-action");
+      if (form.hasAttribute("data-manual-form")) return "manual-add";
       if (form.hasAttribute("data-source-form")) return "source:" + form.getAttribute("data-source-form");
       if (form.matches("[data-metadata-editor]") && form.id) return form.id;
       return [form.getAttribute("action"), form.getAttribute("method"), Array.from(form.querySelectorAll('input[type="hidden"]'))
@@ -262,7 +287,7 @@
     forms.forEach(function (form, index) {
       var fresh = (freshByKey[formKey(form)] || []).shift();
       if (form === submitted) { delete form.dataset.dirty; return; }
-      if (!fresh && form.dataset.dirty && form.hasAttribute("data-source-form")) {
+        if (!fresh && form.dataset.dirty && form.matches("[data-work-source],[data-source-form],[data-rule-command],[data-profile-command],[data-ai-provider-command],[data-ai-catalogue-command],[data-ai-chain-command],[data-ai-network-command],[data-credential-command]")) {
         fresh = form.cloneNode(true);
         fragment.appendChild(fresh);
       }
@@ -292,6 +317,18 @@
     });
     var opened = Array.from(main.querySelectorAll("details")).map(function (node) { return node.open; });
     function restore() {
+      if (vaultPassword !== null) {
+        var vaultDraft = main.querySelector('[data-credential-draft][data-credential-command="add"]');
+        if (vaultDraft) vaultDraft.elements.password.value = vaultPassword;
+      }
+      if (torrentPassword !== null) {
+        var torrentForm = main.querySelector('[data-settings-action="torrent"]');
+        if (torrentForm) torrentForm.elements.password.value = torrentPassword;
+      }
+      if (aiKeys !== null) {
+        var aiDraft = main.querySelector('[data-ai-catalogue-draft][data-ai-catalogue-command="keys-add"]');
+        if (aiDraft) aiDraft.elements.api_keys.value = aiKeys;
+      }
       main.querySelectorAll('input[type="checkbox"]').forEach(function (node) {
         if (checked.some(function (pair) { return pair[0] === node.name && pair[1] === node.value; })) {
           node.checked = true;
@@ -315,7 +352,12 @@
     window.htmx.swap(main, fragment.innerHTML, { swapStyle: "innerHTML", settleDelay: 20 }, { afterSettleCallback: restore });
   }
   function load(url) {
+    document.querySelectorAll('[data-one-time-secret]').forEach(function (node) { node.remove(); });
     document.querySelectorAll("#candidate-filters,#downloaded-filters").forEach(function (form) { delete form.dataset.dirty; });
+    document.querySelectorAll('[data-candidate-form] input[name="candidate_ids"]:checked, [data-downloaded-form] input[name="candidate_ids"]:checked').forEach(function (node) {
+      node.checked = false;
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+    });
     current = local(url).pathname + local(url).search;
     revision += 1;
     scheduleRefresh();
@@ -383,7 +425,8 @@
       if (frame.format === "html" && frame.status < 500) {
         refreshAgain = frame.sequence < sequence;
         if (frame.type === "command.result") delete form.dataset.dirty;
-        swap(frame.data, frame.type === "command.result" || form.hasAttribute("data-source-form") ? form : null, true);
+        swap(frame.data, frame.type === "command.result" || form.matches("[data-work-source],[data-source-form],[data-settings-action],[data-manual-form]") ? form : null, true,
+          frame.type === "command.error");
       }
       if (frame.type === "command.error") {
         form.dataset.dirty = "true";

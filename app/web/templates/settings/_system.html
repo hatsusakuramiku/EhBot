@@ -32,15 +32,16 @@
     <section class="ui-panel">
       <h2 class="ui-section-title">运行参数</h2>
       <p class="ui-hint">保存后无需重启；新任务采用新参数，旧客户端重新读取配置后采用新的轮询间隔。</p>
-      <form class="ui-form" method="post" action="{{ url_for('save_system_settings') }}"
+      <form data-settings-action="system" {% if settings_draft and settings_draft.action == 'system' %}data-dirty="true"{% endif %} class="ui-form" method="post" action="{{ url_for('save_system_settings') }}"
             style="margin-top: var(--s-4)">
+        {{ settings_command_fields('system', 'system') }}
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="ui-field">
           <label for="sys-concurrency">来源并发上限</label>
           <input class="ui-input" id="sys-concurrency" name="source_concurrency" type="number"
                  min="{{ bounds.source_concurrency.minimum }}"
                  max="{{ bounds.source_concurrency.maximum }}"
-                 value="{{ system.source_concurrency }}">
+                 value="{{ preference_value('system', 'source_concurrency', system.source_concurrency) }}">
           <small>
             同时抓取的来源数，{{ bounds.source_concurrency.minimum }}–{{ bounds.source_concurrency.maximum }}。
             {%- if not system.source_concurrency_overridden %} 当前为默认值。{% endif %}
@@ -52,7 +53,7 @@
           <input class="ui-input" id="sys-poll" name="poll_interval_ms" type="number"
                  min="{{ bounds.poll_interval_ms.minimum }}"
                  max="{{ bounds.poll_interval_ms.maximum }}"
-                 value="{{ system.poll_interval_ms }}">
+                 value="{{ preference_value('system', 'poll_interval_ms', system.poll_interval_ms) }}">
           <small>
             仅供尚未迁移的客户端读取；WebUI 使用 WebSocket，此值不控制页面更新。
             {%- if not system.poll_interval_overridden %} 当前为默认值。{% endif %}
@@ -64,7 +65,7 @@
                  type="number"
                  min="{{ bounds.auto_approval_interval_minutes.minimum }}"
                  max="{{ bounds.auto_approval_interval_minutes.maximum }}"
-                 value="{{ system.auto_approval_interval_minutes }}">
+                 value="{{ preference_value('system', 'auto_approval_interval_minutes', system.auto_approval_interval_minutes) }}">
           <small>
             后台按此间隔对「待审核」应用自动审批规则，{{ bounds.auto_approval_interval_minutes.minimum }}–{{ bounds.auto_approval_interval_minutes.maximum }}。
             新候选入库时也会立即评估一次，不必等到下个周期。
@@ -78,7 +79,7 @@
                  type="number"
                  min="{{ bounds.mobile_access_ttl_seconds.minimum }}"
                  max="{{ bounds.mobile_access_ttl_seconds.maximum }}"
-                 value="{{ system.mobile_access_ttl_seconds }}">
+                 value="{{ preference_value('system', 'mobile_access_ttl_seconds', system.mobile_access_ttl_seconds) }}">
           <small>
             密码登录得到的 access token 有效多久，{{ bounds.mobile_access_ttl_seconds.minimum }}–{{ bounds.mobile_access_ttl_seconds.maximum }} 秒。
             默认 43200（12 小时）。到期由客户端用 refresh token 自动续期。
@@ -92,7 +93,7 @@
                  type="number"
                  min="{{ bounds.mobile_refresh_ttl_seconds.minimum }}"
                  max="{{ bounds.mobile_refresh_ttl_seconds.maximum }}"
-                 value="{{ system.mobile_refresh_ttl_seconds }}">
+                 value="{{ preference_value('system', 'mobile_refresh_ttl_seconds', system.mobile_refresh_ttl_seconds) }}">
           <small>
             refresh token 有效多久，{{ bounds.mobile_refresh_ttl_seconds.minimum }}–{{ bounds.mobile_refresh_ttl_seconds.maximum }} 秒。
             默认 2592000（30 天）。每次刷新都会轮换并重新计时。
@@ -104,7 +105,7 @@
           <label for="sys-log-level">日志等级</label>
           <select class="ui-select" id="sys-log-level" name="log_level">
             {% for choice in logs.levels %}
-              <option value="{{ choice.code }}"{% if choice.code == system.log_level %} selected{% endif %}>{{ choice.label }}（{{ choice.code }}）</option>
+              <option value="{{ choice.code }}"{% if choice.code == preference_value('system', 'log_level', system.log_level) %} selected{% endif %}>{{ choice.label }}（{{ choice.code }}）</option>
             {% endfor %}
           </select>
           <small>
@@ -116,7 +117,7 @@
         <div class="ui-field">
           <label for="sys-timezone">时区</label>
           <input class="ui-input" id="sys-timezone" name="timezone" list="timezone-options"
-                 value="{{ system.timezone }}" spellcheck="false"
+                 value="{{ preference_value('system', 'timezone', system.timezone) }}" spellcheck="false"
                  placeholder="Asia/Shanghai">
           {#- The list is a shortcut, not a whitelist: the service accepts any
               IANA-shaped name, because the host may have zones this list does
@@ -148,7 +149,7 @@
             <select class="ui-select" id="sys-source-{{ source.code }}"
                     name="priority_{{ source.code }}">
               {% for rank in download_source_ranks %}
-              <option value="{{ rank }}"{% if rank == source.rank %} selected{% endif %}>
+              <option value="{{ rank }}"{% if rank|string == preference_value('system', 'priority_' ~ source.code, source.rank)|string %} selected{% endif %}>
                 第 {{ rank }} 顺位
               </option>
               {% endfor %}

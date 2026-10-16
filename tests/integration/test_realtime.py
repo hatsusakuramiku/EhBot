@@ -1,4 +1,5 @@
 """WebSocket authentication, shared business endpoints and invalidations."""
+from tests.settings_commands import save_then_read_preferences, observed_preferences
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -84,6 +85,27 @@ def test_snapshot_and_catalogue_use_existing_api(tmp_path):
         assert app.state.event_bus.subscriber_count == 0
 
 
+def test_cancelled_command_drains_socket_without_cancelled_future(tmp_path, monkeypatch):
+    import asyncio
+    from threading import Event
+    import httpx
+
+    entered = Event()
+
+    async def cancelled(*args, **kwargs):
+        entered.set()
+        raise asyncio.CancelledError()
+
+    with signed_client(tmp_path) as (client, app):
+        monkeypatch.setattr(httpx.AsyncClient, 'request', cancelled)
+        with client.websocket_connect('/ws/ui', headers={'Origin': 'http://testserver'}) as ws:
+            hello(client, ws)
+            ws.send_json({'type': 'command', 'request_id': 'cancelled', 'name': 'api.list_candidates'})
+            assert ws.receive_json()['type'] == 'command.accepted'
+            assert entered.wait(5)
+        assert app.state.event_bus.subscriber_count == 0
+
+
 def test_html_fragment_and_unknown_command_and_duplicate(tmp_path):
     with signed_client(tmp_path) as (client, _):
         with client.websocket_connect("/ws/ui", headers={"Origin": "http://testserver"}) as ws:
@@ -108,7 +130,7 @@ def test_two_subscribers_receive_committed_http_write(tmp_path):
             with client.websocket_connect("/ws/ui", headers={"Origin": "http://testserver"}) as two:
                 hello(client, two)
                 token = client.get("/candidates").context["csrf_token"]
-                response = client.put("/api/v1/settings/system", json={"poll_interval_ms": 3000}, headers={"X-CSRF-Token": token})
+                response = save_then_read_preferences(client, 'put', "/api/v1/settings/system", json={"poll_interval_ms": 3000}, headers={"X-CSRF-Token": token})
                 assert response.status_code == 200
                 a, b = one.receive_json(), two.receive_json()
                 assert a["type"] == b["type"] == "state"
@@ -124,7 +146,7 @@ def test_json_write_command_and_error_reuse_http_validation(tmp_path):
         name = next(k for k, v in catalogue.items() if v["path"] == "/api/v1/settings/system" and v["method"] == "PUT")
         with client.websocket_connect("/ws/ui", headers={"Origin": "http://testserver"}) as ws:
             hello(client, ws)
-            result, _ = call(ws, name, {"body": {"poll_interval_ms": 3200}})
+            result, _ = call(ws, name, {"body": {**observed_preferences(client, '/api/v1/settings/system'), "poll_interval_ms": 3200}})
             assert result["type"] == "command.result"
             assert client.get("/api/v1/settings/system").json()["system"]["poll_interval_ms"] == 3200
             result, _ = call(ws, "api.get_work", {"params": {"candidate_id": "999"}}, request_id="2")
@@ -141,7 +163,7 @@ def test_bearer_access_and_revocation(tmp_path):
             ws.send_json({"type": "hello", "protocol": PROTOCOL, "client": "mobile"})
             ready = ws.receive_json()
             assert ready["type"] == "ready"
-            assert all(name.startswith("api.") for name in ready["commands"])
+            assert all(name.startswith(("api.", "v2.")) for name in ready["commands"])
             result, _ = call(ws, "api.list_candidates")
             assert result["status"] == 200
             response = client.post("/api/v1/auth/logout", headers={"Authorization": "Bearer " + access})
@@ -252,7 +274,9 @@ def test_real_repack_start_and_finish_are_pushed_to_other_connection(tmp_path):
             hello(client, observer)
             with client.websocket_connect("/ws/ui", headers={"Origin": "http://testserver"}) as operator:
                 hello(client, operator)
-                result, frames = call(operator, "api.convert_work", {"params": {"candidate_id": str(candidate_id)}})
+                from tests.work_commands import observed_review
+                result, frames = call(operator, "api.convert_work", {"params": {"candidate_id": str(candidate_id)},
+                    'body': observed_review(client, candidate_id)})
                 assert result["type"] == "command.result"
                 assert frames[0]["type"] == "command.accepted"
                 with app.state.database.connection() as connection:

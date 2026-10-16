@@ -9,13 +9,13 @@ appearing beside it.
 from __future__ import annotations
 
 import asyncio
+import json
 from urllib.parse import quote_plus, urlsplit
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 from app.api.events import EVENT_DOWNLOAD
-from app.api.actions import apply_metadata_patch
 from app.api.contracts import ApiError
 from app.api.ingestion import retry_ingest_operation
 from app.api.works import (
@@ -23,14 +23,12 @@ from app.api.works import (
     effective_library_path,
     work_snapshot,
 )
-from app.candidates.links import (
-    GALLERY_URL_PATTERN,
-    find_magnet_ref,
-    normalize_preview_url,
-)
-from app.candidates.entries import IngestError
 from app.candidates.operations import list_operations
 from app.review.models import METADATA_FIELDS, field_label
+from app.review.application import edit_metadata as apply_metadata_edit
+from app.review.application import rename_work
+from app.review.commands import WorkCommandError, WorkCommands
+from app.review.service import ReviewError
 from app.web import deps
 
 router = APIRouter()
@@ -75,10 +73,19 @@ async def edit_work_metadata(request: Request, candidate_id: int):
              for name, value in form.items() if name.startswith("lock_original__")
              and ("lock__" + name.removeprefix("lock_original__") in form) != (value == "1")}
     try:
-        result = await apply_metadata_patch(request, candidate_id, {"fields": fields, "locks": locks},
+        revision = int(str(form.get('expected_revision', '')))
+    except ValueError:
+        revision = None
+    try:
+        result = await apply_metadata_edit(deps.database(request), deps.archived_work_service(request),
+            candidate_id, {"fields": fields, "locks": locks,
+            'work_id': form.get('work_id'), 'expected_revision': revision,
+            'idempotency_key': form.get('idempotency_key')},
                                             request.session.get("username", "admin"))
-    except ApiError as exc:
-        return await render_review_error(request, candidate_id, exc.message)
+    except (WorkCommandError, ReviewError) as exc:
+        return await render_work(request, candidate_id, error=exc.public_message,
+                                 status_code=exc.status_code if isinstance(exc, WorkCommandError) else 400,
+                                 metadata_draft=dict(form))
     return RedirectResponse(request.url_for("work_detail", candidate_id=candidate_id).path
                             + "?message=" + quote_plus(result["sync_message"]), status_code=303)
 
@@ -254,6 +261,12 @@ async def render_work(
     error: str | None = None,
     message: str | None = None,
     status_code: int = 200,
+    metadata_draft: dict | None = None,
+    review_draft: dict | None = None,
+    enqueue_draft: dict | None = None,
+    removal_draft: dict | None = None,
+    path_draft: dict | None = None,
+    source_draft: dict | None = None,
 ):
     """The one detail page, for a work at any stage.
 
@@ -282,6 +295,17 @@ async def render_work(
         library_path=await effective_library_path(request),
         archived=deps.optional_service(request, "archived_work_service"),
     )
+    expected_work_id = request.query_params.get('work_id')
+    if expected_work_id is not None:
+        try:
+            current = await WorkCommands(deps.database(request)).version(candidate_id)
+        except WorkCommandError as exc:
+            if exc.status_code != 404:
+                raise
+            current = None
+        if (snapshot is None or snapshot['work_id'] != expected_work_id
+                or current is None or current['work_id'] != expected_work_id):
+            raise HTTPException(status_code=410, detail='原作品已被删除，不会打开复用编号的新作品')
     if snapshot is None:
         operations = await asyncio.to_thread(list_operations, deps.database(request), candidate_id)
         for operation in operations:
@@ -302,6 +326,12 @@ async def render_work(
             "error": error,
             "message": message,
             "metadata_fields": METADATA_FIELDS,
+            "metadata_draft": metadata_draft,
+            "review_draft": review_draft,
+            "enqueue_draft": enqueue_draft,
+            "removal_draft": removal_draft,
+            "path_draft": path_draft,
+            "source_draft": source_draft,
             "field_label": field_label,
             "current_user": request.session.get("username", "admin"),
             # Resolved server-side rather than with `history.back()`: the page
@@ -347,23 +377,18 @@ async def save_archive_path(
         return redirect
     deps.validate_csrf(request, csrf_token)
     service = deps.archived_work_service(request)
+    from app.web.routes.candidates import review_preconditions
+    form = await request.form()
+    payload = {**review_preconditions(form), 'directory': directory, 'filename': filename, 'repack': repack is not None}
     try:
-        result = await service.set_archive_path(
-            candidate_id,
-            directory=directory,
-            filename=filename,
-            operator_name=str(request.session.get("username") or "admin"),
-        )
-        if repack is not None:
-            await deps.conversion_service(request).enqueue_for_candidate(
-                candidate_id
-            )
+        result = await rename_work(deps.database(request), service, deps.conversion_service(request),
+            candidate_id, payload, str(request.session.get('username') or 'admin'), strict=True)
     except Exception as exc:  # noqa: BLE001 - domain refusals carry a message
         message = getattr(exc, "public_message", None)
         if message is None:
             raise
         return await render_work(
-            request, candidate_id, error=str(message), status_code=400
+            request, candidate_id, error=str(message), status_code=getattr(exc, 'status_code', 400), path_draft=payload
         )
     request.app.state.event_bus.publish(
         EVENT_DOWNLOAD, candidate_id=candidate_id
@@ -405,142 +430,52 @@ async def work_detail(
     )
 
 
-@router.post("/works/{candidate_id}/eh-ref")
-async def set_work_eh_ref(
-    request: Request,
-    candidate_id: int,
-    ex_gid: str = Form(),
-    csrf_token: str = Form(),
-):
-    """Re-point a work at a different ExHentai gallery, for metadata.
-
-    ``ex_gid`` must be a full ExHentai/e-hentai gallery URL, because the link
-    is the only thing that carries both the gallery id and its token. A bare
-    numeric id is refused: without a token the metadata scraper cannot address
-    the gallery, so accepting a number would store a reference nothing could
-    fetch. This is the manual escape hatch for an operator who knows the right
-    gallery when the ingestor did not pick it up -- a fast way to relink and
-    then pull the metadata without re-running ingestion. The refreshed page
-    redraws through the same render as every other action, so nothing drifts.
-    """
+async def _source_form(request, candidate_id, action):
+    from app.review.source_commands import SourceCommands
     redirect = deps.require_authenticated(request)
     if redirect:
         return redirect
-    deps.validate_csrf(request, csrf_token)
-
-    # A full URL (not something a bare id would match): the whole input has to
-    # be the link, so trailing whitespace and nothing else is trimmed. This is
-    # what keeps a stray paste of a number from being saved as a gallery ref.
-    match = GALLERY_URL_PATTERN.fullmatch(ex_gid.strip())
-    if match is None:
-        return await render_review_error(
-            request,
-            candidate_id,
-            "无法识别画廊：请粘贴完整的 ExHentai/e-hentai 画廊链接"
-            "（须同时包含画廊编号和 token）。",
-        )
-    gid, token = int(match.group(1)), match.group(2)
-
+    form = await request.form()
+    deps.validate_csrf(request, str(form.get('csrf_token') or ''))
+    raw = dict(form)
+    payload = dict(raw)
     try:
-        result = await deps.database(request).set_candidate_eh_ref(candidate_id, gid, token)
-    except IngestError as exc:
-        message = {
-            'INGEST_IDENTITY_CHANGING': '已有画廊修改正在等待停止确认，请稍后核对。',
-            'INGEST_MANUAL_METADATA_CONFLICT': '两个候选的人工或锁定字段不同，请先核对这些字段。',
-            'INGEST_MANUAL_PATH_CONFLICT': '两个候选的人工归档路径不同，请先核对路径。',
-            'INGEST_REVIEW_CONFLICT': '两个候选的审核决定冲突，请先核对审核结果。',
-        }.get(exc.code, '画廊关联未修改，请刷新并核对当前作品。')
-        return await render_review_error(request, candidate_id, message)
-    notice = f"已切换画廊编号为 {gid}" if result['status'] == 'COMPLETED' else "已登记画廊修改，等待旧执行停止确认"
-    candidate_id = result['result_candidate_id'] or candidate_id
-    return RedirectResponse(
-        f"/works/{candidate_id}?message={quote_plus(notice)}",
-        status_code=303,
-    )
+        if raw.get('confirmed_command'):
+            confirmation = json.loads(raw['confirmed_command'])
+            payload.update({name: confirmation.get(name) for name in
+                            ('expected_revision', 'idempotency_key', 'target_work_id', 'target_revision')})
+        else:
+            payload['expected_revision'] = int(str(raw.get('expected_revision') or ''))
+            if raw.get('target_revision'):
+                payload['target_revision'] = int(raw['target_revision'])
+    except (ValueError, TypeError, KeyError):
+        payload['expected_revision'] = None
+    try:
+        result = await SourceCommands(deps.database(request)).execute(candidate_id, action, payload)
+    except WorkCommandError as exc:
+        return await render_work(request, candidate_id, error=exc.public_message, status_code=exc.status_code,
+            source_draft={'action': action, 'values': payload, 'target': exc.details.get('target',
+                {'work_id': payload.get('target_work_id'), 'revision': payload.get('target_revision')})})
+    request.app.state.event_bus.publish(EVENT_DOWNLOAD, candidate_id=candidate_id)
+    result_id = result.get('result_candidate_id') or candidate_id
+    result_identity = result.get('result_work_id') or result['work_id']
+    return RedirectResponse(request.url_for('work_detail', candidate_id=result_id).path
+                            + '?work_id=' + quote_plus(result_identity), status_code=303)
 
 
-@router.post("/works/{candidate_id}/preview")
-async def set_work_preview(
-    request: Request,
-    candidate_id: int,
-    preview_url: str = Form(""),
-    csrf_token: str = Form(),
-):
-    """Manually pin the Telegraph page that previews a work.
-
-    A channel may post the preview as a link whose text is「预览」, or the
-    ingestor may have missed it; either way the operator can set the page by
-    hand here and it becomes the value every downstream reader sees. The input
-    is validated as a Telegraph page before it is saved, so a paste of a random
-    URL cannot become the work's preview. Clearing it (an empty field) is
-    allowed.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
-
-    raw = preview_url.strip()
-    normalized = None
-    if raw:
-        normalized = normalize_preview_url(raw)
-        if normalized is None:
-            return await render_review_error(
-                request,
-                candidate_id,
-                "无法识别预览链接：仅支持 telegra.ph / graph.org 页面。",
-            )
-
-    await deps.database(request).set_candidate_preview_url(
-        candidate_id, normalized
-    )
-    notice = "已设置预览页" if normalized else "已清除预览页"
-    return RedirectResponse(
-        f"/works/{candidate_id}?message={quote_plus(notice)}",
-        status_code=303,
-    )
+@router.post('/works/{candidate_id}/eh-ref')
+async def set_work_eh_ref(request: Request, candidate_id: int):
+    return await _source_form(request, candidate_id, 'eh-ref')
 
 
-@router.post("/works/{candidate_id}/torrent")
-async def set_work_torrent(
-    request: Request,
-    candidate_id: int,
-    magnet: str = Form(""),
-    csrf_token: str = Form(),
-):
-    """Manually pin a magnet as the work's torrent source.
+@router.post('/works/{candidate_id}/preview')
+async def set_work_preview(request: Request, candidate_id: int):
+    return await _source_form(request, candidate_id, 'preview')
 
-    The operator's answer to a torrent the ingestor could not pull: a paste of
-    the magnet link is validated for its btih hash and stored so the EH_TORRENT
-    provider pushes it by magnet rather than fetching a `.torrent`. Clearing it
-    (an empty field) takes the manual pin away and returns the work to gallery
-    resolution.
-    """
-    redirect = deps.require_authenticated(request)
-    if redirect:
-        return redirect
-    deps.validate_csrf(request, csrf_token)
 
-    raw = magnet.strip()
-    btih = None
-    if raw:
-        ref = find_magnet_ref(raw)
-        if ref is None:
-            return await render_review_error(
-                request,
-                candidate_id,
-                "无法识别磁力链接：需包含 xt=urn:btih: 哈希。",
-            )
-        btih = ref[0]
-
-    await deps.database(request).set_candidate_manual_torrent(
-        candidate_id, raw or None, btih
-    )
-    notice = "已设置种子(磁力)" if raw else "已清除手动种子"
-    return RedirectResponse(
-        f"/works/{candidate_id}?message={quote_plus(notice)}",
-        status_code=303,
-    )
+@router.post('/works/{candidate_id}/torrent')
+async def set_work_torrent(request: Request, candidate_id: int):
+    return await _source_form(request, candidate_id, 'torrent')
 
 
 async def render_review_error(

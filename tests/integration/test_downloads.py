@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 from pathlib import Path
+from tests.work_commands import observed_review
 import tempfile
 
 import httpx
@@ -383,7 +384,7 @@ def test_full_download_workflow_writes_artifact(tmp_path: Path) -> None:
         page = client.get(f"/works/{candidate_id}")
         response = client.post(
             f"/candidates/{candidate_id}/download",
-            data={"csrf_token": page.context["csrf_token"]},
+            data={**observed_review(client, candidate_id), "csrf_token": page.context["csrf_token"]},
         )
         assert response.status_code == 303
 

@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from app.api.contracts import ApiError, api_error_handler
 from app.api.realtime import OperationEventsMiddleware, router as realtime_router
 from app.api.v1 import router as api_v1_router
+from app.api.v2 import router as api_v2_router
 from app.config import Settings
 from app.db.database import Database
 from app.errors import AppError, app_error_handler
@@ -104,9 +105,6 @@ def create_app(
     # Failed-login counter, per application rather than per module, so two
     # applications in one test session cannot share a lockout.
     app.state.login_attempts = {}
-    # One freshly minted API key waiting to be displayed once; see
-    # `app/web/settings_view.py`.
-    app.state.pending_api_key = None
     app.state.templates = build_templates()
     # The process's log buffer, published so a route reads it off state like
     # every other service. Deliberately the module-level singleton and not a new
@@ -141,6 +139,7 @@ def create_app(
     # The JSON API first: every one of its paths is under `/api/v1`, so it can
     # shadow nothing below and nothing below can shadow it.
     app.include_router(api_v1_router)
+    app.include_router(api_v2_router)
     app.include_router(realtime_router)
     app.include_router(auto_approval_router)
     app.include_router(dashboard_router)

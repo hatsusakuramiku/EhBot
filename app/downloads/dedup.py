@@ -4,9 +4,9 @@ Why this exists
 ---------------
 One gallery is one work, and the identity the upstream gives us is its numeric
 gallery id. Ingestion enforces that from now on (`CandidateIngestor`), but a
-database that has been running for a while still holds rows from before the
-rule existed -- and a race between the two ingestion channels can always slip
-one past the gate. This module is the operator-facing repair: group the rows
+damaged or externally edited database can still contain duplicate rows.
+P5 reconciles historical rows and enforces a database unique index. This
+module remains the operator-facing repair: group the rows
 that share a gallery id, keep one of each group, remove the rest.
 
 The keeping order is the operator's, and it is a *total* order so a group
@@ -29,14 +29,20 @@ Two things worth knowing before editing:
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable, Iterable
+import json
+from hashlib import sha256
+from uuid import uuid4
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.candidates.models import display_title
-
-
-LOGGER = logging.getLogger(__name__)
+from app.downloads.execution import run_sync
+from app.review.application import remove_work
+from app.review.batches import ReviewBatches
+from app.review.commands import WorkCommandError, WorkCommands
+from app.review.service import ReviewError
+from app.downloads.archived import ArchivedWorkError
+from app.conversion.convert import ConversionError
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,82 +150,75 @@ def group_candidates(rows: Iterable[dict]) -> list[DedupGroup]:
     return groups
 
 
+
+
 async def build_dedup_plan(database) -> dict:
-    """Every duplicate group with its kept and removed rows, and no writes."""
-    groups = group_candidates(await database.duplicate_gallery_groups())
-    return {
-        "groups": [group.payload() for group in groups],
-        "group_count": len(groups),
-        "removable": sum(len(group.remove) for group in groups),
-    }
+    """Persist the exact read snapshot for an explicit later confirmation."""
+    return await run_sync(_build_plan, database)
 
 
-async def apply_dedup(
-    database,
-    archived_service,
-    download_service,
-    *,
-    operator_name: str = "admin",
-    announce: Callable[[int], None] | None = None,
-) -> dict:
-    """Remove every duplicate beyond each group's winner. Reports per row.
+def _build_plan(database):
+    with database.connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        rows = database._duplicate_gallery_groups_sync(connection)
+        groups = group_candidates(rows)
+        versions = {row['candidate_id']: {'candidate_id': row['candidate_id'], 'work_id': row['work_id'],
+                    'expected_revision': row['expected_revision']} for row in rows}
+        plan = {'plan_id': uuid4().hex, 'groups': [group.payload() for group in groups],
+                'group_count': len(groups), 'removable': sum(len(group.remove) for group in groups)}
+        for group in plan['groups']:
+            for entry in [group['keep'], *group['remove']]:
+                entry.update(versions[entry['candidate_id']])
+        connection.execute('INSERT INTO work_dedup_plans(plan_id, plan_json) VALUES(?, ?)',
+                           (plan['plan_id'], json.dumps(plan)))
+        return plan
 
-    A genuine fault is re-raised rather than folded into `skipped`, the same
-    rule `apply_downloaded_batch` follows: a broken filesystem must not read as
-    「12 件已移除」. A missing candidate is a skip with its reason attached;
-    running producers are stopped by the shared durable removal operation.
-    """
-    groups = group_candidates(await database.duplicate_gallery_groups())
-    removed: list[dict] = []
-    skipped: list[dict] = []
-    for group in groups:
-        for loser in group.remove:
-            reason = removal_reason(loser, group.keep)
+
+async def read_dedup_plan(database, plan_id):
+    def read():
+        with database.connection() as connection:
+            row = connection.execute('SELECT plan_json FROM work_dedup_plans WHERE plan_id = ?', (plan_id,)).fetchone()
+            if row is None:
+                raise WorkCommandError('DEDUP_PLAN_NOT_FOUND', '去重预览不存在，请重新预览', status_code=404)
+            return json.loads(row[0])
+    return await run_sync(read)
+
+
+async def apply_dedup(database, archived_service, download_service, *, plan_id=None,
+                      idempotency_key=None, operator_name='admin', announce=None):
+    """Resume immutable per-row removals from the confirmed preview only."""
+    if not isinstance(plan_id, str) or not plan_id:
+        raise WorkCommandError('PRECONDITION_REQUIRED', '请提交已确认的去重预览编号', status_code=428)
+    WorkCommands._preconditions({'work_id': plan_id, 'expected_revision': 1, 'idempotency_key': idempotency_key})
+    digest = sha256(json.dumps({'action': 'dedup', 'plan_id': plan_id}, sort_keys=True).encode()).hexdigest()
+    plan = await read_dedup_plan(database, plan_id)
+    batch = ReviewBatches(database, archived=archived_service)
+    receipt = await run_sync(batch._begin, idempotency_key, digest, {'action': 'dedup', 'plan_id': plan_id})
+    if receipt is not None:
+        return receipt
+    removed, skipped = [], []
+    for group in plan['groups']:
+        keeper = {name: group['keep'][name] for name in ('candidate_id', 'work_id', 'expected_revision')}
+        for loser in group['remove']:
+            candidate_id = loser['candidate_id']
+            key = 'dedup:' + sha256((idempotency_key + ':' + str(candidate_id)).encode()).hexdigest()
+            payload = {name: loser[name] for name in ('work_id', 'expected_revision')}
+            payload.update(idempotency_key=key, keeper=keeper)
             try:
-                result = await archived_service.purge_work(
-                    loser.candidate_id,
-                    delete_files=True,
-                    operator_name=operator_name,
-                )
-            except Exception as exc:  # noqa: BLE001 - re-raised when unexpected
-                code = getattr(exc, "code", None)
-                message = getattr(exc, "public_message", None)
-                if code is None or message is None:
-                    raise
-                skipped.append(
-                    {
-                        "candidate_id": loser.candidate_id,
-                        "ex_gid": group.ex_gid,
-                        "code": str(code),
-                        "message": str(message),
-                    }
-                )
-                continue
-            removed.append(
-                {
-                    "candidate_id": loser.candidate_id,
-                    "ex_gid": group.ex_gid,
-                    "kept_candidate_id": group.keep.candidate_id,
-                    "reason": reason,
-                    "cancelled_jobs": 0,
-                    "removal_id": result["removal_id"],
-                    "cleanup_status": result["cleanup_status"],
-                }
-            )
-            if announce is not None:
-                announce(loser.candidate_id)
-    LOGGER.info(
-        "gallery_dedup_completed groups=%d removed=%d skipped=%d",
-        len(groups),
-        len(removed),
-        len(skipped),
-    )
-    return {
-        "groups": len(groups),
-        "kept": [group.keep.candidate_id for group in groups],
-        "removed": removed,
-        "skipped": skipped,
-    }
+                result = await remove_work(database, archived_service, candidate_id, 'delete-files', payload, operator_name)
+            except (ReviewError, ArchivedWorkError, ConversionError) as exc:
+                result = await run_sync(batch._refusal, candidate_id, 'delete-files', payload, exc)
+            if 'batch_error' in result:
+                skipped.append({'candidate_id': candidate_id, 'ex_gid': group['ex_gid'], **result['batch_error']})
+            else:
+                removed.append({'candidate_id': candidate_id, 'ex_gid': group['ex_gid'],
+                    'kept_candidate_id': keeper['candidate_id'], 'reason': loser['reason'], 'cancelled_jobs': 0,
+                    'removal_id': result['removal_id'], 'cleanup_status': result['cleanup_status']})
+                if announce is not None:
+                    announce(candidate_id)
+    return await run_sync(batch._complete, idempotency_key, digest,
+        {'plan_id': plan_id, 'groups': plan['group_count'],
+         'kept': [group['keep']['candidate_id'] for group in plan['groups']], 'removed': removed, 'skipped': skipped})
 
 
 __all__ = [

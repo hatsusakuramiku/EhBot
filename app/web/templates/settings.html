@@ -29,6 +29,62 @@
 {% extends layout %}
 {% import "components/ui.html" as ui %}
 
+{% macro settings_command_fields(action, scope) %}
+  {% set original = settings_draft['values'] if settings_draft and settings_draft.action == action else none %}
+  <input type="hidden" name="expected_revision" value="{{ original.expected_revision if original else settings_versions[scope] }}">
+  <input type="hidden" name="idempotency_key" value="{{ original.idempotency_key if original else new_command_key() }}">
+  {% if original and original.expected_revision|string != settings_versions[scope]|string %}
+    <p class="ui-hint">原保存版本 {{ original.expected_revision }}；当前版本 {{ settings_versions[scope] }}。请先核对草稿。</p>
+    <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': settings_versions[scope], 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对，采用当前版本保存草稿</button>
+  {% endif %}
+{% endmacro %}
+
+{% macro rule_command_fields(rule=none, current=none) %}
+  <input type="hidden" name="rule_uuid" value="{{ rule.rule_uuid if rule and rule.rule_uuid else '' }}">
+  <input type="hidden" name="expected_revision" value="{{ rule.expected_revision if rule and rule.expected_revision is defined else (rule.revision if rule and rule.revision is defined else 0) }}">
+  <input type="hidden" name="idempotency_key" value="{{ rule.idempotency_key if rule and rule.idempotency_key else new_command_key() }}">
+  {% if current and rule.expected_revision|string != current.revision|string %}
+    <p class="ui-hint">原规则版本 {{ rule.expected_revision }}；当前版本 {{ current.revision }}。请先核对草稿与下方当前规则。</p>
+    <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': current.revision, 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对，采用当前版本执行</button>
+  {% endif %}
+{% endmacro %}
+
+{% macro ai_provider_command_fields(provider=none, action='save') %}
+  {% set original = ai_provider_draft['values'] if ai_provider_draft and ai_provider_draft.action == action and (ai_provider_draft['values'].get('provider_id') or '')|string == (provider.provider_id if provider else '')|string else none %}
+  {% set current = ai_provider_current if original and provider else provider %}
+  {% set revision = current.revision if current else settings_versions['ai-providers'] %}
+  <input type="hidden" name="provider_uuid" value="{{ original.get('provider_uuid', '') if original else (provider.provider_uuid if provider else '') }}">
+  <input type="hidden" name="expected_revision" value="{{ original.expected_revision if original else revision }}">
+  <input type="hidden" name="idempotency_key" value="{{ original.idempotency_key if original else new_command_key() }}">
+  {% if action == 'delete' %}
+    <input type="hidden" name="keys_revision" value="{{ original.keys_revision if original else provider.keys_revision }}">
+    <input type="hidden" name="models_revision" value="{{ original.models_revision if original else provider.models_revision }}">
+  {% endif %}
+  {% if original and (not provider or current) and (original.expected_revision|string != revision|string or (action == 'delete' and (original.keys_revision|string != current.keys_revision|string or original.models_revision|string != current.models_revision|string))) %}
+    <p class="ui-hint">原版本 {{ original.expected_revision }}；当前版本 {{ revision }}。请先核对草稿。</p>
+    <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': revision, 'idempotency_key': new_command_key(), 'keys_revision': current.keys_revision if current else none, 'models_revision': current.models_revision if current else none} | tojson | forceescape }}">已核对，采用当前版本执行</button>
+  {% elif original and provider and not current %}
+    <p class="ui-hint">原供应商已移除，草稿保留供核对。请重新选择操作对象。</p>
+  {% endif %}
+{% endmacro %}
+
+{% macro ai_catalogue_command_fields(action, item) %}
+  {% set kind = 'provider' if action.endswith('-add') else action.split('-')[0] %}
+  <input type="hidden" name="{{ kind }}_uuid" value="{{ item[kind ~ '_uuid'] }}">
+  <input type="hidden" name="expected_revision" value="{{ item.keys_revision if action == 'keys-add' else (item.models_revision if action == 'models-add' else item.revision) }}">
+  <input type="hidden" name="idempotency_key" value="{{ new_command_key() }}">
+  {% if action == 'key-reset' %}
+    <input type="hidden" name="expected_health_revision" value="{{ item.health_revision }}">
+  {% endif %}
+{% endmacro %}
+
+{% macro ai_network_command_fields(action, provider=none, model=none) %}
+  {% for name, value in ai_network_conditions(action, provider, model).items() %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+  <input type="hidden" name="idempotency_key" value="{{ new_command_key() }}">
+{% endmacro %}
+
 {% block title %}{{ section.label }} · 设置 · EhBot{% endblock %}
 
 {% block content_class %}ui-content{% endblock %}
@@ -52,6 +108,79 @@
   {{ ui.callout(error, tone="danger", role="alert") }}
 {% elif notice %}
   {{ ui.callout(notice, tone="success") }}
+{% endif %}
+
+{% if rule_retry_url %}
+  <form class="ui-form" method="post" action="{{ rule_retry_url }}" data-rule-command
+        data-settings-action="rule-{{ rule_draft.domain }}-{{ rule_draft.action }}-{{ rule_draft['values'].rule_uuid }}" data-dirty="true">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ rule_command_fields(rule_draft['values'], rule_current) }}
+    <input type="hidden" name="enabled" value="{{ 'on' if rule_draft['values'].enabled else 'off' }}">
+    <p class="ui-hint">原操作：{{ '删除规则' if rule_draft.action == 'delete' else ('启用规则' if rule_draft['values'].enabled else '停用规则') }}。原规则身份和版本已保留。</p>
+    <button class="ui-btn" type="submit">重试原操作</button>
+  </form>
+{% endif %}
+
+{% if ai_chain_draft %}
+  {% set draft = ai_chain_draft %}
+  {% set values = draft['values'] %}
+  {% set revision = settings_versions['ai-chain:' ~ draft.scope] %}
+  <section class="ui-panel" style="margin-bottom: var(--s-5)">
+    <h2 class="ui-section-title">未完成的模型链操作</h2>
+    <form class="ui-form" data-ai-chain-command data-settings-action="ai-chain-draft-{{ draft.scope }}-{{ draft.action }}-{{ values.get('model_uuid', '') }}" data-dirty="true" method="post" action="{{ ai_chain_retry_url }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% for name in ['model_id', 'model_uuid', 'model_label', 'delta', 'expected_revision', 'idempotency_key'] %}
+        {% if name in values %}<input type="hidden" name="{{ name }}" value="{{ values[name] }}">{% endif %}
+      {% endfor %}
+      <p class="ui-hint">原操作：{{ {'primary': '设为主力', 'append': '加入备用', 'shift': '调整顺序', 'remove': '移出列表'}[draft.action] }} · {{ values.get('model_label') or (ai_chain_model.label if ai_chain_model else '原模型') }}{% if draft.action == 'shift' %}（步数 {{ values.get('delta', '') }}）{% endif %}。</p>
+      <p class="ui-hint">原版本 {{ values.get('expected_revision', '') }}；当前版本 {{ revision }}。原模型身份和操作编号已保留。</p>
+      {% if ai_chain_model and values.get('expected_revision')|string != revision|string %}
+        <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': revision, 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对当前列表，执行原操作</button>
+      {% elif not ai_chain_model %}
+        <p class="ui-hint">原模型已移除，请重新选择操作对象。</p>
+      {% endif %}
+      <button class="ui-btn" type="submit">重试原操作</button>
+    </form>
+  </section>
+{% endif %}
+
+{% if ai_catalogue_draft %}
+  {% set draft = ai_catalogue_draft %}
+  {% set values = draft['values'] %}
+  <section class="ui-panel" style="margin-bottom: var(--s-5)">
+    <h2 class="ui-section-title">未完成的 Key / 模型操作</h2>
+    <form class="ui-form" method="post" action="{{ ai_catalogue_retry_url }}" data-ai-catalogue-command="{{ draft.action }}"
+          data-ai-catalogue-draft data-settings-action="ai-catalogue-draft-{{ draft.action }}-{{ values.get('provider_uuid', values.get('key_uuid', values.get('model_uuid', ''))) }}" data-dirty="true">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {% for name in ['provider_uuid', 'key_uuid', 'model_uuid', 'expected_revision', 'expected_health_revision', 'idempotency_key', 'enabled', 'discovery_operation_id'] %}
+        {% if name in values %}<input type="hidden" name="{{ name }}" value="{{ values[name] }}">{% endif %}
+      {% endfor %}
+      {% if draft.action == 'keys-add' %}
+        <label class="ui-field">API Key（每行一把）<textarea class="ui-input" name="api_keys" rows="4"></textarea></label>
+        <p class="ui-hint">服务器不回显密钥；重新打开页面或未启用实时提交时，请重新粘贴。</p>
+      {% elif draft.action == 'models-add' %}
+        {% for name in values.get('model_name', []) %}
+          <label class="ui-field">模型名称<input class="ui-input" name="model_name" value="{{ name }}"></label>
+        {% endfor %}
+      {% elif draft.action == 'model-params' %}
+        <label class="ui-field">请求参数（JSON）<textarea class="ui-input" name="params" rows="3">{{ values.get('params', '') }}</textarea></label>
+      {% else %}
+        <p class="ui-hint">原操作：{{ {'key-toggle': '调整 Key 启用状态', 'key-reset': '取消 Key 冷却', 'key-delete': '删除 Key', 'model-toggle': '调整模型启用状态', 'model-delete': '删除模型'}[draft.action] }}{% if 'enabled' in values %}（{{ '启用' if values.enabled == 'on' else '停用' }}）{% endif %}。</p>
+      {% endif %}
+      <p class="ui-hint">原对象身份、版本与操作编号已保留，请核对后重试。</p>
+      {% if ai_catalogue_discovery_stale %}
+        <p class="ui-hint">原拉取结果已过期，请重新拉取并核对模型清单；原选择保留供参考。</p>
+      {% elif ai_catalogue_current %}
+        {% if values.expected_revision|string != ai_catalogue_revision|string or (draft.action == 'key-reset' and values.expected_health_revision|string != ai_catalogue_current.health_revision|string) %}
+          <p class="ui-hint">原配置版本 {{ values.expected_revision }}；当前版本 {{ ai_catalogue_revision }}{% if draft.action == 'key-reset' %}，原健康版本 {{ values.expected_health_revision }}；当前健康版本 {{ ai_catalogue_current.health_revision }}{% endif %}。</p>
+          <button class="ui-btn" type="submit" name="confirmed_command" value="{{ {'expected_revision': ai_catalogue_revision, 'expected_health_revision': ai_catalogue_current.health_revision if draft.action == 'key-reset' else none, 'idempotency_key': new_command_key()} | tojson | forceescape }}">已核对，采用当前版本执行</button>
+        {% endif %}
+      {% else %}
+        <p class="ui-hint">原对象已移除，草稿保留供核对。请重新选择操作对象。</p>
+      {% endif %}
+      <button class="ui-btn" type="submit">重试原操作</button>
+    </form>
+  </section>
 {% endif %}
 
 {% if section.code == "connections" %}

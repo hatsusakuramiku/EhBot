@@ -37,6 +37,7 @@ from app.downloads.models import (
 )
 from app.api.status import provider_label
 from app.main import create_app
+from tests.work_commands import observed_review, observed_review_form
 from tests.integration.markup import (
     gated_targets,
     nested_form_lines,
@@ -323,6 +324,7 @@ def test_a_work_still_downloading_is_not_downloaded_content(
                 "tab": "packed",
                 "action": "redownload",
                 "candidate_ids": [ids["packed"]],
+                **observed_review_form(client, [ids['packed']]),
             },
             follow_redirects=False,
         )
@@ -578,6 +580,7 @@ def test_packing_one_work_uses_the_row_button_and_the_one_packing_path(
             data={
                 "csrf_token": page.context["csrf_token"],
                 "tab": "unpacked",
+                **observed_review_form(client, [ids['unpacked']]),
             },
             follow_redirects=False,
         )
@@ -611,6 +614,7 @@ def test_repacking_a_finished_book_requeues_it_rather_than_reporting_success(
                 "tab": "packed",
                 "action": "repack",
                 "candidate_ids": [ids["packed"]],
+                **observed_review_form(client, [ids['packed']]),
             },
             follow_redirects=False,
         )
@@ -645,6 +649,7 @@ def test_removing_records_keeps_the_files_and_removing_files_does_not(
                 "tab": "all",
                 "action": "remove",
                 "candidate_ids": [keep],
+                **observed_review_form(client, [keep]),
             },
             follow_redirects=False,
         )
@@ -655,9 +660,11 @@ def test_removing_records_keeps_the_files_and_removing_files_does_not(
                 "tab": "all",
                 "action": "remove-files",
                 "candidate_ids": [purge],
+                **observed_review_form(client, [purge]),
             },
             follow_redirects=False,
         )
+        client.portal.call(client.app.state.archived_work_service.process_removals)
     finally:
         client.__exit__(None, None, None)
 
@@ -689,6 +696,7 @@ def test_a_batch_that_partly_applies_reports_both_halves(
                 "tab": "all",
                 "action": "remove",
                 "candidate_ids": [ids["packed"]],
+                **observed_review_form(client, [ids['packed']]),
             },
             follow_redirects=False,
         )
@@ -699,6 +707,7 @@ def test_a_batch_that_partly_applies_reports_both_halves(
                 "tab": "all",
                 "action": "remove",
                 "candidate_ids": [ids["packed"], ids["failed"]],
+                **observed_review_form(client, [ids['packed'], ids['failed']]),
             },
             follow_redirects=False,
         )
@@ -730,6 +739,7 @@ def test_renaming_a_book_moves_it_and_pins_where_a_repack_lands(
                 "csrf_token": page.context["csrf_token"],
                 "tab": "packed",
                 "filename": "整理后的书名",
+                **observed_review(client, ids['packed']),
                 "directory": "分类/作者",
             },
             follow_redirects=False,
@@ -757,6 +767,7 @@ def test_a_rename_cannot_walk_out_of_the_library(tmp_path: Path) -> None:
                 "csrf_token": page.context["csrf_token"],
                 "tab": "packed",
                 "filename": "escaped",
+                **observed_review(client, ids['packed']),
                 "directory": "../../escaped",
             },
             follow_redirects=False,
@@ -764,8 +775,8 @@ def test_a_rename_cannot_walk_out_of_the_library(tmp_path: Path) -> None:
     finally:
         client.__exit__(None, None, None)
 
-    assert response.status_code == 303
-    assert "error=" in response.headers["location"]
+    assert response.status_code == 400
+    assert '../../escaped' in response.text
     assert original.exists()
     assert not (tmp_path.parent / "escaped").exists()
 
@@ -928,6 +939,7 @@ def test_setting_an_archive_path_moves_the_book_and_pins_it(
             data={
                 "csrf_token": page.context["csrf_token"],
                 "directory": "新分类/新作者",
+                **observed_review(client, ids['packed']),
                 "filename": "新书名",
             },
             follow_redirects=False,
@@ -968,6 +980,7 @@ def test_an_occupied_name_re_renders_the_form_with_the_reason(
             data={
                 "csrf_token": page.context["csrf_token"],
                 "directory": "目标",
+                **observed_review(client, ids['packed']),
                 "filename": "已存在",
             },
         )
@@ -994,6 +1007,7 @@ def test_an_illegal_filename_is_refused_rather_than_cleaned(
             data={
                 "csrf_token": page.context["csrf_token"],
                 "filename": "非法?名字",
+                **observed_review(client, ids['packed']),
             },
         )
     finally:
@@ -1049,6 +1063,7 @@ def test_an_action_updates_the_list_in_place_rather_than_reloading_it(
                 "action": "repack",
                 "tab": "all",
                 "candidate_ids": [ids["packed"]],
+                **observed_review_form(client, [ids['packed']]),
             },
             headers={"hx-request": "true"},
             follow_redirects=True,
@@ -1192,7 +1207,9 @@ def _duplicate_pair(
     gid: int = 77001,
     loser_kwargs: dict | None = None,
 ) -> tuple[int, int]:
-    """One gallery id, two works: the packed one and the unpacked one."""
+    """Simulate a damaged library; normal P5 ingestion cannot create duplicates."""
+    with library.database.connection() as connection:
+        connection.execute('DROP INDEX IF EXISTS candidate_gallery_identity')
     keeper = library.add(
         title="重复作品·已打包",
         pack_state=CONVERSION_STATE_COMPLETED,
@@ -1244,10 +1261,12 @@ def test_dedup_removes_the_loser_with_its_files_and_is_idempotent(
         page = client.get("/downloaded/dedup")
         response = client.post(
             "/downloaded/dedup",
-            data={"csrf_token": page.context["csrf_token"]},
+            data={"csrf_token": page.context["csrf_token"], 'plan_id': page.context['plan_id'],
+                  'idempotency_key': 'dedup-web'},
             follow_redirects=False,
         )
         # A second pass has no group left to act on.
+        client.portal.call(client.app.state.archived_work_service.process_removals)
         again = client.get("/downloaded/dedup")
     finally:
         client.__exit__(None, None, None)
@@ -1274,9 +1293,11 @@ def test_dedup_removes_a_paused_work_without_a_preliminary_cancel(tmp_path: Path
         page = client.get("/downloaded/dedup")
         response = client.post(
             "/downloaded/dedup",
-            data={"csrf_token": page.context["csrf_token"]},
+            data={"csrf_token": page.context["csrf_token"], 'plan_id': page.context['plan_id'],
+                  'idempotency_key': 'dedup-paused'},
             follow_redirects=False,
         )
+        client.portal.call(client.app.state.archived_work_service.process_removals)
     finally:
         client.__exit__(None, None, None)
 
@@ -1320,6 +1341,7 @@ def test_the_dedup_plan_is_available_over_the_api_and_matches_the_page(
         executed = client.post(
             "/api/v1/downloaded/dedup",
             headers={CSRF_HEADER: token},
+            json={'plan_id': payload['plan_id'], 'idempotency_key': 'dedup-api'},
         ).json()
     finally:
         client.__exit__(None, None, None)

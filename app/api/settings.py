@@ -23,29 +23,25 @@ operator who has not configured seeding still needs to reach the archive tab.
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any, Callable, Coroutine
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from app.api import deps
 from app.api.contracts import ApiError
 from app.connections.exhentai import ExHentaiCredentials
 from app.connections.models import ProviderConnectionError
-from app.logging import apply_runtime_log_level
-from app.credentials import KIND_API_KEY, hash_secret, new_token
 from app.settings import runtime
+from app.settings.commands import SettingsCommands
+from app.settings.credential_commands import CredentialCommands
+from app.settings.rule_commands import RuleCommands
+from app.review.commands import WorkCommandError
 from app.settings import auto_approval as approval_form
-from app.settings import archive as archive_form
-from app.settings import ai as ai_form
 from app.ai.errors import AiError
-from app.settings.forms import checkbox
-from app.settings import parse as parse_form
-from app.settings import paths as paths_form
 from app.settings import sources as source_form
 from app.archive.service import ArchiveSettingsError
 from app.torrent.models import TorrentError
-from app.settings.service import SystemSettingsError
 from app.api.serializers import (
     ai_chain_entry,
     ai_provider,
@@ -347,6 +343,9 @@ async def _archive_section(request: Request) -> dict[str, Any]:
     # so 「未就绪」 is a word the vocabulary owns. `available` and `configured` are
     # the services' own field names and are left alone.
     toolchain = dict(await service.toolchain_status())
+    commands = deps.optional_service(request, 'toolchain_commands')
+    if commands is not None:
+        toolchain.update(await commands.snapshot())
     toolchain["readiness"] = dependency_view(toolchain.get("available")).to_payload()
     torrent = dict(await service.torrent_client_view())
     torrent["readiness"] = dependency_view(torrent.get("configured")).to_payload()
@@ -565,6 +564,9 @@ async def _ai_section(request: Request) -> dict[str, Any]:
         (entry for entry in catalogue if entry["provider_id"] == selected_id),
         catalogue[0] if catalogue else None,
     )
+    requested_identity = request.query_params.get('provider_uuid')
+    if requested_identity and (selected is None or selected['provider_uuid'] != requested_identity):
+        selected = None
     default_chain = [
         ai_chain_entry(entry) for entry in await service.chain(CHAIN_SCOPE_DEFAULT)
     ]
@@ -574,7 +576,9 @@ async def _ai_section(request: Request) -> dict[str, Any]:
         entry["selected"] = (
             selected is not None and entry["provider_id"] == selected["provider_id"]
         )
+    network = deps.optional_service(request, 'ai_network_commands')
     return {
+        "network_operations": await network.recent() if network else [],
         "ai_enabled": await deps.system_settings_service(request).ai_enabled(),
         "providers": catalogue,
         "selected_provider": selected,
@@ -778,10 +782,18 @@ async def settings_snapshot(request: Request, section: str) -> dict[str, Any]:
     a page would invent a tab. Each caller turns that into its own 404.
     """
     view = settings_section_view(section)
-    body = await _SECTION_BUILDERS[view.code](request)
+    commands = SettingsCommands(deps.database(request))
+    for _ in range(3):
+        versions = await commands.versions(view.code)
+        body = await _SECTION_BUILDERS[view.code](request)
+        if versions == await commands.versions(view.code):
+            break
+    else:
+        raise ApiError('SETTINGS_BUSY', '配置正在变化，请重新读取', status_code=409)
     return {
         "section": view.to_payload(),
         "tabs": section_tabs(view.code),
+        'settings_versions': versions,
         **body,
     }
 
@@ -813,6 +825,25 @@ CONNECTION_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+async def _preference_command(request: Request, action: str) -> dict:
+    """JSON and WS use the same atomic preference command as plain forms."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        result = await SettingsCommands(deps.database(request), deps.system_settings_service(request),
+            deps.archive_settings_service(request)).execute(action, await _json_body(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    if action == 'system':
+        await runtime.refresh_system(request, deps.system_settings_service(request))
+    return result
+
+
+@router.put('/settings/paths/directories')
+async def put_directories(request: Request) -> dict:
+    return await _preference_command(request, 'paths')
+
+
 async def _json_body(request: Request) -> dict:
     """The JSON object a write expects, or a 400 naming what arrived."""
     try:
@@ -821,7 +852,7 @@ async def _json_body(request: Request) -> dict:
         raise ApiError("BODY_INVALID", "请求体不是合法 JSON") from exc
     if not isinstance(payload, dict):
         raise ApiError("BODY_INVALID", "请求体必须是对象")
-    return payload
+    return deps.command_payload(request, payload)
 
 
 def _required_text(payload: dict, field: str, label: str) -> str:
@@ -913,60 +944,10 @@ async def put_connections(request: Request) -> dict:
     return await settings_snapshot(request, "connections")
 
 
-#: The system preferences the JSON layer accepts. The same names the 系统 form
-#: posts, so the two write paths cannot drift over what a field is called; the
-#: values are validated by `SystemSettingsService`, once, for both.
-SYSTEM_SETTING_FIELDS: tuple[str, ...] = (
-    "source_concurrency",
-    "poll_interval_ms",
-    "timezone",
-    "auto_approval_interval_minutes",
-    "mobile_access_ttl_seconds",
-    "mobile_refresh_ttl_seconds",
-    "log_level",
-    # The ordered, comma-separated provider chain. The page builds it from one
-    # rank per source because that is what a form can express; the service stores
-    # this string, so a JSON caller sends the shape that is stored.
-    "download_source_priority",
-)
-
-
 @router.put("/settings/system")
 async def put_system(request: Request) -> dict:
-    """Store the 系统 preferences and make them current.
-
-    Only the fields present in the body are written, so a client can change one
-    cadence without restating the rest -- the page's behaviour, where an absent
-    form field is left alone.
-
-    The post-save refreshes are the page's, through the same
-    `app.settings.runtime` helpers: the display zone is cached on `app.state` and
-    the log level is process state, so a write that skipped them would look like
-    it did nothing until the next restart.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    values = {
-        key: str(payload[key])
-        for key in SYSTEM_SETTING_FIELDS
-        if key in payload and payload[key] is not None
-    }
-    if not values:
-        raise ApiError(
-            "SETTINGS_REQUIRED",
-            "请提供要修改的设置项",
-            details={"allowed": list(SYSTEM_SETTING_FIELDS)},
-        )
-    service = deps.system_settings_service(request)
-    try:
-        await service.save(values)
-    except SystemSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    await runtime.refresh_display_timezone(request, service)
-    await runtime.refresh_download_source_priority(request, service)
-    apply_runtime_log_level(await service.log_level())
-    return await settings_snapshot(request, "system")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'system')
 
 
 #: The archive-password and API-key actions the JSON layer accepts.
@@ -976,21 +957,8 @@ PASSWORD_ACTIONS: frozenset[str] = frozenset(
 
 
 @router.put("/settings/passwords")
-async def put_passwords(request: Request) -> dict:
-    """Add or drop an archive password, or mint / revoke the mobile API key.
-
-    Both live on the 密码库 tab because they are the same kind of thing -- a
-    credential stored once -- and the API key is minted here rather than through
-    the mobile API so a leaked client can never mint a replacement for itself.
-
-    Nothing in the response is a stored secret. The one exception is by design
-    and is the reason this returns a body rather than a snapshot alone:
-    `api-key-generate` answers with the new plaintext **once**, because that is
-    the only moment it exists outside the credential store -- the page shows it
-    the same way, through a one-shot reveal. Every other action answers with the
-    section snapshot, which reports *whether* a credential is configured and
-    never what it is.
-    """
+async def put_passwords(request: Request):
+    """Return an atomic safe receipt, with a minted key only on its first response."""
     await deps.require_session(request)
     deps.require_csrf(request)
     payload = await _json_body(request)
@@ -1001,47 +969,16 @@ async def put_passwords(request: Request) -> dict:
             f"未知的密码库动作：{action}",
             details={"allowed": sorted(PASSWORD_ACTIONS)},
         )
-    plaintext_api_key: str | None = None
-    if action == "add":
-        raw_priority = str(payload.get("priority", "100")).strip() or "100"
-        try:
-            priority = int(raw_priority)
-        except ValueError as exc:
-            raise ApiError("PRIORITY_INVALID", "优先级必须是整数") from exc
-        try:
-            await deps.archive_settings_service(request).add_password(
-                name=str(payload.get("name") or ""),
-                password=str(payload.get("password") or ""),
-                priority=priority,
-                enabled=bool(payload.get("enabled", True)),
-            )
-        except ArchiveSettingsError as exc:
-            raise ApiError(str(exc.code), exc.public_message) from exc
-    elif action == "delete":
-        password_id = payload.get("password_id")
-        if not isinstance(password_id, int):
-            raise ApiError(
-                "PASSWORD_ID_REQUIRED",
-                "请指定要删除的密码条目",
-                details={"field": "password_id"},
-            )
-        await deps.archive_settings_service(request).delete_password(password_id)
-    elif action == "api-key-generate":
-        token, public_id, secret = new_token(KIND_API_KEY)
-        # One transaction: revoke the old key and insert the new one together, so
-        # the partial unique index can never see two valid keys.
-        await deps.database(request).replace_api_key(
-            label="移动端",
-            public_id=public_id,
-            secret_hash=hash_secret(secret),
-        )
-        plaintext_api_key = token
-    else:  # api-key-revoke
-        await deps.database(request).revoke_active_api_key()
-    snapshot = await settings_snapshot(request, "passwords")
-    if plaintext_api_key is not None:
-        snapshot["api_key_plaintext"] = plaintext_api_key
-    return snapshot
+    credential = getattr(request.state, 'api_credential', None)
+    if action.startswith('api-key-') and credential is not None and credential.kind == 'api_key':
+        raise ApiError('PASSWORD_LOGIN_REQUIRED', '请使用管理员密码登录后管理 API Key', status_code=403)
+    try:
+        receipt, plaintext = await CredentialCommands(deps.database(request), deps.archive_settings_service(request)).execute(action, payload)
+    except (WorkCommandError, ArchiveSettingsError) as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=getattr(exc, 'status_code', 400),
+                       details=getattr(exc, 'details', {})) from exc
+    return JSONResponse({**receipt, **({'api_key_plaintext': plaintext} if plaintext else {})},
+                        headers={'Cache-Control': 'no-store'})
 
 
 #: The batch actions over a selection of stored sources -- the 来源规则 tab's
@@ -1167,89 +1104,36 @@ async def put_sources_batch(request: Request) -> dict:
 
 @router.put("/settings/parse")
 async def put_parse_rules(request: Request) -> dict:
-    """Store the candidate-admission parse scheme (the 解析规则 tab, over JSON).
-
-    The reading half is `app/settings/parse.py`'s, shared with the page's
-    `/settings/parse` form: an unchecked switch is an absent field in both
-    worlds, and the archive-format list is filtered against the parser's own
-    vocabulary rather than the caller's.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    service = deps.system_settings_service(request)
-    try:
-        await service.save_parse_rules(
-            parse_form.parse_rules_submission(payload)
-        )
-    except SystemSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "parse")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'parse')
 
 
 @router.post("/settings/parse/reset")
 async def reset_parse_rules(request: Request) -> dict:
-    """Put the shipped scheme back, so a bad experiment is one call from gone."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    await deps.system_settings_service(request).reset_parse_rules()
-    return await settings_snapshot(request, "parse")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'parse-reset')
 
 
 @router.put("/settings/parse/ai")
 async def put_candidate_admission(request: Request) -> dict:
-    """Store the AI candidate gate's switches and prompt.
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'admission')
 
-    The default-prompt rule lives in `app/settings/parse.py` beside the page's
-    copy of it: a prompt submitted byte-identical to the shipped default is
-    stored as 「use the default」, because otherwise every save would pin the
-    default text as an override and the page could never say whether the
-    operator had actually customised it.
-    """
+
+async def _rule_command(request, domain, action, *, rule_id=None):
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    service = deps.system_settings_service(request)
     try:
-        await service.save_candidate_admission(
-            parse_form.candidate_admission(
-                payload, default_prompt=DEFAULT_CANDIDATE_PROMPT
-            )
-        )
-    except SystemSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "parse")
+        return await RuleCommands(deps.database(request)).execute(
+            domain, action, await _json_body(request), rule_id=rule_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
 
 
 @router.post("/settings/auto-approval/rules")
 async def post_auto_approval_rule(request: Request) -> dict:
-    """Create a rule, or overwrite the one `rule_id` names.
-
-    One endpoint for both because it is one editor: absent `rule_id` means
-    create, and a `rule_id` that no longer exists is a 404 rather than a
-    re-create under the old id -- resurrecting a rule the operator deleted is
-    the one outcome nobody asked for.
-
-    The body carries the condition **AST** (`app/auto_approval/rules.py`'s
-    shape, `{"kind": "condition", "field": …, "operator": …, "value": …}` or a
-    group of them). The page builds that AST from its row editor; a JSON client
-    sends it, which is why the validation is shared and the *parsing* is not.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    try:
-        values = approval_form.rule_payload(
-            payload, condition=payload.get("condition")
-        )
-    except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
-        raise ApiError("RULE_INVALID", str(exc)) from exc
-    database = deps.database(request)
-    try:
-        await database.save_auto_approval_rule(**values)
-    except LookupError as exc:
-        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
-    return await settings_snapshot(request, "auto-approval")
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'auto-approval', 'save')
 
 
 @router.post("/settings/auto-approval/rules/dry-run")
@@ -1279,55 +1163,54 @@ async def post_auto_approval_dry_run(request: Request) -> dict:
 
 @router.put("/settings/auto-approval/rules/{rule_id}/toggle")
 async def api_toggle_auto_approval_rule(rule_id: int, request: Request) -> dict:
-    """Park a rule or put it back, without touching anything else about it."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    try:
-        await deps.database(request).set_auto_approval_rule_enabled(
-            rule_id, checkbox(payload.get("enabled"))
-        )
-    except LookupError as exc:
-        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
-    return await settings_snapshot(request, "auto-approval")
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'auto-approval', 'toggle', rule_id=rule_id)
 
 
 @router.delete("/settings/auto-approval/rules/{rule_id}")
 async def api_delete_auto_approval_rule(rule_id: int, request: Request) -> dict:
-    """Delete a rule for good.
-
-    停用 is the reversible half and keeps its own call; this one cannot be undone
-    from the interface, which is why the page puts a confirmation in front of it.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    try:
-        await deps.database(request).delete_auto_approval_rule(rule_id)
-    except LookupError as exc:
-        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
-    return await settings_snapshot(request, "auto-approval")
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'auto-approval', 'delete', rule_id=rule_id)
 
 
 @router.put("/settings/archive/torrent")
 async def put_torrent_client(request: Request) -> dict:
-    """Store the qBittorrent client settings (the 归档与工具 tab, over JSON).
+    """Save one versioned qBittorrent configuration; return a safe receipt."""
+    return await _preference_command(request, 'torrent')
 
-    The reading half is `app/settings/archive.py`'s, shared with the page's
-    `/archive-settings/torrent` form, so the two switches cannot mean different
-    things in the two worlds. The password is written straight into the
-    credential store and never read back -- the snapshot reports whether a client
-    is configured, not what its password is.
-    """
+
+@router.put('/settings/archive/profiles/{name}')
+async def put_archive_profile(request: Request, name: str) -> dict:
+    """Every client edits the same registered server tool configuration."""
+    from app.settings.profile_commands import ProfileCommands
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
     try:
-        await deps.archive_settings_service(request).save_torrent_client(
-            archive_form.torrent_submission(payload)
-        )
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "archive")
+        return await ProfileCommands(deps.database(request)).execute(name, await _json_body(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+
+
+@router.post('/settings/archive/toolchain/install')
+async def post_toolchain_install(request: Request):
+    """Accept installation durably; the request never owns the installer thread."""
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        result = await request.app.state.toolchain_commands.submit(await _json_body(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    return JSONResponse(result, status_code=202, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/settings/archive/toolchain/operations/{operation_id}')
+async def get_toolchain_operation(request: Request, operation_id: str):
+    await deps.require_session(request)
+    try:
+        result = await request.app.state.toolchain_commands.result(operation_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
 
 @router.post("/settings/archive/torrent/test")
@@ -1349,147 +1232,96 @@ async def post_torrent_test(request: Request) -> dict:
 
 @router.put("/settings/archive/limits")
 async def put_archive_limits(request: Request) -> dict:
-    """Store the safety limits, the keep-original switch and the image quality.
-
-    Limits go first, on the page's reason: they are typed by hand and are the
-    field that realistically fails validation, so a rejected number aborts before
-    the quality level is touched.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    service = deps.archive_settings_service(request)
-    try:
-        await service.save_limits(archive_form.limits_submission(payload))
-        if "keep_original" in payload:
-            await service.save_keep_original(checkbox(payload.get("keep_original")))
-        if "image_quality" in payload:
-            await service.save_image_quality(str(payload.get("image_quality") or ""))
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "archive")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'limits')
 
 
 @router.put("/settings/archive/auto-pack")
 async def put_auto_pack(request: Request) -> dict:
-    """Store whether a finished download packs itself."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    try:
-        await deps.archive_settings_service(
-            request
-        ).save_auto_pack_after_download(checkbox(payload.get("enabled")))
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "archive")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'auto-pack')
 
 
 @router.put("/settings/paths/template")
 async def put_library_template(request: Request) -> dict:
-    """Store the layout template and, when given, the title preference.
-
-    One call for both because they are one form: the template says where a book
-    goes and the preference says what `{title}` resolves to, and previewing one
-    without the other would show a path the packer would not produce. The
-    preference is written first, on the page's reason -- a template refusal must
-    not silently discard it, since the two are validated independently.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    values = paths_form.template_payload(payload)
-    service = deps.archive_settings_service(request)
-    try:
-        if "title_source" in values:
-            await service.save_title_source(str(values["title_source"]))
-        await service.save_library_template(str(values["library_template"]))
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "paths")
+    """Apply one versioned preference command and return its fixed receipt."""
+    return await _preference_command(request, 'template')
 
 
 @router.post("/settings/paths/rules")
 async def post_path_rule(request: Request) -> dict:
-    """Create a routing rule, or overwrite the one `path_rule_id` names.
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'paths', 'save')
 
-    The condition arrives as the AST the engine evaluates (`validate_rule_ast`
-    is the gate the page's row editor also goes through), and the template is
-    validated by the archive settings service -- the same check the global
-    template gets, so a rule that could not render is refused now rather than at
-    pack time.
-    """
+
+@router.post('/settings/paths/rearchive')
+async def post_rearchive(request: Request):
+    from app.archive.maintenance import RearchiveCommands
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        result = await RearchiveCommands(deps.database(request), deps.archived_work_service(request),
+            deps.conversion_service(request)).execute(await _json_body(request), await deps.operator_name(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    request.app.state.event_bus.publish('download')
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/settings/paths/rearchive')
+async def get_rearchive_receipt(request: Request, idempotency_key: str):
+    """Inspect an admitted batch without planning or executing its remaining items."""
+    from app.archive.maintenance import RearchiveCommands
+    await deps.require_session(request)
+    try:
+        result = await RearchiveCommands(deps.database(request), None, None).receipt(idempotency_key)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code) from exc
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
+
+@router.post('/settings/paths/ai/cache/clear')
+async def post_clear_path_cache(request: Request):
+    return await _preference_command(request, 'path-cache-clear')
+
+
+@router.post('/settings/paths/rules/dry-run')
+async def post_path_rule_dry_run(request: Request):
     await deps.require_session(request)
     deps.require_csrf(request)
     payload = await _json_body(request)
     try:
-        values = paths_form.path_rule_payload(
-            payload, condition=payload.get("condition")
-        )
-    except (RuleValidationError, ValueError, json.JSONDecodeError) as exc:
-        raise ApiError("RULE_INVALID", str(exc)) from exc
+        values = approval_form.dry_run_payload({**payload, 'action': 'APPROVE'}, condition=payload.get('condition'))
+        result = await AutomaticApprovalService(deps.database(request)).dry_run(**values)
+    except (RuleValidationError, ValueError) as exc:
+        raise ApiError('RULE_INVALID', str(exc)) from exc
+    return {'dry_run': auto_approval_dry_run(result)}
+
+
+@router.post('/settings/paths/template/preview')
+async def post_template_preview(request: Request):
+    from app.archive.preview import template_preview
+    from app.conversion.naming import LibraryTemplateError
+    await deps.require_session(request)
+    deps.require_csrf(request)
     try:
-        await deps.archive_settings_service(request).save_path_rule(**values)
-    except LookupError as exc:
-        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "paths")
+        result = await template_preview(deps.archive_settings_service(request), request.app.state.settings.library_path,
+                                        await _json_body(request))
+    except LibraryTemplateError as exc:
+        raise ApiError(exc.code, exc.public_message) from exc
+    return {'template_preview': result}
 
 
 @router.put("/settings/paths/rules/{rule_id}/toggle")
 async def toggle_path_rule(rule_id: int, request: Request) -> dict:
-    """Park a routing rule or put it back, without touching anything else."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    await deps.database(request).set_archive_path_rule_enabled(
-        rule_id, checkbox(payload.get("enabled"))
-    )
-    return await settings_snapshot(request, "paths")
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'paths', 'toggle', rule_id=rule_id)
 
 
 @router.delete("/settings/paths/rules/{rule_id}")
 async def delete_path_rule(rule_id: int, request: Request) -> dict:
-    """Delete a routing rule for good.
-
-    停用 is the reversible half and keeps its own call; this one cannot be undone
-    from the interface, which is why the page puts a confirmation in front of it.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    try:
-        await deps.database(request).delete_archive_path_rule(rule_id)
-    except LookupError as exc:
-        raise ApiError("RULE_NOT_FOUND", "规则不存在", status_code=404) from exc
-    return await settings_snapshot(request, "paths")
-
-
-def _ai_section_of(scope: str) -> str:
-    """Which settings section a chain scope's editor lives on.
-
-    The three chain editors are the same widget mounted on three tabs, so the
-    response after a chain edit is the tab the operator is looking at.
-    """
-    return {
-        CHAIN_SCOPE_ARCHIVE_PATH: "paths",
-        CHAIN_SCOPE_CANDIDATE: "parse",
-    }.get(scope, "ai")
-
-
-async def _ai_call(request: Request, operation: str, **kwargs: Any) -> dict:
-    """Run one `AiService` call and answer with the section's snapshot.
-
-    Every route below is this function plus a section name: the refusals are the
-    service's (`AiError` carries the code and the operator's sentence), and a
-    deployment with no AI service is a 503 from `deps`, not an AttributeError.
-    """
-    service = deps.ai_service(request)
-    try:
-        await getattr(service, operation)(**kwargs)
-    except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, _ai_section_of(kwargs.get("scope", "")))
+    """Apply the shared versioned rule command and return its fixed receipt."""
+    return await _rule_command(request, 'paths', 'delete', rule_id=rule_id)
 
 
 @router.put("/settings/ai/master")
@@ -1501,31 +1333,33 @@ async def put_ai_master(request: Request) -> dict:
     where the operator left them, so turning it back on restores the exact
     configuration that was there before.
     """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    await deps.system_settings_service(request).save_ai_enabled(
-        checkbox(payload.get("enabled"))
-    )
-    return await settings_snapshot(request, "ai")
+    return await _preference_command(request, 'ai-master')
 
 
 @router.post("/settings/ai/providers")
 async def post_ai_provider(request: Request) -> dict:
-    """Create a provider, or overwrite the one `provider_id` names."""
+    """Save one versioned provider and return its fixed safe receipt."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request, "save_provider", values=ai_form.provider_submission(payload)
-    )
+    return await _ai_provider_command(request, 'save')
 
 
 @router.delete("/settings/ai/providers/{provider_id}")
 async def delete_ai_provider(provider_id: int, request: Request) -> dict:
     await deps.require_session(request)
     deps.require_csrf(request)
-    return await _ai_call(request, "delete_provider", provider_id=provider_id)
+    return await _ai_provider_command(request, 'delete', provider_id=provider_id)
+
+
+async def _ai_provider_command(request, action, *, provider_id=None):
+    from app.settings.ai_commands import AiProviderCommands
+    try:
+        return await AiProviderCommands(deps.database(request), deps.archive_settings_service(request)).execute(
+            action, await _json_body(request), provider_id=provider_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    except AiError as exc:
+        raise ApiError(exc.code, exc.public_message) from exc
 
 
 @router.post("/settings/ai/providers/{provider_id}/keys")
@@ -1537,26 +1371,14 @@ async def post_ai_provider_keys(provider_id: int, request: Request) -> dict:
     """
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request,
-        "add_keys",
-        provider_id=provider_id,
-        raw=ai_form.key_text(payload),
-    )
+    return await _ai_catalogue_command(request, 'keys-add', provider_id)
 
 
 @router.put("/settings/ai/keys/{key_id}/toggle")
 async def toggle_ai_key(key_id: int, request: Request) -> dict:
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request,
-        "set_key_enabled",
-        key_id=key_id,
-        enabled=checkbox(payload.get("enabled")),
-    )
+    return await _ai_catalogue_command(request, 'key-toggle', key_id)
 
 
 @router.post("/settings/ai/keys/{key_id}/reset")
@@ -1564,14 +1386,14 @@ async def reset_ai_key(key_id: int, request: Request) -> dict:
     """Release a key from its cooldown, so it is tried again."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    return await _ai_call(request, "reset_key_cooldown", key_id=key_id)
+    return await _ai_catalogue_command(request, 'key-reset', key_id)
 
 
 @router.delete("/settings/ai/keys/{key_id}")
 async def delete_ai_key(key_id: int, request: Request) -> dict:
     await deps.require_session(request)
     deps.require_csrf(request)
-    return await _ai_call(request, "delete_key", key_id=key_id)
+    return await _ai_catalogue_command(request, 'key-delete', key_id)
 
 
 @router.post("/settings/ai/providers/{provider_id}/models")
@@ -1579,44 +1401,40 @@ async def post_ai_provider_models(provider_id: int, request: Request) -> dict:
     """Add one or more model names to a provider."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request,
-        "add_models",
-        provider_id=provider_id,
-        names=ai_form.model_names(payload),
-    )
+    return await _ai_catalogue_command(request, 'models-add', provider_id)
+
+
+async def _ai_network_command(request, action, *, target_id=None):
+    await deps.require_session(request)
+    deps.require_csrf(request)
+    try:
+        result = await request.app.state.ai_network_commands.submit(action, await _json_body(request), target_id=target_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    return JSONResponse(result, status_code=202, headers={'Cache-Control': 'no-store'})
+
+
+@router.get('/settings/ai/operations/{operation_id}')
+async def get_ai_network_operation(request: Request, operation_id: str):
+    await deps.require_session(request)
+    try:
+        result = await request.app.state.ai_network_commands.result(operation_id)
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
 
 @router.post("/settings/ai/providers/{provider_id}/models/fetch")
-async def fetch_ai_provider_models(provider_id: int, request: Request) -> dict:
-    """`GET /v1/models`, as a list for the operator to pick from.
-
-    Fetched names are not added and not tested: a listing says a model exists,
-    not that this deployment can talk to it. So this is a read, and it answers
-    with the names rather than a section snapshot.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    service = deps.ai_service(request)
-    try:
-        names = await service.list_remote_models(provider_id)
-    except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return {"provider_id": provider_id, "names": list(names)}
+async def api_fetch_ai_provider_models(provider_id: int, request: Request):
+    """Admit a model-list request once; query the durable result separately."""
+    return await _ai_network_command(request, 'fetch', target_id=provider_id)
 
 
 @router.put("/settings/ai/models/{model_id}/toggle")
 async def toggle_ai_model(model_id: int, request: Request) -> dict:
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request,
-        "set_model_enabled",
-        model_id=model_id,
-        enabled=checkbox(payload.get("enabled")),
-    )
+    return await _ai_catalogue_command(request, 'model-toggle', model_id)
 
 
 @router.put("/settings/ai/models/{model_id}/params")
@@ -1624,83 +1442,43 @@ async def put_ai_model_params(model_id: int, request: Request) -> dict:
     """Store a model's request parameters (a JSON string, as the page submits)."""
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
-    return await _ai_call(
-        request, "save_model_params", model_id=model_id, raw=payload.get("params")
-    )
+    return await _ai_catalogue_command(request, 'model-params', model_id)
 
 
 @router.delete("/settings/ai/models/{model_id}")
 async def delete_ai_model(model_id: int, request: Request) -> dict:
     await deps.require_session(request)
     deps.require_csrf(request)
-    return await _ai_call(request, "delete_model", model_id=model_id)
+    return await _ai_catalogue_command(request, 'model-delete', model_id)
+
+
+async def _ai_catalogue_command(request, action, target_id):
+    from app.settings.ai_commands import AiCatalogueCommands
+    try:
+        return await AiCatalogueCommands(deps.database(request), deps.archive_settings_service(request)).execute(
+            action, target_id, await _json_body(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
+    except AiError as exc:
+        raise ApiError(exc.code, exc.public_message) from exc
 
 
 @router.post("/settings/ai/models/{model_id}/verify")
-async def verify_ai_model(model_id: int, request: Request) -> dict:
-    """Send the minimal chat request and report what came back.
-
-    A failure answers 400 with the provider's own words, the same shape the
-    qBittorrent 连通测试 uses: the operator asked a question, and the answer is
-    「不，原因是 …」 rather than a 200 that hides it.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    service = deps.ai_service(request)
-    try:
-        verification = await service.verify_model(model_id)
-    except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    if not verification.ok:
-        raise ApiError("MODEL_VERIFY_FAILED", f"验证失败：{verification.message}")
-    return {"ok": True, "message": verification.message}
+async def api_verify_ai_model(model_id: int, request: Request):
+    """Admit a verification against the observed model/provider/key revisions."""
+    return await _ai_network_command(request, 'model', target_id=model_id)
 
 
 @router.post("/settings/ai/providers/{provider_id}/verify")
-async def verify_ai_provider(provider_id: int, request: Request) -> dict:
-    """Test every enabled model of one provider, in order."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    service = deps.ai_service(request)
-    try:
-        results = await service.verify_all(provider_id)
-    except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return {"results": _verify_payload(results)}
+async def api_verify_ai_provider(provider_id: int, request: Request):
+    """Capture and verify this provider's enabled models in order."""
+    return await _ai_network_command(request, 'provider', target_id=provider_id)
 
 
 @router.post("/settings/ai/verify")
-async def verify_all_ai_models(request: Request) -> dict:
-    """Test every enabled model of every provider, in order."""
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    service = deps.ai_service(request)
-    try:
-        results = await service.verify_all()
-    except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return {"results": _verify_payload(results)}
-
-
-def _verify_payload(results: Any) -> dict[str, Any]:
-    """A verification run as `{ok, failed, message}`.
-
-    The summary is built here rather than in each caller because the page says
-    the same sentence: 「测试完成：N/M 个模型通过」, or the empty case's own line.
-    """
-    items = list(results)
-    passed = sum(1 for item in items if item.ok)
-    if not items:
-        return {"ok": 0, "total": 0, "message": "没有启用的模型可测试。"}
-    return {
-        "ok": passed,
-        "total": len(items),
-        "message": f"测试完成：{passed}/{len(items)} 个模型通过。",
-        "entries": [
-            {"ok": bool(item.ok), "message": str(item.message)} for item in items
-        ],
-    }
+async def api_verify_all_ai_models(request: Request):
+    """Capture the observed catalogue before running the sequential checks."""
+    return await _ai_network_command(request, 'all')
 
 
 @router.put("/settings/ai/chain/{scope}")
@@ -1717,119 +1495,37 @@ async def put_ai_chain(scope: str, request: Request) -> dict:
     """
     await deps.require_session(request)
     deps.require_csrf(request)
-    payload = await _json_body(request)
+    from app.settings.ai_commands import AiChainCommands
     try:
-        code = ai_form.chain_scope(scope)
-        action = ai_form.chain_action(str(payload.get("action") or ""))
-        model_id = ai_form.chain_model_id(payload)
+        return await AiChainCommands(deps.database(request)).execute(scope, await _json_body(request))
+    except WorkCommandError as exc:
+        raise ApiError(exc.code, exc.public_message, status_code=exc.status_code, details=exc.details) from exc
     except AiError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    service = deps.ai_service(request)
-    try:
-        if action == "shift":
-            await service.shift_chain(model_id, int(payload.get("delta") or 0), code)
-        elif action == "remove":
-            await service.remove_from_chain(model_id, code)
-        elif action == "primary":
-            await service.set_chain_primary(model_id, code)
-        else:
-            await service.append_to_chain(model_id, code)
-    except (AiError, ValueError) as exc:
-        message = exc.public_message if isinstance(exc, AiError) else "移动方向无效"
-        raise ApiError(str(getattr(exc, "code", "CHAIN_SHIFT_INVALID")), message) from exc
-    return await settings_snapshot(request, _ai_section_of(code))
+        raise ApiError(exc.code, exc.public_message) from exc
 
 
 @router.put("/settings/paths/ai")
 async def put_ai_path_settings(request: Request) -> dict:
-    """Store the 路径来源 choice and the AI sub-panel in one write.
+    """Atomically save the path AI panel with its observed version."""
+    return await _preference_command(request, 'path-ai')
 
-    One call because it is one form: the radio says whether the model or the
-    template decides a path, and the prompt, the two numbers and the three
-    switches only mean anything under the AI choice. The numbers are written
-    first, on the archive tab's reason -- they are the field that realistically
-    fails validation, so a rejected value aborts before the mode is changed.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    values = paths_form.ai_path_submission(payload)
-    service = deps.archive_settings_service(request)
-    if bool(values["auto_series"]):
-        # Same rule as the page: 「自动添加系列」 needs the master switch on and
-        # a chain to ask. Refused before any write so a rejected call changes
-        # nothing at all.
-        if not await deps.system_settings_service(request).ai_enabled():
-            raise ApiError(
-                "SERIES_AI_UNAVAILABLE", "AI 总开关关闭，无法开启「自动添加系列」"
-            )
-        ai_service = deps.optional_service(request, "ai_service")
-        if ai_service is None or not await ai_service.effective_chain(
-            CHAIN_SCOPE_ARCHIVE_PATH
-        ):
-            raise ApiError(
-                "SERIES_AI_UNAVAILABLE",
-                "还没有可用的模型链，无法开启「自动添加系列」",
-            )
-    try:
-        await service.save_ai_batch_size(values["ai_batch_size"])
-        await service.save_ai_concurrency(values["ai_concurrency"])
-        await service.save_path_source(str(values["path_source"]))
-        await service.save_ai_prompt(str(values["ai_prompt"]))
-        await service.save_ai_fallback_to_rules(
-            bool(values["ai_fallback_to_rules"])
-        )
-        await service.save_ai_stream(bool(values["ai_stream"]))
-        await service.save_ai_default_include_current(
-            bool(values["ai_default_include_current"])
-        )
-        await service.save_auto_series(bool(values["auto_series"]))
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "paths")
+
+@router.put('/settings/paths/ai/models')
+async def put_path_model_source(request: Request) -> dict:
+    """Choose the path model source through the shared command contract."""
+    return await _preference_command(request, 'path-model-source')
 
 
 @router.put("/settings/paths/ai/prompt")
 async def put_ai_path_prompt(request: Request) -> dict:
-    """Store the archive-path prompt, or reset it to the shipped one.
-
-    `{"prompt": ""}` is how the page's 「恢复默认」 button submits, and it is why
-    this is a separate call from the panel: blank means 「use the default」 rather
-    than 「ask nothing」, and the default lives in `app/ai/prompt.py` -- writing a
-    copy of today's wording into the database would freeze it for a deployment
-    that upgrades to a better one tomorrow.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    try:
-        await deps.archive_settings_service(request).save_ai_prompt(
-            str(payload.get("prompt") or "")
-        )
-    except ArchiveSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "paths")
+    """Store a prompt; blank follows the shipped default on future upgrades."""
+    return await _preference_command(request, 'path-ai-prompt')
 
 
 @router.put("/settings/parse/model-source")
 async def put_candidate_model_source(request: Request) -> dict:
-    """Choose whether the AI candidate gate inherits the default model chain or
-    carries its own.
-
-    Its own call rather than part of the admission write because it is a
-    different question: the gate's switches say what to do with a verdict, this
-    says which list of models produces one.
-    """
-    await deps.require_session(request)
-    deps.require_csrf(request)
-    payload = await _json_body(request)
-    try:
-        await deps.system_settings_service(
-            request
-        ).save_ai_candidate_model_source(str(payload.get("model_source") or ""))
-    except SystemSettingsError as exc:
-        raise ApiError(str(exc.code), exc.public_message) from exc
-    return await settings_snapshot(request, "parse")
+    """Choose the candidate gate's model source independently of its switches."""
+    return await _preference_command(request, 'candidate-model-source')
 
 
 @router.get("/settings/{section}")

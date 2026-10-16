@@ -203,6 +203,10 @@ class AiProvider:
     #: only correct value is the one the deployment already sets.
     custom_headers: dict[str, Any] = field(default_factory=dict)
     default_params: AiRequestParams = field(default_factory=AiRequestParams)
+    provider_uuid: str = ''
+    revision: int = 1
+    keys_revision: int = 1
+    models_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +221,9 @@ class AiProviderKey:
     cooldown_until: str | None
     last_used_at: str | None
     created_at: str
+    key_uuid: str = ''
+    revision: int = 1
+    health_revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,13 +243,14 @@ class AiProviderModel:
     last_verify_ok: bool | None = None
     last_verify_error: str | None = None
     params: AiRequestParams = field(default_factory=AiRequestParams)
+    model_uuid: str = ''
+    revision: int = 1
 
     @property
     def verified(self) -> bool:
         """Whether a connectivity check has passed for this model.
 
-        Deliberately not 「not failed」: an entry that was never tested has no
-        business in the chain, which is what makes 「保存即验证」 enforceable.
+        Verification is diagnostic; unverified models may be configured in a chain.
         """
         return self.last_verify_ok is True
 

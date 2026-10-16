@@ -112,8 +112,9 @@ class DuplicateCandidateError(ValueError):
     #: The noun for what was duplicated, used verbatim in the message.
     label = "候选"
 
-    def __init__(self, existing_candidate_id: int) -> None:
+    def __init__(self, existing_candidate_id: int, existing_work_id: str | None = None) -> None:
         self.existing_candidate_id = int(existing_candidate_id)
+        self.existing_work_id = existing_work_id
         super().__init__(f"该{self.label}已有候选 #{self.existing_candidate_id}")
 
 
@@ -283,8 +284,9 @@ _CANDIDATE_LIST_SELECT = (
     " WHERE mv.candidate_id = c.id AND mv.field_name = 'Language' "
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     "COUNT(cm.source_message_id), c.updated_at, c.ex_gid, "
-    "c.ex_gallery_token, c.thumb_url, c.filter_reason "
-    "FROM candidates c LEFT JOIN candidate_messages cm "
+    "c.ex_gallery_token, c.thumb_url, c.filter_reason, wv.work_id, wv.revision "
+    "FROM candidates c JOIN work_versions wv ON wv.candidate_id = c.id "
+    "LEFT JOIN candidate_messages cm "
     "ON cm.candidate_id = c.id"
 )
 
@@ -371,9 +373,10 @@ _DOWNLOADED_SELECT = (
     " ORDER BY mv.is_manual DESC, mv.confidence DESC LIMIT 1), "
     # The filter verdict travels with the work so a flagged row can say why
     # without a second read (R60); the serializer decides whether it is shown.
-    "c.filter_result, c.filter_reason "
+    "c.filter_result, c.filter_reason, v.work_id, v.revision "
     "FROM download_jobs dj "
     "JOIN candidates c ON c.id = dj.candidate_id "
+    "JOIN work_versions v ON v.candidate_id = c.id "
     "LEFT JOIN artifacts arch "
     "  ON arch.job_id = dj.id AND arch.artifact_type = 'ARCHIVE' "
     "LEFT JOIN download_jobs pack "
@@ -424,6 +427,8 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
         raw_tags=text(24),
         filter_result=text(25),
         filter_reason=text(26),
+        work_id=text(27),
+        revision=number(28),
     )
 
 
@@ -432,14 +437,13 @@ def _downloaded_work(row: Sequence[object]) -> DownloadedWork:
 #: field on a page, and there are four places that read this table.
 _AI_PROVIDER_COLUMNS = (
     "id, name, code, base_url, timeout_seconds, max_retries, enabled, "
-    "custom_headers, default_params"
+    "custom_headers, default_params, provider_uuid, revision, keys_revision, models_revision"
 )
 
-#: Same for models. `params` is last on purpose: the chain query reuses the
-#: mapper on a slice, and appending is the change that keeps the slice intact.
+#: The chain projection keeps the same provider/model field order as these DTOs.
 _AI_MODEL_COLUMNS = (
     "id, provider_id, name, enabled, last_verified_at, last_verify_ok, "
-    "last_verify_error, params"
+    "last_verify_error, params, model_uuid, revision"
 )
 
 
@@ -456,6 +460,10 @@ def _ai_provider_from_row(row: Sequence[object]) -> AiProvider:
         enabled=bool(row[6]),
         custom_headers=_json_object(row[7]),
         default_params=_params(row[8]),
+        provider_uuid=str(row[9]),
+        revision=int(row[10]),
+        keys_revision=int(row[11]),
+        models_revision=int(row[12]),
     )
 
 
@@ -473,6 +481,9 @@ def _ai_key_from_row(row: Sequence[object]) -> AiProviderKey:
         ),
         last_used_at=str(row[6]) if row[6] is not None else None,
         created_at=str(row[7]),
+        key_uuid=str(row[8]),
+        revision=int(row[9]),
+        health_revision=int(row[10]),
     )
 
 
@@ -481,9 +492,9 @@ def _ai_key_from_row(row: Sequence[object]) -> AiProviderKey:
 _AI_CHAIN_SELECT = (
     "SELECT ch.position, "
     "p.id, p.name, p.code, p.base_url, p.timeout_seconds, p.max_retries, "
-    "p.enabled, p.custom_headers, p.default_params, "
+    "p.enabled, p.custom_headers, p.default_params, p.provider_uuid, p.revision, p.keys_revision, p.models_revision, "
     "m.id, m.provider_id, m.name, m.enabled, m.last_verified_at, "
-    "m.last_verify_ok, m.last_verify_error, m.params "
+    "m.last_verify_ok, m.last_verify_error, m.params, m.model_uuid, m.revision "
     "FROM ai_model_chain ch "
     "JOIN ai_provider_models m ON m.id = ch.provider_model_id "
     "JOIN ai_providers p ON p.id = m.provider_id "
@@ -512,6 +523,8 @@ def _ai_model_from_row(row: Sequence[object]) -> AiProviderModel:
             str(row[6]) if row[6] is not None else None
         ),
         params=_params(row[7]),
+        model_uuid=str(row[8]),
+        revision=int(row[9]),
     )
 
 
@@ -698,6 +711,8 @@ def _candidate_list_item(row: Sequence[object]) -> CandidateListItem:
         language=str(row[8]) if row[8] is not None else None,
         thumb_url=str(row[13]) if row[13] is not None else None,
         filter_reason=str(row[14]) if row[14] is not None else None,
+        work_id=str(row[15]),
+        revision=int(row[16]),
     )
 
 
@@ -1658,9 +1673,9 @@ class Database:
         )
 
     def _replace_api_key_sync(
-        self, label: str, public_id: str, secret_hash: str
+        self, label: str, public_id: str, secret_hash: str, *, connection=None
     ) -> None:
-        with self.connection() as connection:
+        with self.connection() if connection is None else nullcontext(connection) as connection:
             connection.execute(
                 "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
                 "WHERE kind = 'api_key' AND revoked_at IS NULL"
@@ -1676,8 +1691,8 @@ class Database:
         """Revoke the current key; returns how many rows changed (0 or 1)."""
         return await asyncio.to_thread(self._revoke_active_api_key_sync)
 
-    def _revoke_active_api_key_sync(self) -> int:
-        with self.connection() as connection:
+    def _revoke_active_api_key_sync(self, *, connection=None) -> int:
+        with self.connection() if connection is None else nullcontext(connection) as connection:
             cursor = connection.execute(
                 "UPDATE api_credentials SET revoked_at = CURRENT_TIMESTAMP "
                 "WHERE kind = 'api_key' AND revoked_at IS NULL"
@@ -2487,8 +2502,8 @@ class Database:
             self._downloaded_work_sync, int(candidate_id)
         )
 
-    def _downloaded_work_sync(self, candidate_id: int) -> DownloadedWork | None:
-        with self.connection() as connection:
+    def _downloaded_work_sync(self, candidate_id: int, connection=None) -> DownloadedWork | None:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             row = connection.execute(
                 f"{_DOWNLOADED_SELECT} WHERE dj.provider <> ? "
                 "  AND arch.path IS NOT NULL "
@@ -2673,9 +2688,9 @@ class Database:
         )
 
     def _set_candidate_preview_url_sync(
-        self, candidate_id: int, preview_url: str | None
+        self, candidate_id: int, preview_url: str | None, *, connection=None
     ) -> None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             connection.execute(
                 "UPDATE candidates SET preview_url = ?, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -2708,8 +2723,9 @@ class Database:
         candidate_id: int,
         magnet_url: str | None,
         torrent_hash: str | None,
+        *, connection=None,
     ) -> None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             connection.execute(
                 "UPDATE candidates SET magnet_url = ?, torrent_hash = ?, "
                 "torrent_count = NULL, "
@@ -2724,7 +2740,8 @@ class Database:
                 + title_subquery("c.id")
                 + ", c.ex_gid, c.ex_gallery_token, c.preview_url, "
                 "c.torrent_count, "
-                "c.torrent_hash, c.magnet_url FROM candidates c WHERE c.id = ?",
+                "c.torrent_hash, c.magnet_url, w.work_id FROM candidates c "
+                "JOIN work_versions w ON w.candidate_id = c.id WHERE c.id = ?",
 
                 (candidate_id,),
             ).fetchone()
@@ -2772,6 +2789,7 @@ class Database:
             torrent_count=int(row[8]) if row[8] is not None else None,
             torrent_hash=str(row[9]) if row[9] is not None else None,
             magnet_url=str(row[10]) if row[10] is not None else None,
+            work_id=str(row[11]),
         )
 
     async def locate_candidate_message(
@@ -2860,17 +2878,20 @@ class Database:
         the magnet side.
         """
         if ex_gid is not None:
-            existing = Database._gallery_candidate_id_sync(connection, ex_gid)
-            if existing is not None:
-                return DuplicateGalleryCandidate(existing)
+            row = connection.execute(
+                'SELECT c.id, w.work_id FROM candidates c JOIN work_versions w ON w.candidate_id = c.id '
+                'WHERE c.ex_gid = ?', (ex_gid,),
+            ).fetchone()
+            if row is not None:
+                return DuplicateGalleryCandidate(int(row[0]), str(row[1]))
         if torrent_hash:
             row = connection.execute(
-                "SELECT id FROM candidates "
-                "WHERE LOWER(torrent_hash) = ? ORDER BY id LIMIT 1",
+                "SELECT c.id, w.work_id FROM candidates c JOIN work_versions w ON w.candidate_id = c.id "
+                "WHERE LOWER(c.torrent_hash) = ? ORDER BY c.id LIMIT 1",
                 (str(torrent_hash).lower(),),
             ).fetchone()
             if row is not None:
-                return DuplicateTorrentCandidate(int(row[0]))
+                return DuplicateTorrentCandidate(int(row[0]), str(row[1]))
         return None
 
     @staticmethod
@@ -2934,9 +2955,9 @@ class Database:
                 (ex_gid, ex_gallery_token, filter_reason, magnet_url, torrent_hash),
             )
         except sqlite3.IntegrityError:
-            existing = self._gallery_candidate_id_sync(connection, ex_gid) if ex_gid is not None else None
-            if existing is not None:
-                raise DuplicateGalleryCandidate(existing) from None
+            duplicate = self._manual_duplicate_sync(connection, ex_gid, None)
+            if duplicate is not None:
+                raise duplicate from None
             raise
         candidate_id = int(cursor.lastrowid)
         if ingest_claim is not None:
@@ -3064,8 +3085,9 @@ class Database:
         operator_name: str,
         field_name: str,
         field_value: str,
+        connection=None,
     ) -> None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT 1 FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -3117,6 +3139,7 @@ class Database:
         operator_name: str,
         field_name: str,
         locked: bool,
+        connection=None,
     ) -> None:
         """Pin or release every stored value for one field.
 
@@ -3126,7 +3149,7 @@ class Database:
         adding a higher-confidence value must not slip past the lock by
         landing on a row that was never locked.
         """
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             candidate_row = connection.execute(
                 "SELECT 1 FROM candidates WHERE id = ?",
                 (candidate_id,),
@@ -3204,13 +3227,16 @@ class Database:
         """
         return await asyncio.to_thread(self._duplicate_gallery_groups_sync)
 
-    def _duplicate_gallery_groups_sync(self) -> list[dict]:
-        with self.connection() as connection:
-            rows = connection.execute(
+    def _duplicate_gallery_groups_sync(self, connection=None) -> list[dict]:
+        if connection is None:
+            with self.connection() as connection:
+                return self._duplicate_gallery_groups_sync(connection)
+        rows = connection.execute(
                 "SELECT c.id, c.ex_gid, c.status, "
                 + title_subquery("c.id")
-                + ", cbz.id IS NOT NULL, cbz.page_count "
+                + ", cbz.id IS NOT NULL, cbz.page_count, v.work_id, v.revision "
                 "FROM candidates c "
+                "JOIN work_versions v ON v.candidate_id = c.id "
                 "LEFT JOIN download_jobs pack "
                 "  ON pack.idempotency_key = 'convert:' || c.id "
                 "LEFT JOIN artifacts cbz "
@@ -3228,6 +3254,8 @@ class Database:
                 "title": str(row[3]) if row[3] is not None else None,
                 "packaged": bool(row[4]),
                 "page_count": int(row[5]) if row[5] is not None else None,
+                "work_id": row[6],
+                "expected_revision": row[7],
             }
             for row in rows
         ]
@@ -3292,6 +3320,7 @@ class Database:
             updated_at=str(row[8]),
             case_sensitive=bool(row[9]),
             action=str(row[10]),
+            rule_uuid=str(row[11]),
         )
 
     async def list_auto_approval_rules(
@@ -3308,7 +3337,7 @@ class Database:
         with nullcontext(connection) if connection is not None else self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at, case_sensitive, action "
+                "dsl_snapshot, created_at, updated_at, case_sensitive, action, rule_uuid "
                 "FROM auto_approval_rules "
                 + where_sql
                 + "ORDER BY priority, id"
@@ -3321,12 +3350,12 @@ class Database:
         return await asyncio.to_thread(self._get_auto_approval_rule_sync, rule_id)
 
     def _get_auto_approval_rule_sync(
-        self, rule_id: int
+        self, rule_id: int, connection=None
     ) -> AutoApprovalRule | None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
-                "dsl_snapshot, created_at, updated_at, case_sensitive, action "
+                "dsl_snapshot, created_at, updated_at, case_sensitive, action, rule_uuid "
                 "FROM auto_approval_rules "
                 "WHERE id = ?",
                 (rule_id,),
@@ -3367,8 +3396,9 @@ class Database:
         dsl_snapshot: str,
         case_sensitive: bool = False,
         action: str = RULE_ACTION_APPROVE,
+        connection=None,
     ) -> AutoApprovalRule:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             if rule_id is None:
                 cursor = connection.execute(
                     "INSERT INTO auto_approval_rules "
@@ -3405,7 +3435,7 @@ class Database:
                 )
                 if cursor.rowcount != 1:
                     raise LookupError(f"Automatic approval rule {rule_id} does not exist")
-        result = self._get_auto_approval_rule_sync(rule_id)
+            result = self._get_auto_approval_rule_sync(rule_id, connection=connection)
         if result is None:
             raise LookupError(f"Automatic approval rule {rule_id} does not exist")
         return result
@@ -3475,6 +3505,7 @@ class Database:
             created_at=str(row[8]),
             updated_at=str(row[9]),
             case_sensitive=bool(row[10]),
+            rule_uuid=str(row[11]),
         )
 
     async def list_archive_path_rules(
@@ -3492,7 +3523,7 @@ class Database:
             rows = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
                 "dsl_snapshot, path_template, created_at, updated_at, "
-                "case_sensitive FROM archive_path_rules "
+                "case_sensitive, rule_uuid FROM archive_path_rules "
                 + where_sql
                 + "ORDER BY priority, id"
             ).fetchall()
@@ -3508,13 +3539,13 @@ class Database:
         )
 
     def _get_archive_path_rule_sync(
-        self, rule_id: int
+        self, rule_id: int, connection=None
     ) -> ArchivePathRule | None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, enabled, priority, version, condition_json, "
                 "dsl_snapshot, path_template, created_at, updated_at, "
-                "case_sensitive FROM archive_path_rules WHERE id = ?",
+                "case_sensitive, rule_uuid FROM archive_path_rules WHERE id = ?",
                 (rule_id,),
             ).fetchone()
         return (
@@ -3557,8 +3588,9 @@ class Database:
         dsl_snapshot: str,
         path_template: str,
         case_sensitive: bool = False,
+        connection=None,
     ) -> ArchivePathRule:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             if rule_id is None:
                 cursor = connection.execute(
                     "INSERT INTO archive_path_rules "
@@ -3601,7 +3633,7 @@ class Database:
                     raise LookupError(
                         f"Archive path rule {rule_id} does not exist"
                     )
-        result = self._get_archive_path_rule_sync(rule_id)
+            result = self._get_archive_path_rule_sync(rule_id, connection=connection)
         if result is None:
             raise LookupError(f"Archive path rule {rule_id} does not exist")
         return result
@@ -3698,9 +3730,9 @@ class Database:
         )
 
     def _re_evaluate_candidate_metadata_rules_sync(
-        self, candidate_id: int
+        self, candidate_id: int, connection=None
     ) -> None:
-        with self.connection() as connection:
+        with nullcontext(connection) if connection is not None else self.connection() as connection:
             source_row = connection.execute(
                 "SELECT ts.id, ts.source_type, ts.chat_id, ts.display_name, "
                 "ts.enabled, ts.rules_json FROM telegram_sources ts "
@@ -3861,7 +3893,7 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, name, backend, kind, executable_path, "
-                "supported_formats, timeout_seconds, capabilities, enabled "
+                "supported_formats, timeout_seconds, capabilities, enabled, profile_uuid, revision "
                 "FROM archive_tool_profiles " + where_sql + "ORDER BY id"
             ).fetchall()
         return tuple(self._tool_profile_from_row(row) for row in rows)
@@ -3879,6 +3911,8 @@ class Database:
             timeout_seconds=int(row[6]),
             capabilities=tuple(json.loads(str(row[7]))),
             enabled=bool(row[8]),
+            profile_uuid=str(row[9]),
+            revision=int(row[10]),
         )
 
 
@@ -3890,7 +3924,7 @@ class Database:
         with self.connection() as connection:
             row = connection.execute(
                 "SELECT id, name, backend, kind, executable_path, "
-                "supported_formats, timeout_seconds, capabilities, enabled "
+                "supported_formats, timeout_seconds, capabilities, enabled, profile_uuid, revision "
                 "FROM archive_tool_profiles WHERE name = ?",
                 (name,),
             ).fetchone()
@@ -3920,6 +3954,8 @@ class Database:
         enabled: bool | None,
         executable_path: str | None,
         timeout_seconds: int | None,
+        *,
+        connection=None,
     ) -> None:
         assignments: list[str] = []
         params: list[object] = []
@@ -3938,7 +3974,7 @@ class Database:
             return
         assignments.append("updated_at = CURRENT_TIMESTAMP")
         params.append(name)
-        with self.connection() as connection:
+        with self.connection() if connection is None else nullcontext(connection) as connection:
             cursor = connection.execute(
                 "UPDATE archive_tool_profiles SET "
                 + ", ".join(assignments)
@@ -3963,7 +3999,7 @@ class Database:
         where_sql = "WHERE enabled = 1 " if enabled_only else ""
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT id, name, priority, enabled, last_success_at, created_at "
+                "SELECT id, name, priority, enabled, last_success_at, created_at, password_uuid, revision "
                 "FROM archive_passwords "
                 + where_sql
                 + "ORDER BY last_success_at IS NULL, last_success_at DESC, "
@@ -3977,25 +4013,27 @@ class Database:
                 enabled=bool(row[3]),
                 last_success_at=str(row[4]) if row[4] is not None else None,
                 created_at=str(row[5]),
+                password_uuid=str(row[6]),
+                revision=int(row[7]),
             )
             for row in rows
         )
 
 
-    async def list_archive_password_secrets(self) -> tuple[tuple[int, str], ...]:
-        """Return `(id, ciphertext)` for enabled passwords in attempt order."""
+    async def list_archive_password_secrets(self) -> tuple[tuple[int, str, str, int], ...]:
+        """Read ciphertext and its configuration identity in the same snapshot."""
         return await asyncio.to_thread(self._list_archive_password_secrets_sync)
 
 
-    def _list_archive_password_secrets_sync(self) -> tuple[tuple[int, str], ...]:
+    def _list_archive_password_secrets_sync(self) -> tuple[tuple[int, str, str, int], ...]:
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT id, secret_json FROM archive_passwords "
+                "SELECT id, secret_json, password_uuid, revision FROM archive_passwords "
                 "WHERE enabled = 1 "
                 "ORDER BY last_success_at IS NULL, last_success_at DESC, "
                 "priority, id"
             ).fetchall()
-        return tuple((int(row[0]), str(row[1])) for row in rows)
+        return tuple((int(row[0]), str(row[1]), str(row[2]), int(row[3])) for row in rows)
 
 
     async def save_archive_password(
@@ -4007,10 +4045,10 @@ class Database:
 
 
     def _save_archive_password_sync(
-        self, name: str, secret_json: str, priority: int, enabled: bool
+        self, name: str, secret_json: str, priority: int, enabled: bool, *, connection=None
     ) -> int:
-        with self.connection() as connection:
-            cursor = connection.execute(
+        with self.connection() if connection is None else nullcontext(connection) as connection:
+            connection.execute(
                 "INSERT INTO archive_passwords "
                 "(name, secret_json, priority, enabled) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(name) DO UPDATE SET secret_json = excluded.secret_json, "
@@ -4018,11 +4056,10 @@ class Database:
                 "updated_at = CURRENT_TIMESTAMP",
                 (name, secret_json, int(priority), int(enabled)),
             )
-            if cursor.lastrowid:
-                row = connection.execute(
-                    "SELECT id FROM archive_passwords WHERE name = ?",
-                    (name,),
-                ).fetchone()
+            row = connection.execute(
+                "SELECT id FROM archive_passwords WHERE name = ?", (name,),
+            ).fetchone()
+            if row:
                 return int(row[0])
         raise LookupError(f"Archive password {name!r} could not be saved")
 
@@ -4031,25 +4068,25 @@ class Database:
         await asyncio.to_thread(self._delete_archive_password_sync, password_id)
 
 
-    def _delete_archive_password_sync(self, password_id: int) -> None:
-        with self.connection() as connection:
+    def _delete_archive_password_sync(self, password_id: int, *, connection=None) -> None:
+        with self.connection() if connection is None else nullcontext(connection) as connection:
             connection.execute(
                 "DELETE FROM archive_passwords WHERE id = ?", (password_id,)
             )
 
 
-    async def mark_archive_password_success(self, password_id: int) -> None:
+    async def mark_archive_password_success(self, password_id: int, *, password_uuid: str, expected_revision: int) -> None:
         await asyncio.to_thread(
-            self._mark_archive_password_success_sync, password_id
+            self._mark_archive_password_success_sync, password_id, password_uuid, expected_revision
         )
 
 
-    def _mark_archive_password_success_sync(self, password_id: int) -> None:
+    def _mark_archive_password_success_sync(self, password_id: int, password_uuid: str, expected_revision: int) -> None:
         with self.connection() as connection:
             connection.execute(
                 "UPDATE archive_passwords SET last_success_at = CURRENT_TIMESTAMP, "
-                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (password_id,),
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND password_uuid = ? AND revision = ? AND enabled = 1",
+                (password_id, password_uuid, expected_revision),
             )
 
 
@@ -4174,6 +4211,7 @@ class Database:
         enabled: bool,
         custom_headers: str,
         default_params: str,
+        *, connection: sqlite3.Connection | None = None,
     ) -> AiProvider:
         """Insert or update one provider, keyed by id when there is one.
 
@@ -4181,7 +4219,7 @@ class Database:
         providers an operator cannot tell apart in a dropdown is a
         configuration bug, not a feature.
         """
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             try:
                 if provider_id is None:
                     cursor = connection.execute(
@@ -4235,7 +4273,9 @@ class Database:
     async def delete_ai_provider(self, provider_id: int) -> None:
         await asyncio.to_thread(self._delete_ai_provider_sync, provider_id)
 
-    def _delete_ai_provider_sync(self, provider_id: int) -> None:
+    def _delete_ai_provider_sync(
+        self, provider_id: int, *, connection: sqlite3.Connection | None = None,
+    ) -> None:
         """Remove a provider, its keys and its models (and their chain slots).
 
         The children go first, in dependency order. `PRAGMA foreign_keys` is on
@@ -4243,7 +4283,7 @@ class Database:
         readable and does not silently change meaning if that pragma is ever
         dropped for a bulk import.
         """
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             connection.execute(
                 "DELETE FROM ai_model_chain WHERE provider_model_id IN "
                 "(SELECT id FROM ai_provider_models WHERE provider_id = ?)",
@@ -4283,7 +4323,7 @@ class Database:
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT id, provider_id, label, enabled, failures, "
-                "cooldown_until, last_used_at, created_at "
+                "cooldown_until, last_used_at, created_at, key_uuid, revision, health_revision "
                 "FROM ai_provider_keys WHERE provider_id = ? "
                 + where_sql
                 + "ORDER BY id",
@@ -4291,21 +4331,44 @@ class Database:
             ).fetchall()
         return tuple(_ai_key_from_row(row) for row in rows)
 
-    async def ai_provider_key_cipher(self, key_id: int) -> str | None:
+    async def ai_provider_key_cipher(
+        self, key_id: int, *, expected: AiProviderKey | None = None,
+        provider: AiProvider | None = None,
+    ) -> str | None:
         """The encrypted envelope for one key, or None once it is gone.
 
         The only read that returns a secret, and it returns ciphertext: the
         caller holds the master key and decrypts for one request. Nothing here
         logs the value.
         """
-        return await asyncio.to_thread(self._ai_provider_key_cipher_sync, key_id)
+        return await asyncio.to_thread(self._ai_provider_key_cipher_sync, key_id, expected, provider)
 
-    def _ai_provider_key_cipher_sync(self, key_id: int) -> str | None:
+    def _ai_provider_key_cipher_sync(
+        self, key_id: int, expected: AiProviderKey | None = None,
+        provider: AiProvider | None = None,
+    ) -> str | None:
+        guard, args = self._ai_key_guard(expected, provider)
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT cipher FROM ai_provider_keys WHERE id = ?", (key_id,)
+                "SELECT cipher FROM ai_provider_keys WHERE id = ?" + guard,
+                (key_id, *args),
             ).fetchone()
         return str(row[0]) if row is not None else None
+
+    @staticmethod
+    def _ai_key_guard(
+        expected: AiProviderKey | None, provider: AiProvider | None,
+    ) -> tuple[str, tuple[object, ...]]:
+        """Bind a delayed key read/health write to its original configuration."""
+        sql, args = '', ()
+        if expected is not None:
+            sql += ' AND key_uuid = ? AND revision = ?'
+            args += (expected.key_uuid, expected.revision)
+        if provider is not None:
+            sql += (' AND provider_id IN (SELECT id FROM ai_providers '
+                    'WHERE provider_uuid = ? AND revision = ?)')
+            args += (provider.provider_uuid, provider.revision)
+        return sql, args
 
     async def add_ai_provider_key(
         self, provider_id: int, *, label: str, cipher: str
@@ -4327,10 +4390,11 @@ class Database:
         )
 
     def _add_ai_provider_keys_sync(
-        self, provider_id: int, entries: tuple[tuple[str, str], ...]
+        self, provider_id: int, entries: tuple[tuple[str, str], ...],
+        *, connection: sqlite3.Connection | None = None,
     ) -> tuple[AiProviderKey, ...]:
         stored: list[AiProviderKey] = []
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             for label, cipher in entries:
                 cursor = connection.execute(
                     "INSERT INTO ai_provider_keys (provider_id, label, cipher) "
@@ -4339,7 +4403,7 @@ class Database:
                 )
                 row = connection.execute(
                     "SELECT id, provider_id, label, enabled, failures, "
-                    "cooldown_until, last_used_at, created_at "
+                    "cooldown_until, last_used_at, created_at, key_uuid, revision, health_revision "
                     "FROM ai_provider_keys WHERE id = ?",
                     (int(cursor.lastrowid),),
                 ).fetchone()
@@ -4354,9 +4418,9 @@ class Database:
         )
 
     def _set_ai_provider_key_enabled_sync(
-        self, key_id: int, enabled: bool
+        self, key_id: int, enabled: bool, *, connection: sqlite3.Connection | None = None,
     ) -> None:
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             cursor = connection.execute(
                 "UPDATE ai_provider_keys SET enabled = ? WHERE id = ?",
                 (1 if enabled else 0, key_id),
@@ -4367,8 +4431,10 @@ class Database:
     async def delete_ai_provider_key(self, key_id: int) -> None:
         await asyncio.to_thread(self._delete_ai_provider_key_sync, key_id)
 
-    def _delete_ai_provider_key_sync(self, key_id: int) -> None:
-        with self.connection() as connection:
+    def _delete_ai_provider_key_sync(
+        self, key_id: int, *, connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             cursor = connection.execute(
                 "DELETE FROM ai_provider_keys WHERE id = ?", (key_id,)
             )
@@ -4376,14 +4442,16 @@ class Database:
                 raise LookupError(f"AI provider key {key_id} does not exist")
 
     async def record_ai_key_failure(
-        self, key_id: int, *, cooldown_minutes: int
+        self, key_id: int, *, cooldown_minutes: int,
+        expected: AiProviderKey | None = None, provider: AiProvider | None = None,
     ) -> None:
         await asyncio.to_thread(
-            self._record_ai_key_failure_sync, key_id, cooldown_minutes
+            self._record_ai_key_failure_sync, key_id, cooldown_minutes, expected, provider
         )
 
     def _record_ai_key_failure_sync(
-        self, key_id: int, cooldown_minutes: int
+        self, key_id: int, cooldown_minutes: int,
+        expected: AiProviderKey | None = None, provider: AiProvider | None = None,
     ) -> None:
         """Count a refusal and park this key for a while.
 
@@ -4393,18 +4461,21 @@ class Database:
         database's own `CURRENT_TIMESTAMP`.
         """
         with self.connection() as connection:
+            guard, args = self._ai_key_guard(expected, provider)
             connection.execute(
                 "UPDATE ai_provider_keys SET failures = failures + 1, "
                 "cooldown_until = datetime('now', ?), "
-                "last_used_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (f"+{max(0, int(cooldown_minutes))} minutes", key_id),
+                "last_used_at = CURRENT_TIMESTAMP WHERE id = ?" + guard,
+                (f"+{max(0, int(cooldown_minutes))} minutes", key_id, *args),
             )
 
     async def reset_ai_key_cooldown(self, key_id: int) -> None:
         await asyncio.to_thread(self._reset_ai_key_cooldown_sync, key_id)
 
-    def _reset_ai_key_cooldown_sync(self, key_id: int) -> None:
-        with self.connection() as connection:
+    def _reset_ai_key_cooldown_sync(
+        self, key_id: int, *, connection: sqlite3.Connection | None = None,
+    ) -> None:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             cursor = connection.execute(
                 "UPDATE ai_provider_keys SET cooldown_until = NULL WHERE id = ?",
                 (key_id,),
@@ -4412,15 +4483,22 @@ class Database:
             if cursor.rowcount != 1:
                 raise LookupError(f"AI provider key {key_id} does not exist")
 
-    async def mark_ai_key_used(self, key_id: int) -> None:
-        await asyncio.to_thread(self._mark_ai_key_used_sync, key_id)
+    async def mark_ai_key_used(
+        self, key_id: int, *, expected: AiProviderKey | None = None,
+        provider: AiProvider | None = None,
+    ) -> None:
+        await asyncio.to_thread(self._mark_ai_key_used_sync, key_id, expected, provider)
 
-    def _mark_ai_key_used_sync(self, key_id: int) -> None:
+    def _mark_ai_key_used_sync(
+        self, key_id: int, expected: AiProviderKey | None = None,
+        provider: AiProvider | None = None,
+    ) -> None:
         with self.connection() as connection:
+            guard, args = self._ai_key_guard(expected, provider)
             connection.execute(
                 "UPDATE ai_provider_keys SET last_used_at = CURRENT_TIMESTAMP, "
-                "cooldown_until = NULL WHERE id = ?",
-                (key_id,),
+                "cooldown_until = NULL WHERE id = ?" + guard,
+                (key_id, *args),
             )
 
     async def list_ai_provider_models(
@@ -4502,10 +4580,10 @@ class Database:
         )
 
     def _add_ai_provider_models_sync(
-        self, provider_id: int, names: tuple[str, ...]
+        self, provider_id: int, names: tuple[str, ...], *, connection: sqlite3.Connection | None = None,
     ) -> tuple[AiProviderModel, ...]:
         stored: list[AiProviderModel] = []
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             for name in names:
                 connection.execute(
                     "INSERT INTO ai_provider_models (provider_id, name) "
@@ -4557,10 +4635,10 @@ class Database:
         )
 
     def _set_ai_provider_model_params_sync(
-        self, model_id: int, params: AiRequestParams
+        self, model_id: int, params: AiRequestParams, *, connection: sqlite3.Connection | None = None,
     ) -> None:
         document = json.dumps(_params_document(params), ensure_ascii=False)
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             cursor = connection.execute(
                 "UPDATE ai_provider_models SET params = ? WHERE id = ?",
                 (document, model_id),
@@ -4569,9 +4647,9 @@ class Database:
                 raise LookupError(f"AI provider model {model_id} does not exist")
 
     def _set_ai_provider_model_enabled_sync(
-        self, model_id: int, enabled: bool
+        self, model_id: int, enabled: bool, *, connection: sqlite3.Connection | None = None,
     ) -> None:
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             cursor = connection.execute(
                 "UPDATE ai_provider_models SET enabled = ? WHERE id = ?",
                 (1 if enabled else 0, model_id),
@@ -4582,7 +4660,9 @@ class Database:
     async def delete_ai_provider_model(self, model_id: int) -> None:
         await asyncio.to_thread(self._delete_ai_provider_model_sync, model_id)
 
-    def _delete_ai_provider_model_sync(self, model_id: int) -> None:
+    def _delete_ai_provider_model_sync(
+        self, model_id: int, *, connection: sqlite3.Connection | None = None,
+    ) -> None:
         """Delete a model and whatever chain slot it occupies.
 
         Leaving the slot behind would shift nothing (positions are explicit) but
@@ -4590,7 +4670,7 @@ class Database:
         it makes the chain shorter, which is the honest result of removing a
         model an operator no longer wants tried.
         """
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             connection.execute(
                 "DELETE FROM ai_model_chain WHERE provider_model_id = ?",
                 (model_id,),
@@ -4604,26 +4684,44 @@ class Database:
                 )
 
     async def mark_ai_model_verified(
-        self, model_id: int, *, ok: bool, error: str | None
-    ) -> None:
-        await asyncio.to_thread(
-            self._mark_ai_model_verified_sync, model_id, ok, error
+        self, model_id: int, *, ok: bool, error: str | None,
+        expected: AiProviderModel | None = None, provider: AiProvider | None = None,
+        operation_id: str | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._mark_ai_model_verified_sync, model_id, ok, error, expected, provider, operation_id
         )
 
     def _mark_ai_model_verified_sync(
-        self, model_id: int, ok: bool, error: str | None
-    ) -> None:
+        self, model_id: int, ok: bool, error: str | None,
+        expected: AiProviderModel | None = None, provider: AiProvider | None = None,
+        operation_id: str | None = None,
+    ) -> bool:
+        guard, args = '', ()
+        if expected is not None:
+            guard += ' AND model_uuid = ? AND revision = ?'
+            args += (expected.model_uuid, expected.revision)
+        if provider is not None:
+            guard += (' AND provider_id IN (SELECT id FROM ai_providers WHERE '
+                      'provider_uuid = ? AND revision = ? AND keys_revision = ?)')
+            args += (provider.provider_uuid, provider.revision, provider.keys_revision)
+        if operation_id is not None:
+            guard += (" AND EXISTS (SELECT 1 FROM ai_network_operations o WHERE o.operation_id = ? "
+                      "AND o.status = 'RUNNING' AND (o.session_id IS NULL OR EXISTS "
+                      "(SELECT 1 FROM worker_sessions s WHERE s.session_id = o.session_id AND s.status = 'LIVE')))")
+            args += (operation_id,)
         with self.connection() as connection:
             cursor = connection.execute(
                 "UPDATE ai_provider_models SET last_verified_at = "
                 "CURRENT_TIMESTAMP, last_verify_ok = ?, last_verify_error = ? "
-                "WHERE id = ?",
-                (1 if ok else 0, error, model_id),
+                "WHERE id = ?" + guard,
+                (1 if ok else 0, error, model_id, *args),
             )
-            if cursor.rowcount != 1:
+            if cursor.rowcount != 1 and expected is None and provider is None:
                 raise LookupError(
                     f"AI provider model {model_id} does not exist"
                 )
+            return cursor.rowcount == 1
 
     async def list_ai_model_chain(
         self, scope: str = CHAIN_SCOPE_DEFAULT
@@ -4641,8 +4739,8 @@ class Database:
         return tuple(
             AiModelChainEntry(
                 position=int(row[0]),
-                provider=_ai_provider_from_row(row[1:10]),
-                model=_ai_model_from_row(row[10:18]),
+                provider=_ai_provider_from_row(row[1:14]),
+                model=_ai_model_from_row(row[14:24]),
                 scope=scope,
             )
             for row in rows
@@ -4656,7 +4754,7 @@ class Database:
         )
 
     def _save_ai_model_chain_sync(
-        self, model_ids: tuple[int, ...], scope: str
+        self, model_ids: tuple[int, ...], scope: str, *, connection: sqlite3.Connection | None = None,
     ) -> tuple[AiModelChainEntry, ...]:
         """Replace the whole chain with `model_ids`, in that order.
 
@@ -4665,7 +4763,7 @@ class Database:
         verbs would each have to renumber the rest anyway. One transaction
         keeps a failed save from leaving the primary missing.
         """
-        with self.connection() as connection:
+        with (nullcontext(connection) if connection is not None else self.connection()) as connection:
             if model_ids:
                 placeholders = ", ".join("?" for _ in model_ids)
                 found = {
@@ -4697,8 +4795,8 @@ class Database:
         return tuple(
             AiModelChainEntry(
                 position=int(row[0]),
-                provider=_ai_provider_from_row(row[1:10]),
-                model=_ai_model_from_row(row[10:18]),
+                provider=_ai_provider_from_row(row[1:14]),
+                model=_ai_model_from_row(row[14:24]),
                 scope=scope,
             )
             for row in rows
@@ -4802,11 +4900,9 @@ class Database:
         """
         return await asyncio.to_thread(self._clear_ai_path_suggestions_sync)
 
-    def _clear_ai_path_suggestions_sync(self) -> int:
-        with self.connection() as connection:
-            before = connection.total_changes
-            connection.execute("DELETE FROM ai_path_suggestions")
-            return connection.total_changes - before
+    def _clear_ai_path_suggestions_sync(self, connection=None) -> int:
+        with self.connection() if connection is None else nullcontext(connection) as connection:
+            return connection.execute("DELETE FROM ai_path_suggestions").rowcount
 
     async def ai_path_suggestion_count(self) -> int:
         return await asyncio.to_thread(self._ai_path_suggestion_count_sync)

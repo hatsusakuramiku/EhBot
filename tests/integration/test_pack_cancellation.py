@@ -28,8 +28,8 @@ async def test_stopped_repack_drains_thread_and_preserves_previous_archive(tmp_p
     entered, released, exited = Event(), Event(), Event()
     build = pack._build_processor
 
-    async def blocking_processor(quality):
-        actual = await build(quality)
+    async def blocking_processor(quality, **kwargs):
+        actual = await build(quality, **kwargs)
 
         class Processor:
             def process(self, *args, **kwargs):

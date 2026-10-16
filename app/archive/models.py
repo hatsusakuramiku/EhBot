@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -114,6 +114,8 @@ class ToolProfile:
     timeout_seconds: int
     capabilities: tuple[str, ...]
     enabled: bool
+    profile_uuid: str = ''
+    revision: int = 1
 
     def supports(self, source_format: str) -> bool:
         return source_format in self.supported_formats
@@ -132,6 +134,18 @@ class ArchivePasswordEntry:
     enabled: bool
     last_success_at: str | None
     created_at: str
+    password_uuid: str = ''
+    revision: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ArchivePasswordAttempt:
+    """One decrypted input and its original vault configuration identity."""
+
+    password_id: int
+    password_uuid: str
+    revision: int
+    password: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +192,7 @@ class ArchivePathRule:
     created_at: str
     updated_at: str
     case_sensitive: bool = False
+    rule_uuid: str = ''
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +213,7 @@ __all__ = [
     "ArchiveManifest",
     "ArchiveMember",
     "ArchivePasswordEntry",
+    "ArchivePasswordAttempt",
     "ArchivePathRule",
     "ArchiveProcessResult",
     "ArchiveTaskSnapshot",

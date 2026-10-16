@@ -240,6 +240,48 @@ async def test_changed_remote_identity_cannot_be_deleted_or_release_slot(databas
 
 
 @pytest.mark.asyncio
+async def test_config_change_during_push_retains_original_instance_until_restored(database, tmp_path):
+    remote = Remote()
+    remote.release.clear()
+    hosts = []
+
+    async def request(message):
+        hosts.append(message.url.host)
+        return await remote.request(message)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(request)) as client:
+        service, torrent, original = services(database, tmp_path, remote, client)
+        job_id = pending(database, 'EH_TORRENT')
+        worker = asyncio.create_task(service._process_one())
+        await asyncio.wait_for(remote.entered.wait(), 2)
+
+        async def changed_config():
+            return replace(original, base_url='http://new-instance.invalid')
+
+        torrent._config_provider = changed_config
+        remote.release.set()
+        assert await asyncio.wait_for(worker, 2)
+        assert set(hosts) == {'remote.invalid'}
+        with database.connection() as connection:
+            assert connection.execute('SELECT instance_url, ownership FROM queue_remote_resources').fetchone() == (
+                original.base_url, 'OWNED')
+        receipt = await service.command(job_id, 'cancel', **observed(database, job_id))
+        assert await service.process_operations() == 0
+        assert remote.deleted == [] and set(hosts) == {'remote.invalid'}
+        assert (await service.get_task(receipt['task_id']))['status'] == 'STOPPING'
+
+        async def restored_config():
+            # Repairing credentials or mappings on the original instance must
+            # remain possible while its old resource occupies the work slot.
+            return replace(original, username='repaired-user', local_save_path=str(tmp_path))
+
+        torrent._config_provider = restored_config
+        assert await service.process_operations() == 1
+        assert (await service.get_task(receipt['task_id']))['status'] == 'CANCELLED'
+        assert remote.added == 1 and len(remote.deleted) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["INTENDED", "REGISTERED"])
 async def test_restart_after_remote_push_before_park_stops_old_transfer_before_requeue(database, tmp_path, phase):
     remote = Remote()

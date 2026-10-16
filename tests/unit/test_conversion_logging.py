@@ -183,7 +183,7 @@ async def test_handle_job_archive_error_keeps_original_traceback(tmp_path, caplo
     class _BoomProcessor:
         def process(self, *args, **kwargs):
             raise ArchiveError("ARCHIVE_CORRUPT", "header is not a valid zip")
-    async def build_processor(image_quality):
+    async def build_processor(image_quality, **kwargs):
         return _BoomProcessor()
     service._build_processor = build_processor
 

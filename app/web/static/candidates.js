@@ -253,6 +253,9 @@
       })
       .then(function (payload) {
         renderRows(payload.metadata_editor ? payload.metadata_editor.fields : payload.metadata || []);
+        rowHost.dataset.workId = payload.metadata_editor ? payload.metadata_editor.work_id : payload.work_id;
+        rowHost.dataset.revision = String(payload.metadata_editor ? payload.metadata_editor.revision : payload.revision);
+        delete rowHost._metadataCommand;
         /* `note` is the caller's word about what just happened -- a save, for
          * instance. Set after the load so it is not overwritten by it. */
         say(note || "");
@@ -318,7 +321,9 @@
            * a field can move the candidate out of 待补充 and can change what
            * every other field's provenance is, and the server is the only thing
            * that knows. */
-          if (body.sync_skipped && !["WORK_NOT_PACKED", "NO_ARCHIVE_CHANGES"].includes(body.sync_skipped)) {
+          if (!body.metadata_editor || body.snapshot_changed) {
+            say("修改已受理，但作品随后有变化；草稿与原版本已保留，请核对最新状态");
+          } else if (body.sync_skipped && !["WORK_NOT_PACKED", "NO_ARCHIVE_CHANGES"].includes(body.sync_skipped)) {
             say(body.sync_message);
           } else openDrawer(openId, opener, body.sync_message || "已保存");
         })

@@ -12,6 +12,9 @@ from app.downloads.archived import ArchivedWorkService
 from app.downloads.queue import QueueControl
 from app.downloads.execution import attempt_path, execution_scope
 from app.downloads.service import DownloadService
+from app.review.application import remove_work
+from app.review.commands import WorkCommands
+from tests.work_commands import observed_review_batch
 from app.main import create_app
 from app.api.deps import CSRF_HEADER
 from tests.integration.test_api_auth import complete_first_run, make_settings
@@ -67,7 +70,10 @@ async def test_purge_revokes_late_write_and_readded_identity_waits_for_actual_ex
     worker = asyncio.create_task(downloads._process_one())
     await asyncio.wait_for(entered.wait(), 2)
     old_task = observed(database, job_id)["task_id"]
-    result = await removal.purge_work(1, delete_files=True)
+    version = await WorkCommands(database).version(1)
+    result = await remove_work(database, removal, 1, 'delete-files', {
+        'work_id': version['work_id'], 'expected_revision': version['revision'],
+        'idempotency_key': 'purge-running'}, 'admin')
     assert result["removed_candidate"] == 1 and result["cleanup_status"] == "PENDING"
     assert await database.get_candidate(1) is None and source.exists()
     with database.connection() as c:
@@ -214,7 +220,7 @@ def test_shared_http_api_returns_queryable_cleanup_after_candidate_is_gone(tmp_p
         pending(app.state.database)
         app.state.download_service._claim_pending_job_sync()
         result = client.post("/api/v1/candidates/batch",
-                             json={"action": "delete", "candidate_ids": [1]},
+                             json={"action": "delete", "candidate_ids": [1], **observed_review_batch(client, [1])},
                              headers={CSRF_HEADER: csrf_token(client)})
         assert result.status_code == 200
         removed = result.json()["applied"][0]

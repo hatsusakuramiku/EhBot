@@ -6,6 +6,8 @@ import asyncio
 import sqlite3
 from pathlib import Path
 
+from tests.work_commands import observed_work, observed_review, observed_review_batch
+
 from fastapi.testclient import TestClient
 
 from app.api.actions import MAX_BATCH
@@ -260,7 +262,7 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/candidates/batch",
-                json={"action": "reject", "candidate_ids": [1]},
+                json={"action": "reject", "candidate_ids": [1], **observed_review_batch(client, [1])},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
             status = client.get("/api/v1/works/1").json()["status"]["code"]
@@ -279,7 +281,7 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/candidates/batch",
-                json={"action": "approve", "candidate_ids": [1]},
+                json={"action": "approve", "candidate_ids": [1], **observed_review_batch(client, [1])},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
             status = client.get("/api/v1/works/1").json()["status"]["code"]
@@ -361,7 +363,7 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/candidates/batch",
-                json={"action": "delete", "candidate_ids": [1]},
+                json={"action": "delete", "candidate_ids": [1], **observed_review_batch(client, [1])},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
             gone = client.get("/api/v1/works/1")
@@ -384,7 +386,7 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/candidates/batch",
-                json={"action": "delete", "candidate_ids": [1]},
+                json={"action": "delete", "candidate_ids": [1], **observed_review_batch(client, [1])},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -427,7 +429,8 @@ class TestWriteGates:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/candidates/batch",
-                json={"action": "delete-files", "candidate_ids": [999]},
+                json={"action": "delete-files", "candidate_ids": [999], 'idempotency_key': 'previously-observed',
+                      'versions': {'999': {'work_id': 'removed-work-uuid', 'expected_revision': 1}}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -451,7 +454,7 @@ class TestMetadataPatch:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/requeue",
-                json={"note": "误驳回"},
+                json={**observed_review(client), "note": "误驳回"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
             status = client.get("/api/v1/works/1").json()["status"]["code"]
@@ -472,11 +475,11 @@ class TestMetadataPatch:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/requeue",
-                json={},
+                json=observed_review(client),
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
-        assert response.status_code == 400
+        assert response.status_code == 409
         assert response.json()["error"]["code"] == "REVIEW_INVALID_TRANSITION"
 
     def test_requeue_needs_the_same_write_gates_as_any_other_action(
@@ -502,7 +505,7 @@ class TestMetadataPatch:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"fields": {"Artist": "Sensei"}},
+                json={**observed_work(client), "fields": {"Artist": "Sensei"}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -535,7 +538,8 @@ class TestMetadataPatch:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/404/metadata",
-                json={"fields": {"Artist": "Sensei"}},
+                json={"work_id": "deleted-work", "expected_revision": 1,
+                      "idempotency_key": "missing-work-edit", "fields": {"Artist": "Sensei"}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -577,7 +581,7 @@ class TestMetadataLocks:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"locks": {"Title": True}},
+                json={**observed_work(client), "locks": {"Title": True}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
             entry = next(
@@ -607,12 +611,12 @@ class TestMetadataLocks:
             token = csrf_token(client)
             client.patch(
                 "/api/v1/works/1/metadata",
-                json={"locks": {"Title": True}},
+                json={**observed_work(client), "locks": {"Title": True}},
                 headers={CSRF_HEADER: token},
             )
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"locks": {"Title": False}},
+                json={**observed_work(client), "locks": {"Title": False}},
                 headers={CSRF_HEADER: token},
             )
 
@@ -632,6 +636,7 @@ class TestMetadataLocks:
             response = client.patch(
                 "/api/v1/works/1/metadata",
                 json={
+                    **observed_work(client),
                     "fields": {"Artist": "Sensei"},
                     "locks": {"Artist": True},
                 },
@@ -706,7 +711,7 @@ class TestMetadataLocks:
             log_in(client, settings)
             response = client.patch(
                 "/api/v1/works/1/metadata",
-                json={"locks": {"Artist": True}},
+                json={**observed_work(client), "locks": {"Artist": True}},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -750,7 +755,7 @@ class TestConvert:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/convert",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -771,7 +776,7 @@ class TestConvert:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/convert",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -789,12 +794,12 @@ class TestConvert:
             log_in(client, settings)
             first = client.post(
                 "/api/v1/works/1/convert",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             ).json()["job_id"]
             second = client.post(
                 "/api/v1/works/1/convert",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             ).json()["job_id"]
 
@@ -808,7 +813,7 @@ class TestConvert:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/404/convert",
-                json={},
+                json={'work_id': 'removed-work', 'expected_revision': 1, 'idempotency_key': 'missing-work', },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -842,12 +847,12 @@ class TestConvert:
                 own = c.execute('SELECT artifact_id FROM artifacts WHERE job_id = ?', (own_job,)).fetchone()[0]
                 foreign = c.execute('SELECT artifact_id FROM artifacts WHERE job_id = ?', (foreign_job,)).fetchone()[0]
             for invalid in ('', True, 123, []):
-                result = client.post('/api/v1/works/1/convert', json={'input_artifact_id': invalid}, headers=headers)
+                result = client.post('/api/v1/works/1/convert', json={**observed_review(client, 1), 'input_artifact_id': invalid}, headers=headers)
                 assert result.status_code == 400
                 assert result.json()['error']['code'] == 'ARTIFACT_INVALID'
-            wrong = client.post('/api/v1/works/1/convert', json={'input_artifact_id': foreign}, headers=headers)
+            wrong = client.post('/api/v1/works/1/convert', json={**observed_review(client, 1), 'input_artifact_id': foreign}, headers=headers)
             assert wrong.status_code == 400 and wrong.json()['error']['code'] == 'ARCHIVE_NOT_READY'
-            selected = client.post('/api/v1/works/1/convert', json={'input_artifact_id': own}, headers=headers)
+            selected = client.post('/api/v1/works/1/convert', json={**observed_review(client, 1), 'input_artifact_id': own}, headers=headers)
             assert selected.status_code == 200
             with sqlite3.connect(settings.data_path / 'ehbot.db') as c:
                 assert c.execute("SELECT json_extract(details_json, '$.input_artifact_id') FROM download_jobs WHERE id = ?",
@@ -870,7 +875,7 @@ class TestFetchMetadata:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/fetch-metadata",
-                json={},
+                json=observed_work(client),
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -887,7 +892,7 @@ class TestFetchMetadata:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/404/fetch-metadata",
-                json={},
+                json={"work_id": "deleted-work", "expected_revision": 1, "idempotency_key": "missing-work-fetch"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -935,7 +940,7 @@ class TestPullSource:
             jobs = {
                 provider: client.post(
                     f"/api/v1/works/{candidate_id}/sources/{provider}",
-                    json={},
+                    json={**observed_review(client, candidate_id), },
                     headers={CSRF_HEADER: csrf_token(client)},
                 )
                 for candidate_id, provider in enumerate(("EXHENTAI", "TELEGRAPH", "EH_TORRENT"), 1)
@@ -958,7 +963,7 @@ class TestPullSource:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/sources/exhentai",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -978,7 +983,7 @@ class TestPullSource:
             responses = [
                 client.post(
                     f"/api/v1/works/1/sources/{provider}",
-                    json={},
+                    json={**observed_review(client, 1), },
                     headers={CSRF_HEADER: csrf_token(client)},
                 )
                 for provider in ("TELEGRAM", "TELEGRAM_USER")
@@ -999,7 +1004,7 @@ class TestPullSource:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/1/sources/CONVERSION",
-                json={},
+                json={**observed_review(client, 1), },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 
@@ -1024,7 +1029,7 @@ class TestPullSource:
             log_in(client, settings)
             response = client.post(
                 "/api/v1/works/404/sources/EXHENTAI",
-                json={},
+                json={'work_id': 'removed-work', 'expected_revision': 1, 'idempotency_key': 'missing-work', },
                 headers={CSRF_HEADER: csrf_token(client)},
             )
 

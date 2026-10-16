@@ -754,15 +754,19 @@ class ConversionService:
         free-form column: a new column for two booleans one branch reads would
         be a schema change for nothing.
         """
+        await self.prepare_enqueue(candidate_id, refile=refile)
+        return await run_sync(
+            self._enqueue_sync, candidate_id, refile, refresh_ai_path, input_artifact_id
+        )
+
+    async def prepare_enqueue(self, candidate_id: int, *, refile: bool = False) -> None:
+        """Check recoverable publications and packaging options outside the write lock."""
         await run_sync(self._publications.retry_required, candidate_id)
         if not refile:
             # A repack whose series cannot be resolved is refused here, before a
             # task exists -- see the helper. A first pack is let through so the
             # job can park in 需干预 with the same reason.
             await self._refuse_series_before_enqueue(candidate_id)
-        return await run_sync(
-            self._enqueue_sync, candidate_id, refile, refresh_ai_path, input_artifact_id
-        )
 
     def _enqueue_sync(
         self,
@@ -1412,7 +1416,8 @@ class ConversionService:
                 )
             return
         image_quality = await self._settings.image_quality()
-        processor = await self._build_processor(image_quality)
+        password_attempts = await self._settings.password_attempts()
+        processor = await self._build_processor(image_quality, password_attempts=password_attempts)
         staged_target = (attempt_path(library_target.parent / ".ehbot-staging" / library_target.name)
                          if current_execution.get() is not None else library_target)
         try:
@@ -1484,7 +1489,9 @@ class ConversionService:
             )
             return
         if result.password_id is not None:
-            await self._settings.mark_password_success(result.password_id)
+            used_password = next((entry for entry in password_attempts if entry.password_id == result.password_id), None)
+            if used_password is not None:
+                await self._settings.mark_password_success(used_password)
         completion = {
             **result.snapshot.as_dict(),
             "page_count": result.page_count,
@@ -1626,17 +1633,18 @@ class ConversionService:
             )
 
     async def _build_processor(
-        self, image_quality: str | None = None
+        self, image_quality: str | None = None, *, password_attempts=None
     ) -> ArchiveProcessor:
         profiles = await self._settings.profiles(enabled_only=True)
         limits = await self._settings.limits()
-        passwords = await self._settings.password_attempts()
+        if password_attempts is None:
+            password_attempts = await self._settings.password_attempts()
         if image_quality is None:
             image_quality = await self._settings.image_quality()
         return ArchiveProcessor(
             profiles=profiles,
             limits=limits,
-            passwords=passwords,
+            passwords=tuple((entry.password_id, entry.password) for entry in password_attempts),
             tools_path=self._settings.tools_path,
             image_quality=image_quality,
         )

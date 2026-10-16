@@ -20,7 +20,6 @@ from uuid import uuid4
 
 from app.candidates.entries import IngestError, claim_manual_gallery, fail_claim, renew_claim
 from app.candidates.links import find_gallery_ref, find_preview_gallery_ref
-from app.db.database import DuplicateGalleryCandidate
 from app.downloads.models import PROVIDER_EH_TORRENT, PROVIDER_TELEGRAPH, PROVIDER_TELEGRAM, PROVIDER_TELEGRAM_USER
 from app.downloads.service import DownloadError
 from app.downloads.execution import run_sync
@@ -84,9 +83,6 @@ async def ingest_manual_link(
             "仅支持 ExHentai 画廊链接（exhentai.org / e-hentai.org）",
         )
     gid, token = reference
-    existing = await database.candidate_id_for_gallery(gid)
-    if existing is not None:
-        raise DuplicateGalleryCandidate(existing)
     def reserve():
         with database.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")

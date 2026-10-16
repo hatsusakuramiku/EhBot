@@ -67,6 +67,7 @@
             data-rename-open="{{ item.candidate_id }}"
             data-rename-name="{{ item.cbz_path or '' }}"
             data-rename-relative="{{ item.library_relative_path or '' }}"
+            data-rename-work-id="{{ item.work_id }}" data-rename-revision="{{ item.revision }}"
             data-rename-title="{{ item.title or '' }}" hidden>改名/移动</button>
     {% endif %}
     <a class="ui-btn" data-size="sm" data-variant="ghost" href="{{ item.href }}">详情</a>
@@ -77,7 +78,7 @@
   <tr data-work-id="{{ item.candidate_id }}">
     <td data-label="选择">
       <input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ item.candidate_id }}"
-             aria-label="选择「{{ item.title or '未命名作品' }}」">
+             aria-label="选择「{{ item.title or '未命名作品' }}」" {% if batch_draft and item.candidate_id in batch_draft.candidate_ids %}checked{% endif %}>
     </td>
     <td data-label="作品">
       <span class="ui-table-primary"><a href="{{ item.href }}">{{ item.title or "未命名作品" }}</a></span>
@@ -192,7 +193,7 @@
       {% endif %}
     </div>
 
-    {% if works %}
+    {% if works or batch_draft %}
     {#- `hx-post` here covers every button that submits this form: the batch
         actions, and the per-row 打包 whose `formaction` retargets the same
         submission. HTMX honours `formaction`, so one attribute converts them all
@@ -203,10 +204,28 @@
         of fifty books. -#}
     <form data-downloaded-form id="downloaded-batch" method="post" action="/downloaded/batch"
           hx-post="/downloaded/batch"
-          x-data="{ selected: 0 }"
+          x-data="{ selected: {{ batch_draft.candidate_ids | length if batch_draft else 0 }} }"
           @change="selected = $el.querySelectorAll('input[name=candidate_ids]:checked').length">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="tab" value="{{ tab }}">
+      <input type="hidden" name="idempotency_key" value="{{ batch_draft.idempotency_key if batch_draft else new_command_key() }}">
+      {% for item in works %}
+      {% set observed = batch_draft.versions.get(item.candidate_id|string, item) if batch_draft else item %}
+      <input type="hidden" name="work_id_{{ item.candidate_id }}" value="{{ observed.work_id }}">
+      <input type="hidden" name="expected_revision_{{ item.candidate_id }}" value="{{ observed.get('expected_revision', observed.revision) }}">
+      <input type="hidden" name="idempotency_key_{{ item.candidate_id }}" value="{{ observed.get('idempotency_key', new_command_key()) }}">
+      {% endfor %}
+      {% if batch_draft %}
+      {% set visible_ids = works | map(attribute='candidate_id') | list %}
+      {% for candidate_id in batch_draft.candidate_ids if candidate_id not in visible_ids %}
+      {% set observed = batch_draft.versions[candidate_id|string] %}
+      <label class="ui-table-secondary"><input class="ui-checkbox" type="checkbox" name="candidate_ids" value="{{ candidate_id }}" checked>
+        作品 #{{ candidate_id }} 已离开当前列表，保留原批次选择；重发仍返回原结果。</label>
+      <input type="hidden" name="work_id_{{ candidate_id }}" value="{{ observed.work_id }}">
+      <input type="hidden" name="expected_revision_{{ candidate_id }}" value="{{ observed.expected_revision }}">
+      <input type="hidden" name="idempotency_key_{{ candidate_id }}" value="{{ observed.idempotency_key }}">
+      {% endfor %}
+      {% endif %}
 
       {% if view == "list" %}
       {% call ui.table(columns, caption=tab_title) %}
@@ -225,6 +244,7 @@
                 status=item.pack,
                 selectable=true,
                 value=item.candidate_id,
+                selected=batch_draft and item.candidate_id in batch_draft.candidate_ids,
                 tag_hrefs=tag_hrefs) %}
             <span class="ui-card-facts">{{ item.provider.label }}{% if item.page_count is not none %} · {{ item.page_count }} 页{% endif %} · {{ size_text(item.cbz_size or item.archive_size) }}</span>
             {{ work_actions(item) }}
@@ -296,7 +316,7 @@
     The form lives here rather than in a row for the reason the row actions are
     buttons: this would otherwise be a form nested inside the batch form, which
     the HTML parser discards. Out here it is a sibling, so it is a real form. -#}
-<div data-rename-drawer hidden>
+<div data-rename-drawer{% if not rename_draft %} hidden{% endif %}>
   <div class="ui-scrim" data-rename-close></div>
   <aside class="ui-drawer" data-side="right" role="dialog" aria-modal="true"
          aria-labelledby="rename-drawer-title">
@@ -305,25 +325,30 @@
       <button class="ui-btn" data-variant="ghost" data-size="icon" type="button"
               data-rename-close aria-label="关闭">✕</button>
     </header>
-    <form method="post" data-rename-form>
+    <form method="post" data-rename-form{% if rename_draft %} action="/downloaded/{{ rename_draft.candidate_id }}/rename" data-dirty="true"{% endif %}>
       <div class="ui-drawer-body">
         <p class="ui-hint" data-rename-current role="status" aria-live="polite"></p>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="tab" value="{{ tab }}">
+        <input type="hidden" name="work_id" value="{{ rename_draft.work_id if rename_draft else '' }}">
+        <input type="hidden" name="expected_revision" value="{{ rename_draft.expected_revision if rename_draft else '' }}">
+        <input type="hidden" name="idempotency_key" value="{{ rename_draft.idempotency_key if rename_draft else '' }}">
         <div class="ui-field">
           <label for="rename-filename">文件名</label>
           <input class="ui-input" id="rename-filename" name="filename" type="text"
+                 value="{{ rename_draft.filename if rename_draft else '' }}"
                  aria-describedby="rename-filename-hint">
           <span class="ui-hint" id="rename-filename-hint">不含 .cbz 后缀；非法字符会被自动清理。留空则保留现有文件名</span>
         </div>
         <div class="ui-field">
           <label for="rename-directory">归档子目录</label>
           <input class="ui-input" id="rename-directory" name="directory" type="text"
+                 value="{{ rename_draft.directory if rename_draft else '' }}"
                  placeholder="例如 分类/作者" aria-describedby="rename-directory-hint">
           <span class="ui-hint" id="rename-directory-hint">相对于书库根目录，留空则直接放在根目录下</span>
         </div>
         <label class="ui-filter-option">
-          <input class="ui-checkbox" type="checkbox" name="repack">
+          <input class="ui-checkbox" type="checkbox" name="repack"{% if rename_draft and rename_draft.repack %} checked{% endif %}>
           <span>移动后重新打包一次</span>
         </label>
       </div>

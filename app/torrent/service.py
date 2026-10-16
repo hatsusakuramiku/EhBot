@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import sqlite3
 from pathlib import Path
 import time
@@ -311,67 +310,6 @@ class TorrentService:
         with self._database.connection() as connection:
             connection.execute("UPDATE queue_remote_resources SET status = 'STOP_CONFIRMED', "
                                "updated_at = CURRENT_TIMESTAMP WHERE resource_id = ?", (resource_id,))
-
-    async def complete_if_ready(self, job_id: int) -> bool:
-        """Finish a parked torrent whose payload is already readable on disk.
-
-        The retry path tries the cheap outcome first: a job that failed with a
-        content-read error is usually waiting on a path the operator has since
-        fixed. If the client reports the transfer complete and the resolved
-        save path is readable, the job is completed here without a fresh push.
-        Any transient failure falls back to ``False`` so the caller re-pushes.
-        Settings are re-read in this method so a corrected save path takes
-        effect at once, satisfying the "re-read on every retry" contract.
-        """
-        candidate_id, details = await run_sync(
-            self._job_candidate_details_sync, job_id
-        )
-        digest = str(details.get("hash") or "")
-        if not digest:
-            return False
-        try:
-            config = await self._config()
-            status = await self._client(config).status(digest)
-            if status is None or not status.is_complete or not status.content_path:
-                return False
-            content_path = resolve_content_path(
-                status.content_path, config.save_path, config.local_save_path
-            )
-            if not os.path.exists(content_path) or not os.access(
-                content_path, os.R_OK
-            ):
-                return False
-            work_path = await self._effective_work_path()
-            delivery = await run_sync(
-                self._take_delivery_sync,
-                candidate_id,
-                status,
-                config,
-                work_path,
-            )
-            merged = self._merge_progress(details, status)
-            merged["archive_path"] = delivery.archive_path
-            merged["archive_bytes"] = delivery.size_bytes
-            merged["packed_directory"] = delivery.was_directory
-            merged["completed_at"] = time.time()
-            merged["seeding"] = True
-            merged["retried_complete"] = True
-            await run_sync(
-                self._complete_sync,
-                job_id,
-                candidate_id,
-                delivery,
-                merged,
-            )
-            if not config.keep_seeding:
-                await self._cleanup_completed_resource(job_id, merged)
-            await self._queue_pack(candidate_id)
-            return True
-        except (TorrentError, httpx.HTTPError, OSError):
-            # The client may be down or the payload still not quite readable;
-            # either way the caller falls through to a normal re-push, which
-            # surfaces the reason in the job's error state.
-            return False
 
     async def abandon(self, job_id: int) -> None:
         """Legacy adapter to the same ownership check and confirmed stop path."""
@@ -726,21 +664,6 @@ class TorrentService:
                 else "\u5c1a\u672a\u62c9\u53d6 gdata\uff0c\u79cd\u5b50\u4fe1\u606f\u672a\u77e5",
             )
         return int(row[0]), str(row[1]), str(row[3])
-
-    def _job_candidate_details_sync(self, job_id: int) -> tuple[int, dict]:
-        with self._database.connection() as connection:
-            row = connection.execute(
-                "SELECT candidate_id, details_json FROM download_jobs "
-                "WHERE id = ?",
-                (job_id,),
-            ).fetchone()
-        if row is None:
-            return 0, {}
-        try:
-            details = json.loads(str(row[1] or "{}"))
-        except ValueError:
-            details = {}
-        return int(row[0]), details if isinstance(details, dict) else {}
 
     def _job_details_sync(self, job_id: int) -> dict:
         with self._database.connection() as connection:

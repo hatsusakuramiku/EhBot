@@ -82,6 +82,8 @@ class CandidateListItem:
     #: Why the candidate was flagged, shown on the row when it explains
     #: something (R60). Read for every row, rendered for few.
     filter_reason: str | None = None
+    work_id: str | None = None
+    revision: int | None = None
 
     @property
     def display_title(self) -> str:
@@ -118,6 +120,7 @@ class CandidateDetail:
     torrent_count: int | None = None
     torrent_hash: str | None = None
     magnet_url: str | None = None
+    work_id: str | None = None
 
     @property
     def display_title(self) -> str:

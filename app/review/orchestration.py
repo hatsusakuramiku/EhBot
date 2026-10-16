@@ -191,6 +191,33 @@ class ReviewOrchestrator:
             )
         return candidate
 
+    async def work_command(self, candidate_id, action, payload, operator):
+        """Accept an observed review and its prepared download as one DB change."""
+        from app.review.commands import WorkCommands
+        commands = WorkCommands(self._database)
+        receipt = await commands.inspect_review(candidate_id, action, payload)
+        if receipt is not None:
+            return receipt
+        download, prepared = None, None
+        if action == 'approve':
+            try:
+                candidate = await self._load_reviewable(candidate_id)
+                routed = self.route_source(candidate)
+                if not routed.is_downloadable:
+                    raise ReviewError('CANDIDATE_NOT_DOWNLOADABLE', f'候选 #{candidate_id} 没有可用的下载来源')
+                download = self._download_service()
+                prepared = await download.prepare_work_download(candidate_id, routed.provider, routed.attachment)
+            except (ReviewError, DownloadError):
+                receipt = await commands.inspect_review(candidate_id, action, payload)
+                if receipt is not None:
+                    return receipt
+                raise
+        return await commands.review(candidate_id, action, payload, operator, download=download, prepared=prepared)
+
+    async def review_batch(self, action, candidate_ids, versions, key, operator):
+        from app.review.batches import ReviewBatches
+        return await ReviewBatches(self._database, self).run(action, candidate_ids, versions, key, operator)
+
     async def approve_and_enqueue(
         self, candidate_ids: list[int], operator: str
     ) -> tuple[int, ...]:

@@ -17,6 +17,7 @@ import time
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import httpx
+from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.routing import APIRoute
 
@@ -35,7 +36,7 @@ MAX_FRAME_BYTES = 262144
 
 def command_catalogue() -> dict[str, dict]:
     """Publish only finite JSON/HTML routes; exclude auth, streams and files."""
-    from app.api import accounts, actions, activity, candidates, downloaded, ingestion, logs, settings, summary, works
+    from app.api import accounts, actions, activity, candidates, downloaded, ingestion, logs, settings, summary, works, v2
     from app.web.routes import (
         activity as web_activity, auto_approval, candidates as web_candidates,
         connections, dashboard, downloaded as web_downloaded, logs as web_logs,
@@ -44,6 +45,7 @@ def command_catalogue() -> dict[str, dict]:
     catalogue = {}
     groups = (
         ("api", "/api/v1", [accounts, actions, activity, candidates, downloaded, ingestion, logs, settings, summary, works]),
+        ("v2", "", [v2]),
         ("web", "", [web_activity, auto_approval, web_candidates, connections, dashboard,
                      web_downloaded, web_logs, manual_add, settings_pages, web_works]),
     )
@@ -51,7 +53,7 @@ def command_catalogue() -> dict[str, dict]:
         for module in modules:
             for route in module.router.routes:
                 if (not isinstance(route, APIRoute) or route.path.endswith("/stream")
-                        or route.name == "api_account_reveal"):
+                        or route.endpoint.__name__ == "api_account_reveal"):
                     continue
                 method = next(iter(route.methods))
                 name = f"{namespace}.{route.name}"
@@ -59,7 +61,7 @@ def command_catalogue() -> dict[str, dict]:
                 catalogue[name] = {
                     "method": method, "path": prefix + route.path,
                     "params": list(route.param_convertors),
-                    "encoding": "json" if namespace == "api" else "form",
+                    "encoding": "form" if namespace == "web" else "json",
                 }
     return catalogue
 
@@ -170,7 +172,7 @@ async def realtime_socket(ws: WebSocket):
         hello = await asyncio.wait_for(read(), timeout=10)
         if hello.get("type") != "hello" or hello.get("protocol") != PROTOCOL:
             raise ApiError("PROTOCOL_UNSUPPORTED", "实时协议版本不匹配", status_code=400)
-        if hello.get("client") not in {"web", "mobile"}:
+        if hello.get("client") not in {"web", "mobile", "desktop"}:
             raise ApiError("CLIENT_INVALID", "客户端类型不正确", status_code=400)
         if not bearer:
             supplied = hello.get("csrf_token")
@@ -188,8 +190,8 @@ async def realtime_socket(ws: WebSocket):
         return
 
     catalogue = command_catalogue()
-    if hello["client"] == "mobile":
-        catalogue = {name: item for name, item in catalogue.items() if name.startswith("api.")}
+    if hello["client"] != "web":
+        catalogue = {name: item for name, item in catalogue.items() if name.startswith(("api.", "v2."))}
     bus = ws.app.state.event_bus
     # A browser cookie has the same absolute lifetime on an active socket as it
     # has on a new HTTP request; heartbeats never renew it invisibly.
@@ -371,12 +373,15 @@ async def realtime_socket(ws: WebSocket):
             except ApiError as exc:
                 await send({"type": "error", "error": exc.to_payload()["error"]})
                 await ws.close(code=4401)
-            except (WebSocketDisconnect, RuntimeError, TimeoutError):
+            except (WebSocketDisconnect, RuntimeError, TimeoutError, asyncio.CancelledError):
                 pass
             finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                # A transport cancel may also cancel the command worker. Drain
+                # all socket children before closing its HTTP client or streams.
+                with CancelScope(shield=True):
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _matches(template: str, path: str) -> bool:

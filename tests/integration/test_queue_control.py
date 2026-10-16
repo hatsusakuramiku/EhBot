@@ -349,7 +349,7 @@ def test_retry_refusal_performs_no_remote_side_effects(database, tmp_path):
     called = []
     async def remote(*args):
         called.append(args)
-    service = DownloadService(database, tmp_path, torrent_push=remote, torrent_abandon=remote, torrent_verify=remote)
+    service = DownloadService(database, tmp_path, torrent_push=remote, torrent_abandon=remote)
     job_id = pending(database, 'EH_TORRENT')
     with pytest.raises(DownloadError):
         asyncio.run(service.retry_job(job_id))

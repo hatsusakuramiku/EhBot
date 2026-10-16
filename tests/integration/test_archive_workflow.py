@@ -1,3 +1,5 @@
+from tests.settings_commands import observed_profile, save_then_read_preferences
+from tests.credential_commands import observed_credentials
 import hashlib
 from pathlib import Path
 import zipfile
@@ -140,7 +142,7 @@ def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
         authenticate(client, settings)
         page = client.get("/settings/archive")
         csrf_token = page.context["csrf_token"]
-        limits_response = client.post(
+        limits_response = save_then_read_preferences(client, 'post',
             "/archive-settings/limits",
             data={
                 "max_members": "1200",
@@ -155,6 +157,7 @@ def test_admin_can_update_limits_and_tool_profile(tmp_path: Path) -> None:
         profile_response = client.post(
             "/archive-settings/profiles/7zz-default",
             data={
+                **observed_profile(client, '7zz-default'),
                 "executable_path": "/usr/bin/7zz",
                 "timeout_seconds": "1200",
                 "enabled": "on",
@@ -181,7 +184,7 @@ def test_image_quality_defaults_to_original_and_round_trips(
         authenticate(client, settings)
         page = client.get("/settings/archive")
         assert page.context["image_quality"]["selected"] == "original"
-        saved = client.post(
+        saved = save_then_read_preferences(client, 'post',
             "/archive-settings/limits",
             data={
                 "max_members": "1200",
@@ -207,7 +210,7 @@ def test_unknown_image_quality_is_rejected(tmp_path: Path) -> None:
     with TestClient(app) as client:
         authenticate(client, settings)
         page = client.get("/settings/archive")
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/limits",
             data={
                 "image_quality": "ultra",
@@ -225,7 +228,7 @@ def test_invalid_limit_is_rejected_without_saving(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         csrf_token = client.get("/settings/archive").context["csrf_token"]
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/limits",
             data={"max_members": "-3", "csrf_token": csrf_token},
         )
@@ -244,6 +247,7 @@ def test_password_is_stored_encrypted_and_never_echoed(tmp_path: Path) -> None:
             "/archive-settings/passwords",
             data={
                 "name": "shared",
+                **observed_credentials(client, 'add'),
                 "password": "top-secret-archive-password",
                 "priority": "10",
                 "enabled": "on",
@@ -275,20 +279,25 @@ def test_admin_can_delete_password_entry(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         csrf_token = client.get("/settings/passwords").context["csrf_token"]
-        client.post(
+        created = client.post(
             "/archive-settings/passwords",
             data={
                 "name": "temporary",
+                **observed_credentials(client, 'add'),
                 "password": "value",
                 "priority": "10",
                 "enabled": "on",
                 "csrf_token": csrf_token,
             },
         )
-        client.post(
+        assert created.status_code == 200
+        deleted = client.post(
             "/archive-settings/passwords/1/delete",
-            data={"csrf_token": csrf_token},
+            data={"csrf_token": csrf_token,
+                  **observed_credentials(client, 'delete', 1)},
+            follow_redirects=False,
         )
+        assert deleted.status_code == 303
         listed = client.get("/settings/passwords")
 
     assert "temporary" not in listed.text
@@ -565,9 +574,9 @@ async def test_conversion_uses_vault_password_and_marks_success(
         name="shared", password="unlock-me", priority=5
     )
     attempts = await settings_service.password_attempts()
-    assert attempts == ((password_id, "unlock-me"),)
+    assert [(entry.password_id, entry.password) for entry in attempts] == [(password_id, "unlock-me")]
 
-    await settings_service.mark_password_success(password_id)
+    await settings_service.mark_password_success(attempts[0])
     entries = await settings_service.passwords()
     assert entries[0].last_success_at is not None
 
@@ -602,7 +611,7 @@ def test_paths_can_be_changed_from_the_settings_page(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         page = client.get("/settings/paths")
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/paths",
             data={
                 "library_path": str(new_library),
@@ -627,7 +636,7 @@ def test_relative_path_is_rejected(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         page = client.get("/settings/paths")
-        response = client.post(
+        response = save_then_read_preferences(client, 'post',
             "/archive-settings/paths",
             data={
                 "library_path": "relative/library",
@@ -645,7 +654,7 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
     with TestClient(create_app(settings)) as client:
         authenticate(client, settings)
         page = client.get("/settings/paths")
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/paths",
             data={
                 "library_path": str(override),
@@ -656,7 +665,7 @@ def test_clearing_an_override_restores_the_default(tmp_path: Path) -> None:
         page = client.get("/settings/paths")
         assert str(override) in page.text
 
-        client.post(
+        save_then_read_preferences(client, 'post',
             "/archive-settings/paths",
             data={
                 "library_path": "",

@@ -21,6 +21,7 @@ import stat
 import subprocess
 import tarfile
 from dataclasses import dataclass
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -316,7 +317,36 @@ def extract_windows_binaries(
         shutil.rmtree(work, ignore_errors=True)
 
 
-def install(
+@contextmanager
+def _installation_lock(tools_path: Path):
+    """Protect the actual files across service copies, threads and CLI processes."""
+    path = Path(tools_path) / '7zip' / 'install.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as handle:
+        try:
+            if os.name == 'nt':
+                import msvcrt
+                if path.stat().st_size == 0:
+                    handle.write(b'0')
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ToolchainError('TOOLCHAIN_BUSY', '已有工具安装正在操作该目录，请等待其结束') from None
+        yield
+
+
+def install(tools_path: Path, *, system: str | None = None, machine: str | None = None,
+            force: bool = False, download=None, runner=None) -> Path:
+    """Install one verified build while holding exclusive ownership of its files."""
+    with _installation_lock(tools_path):
+        return _install(tools_path, system=system, machine=machine, force=force, download=download, runner=runner)
+
+
+def _install(
     tools_path: Path,
     *,
     system: str | None = None,
@@ -330,6 +360,13 @@ def install(
     The install is idempotent: an existing verified binary for this version is
     reused unless `force` is set.
     """
+    root = install_root(tools_path)
+    previous = root.with_name(f'{root.name}.previous')
+    if previous.exists():
+        if not root.exists():
+            previous.replace(root)
+        else:
+            shutil.rmtree(previous)
     resolved_system = (system or platform.system()).strip().lower()
     existing = installed_executable(tools_path, system=resolved_system)
     if existing is not None and not force:
@@ -341,7 +378,6 @@ def install(
     if resolved_system == "windows":
         bootstrap_payload = (download or _download)(WINDOWS_BOOTSTRAP_ASSET.url)
         verify_digest(bootstrap_payload, WINDOWS_BOOTSTRAP_ASSET.sha256)
-    root = install_root(tools_path)
     staging = root.with_name(f"{root.name}.incoming")
     shutil.rmtree(staging, ignore_errors=True)
     try:
@@ -352,8 +388,16 @@ def install(
                 payload, bootstrap_payload, staging, runner=runner
             )
         root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(root, ignore_errors=True)
-        staging.replace(root)
+        if root.exists():
+            root.replace(previous)
+        try:
+            staging.replace(root)
+        except BaseException:
+            if previous.exists():
+                previous.replace(root)
+            raise
+        if previous.exists():
+            shutil.rmtree(previous)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     executable = installed_executable(tools_path, system=resolved_system)

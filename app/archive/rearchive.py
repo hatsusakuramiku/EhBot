@@ -118,6 +118,7 @@ class ReArchiveSkip:
     title: str | None
     code: str
     message: str
+    park: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +248,7 @@ async def _plan_template_candidate(
             await archived.park_for_invalid_path(
                 candidate.candidate_id, code, message
             )
-        return ReArchiveSkip(candidate.candidate_id, candidate.title, code, message)
+        return ReArchiveSkip(candidate.candidate_id, candidate.title, code, message, park=not packed)
     if planned is None:
         if packed:
             # A packed book with no title at all: there is no name to move it

@@ -31,6 +31,7 @@ class AutoApprovalRule:
     #: old behaviour so every existing construction -- tests included -- keeps
     #: meaning what it meant before `action` existed.
     action: str = RULE_ACTION_APPROVE
+    rule_uuid: str = ''
 
 
 @dataclass(frozen=True, slots=True)

@@ -88,6 +88,7 @@ INGEST_OPERATION_ERRORS = {
     'INGEST_REVIEW_CONFLICT': '两份作品的审核结论冲突，请核对后重试。',
     'INGEST_GALLERY_CONFLICT': '画廊身份冲突，请核对关联。',
     'INGEST_REFERENCE_CHANGED': '画廊关联已有新变更，请刷新后核对。',
+    'INGEST_REFERENCE_TARGET_CHANGED': '待合并的目标作品已变化，请重新核对来源与目标后提交画廊修改。',
     'INGEST_OBSERVATION_CHANGED': '消息来源已有新变更，请刷新后核对。',
     'INGEST_TARGET_REMOVED': '目标作品已移除，请核对后重新操作。',
     'INGEST_CANDIDATE_NOT_FOUND': '原作品已移除或合并。',
