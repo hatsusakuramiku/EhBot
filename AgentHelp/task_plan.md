@@ -456,8 +456,8 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [ ] P8：产物依赖、发布、打包取消
 - [ ] P9：心跳、恢复、预算、清理
 - [ ] P10：全域共享 API、版本/幂等、WS/冲突 UI
-- [ ] P11：审批饥饿、ComicInfo 写锁、缩略图竞态
-- [ ] P12：合同与本地验收、升级/恢复、最终交接
+- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as the final P11 local commit SHA verified in Git history)
+- [ ] P12: final contracts and local acceptance, migration/recovery checks, and Linux guardian execution
 
 
 ## R92 / P5 独立交付
@@ -530,6 +530,16 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] WS取消修前复现/修后收束；集中612/0、相邻76/0、来源组82pass/1时间夹具失败后完整详情39/0，真实DOM root/proxy通过。
 - [x] 3088 collect-only；152XML最新当前节点1623 distinct passed、0failure/error/skip；compileall/CodeGraph/diff-check及用户文档同步。
 - [ ] 立即整阶段暂存、审查、本地提交并核实记录SHA；039随提交冻结，不拆P10切片。仅排除models.py既有BOM。
-- [ ] P11与P12按原范围继续；Linux guardian实跑尚未完成，总目标active。
+- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as the final P11 local commit SHA verified in Git history)
 
 上文P10“进行中/未验收”和旧计数均为历史快照，本节及P10审计顶部为当前事实。
+
+
+## R98 / P11 complete (2026-10-16)
+
+- [x] Approval sweeper uses a bounded persistent rotation cursor; failures and non-matches beyond the first 100 items no longer starve later work.
+- [x] Thumbnail coordination rereads the database state under the hash lock, preventing duplicate fetches from stale PENDING snapshots.
+- [x] ComicInfo rewriting prepares outside the SQLite write transaction and uses a final short identity/version/file check with existing publication recovery.
+- [x] Pending metadata synchronization uses a persistent rotation cursor, per-item failure isolation, and a service-level concurrency guard.
+- [x] Focused P11 regression baseline: 131 passed, 0 failure/error/skip; version `0.3.0rc14`; no new migration.
+- [x] Stage, review, commit, and record the phase SHA before starting P12.

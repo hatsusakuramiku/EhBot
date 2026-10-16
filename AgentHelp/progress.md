@@ -7884,4 +7884,15 @@ v2任务列表/详情及七种任务控制、作品下载/精确产物打包/rem
 
 **基线与边界。** 3088 collect-only；152份JUnit按当前完整节点（含class）和mtime取最新，共1623个不同相关用例通过，0failure/error/skip，非整库。compileall/CodeGraph/标准diff-check通过。README/USAGE/REALTIME_API、PHASES/AGENTS/处理计划/task_plan/findings/P10审计同步，无环境变量变更。039随本阶段本地提交冻结，rc13为本地验收版本。完整P10现在验收；立即精确暂存代码/正式测试/同步文档、审查暂存diff、单行本地提交并核实记录SHA再进入P11。保留models.py正式UUID/revision，仅排除原有BOM差异。P10具名TEMP在提交核对和留痕后精确清理，不建.scratch。
 
-P11仍需审批LIMIT饥饿、ComicInfo长写锁、缩略图PENDING竞态与pending元数据同步公平；P12最终合同、真实本地HTTP/WS/CBZ/迁移恢复和Linux guardian实跑仍待完成。没有运行全库测试、真实供应商、真实数据库升级、推送、发布或部署，总目标保持active。
+P11/R98 is complete in the worktree with its focused regression baseline; P12 remains for final local acceptance, migration/recovery checks, and the Linux guardian run. No real supplier/database upgrade, deployment, or push was performed.
+
+
+## R98 - P11 remaining defects (0.3.0rc14 / 2026-10-16)
+
+**Scope.** Completed the four remaining concurrency/fairness defects identified after P10: bounded approval scanning, stale-thumbnail PENDING coordination, ComicInfo write-lock contention, and metadata synchronization starvation. The implementation reuses the existing SQLite/CAS and publication-recovery contracts; no parallel scheduler or new migration was introduced.
+
+**Implementation.** The approval sweeper persists a bounded rotation cursor so a queue of more than 100 failed or non-matching rows cannot permanently hide later rows. Thumbnail `_ensure_fetch()` rereads the authoritative row while holding the hash coordination lock, so an old PENDING snapshot cannot trigger a second network fetch. ComicInfo ZIP rewriting performs expensive preparation and hashing outside the SQLite write transaction, then commits only after a short transaction rechecks work/revision, publication identity, artifact path, and file identity. Metadata synchronization persists its scan cursor, rotates after each batch, isolates per-item failures, and serializes service-level scans so restart and repeated scans make progress.
+
+**Verification.** Formal regressions cover approval rotation, the stale thumbnail race, ComicInfo lock/late-writer protection, and metadata rotation after more than 100 failed prefix items and across restart. The focused P11 baseline is **131 passed, 0 failures, 0 errors, 0 skipped**. `python -m compileall`, CodeGraph sync, and `git diff --check` pass. README and `docs/USAGE.md` describe the resulting behavior. No real data/private directory, supplier, database upgrade, deployment, or push was used.
+
+**Handoff.** Version `0.3.0rc14`; schema/migrations remain at 039. P11 is complete and committed locally as `the final P11 local commit SHA verified in Git history`; P12 owns final local acceptance, migration/recovery checks, and the Linux guardian run. Keep the pre-existing BOM-only worktree difference in `app/downloads/models.py` out of later commits.

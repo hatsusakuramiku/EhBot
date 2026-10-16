@@ -85,6 +85,7 @@ class ThumbnailService:
 
         #: In-flight fetch dedup: ``hash -> asyncio.Event``.
         self._pending_fetches: dict[str, asyncio.Event] = {}
+        self._pending_fetches_lock = asyncio.Lock()
 
         #: Global concurrency limiter for outbound fetches.
         self._fetch_semaphore = asyncio.Semaphore(PROXY_CONCURRENCY)
@@ -297,18 +298,28 @@ class ThumbnailService:
 
     async def _ensure_fetch(self, row: ThumbnailRow) -> None:
         """Wait for an in-flight fetch or start one."""
-        if row.hash in self._pending_fetches:
-            event = self._pending_fetches[row.hash]
+        # The caller may have read PENDING before another request completed.
+        # Re-read while holding the coordinator lock so a stale snapshot can
+        # never start a second fetch after the first event has been removed.
+        async with self._pending_fetches_lock:
+            latest = await self._row_by_hash(row.hash)
+            if latest is None or latest.state != THUMBNAIL_STATE_PENDING:
+                return
+            event = self._pending_fetches.get(row.hash)
+            owner = event is None
+            if owner:
+                event = asyncio.Event()
+                self._pending_fetches[row.hash] = event
+        if not owner:
             await event.wait()
             return
-
-        event = asyncio.Event()
-        self._pending_fetches[row.hash] = event
         try:
-            await self._fetch_and_store(row)
+            await self._fetch_and_store(latest)
         finally:
-            self._pending_fetches.pop(row.hash, None)
-            event.set()
+            async with self._pending_fetches_lock:
+                if self._pending_fetches.get(row.hash) is event:
+                    self._pending_fetches.pop(row.hash, None)
+                event.set()
 
     async def _fetch_and_store(self, row: ThumbnailRow) -> None:
         """Fetch the upstream image, render, write to disk, update DB."""

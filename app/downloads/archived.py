@@ -28,7 +28,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import shutil
 import sqlite3
+import threading
 import zipfile
 from contextlib import closing, nullcontext
 from types import SimpleNamespace
@@ -193,6 +196,12 @@ class ArchivedWorkService:
         # a test can observe the chaining without running a packer.
         self._notify = notify
         self._removal_lock = asyncio.Lock()
+        # Metadata rewrites are coordinated in-process while the database is
+        # deliberately left unlocked. The final transaction still rechecks
+        # the durable identity, so a second process can only cause a safe
+        # WORK_CHANGED result rather than publish stale bytes.
+        self._metadata_sync_lock = threading.RLock()
+        self._metadata_sync_process_lock = asyncio.Lock()
 
     async def _roots(self) -> tuple[Path, Path]:
         """The library and work directories as configured right now.
@@ -338,9 +347,12 @@ class ArchivedWorkService:
         return await run_sync(self._finish_metadata_sync, sync_id, library)
 
     def _finish_metadata_sync(self, sync_id, library):
+        with self._metadata_sync_lock:
+            return self._finish_metadata_sync_locked(sync_id, library)
+
+    def _finish_metadata_sync_locked(self, sync_id, library):
         from app.review.commands import WorkCommandError
         with self._database.connection() as connection:
-            connection.execute('BEGIN IMMEDIATE')
             row = connection.execute('SELECT s.status, s.result_json, s.work_id, s.revision, '
                 's.fields_json, s.fetched_fields_json, s.operator_name, v.candidate_id, v.revision '
                 'FROM work_metadata_syncs s JOIN work_versions v ON v.work_id = s.work_id '
@@ -353,47 +365,103 @@ class ArchivedWorkService:
                 result = {'synced': False, 'reason': 'WORK_CHANGED',
                           'message': '元数据已保存，作品随后已变化，本次归档同步已跳过'}
             else:
-                result = self._sync_archive_metadata_sync(row[7], library, json.loads(row[4]),
-                    json.loads(row[5]), row[6], connection=connection)
-                result['work_id'] = row[2]
-                result['revision'] = connection.execute(
-                    'SELECT revision FROM work_versions WHERE work_id = ?', (row[2],)).fetchone()[0]
+                fields = json.loads(row[4])
+                fetched_fields = json.loads(row[5])
+                operator_name = row[6]
+                work_id = row[2]
+                expected_revision = row[3]
+                candidate_id = row[7]
+                result = None
+        if result is None:
+            result = self._sync_archive_metadata_sync(
+                candidate_id, library, fields, fetched_fields, operator_name,
+                expected_revision=expected_revision,
+            )
+            result['work_id'] = work_id
+            with self._database.connection() as connection:
+                current = connection.execute(
+                    'SELECT revision FROM work_versions WHERE work_id = ?', (work_id,)
+                ).fetchone()
+                result['revision'] = current[0] if current else expected_revision
+        with self._database.connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current = connection.execute(
+                'SELECT status, result_json FROM work_metadata_syncs WHERE sync_id = ?',
+                (sync_id,),
+            ).fetchone()
+            if current is not None and current[0] != 'PENDING':
+                return json.loads(current[1])
             connection.execute('UPDATE work_metadata_syncs SET status = ?, result_json = ? WHERE sync_id = ?',
                 ('COMPLETED' if result['synced'] else 'SKIPPED', json.dumps(result), sync_id))
             return result
 
     async def process_metadata_syncs(self):
         """Use the existing operations loop to recover committed, unfinished edits."""
+        async with self._metadata_sync_process_lock:
+            return await self._process_metadata_syncs()
+
+    async def _process_metadata_syncs(self):
         def pending():
             with self._database.connection() as connection:
-                return [row[0] for row in connection.execute('SELECT sync_id FROM work_metadata_syncs '
-                    "WHERE status = 'PENDING' ORDER BY created_at, sync_id LIMIT 100")]
+                cursor = connection.execute(
+                    "SELECT value FROM system_settings WHERE key = 'metadata_sync_cursor'"
+                ).fetchone()
+                marker = json.loads(cursor[0]) if cursor else None
+                if marker and len(marker) == 2:
+                    rows = connection.execute(
+                        "SELECT sync_id, created_at FROM work_metadata_syncs "
+                        "WHERE status = 'PENDING' ORDER BY "
+                        "CASE WHEN created_at > ? OR (created_at = ? AND sync_id > ?) "
+                        "THEN 0 ELSE 1 END, created_at, sync_id LIMIT 100",
+                        (marker[0], marker[0], marker[1]),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        "SELECT sync_id, created_at FROM work_metadata_syncs "
+                        "WHERE status = 'PENDING' ORDER BY created_at, sync_id LIMIT 100"
+                    ).fetchall()
+                if rows:
+                    last = [str(rows[-1][1]), str(rows[-1][0])]
+                    connection.execute(
+                        "INSERT INTO system_settings(key, value) VALUES ('metadata_sync_cursor', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                        "updated_at = CURRENT_TIMESTAMP",
+                        (json.dumps(last, separators=(',', ':')),),
+                    )
+                return [row[0] for row in rows]
         count = 0
         for sync_id in await run_sync(pending):
             try:
                 await self.finish_metadata_sync(sync_id)
                 count += 1
-            except (OSError, sqlite3.Error):
-                logger.warning('metadata_sync_pending sync_id=%s', sync_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - one broken item must not starve the batch
+                logger.warning('metadata_sync_pending_failed sync_id=%s', sync_id)
         return count
 
     async def sync_archive_metadata(self, candidate_id: int, *, fields=None, fetched_fields=None, operator_name="admin") -> dict:
         """Update ComicInfo in place; skipped writes retain the database edit.
 
         Unpacked works, running packs and unapproved works are reported as
-        skipped. A write reservation covers the state check, file replacement
-        and artifact update, preventing a worker claim or concurrent sync from
-        overtaking this operation. No image decoding or source archive is used.
+        skipped. ZIP processing happens outside SQLite's write transaction;
+        the final short transaction rechecks the work, artifact and file
+        identity before recording the new hash. No image decoding or source
+        archive is used.
         """
         library, _ = await self._roots()
         return await asyncio.to_thread(self._sync_archive_metadata_sync, candidate_id, library, fields, fetched_fields or {}, operator_name)
 
-    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin", connection=None) -> dict:
+    def _sync_archive_metadata_sync(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin", *, expected_revision=None) -> dict:
+        with self._metadata_sync_lock:
+            return self._sync_archive_metadata_locked(
+                candidate_id, library, fields, fetched_fields, operator_name,
+                expected_revision=expected_revision,
+            )
+
+    def _sync_archive_metadata_locked(self, candidate_id: int, library: Path, fields=None, fetched_fields=None, operator_name="admin", *, expected_revision=None) -> dict:
         from app.conversion.comicinfo import changed_elements, element_sources
-        owns_connection = connection is None
-        with nullcontext(connection) if connection is not None else self._database.connection() as connection:
-            if owns_connection:
-                connection.execute("BEGIN IMMEDIATE")
+        with self._database.connection() as connection:
             row = self._cbz_row(connection, candidate_id)
             reason = None
             message = "元数据已保存，归档文件已同步"
@@ -412,10 +480,24 @@ class ArchivedWorkService:
                     reason, message = "WORK_PACK_FORBIDDEN", "元数据已保存，当前审核状态不允许同步归档"
             if reason:
                 return {"synced": False, "reason": reason, "message": message}
+            version_row = connection.execute(
+                "SELECT revision FROM work_versions WHERE candidate_id = ?", (candidate_id,)
+            ).fetchone()
+            if version_row is None:
+                return {"synced": False, "reason": "WORK_CHANGED",
+                        "message": "元数据已保存，作品随后已变化，本次归档同步已跳过"}
+            if expected_revision is None:
+                expected_revision = int(version_row[0])
+            elif int(version_row[0]) != int(expected_revision):
+                return {"synced": False, "reason": "WORK_CHANGED",
+                        "message": "元数据已保存，作品随后已变化，本次归档同步已跳过"}
             try:
                 path = _resolve_inside(library, Path(row[1]))
+                original_stamp = _stamp(path)
                 with zipfile.ZipFile(path) as archive:
                     previous = archive.read("ComicInfo.xml")
+                if _stamp(path) != original_stamp:
+                    raise OSError("Archive changed while reading metadata")
                 metadata = self._metadata_rows(connection, candidate_id)
                 projected = ET.fromstring(build_from_metadata(metadata, f"candidate-{candidate_id}", int(row[2] or 0)))
                 root = ET.fromstring(previous)
@@ -438,40 +520,97 @@ class ArchivedWorkService:
                         child = ET.SubElement(root, name)
                     child.text = value
                 comicinfo = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                backup = path.with_name(f".{path.name}.{uuid4().hex}.metadata-previous")
+                try:
+                    os.link(path, backup)
+                except OSError:
+                    shutil.copyfile(path, backup)
+                if _stamp(path) != original_stamp:
+                    raise OSError("Archive changed before metadata rewrite")
+                rewritten = False
                 rewrite_comicinfo(path, comicinfo)
+                rewritten = True
                 with path.open("rb") as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                new_stamp = _stamp(path)
             except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, ArchivedWorkError) as exc:
                 logger.warning("archive_metadata_sync_failed: %s", exc)
+                if 'backup' in locals():
+                    if locals().get("rewritten") and Path(backup).exists():
+                        try:
+                            Path(backup).replace(path)
+                        except OSError:
+                            logger.exception("archive_metadata_sync_restore_failed", extra={"error_code": "ARCHIVE_METADATA_SYNC_FAILED"})
+                    else:
+                        Path(backup).unlink(missing_ok=True)
                 return {"synced": False, "reason": "ARCHIVE_METADATA_SYNC_FAILED",
                         "message": "元数据已保存到数据库，但归档同步失败，请检查文件后重试"}
-            connection.execute(
-                "UPDATE artifacts SET sha256 = ?, size_bytes = ? WHERE id = ?",
-                (digest, path.stat().st_size, row[0]),
-            )
-            audit = None
-            if names:
-                placeholders = ",".join("?" for _ in names)
-                audit = connection.execute(
-                    "SELECT id, details_json FROM review_actions WHERE candidate_id = ? "
-                    "AND action = 'EDIT_METADATA' AND json_extract(details_json, '$.field') IN ("
-                    + placeholders + ") ORDER BY id DESC LIMIT 1", (candidate_id, *names),
+        result = None
+        try:
+            with self._database.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._cbz_row(connection, candidate_id)
+                current_revision = connection.execute(
+                    "SELECT revision FROM work_versions WHERE candidate_id = ?", (candidate_id,)
                 ).fetchone()
-            if audit:
-                details = json.loads(audit[1])
-                details.update(archive_synced=True, path=str(path))
-                connection.execute("UPDATE review_actions SET details_json = ? WHERE id = ?",
-                                   (json.dumps(details, ensure_ascii=False), audit[0]))
-            elif fetched_fields:
-                # A fetched-only save has no manual edit to annotate. Record the
-                # explicit file write without mislabelling an older manual edit.
-                connection.execute(
-                    "INSERT INTO review_actions (candidate_id, action, operator_name, details_json) "
-                    "VALUES (?, 'EDIT_METADATA', ?, ?)",
-                    (candidate_id, operator_name, json.dumps({"fetched_fields": sorted(updates),
-                     "archive_synced": True, "path": str(path)}, ensure_ascii=False)),
-                )
-            return {"synced": True, "message": message, "path": str(path)}
+                status = connection.execute(
+                    "SELECT status FROM candidates WHERE id = ?", (candidate_id,)
+                ).fetchone()
+                if (current is None or current[0] != row[0] or current[1] != row[1]
+                        or current_revision is None or int(current_revision[0]) != int(expected_revision)
+                        or status is None or status[0] in _PACK_FORBIDDEN_STATUSES
+                        or _stamp(path) != new_stamp):
+                    result = {"synced": False, "reason": "WORK_CHANGED",
+                              "message": "元数据已保存，作品随后已变化，本次归档同步已跳过"}
+                else:
+                    connection.execute(
+                        "UPDATE artifacts SET sha256 = ?, size_bytes = ? WHERE id = ?",
+                        (digest, path.stat().st_size, row[0]),
+                    )
+                    audit = None
+                    if names:
+                        placeholders = ",".join("?" for _ in names)
+                        audit = connection.execute(
+                            "SELECT id, details_json FROM review_actions WHERE candidate_id = ? "
+                            "AND action = 'EDIT_METADATA' AND json_extract(details_json, '$.field') IN ("
+                            + placeholders + ") ORDER BY id DESC LIMIT 1", (candidate_id, *names),
+                        ).fetchone()
+                    if audit:
+                        details = json.loads(audit[1])
+                        details.update(archive_synced=True, path=str(path))
+                        connection.execute("UPDATE review_actions SET details_json = ? WHERE id = ?",
+                                           (json.dumps(details, ensure_ascii=False), audit[0]))
+                    elif fetched_fields:
+                        connection.execute(
+                            "INSERT INTO review_actions (candidate_id, action, operator_name, details_json) "
+                            "VALUES (?, 'EDIT_METADATA', ?, ?)",
+                            (candidate_id, operator_name, json.dumps({"fetched_fields": sorted(updates),
+                             "archive_synced": True, "path": str(path)}, ensure_ascii=False)),
+                        )
+                    result = {"synced": True, "message": message, "path": str(path)}
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("archive_metadata_sync_commit_failed: %s", exc)
+            result = {"synced": False, "reason": "ARCHIVE_METADATA_SYNC_FAILED",
+                      "message": "元数据已保存到数据库，但归档同步失败，请检查文件后重试"}
+        cleanup_backup = True
+        if not result["synced"]:
+            try:
+                if _stamp(path) == new_stamp and Path(backup).exists():
+                    Path(backup).replace(path)
+                else:
+                    logger.warning("archive_metadata_sync_restore_refused path=%s", path)
+                    cleanup_backup = False
+                    result = {"synced": False, "reason": "ARCHIVE_METADATA_SYNC_FAILED",
+                              "message": "元数据已保存到数据库，但归档同步失败，请检查文件后重试"}
+            except OSError:
+                logger.exception("archive_metadata_sync_restore_failed", extra={"error_code": "ARCHIVE_METADATA_SYNC_FAILED"})
+                cleanup_backup = False
+        if cleanup_backup:
+            try:
+                Path(backup).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("archive_metadata_sync_backup_cleanup_failed", extra={"error_code": "ARCHIVE_CLEANUP_FAILED"})
+        return result
 
     # ---------------------------------------------------------------- removal
 

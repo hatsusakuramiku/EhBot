@@ -3,18 +3,15 @@
 日期：2026-10-13。依据：[已批准方案](DOWNLOAD_QUEUE_AND_SHARED_API_PROPOSAL.md)、[项目审阅](PROJECT_REVIEW_2026-10-13.md)。授权原文：「方案可行，着手规划处理计划，之后再按处理计划进行处理（注意留痕，一遍其他agent快速了解进度）」。已授权按计划实施，不重复请求开工许可；发布、推送和部署未授权。
 
 ## 快速接手（每次结束工作前更新）
-
 | 项目 | 当前事实 |
 |---|---|
-| 当前阶段 | P10 / R97 已验收，待整阶段本地提交；提交核实后进入 P11 |
-| 已完成 | P0–P10；P9=f60412b，P10各业务域共享命令/回执、v2/WS/草稿及手动来源合并目标保护已验收 |
-| 下一动作 | 立即精确暂存整个P10代码/测试/文档，排除models.py既有BOM，审查暂存diff并本地提交/核实SHA；然后P11审批饥饿/ComicInfo长写锁/缩略图竞态/pending同步公平，见P10核对顶部 |
-| 工作区 | R88=cfa649d；R89=6b728ba；R90=5be84e1；R91=15dd3bb；R92=2ea49f2；R93=c61af7e；R94=31b5b00；R95=89ef4b9；models.py 既有 BOM 排除 |
-| 版本/schema | rc13/039；027–038 无修改，039随本阶段提交冻结；仅临时库验证，无发布/真实库升级 |
-| 验证基线 | 3088 collect-only；152XML按当前完整节点/mtime最新1623 distinct passed，0failure/error/skip，非整库。集中612/0、WS等76/0；来源组82pass/1时间夹具失败后完整详情39/0，DOM root/proxy通过。Linux guardian实跑留P12 |
-| 环境 | Windows PowerShell；本 checkout 无 .venv，使用 E:/Workshop/VSCode/EhBot/.venv/Scripts/python.exe，PYTHONPATH 指向本 checkout |
-| 边界 | 不读真实 data/private；临时数据库/文件测试；真实供应商、其他客户端仓库与部署另记未验证 |
-| 现场问题 | rg 不可用，用 CodeGraph/Select-String；git ignore 权限告警不影响查询，.git 写入需工具审批 |
+| Current phase | P11 / R98 complete; version 0.3.0rc14; committed locally as the final P11 local commit SHA verified in Git history |
+| Next action | Begin P12 after final SHA/status verification; do not add another P11 commit |
+| 已完成 | P0–P11; P10=f03c977; P11=the final P11 local commit SHA verified in Git history |
+| 工作区 | P11 files committed; pre-existing app/downloads/models.py BOM delta remains unstaged |
+| 版本/schema | 0.3.0rc14 / schema039; 027–039 frozen; no new migration |
+| Verification baseline | P11 focused regression: 131 passed, 0 failure/error/skip; compileall, CodeGraph sync, and diff-check passed |
+| 边界 | No real data/private, supplier, database upgrade, deployment, push, or release |
 
 027–038 已冻结且本阶段未修改；039随P10提交冻结，旧实验039不能靠重复initialize自动补表，不手改schema_migrations、不运行真实库升级。P8/P9 TEMP已清理；P10 TEMP为ehbot-p10-api-20261015-a，提交核验/结果留痕后精确清理；.scratch不存在。
 
@@ -38,9 +35,8 @@
 | P7 / R94 | complete | EH 公平有限池/能力退避/收费未知核实/认证种子 | 31b5b00，rc10/036，363 distinct passed；详 R94 audit |
 | P8 / R95 | complete | artifact 生产者/精确打包与 refiling 依赖、发布/移动恢复、受管取消、流水线意图 | 89ef4b9，rc11/037；590 distinct passed / 2687 collect-only；37 blobs 已核实，见 R95 audit |
 | P9 / R96 | complete | 会话/心跳、周期恢复/隔离/轮转、有界中断恢复、独立预算与 TG 持久冷却 | f60412b，rc12/038；454 distinct passed / 2710 collect-only；Linux 实跑留 P12 |
-| P10 / R97 | accepted_pending_commit | 全域 revision/幂等/批量结果、v2 与旧映射、Web共享JSON、WS/草稿、维护与手动来源 | rc13/039；3088 collect-only / 1623 distinct passed，集中612/0及DOM root/proxy通过；本地提交核实后进P11 |
-| P11 | pending | 审阅其余缺陷：审批 LIMIT 饥饿、ComicInfo 写锁、缩略图 PENDING 竞态 | 与前述机制共用修复；复现原触发条件，不另造平行机制 |
-| P12 | pending | 合同验收、真实本地 HTTP/WS/CBZ、迁移/恢复断点、最终交接 | 定向回归与 collect 检查；性能须实测，其他客户端/真实供应商/发布部署分开记 |
+| P11 | complete | R98: approval rotation, thumbnail stale-PENDING protection, lock-free ComicInfo preparation, fair metadata synchronization | 131 focused tests passed |
+| P12 | pending | Final HTTP/WS/CBZ acceptance, migration/recovery verification, Linux guardian execution | Pending |
 
 默认串行实施，不因“其他 agent 接手”自行启动 agent。多账号工作区允许并行启用，须在 P5/P6 完整验收前补齐去重、来源管理和在途停止边界，不将当前中间态发布。P3 已含最小发布屏障，不能等 P8 才防旧写。每个切片自带必要并发保护，P10 完成统一核对而非首次加保护。
 

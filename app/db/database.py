@@ -3266,6 +3266,7 @@ class Database:
         *,
         oldest_first: bool = False,
         require_gallery: bool = False,
+        after_id: int | None = None,
     ) -> tuple[int, ...]:
         """Candidates awaiting review, newest first unless asked otherwise.
 
@@ -3277,13 +3278,19 @@ class Database:
         the opposite order, because what an operator is checking is the rule
         against what just arrived, so the caller says which it needs.
 
+        `after_id` is a bounded round-robin cursor for the sweeper. When it is
+        supplied, rows after that id are returned first and the query wraps to
+        the oldest eligible id. Trial runs leave it unset and therefore keep
+        their newest-first behaviour.
+
         `require_gallery` is the same kind of necessity for the sweeper (R59):
         automatic rules never decide a candidate without a gallery id, so an
         unfiltered batch would let a backlog of them occupy the whole window
         and starve every candidate behind it.
         """
         return await asyncio.to_thread(
-            self._pending_candidate_ids_sync, limit, oldest_first, require_gallery
+            self._pending_candidate_ids_sync, limit, oldest_first, require_gallery,
+            after_id,
         )
 
     def _pending_candidate_ids_sync(
@@ -3291,15 +3298,21 @@ class Database:
         limit: int,
         oldest_first: bool = False,
         require_gallery: bool = False,
+        after_id: int | None = None,
     ) -> tuple[int, ...]:
         with self.connection() as connection:
+            if after_id is not None and oldest_first:
+                order = "ORDER BY (id <= ?) ASC, id ASC"
+                params = (after_id, limit)
+            else:
+                order = "ORDER BY id " + ("ASC" if oldest_first else "DESC")
+                params = (limit,)
             rows = connection.execute(
                 "SELECT id FROM candidates WHERE status = 'PENDING_REVIEW' "
                 + ("AND ex_gid IS NOT NULL " if require_gallery else "")
-                + "ORDER BY id "
-                + ("ASC" if oldest_first else "DESC")
+                + order
                 + " LIMIT ?",
-                (limit,),
+                params,
             ).fetchall()
         return tuple(int(row[0]) for row in rows)
 

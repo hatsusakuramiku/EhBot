@@ -92,6 +92,10 @@ class AutoApprovalSweeper:
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._sweep_lock = asyncio.Lock()
+        # A failed or non-matching candidate must not occupy the first page
+        # forever. The cursor is only a scan position; it does not change the
+        # candidate's ordering or approval semantics.
+        self._sweep_cursor: int | None = None
 
     def wake(self) -> None:
         """Promptly reconcile durable ingestion intents; no work lives in this event."""
@@ -189,11 +193,18 @@ class AutoApprovalSweeper:
         only path that may decide, and it declines rather than raising when no
         rule matches, so this method does not need to know what a rule is.
         """
-        candidate_ids = await self._database.pending_candidate_ids(
-            limit=SWEEP_BATCH_SIZE, oldest_first=True, require_gallery=True
-        )
+        kwargs = {
+            "limit": SWEEP_BATCH_SIZE,
+            "oldest_first": True,
+            "require_gallery": True,
+        }
+        if self._sweep_cursor is not None:
+            kwargs["after_id"] = self._sweep_cursor
+        candidate_ids = await self._database.pending_candidate_ids(**kwargs)
         if not candidate_ids:
+            self._sweep_cursor = None
             return 0
+        self._sweep_cursor = candidate_ids[-1]
         # Metadata before rules, for the whole batch in one call. A rule reads
         # metadata: 「{Category} = 'Manga'」 cannot match a candidate whose gallery
         # has not been read, so an unenriched batch is not 「no rule matched」 --

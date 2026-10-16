@@ -1,4 +1,5 @@
 """Shared metadata API: retries, stale clients and durable file follow-ups."""
+import asyncio
 import json
 from html.parser import HTMLParser
 from xml.etree import ElementTree as ET
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import CSRF_HEADER
 from app.main import create_app
+from app.downloads.archived import ArchivedWorkService
 from app.review.commands import WorkCommands
 from tests.integration.test_api_domains import csrf_token
 from tests.integration.test_api_v1 import log_in
@@ -85,6 +87,38 @@ def test_committed_metadata_sync_recovers_after_application_restart(tmp_path):
             row = connection.execute('SELECT status, result_json FROM work_metadata_syncs WHERE sync_id = ?',
                                      (accepted['metadata_sync_id'],)).fetchone()
             assert row[0] == 'COMPLETED' and json.loads(row[1])['synced'] is True
+
+
+def test_pending_metadata_sync_cursor_survives_restart_and_skips_failed_prefix(tmp_path):
+    settings, database, _, service = packed_fixture(tmp_path)
+    with database.connection() as connection:
+        work_id = connection.execute(
+            'SELECT work_id FROM work_versions WHERE candidate_id = 1'
+        ).fetchone()[0]
+        for index in range(101):
+            connection.execute(
+                'INSERT INTO work_metadata_syncs '
+                '(sync_id, work_id, revision, fields_json, fetched_fields_json, operator_name, created_at) '
+                "VALUES (?, ?, 0, '{}', '{}', 'admin', '2026-01-01 00:00:00')",
+                (f'sync-{index:03d}', work_id),
+            )
+
+    calls: list[str] = []
+
+    async def finish(sync_id):
+        calls.append(sync_id)
+        if sync_id != 'sync-100':
+            raise RuntimeError('one item is unavailable')
+        return {'synced': False, 'reason': 'WORK_CHANGED'}
+
+    service.finish_metadata_sync = finish
+    assert asyncio.run(service.process_metadata_syncs()) == 0
+    assert calls == [f'sync-{index:03d}' for index in range(100)]
+
+    restarted = ArchivedWorkService(database, settings.library_path, settings.work_path)
+    restarted.finish_metadata_sync = finish
+    assert asyncio.run(restarted.process_metadata_syncs()) == 1
+    assert calls[100] == 'sync-100'
 
 
 def test_late_sync_of_superseded_edit_never_replaces_newer_file_values(tmp_path):

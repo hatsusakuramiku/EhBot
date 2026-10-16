@@ -333,6 +333,29 @@ class TestConcurrentFirstPaint:
         assert len(transport.requests) == 1
         assert {result.state for result in results} == {"READY"}
 
+    @pytest.mark.asyncio
+    async def test_a_stale_pending_snapshot_does_not_fetch_after_completion(
+        self, tmp_path: Path
+    ) -> None:
+        from app.thumbnails.service import ThumbnailService
+
+        settings = make_settings(tmp_path)
+        settings.data_path.mkdir(parents=True, exist_ok=True)
+        database = Database(settings.data_path / "ehbot.db")
+        await database.initialize()
+        digest = admit_cover_into(database)
+        transport = RecordingTransport()
+        async with httpx.AsyncClient(transport=transport) as http_client:
+            service = ThumbnailService(
+                database, settings.data_path / "thumbnails", http_client
+            )
+            stale = await service._row_by_hash(digest)  # noqa: SLF001
+            assert stale is not None and stale.state == "PENDING"
+            assert (await service.get_or_create(digest)).state == "READY"
+            await service._ensure_fetch(stale)  # noqa: SLF001
+
+        assert len(transport.requests) == 1
+
 
 class TestCoverInTheCandidatePayload:
     def test_a_candidate_with_a_cover_exposes_only_the_proxy_url(

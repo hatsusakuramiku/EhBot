@@ -323,6 +323,36 @@ def test_the_sweep_reads_the_oldest_candidates_first(tmp_path: Path) -> None:
     assert stranded <= set(seen)
 
 
+def test_the_sweep_round_robin_cursor_reaches_rows_after_a_stuck_batch() -> None:
+    calls: list[int | None] = []
+
+    class FakeDatabase:
+        async def pending_candidate_ids(
+            self,
+            limit: int = 100,
+            *,
+            oldest_first: bool = False,
+            require_gallery: bool = False,
+            after_id: int | None = None,
+        ) -> tuple[int, ...]:
+            assert oldest_first and require_gallery and limit == SWEEP_BATCH_SIZE
+            calls.append(after_id)
+            return (1, 2) if after_id is None else (101,)
+
+    class FakeOrchestrator:
+        async def apply_automatic_decision(self, candidate_id: int) -> str | None:
+            return None
+
+    class FakeSettings:
+        async def auto_approval_interval_minutes(self) -> int:
+            return 30
+
+    sweeper = AutoApprovalSweeper(FakeDatabase(), FakeOrchestrator(), FakeSettings())
+    assert asyncio.run(sweeper.sweep_once()) == 0
+    assert asyncio.run(sweeper.sweep_once()) == 0
+    assert calls == [None, 2]
+
+
 # ---------------------------------------------------------------------------
 #  元数据优先 (item 3)
 # ---------------------------------------------------------------------------

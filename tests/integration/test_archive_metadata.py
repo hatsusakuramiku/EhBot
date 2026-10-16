@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+import threading
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -74,6 +75,34 @@ async def test_edit_preserves_images_facts_and_extra_elements_and_updates_digest
     assert audit["archive_synced"] is True
     assert list(path.parent.iterdir()) == [path]
     assert path.stat().st_mode == mode
+
+
+@pytest.mark.asyncio
+async def test_metadata_rewrite_does_not_hold_the_sqlite_write_lock(tmp_path, monkeypatch):
+    _, database, path, service = await asyncio.to_thread(packed_fixture, tmp_path)
+    await ReviewService(database).set_manual_metadata(1, "admin", "Series", "New series")
+    before = path.read_bytes()
+    entered = threading.Event()
+    release = threading.Event()
+    original = __import__("app.downloads.archived", fromlist=["rewrite_comicinfo"]).rewrite_comicinfo
+
+    def blocked(path_arg, comicinfo):
+        entered.set()
+        assert release.wait(3)
+        return original(path_arg, comicinfo)
+
+    monkeypatch.setattr("app.downloads.archived.rewrite_comicinfo", blocked)
+    task = asyncio.create_task(service.sync_archive_metadata(1))
+    assert await asyncio.to_thread(entered.wait, 3)
+
+    # A concurrent metadata edit must be able to commit while the ZIP is being
+    # rebuilt. The final identity check then rejects the stale file and restores
+    # the original bytes.
+    await ReviewService(database).set_manual_metadata(1, "admin", "Series", "Concurrent series")
+    release.set()
+    result = await asyncio.wait_for(task, 3)
+    assert result["reason"] == "WORK_CHANGED"
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("status,job_state,reason", [
