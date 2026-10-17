@@ -370,7 +370,7 @@ def test_a_small_attachment_still_wins_over_the_preview_page(
     assert [job.provider for job in jobs] == ["TELEGRAM"]
 
 
-def test_the_manual_preview_button_refuses_a_second_active_source(tmp_path: Path) -> None:
+def test_the_manual_preview_button_stops_the_old_source_before_switching(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     database = Database(settings.data_path / "ehbot.db")
     candidate_id = asyncio.run(
@@ -398,19 +398,27 @@ def test_the_manual_preview_button_refuses_a_second_active_source(tmp_path: Path
             f"/candidates/{candidate_id}/telegraph",
             data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
-        assert response.status_code == 400
-        # Repeating a competing source does not steal the existing work slot.
-        client.post(
+        assert response.status_code == 303
+        with database.connection() as connection:
+            assert connection.execute("SELECT provider, state FROM download_jobs").fetchall() == [("TELEGRAM", "STOPPING")]
+        client.portal.call(app.state.download_service.process_operations)
+        with database.connection() as connection:
+            assert connection.execute("SELECT provider, state FROM download_jobs ORDER BY id").fetchall() == [
+                ("TELEGRAM", "CANCELLED"), ("TELEGRAPH", "PENDING")]
+        # Repeating the selected source reuses its active task.
+        repeated = client.post(
             f"/candidates/{candidate_id}/telegraph",
             data={**observed_review(client, candidate_id), "csrf_token": csrf},
         )
+        assert repeated.status_code == 303
 
     jobs = asyncio.run(
         DownloadService(database, settings.work_path).list_jobs_for_candidate(
             candidate_id
         )
     )
-    assert sorted(job.provider for job in jobs) == ["TELEGRAM"]
+    assert sorted(job.provider for job in jobs) == ["TELEGRAM", "TELEGRAPH"]
+    assert sum(job.state in {"PENDING", "DOWNLOADING", "STOPPING"} for job in jobs) == 1
 
 
 @pytest.mark.asyncio

@@ -456,7 +456,7 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [ ] P8：产物依赖、发布、打包取消
 - [ ] P9：心跳、恢复、预算、清理
 - [ ] P10：全域共享 API、版本/幂等、WS/冲突 UI
-- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as the final P11 local commit SHA verified in Git history)
+- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as 22a29468397f3cdab76f643046c03035889c272f)
 - [ ] P12: final contracts and local acceptance, migration/recovery checks, and Linux guardian execution
 
 
@@ -530,7 +530,7 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] WS取消修前复现/修后收束；集中612/0、相邻76/0、来源组82pass/1时间夹具失败后完整详情39/0，真实DOM root/proxy通过。
 - [x] 3088 collect-only；152XML最新当前节点1623 distinct passed、0failure/error/skip；compileall/CodeGraph/diff-check及用户文档同步。
 - [ ] 立即整阶段暂存、审查、本地提交并核实记录SHA；039随提交冻结，不拆P10切片。仅排除models.py既有BOM。
-- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as the final P11 local commit SHA verified in Git history)
+- [x] P11: approval rotation, ComicInfo lock-free preparation, thumbnail stale-PENDING race, and fair metadata synchronization (R98 complete; committed locally as 22a29468397f3cdab76f643046c03035889c272f)
 
 上文P10“进行中/未验收”和旧计数均为历史快照，本节及P10审计顶部为当前事实。
 
@@ -543,3 +543,13 @@ Implementation phase 15 (operator-facing bugfix and workflow completion: history
 - [x] Pending metadata synchronization uses a persistent rotation cursor, per-item failure isolation, and a service-level concurrency guard.
 - [x] Focused P11 regression baseline: 131 passed, 0 failure/error/skip; version `0.3.0rc14`; no new migration.
 - [x] Stage, review, commit, and record the phase SHA before starting P12.
+
+## P12 final acceptance (2026-10-16, in progress)
+
+- [x] Reproduce the 22 failures from the first full regression; repair historical task error lookup and missing STOPPING gallery state.
+- [x] Synchronize old schema, versioned rename/batch, authenticated SSE and review adapter fixtures without weakening product gates.
+- [x] Nine affected files 141/0; five adjacent review/execution/v2 files 39/0; 3093 collected; compileall/CodeGraph/diff-check passed.
+- [x] Final Windows full regression completed: 3093 passed in 2040.33s, exit 0; JUnit 3093 tests, 0 failure/error/skip. Session 76976 exited; no rerun needed without new changes.
+- [ ] Run POSIX guardian and real toolchain acceptance on Linux/Docker; Docker is absent on this host.
+- [x] Stage and review the P12 Windows checkpoint, then commit it for Linux handoff; keep the pre-existing models.py BOM delta unstaged.
+- [ ] After Linux acceptance, update the final audit and create the final P12 acceptance commit; the checkpoint commit is not final acceptance.

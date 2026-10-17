@@ -1,7 +1,7 @@
 """R87: rendered requests, public-origin TCP WS and actual archive saves."""
 import asyncio
 
-from tests.work_commands import observed_work
+from tests.work_commands import observed_work, observed_review_form
 from tests.rule_commands import observed_rule
 from tests.integration.test_work_review_http import Forms
 from contextlib import contextmanager
@@ -152,6 +152,8 @@ def test_batch_repack_ws_keeps_repeated_ids_and_reports_validation(tmp_path):
         with client.websocket_connect("/ws/ui", headers={"Origin": "http://testserver"}) as ws:
             hello(client, ws)
             body = [["candidate_ids", str(ids["unpacked"])], ["candidate_ids", str(ids["packed"])], ["action", "repack"]]
+            body.extend([key, str(value)] for key, value in
+                        observed_review_form(client, [ids["unpacked"], ids["packed"]]).items())
             result, _ = call(ws, "web.downloaded_batch_action", {"body": body, "context": "/downloaded?page_size=75"})
             assert result["type"] == "command.result"
             with library.database.connection() as db:

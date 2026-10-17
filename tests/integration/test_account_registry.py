@@ -178,12 +178,14 @@ def test_upgrade_030_preserves_legacy_tasks_and_is_repeatable(tmp_path):
     database = old_database(tmp_path, [(1, "TELEGRAM", "PENDING", "legacy")], last_version=29)
     with database.connection() as c:
         tasks = c.execute("SELECT * FROM queue_tasks").fetchall()
-        jobs = c.execute("SELECT * FROM download_jobs").fetchall()
+        columns = ', '.join(row[1] for row in c.execute("PRAGMA table_info(download_jobs)"))
+        jobs = c.execute(f"SELECT {columns} FROM download_jobs").fetchall()
     asyncio.run(database.initialize())
     asyncio.run(database.initialize())
     with database.connection() as c:
         assert c.execute("SELECT * FROM queue_tasks").fetchall() == tasks
-        assert c.execute("SELECT * FROM download_jobs").fetchall() == jobs
+        assert c.execute(f"SELECT {columns} FROM download_jobs").fetchall() == jobs
+        assert c.execute("SELECT recovery_count FROM download_jobs").fetchall() == [(0,)]
         assert c.execute("SELECT COUNT(*) FROM external_accounts").fetchone()[0] == 0
         assert c.execute("SELECT COUNT(*) FROM schema_migrations WHERE version = 30").fetchone()[0] == 1
 

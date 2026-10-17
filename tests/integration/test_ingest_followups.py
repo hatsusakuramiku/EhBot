@@ -1,5 +1,6 @@
 """Publication and follow-up survive notification loss, retry and restart."""
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -172,9 +173,11 @@ async def test_legacy_alias_followups_recover_one_decision_and_ack_every_alias(t
         # key remains an alias of that same work during backfill.
         source(c, 2, 1, text='https://exhentai.org/g/123/fixture-token/')
         write_metadata(c, 1)
-    await database.save_auto_approval_rule(rule_id=None, name='migrated', enabled=True, priority=1,
-        condition={'kind': 'condition', 'field': 'Title', 'operator': '=', 'value': 'ready'},
-        dsl_snapshot='{Title} = "ready"', action='REJECT')
+        # Seed the actual pre-031 schema without calling the current repository.
+        c.execute("INSERT INTO auto_approval_rules(name, enabled, priority, condition_json, dsl_snapshot, action) "
+                  "VALUES('migrated', 1, 1, ?, ?, 'REJECT')",
+                  (json.dumps({'kind': 'condition', 'field': 'Title', 'operator': '=', 'value': 'ready'}),
+                   '{Title} = "ready"'))
     await database.initialize()
     assert len(due_followups(database, 100)) == 2
     assert await sweeper(database, tmp_path).process_ingest_followups() == 1

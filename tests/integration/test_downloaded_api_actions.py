@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from tests.work_commands import observed_review
 
 from app.api.deps import CSRF_HEADER
 from app.config import Settings
@@ -59,7 +60,7 @@ class TestRename:
         try:
             response = client.post(
                 f"/api/v1/downloaded/{candidate_id}/rename",
-                json={"filename": "新名字"},
+                json={**observed_review(client, candidate_id), "filename": "新名字"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
@@ -86,7 +87,7 @@ class TestRename:
                 f"/api/v1/downloaded/{candidate_id}/rename",
                 # Both parts, as the page's drawer sends them: a bare filename
                 # means「move it to the library root」, which is a move.
-                json={"filename": "已打包作品", "directory": "作者"},
+                json={**observed_review(client, candidate_id), "filename": "已打包作品", "directory": "作者"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
@@ -106,7 +107,7 @@ class TestRename:
         try:
             response = client.post(
                 f"/api/v1/downloaded/{candidate_id}/rename",
-                json={"filename": "新名字"},
+                json={**observed_review(client, candidate_id), "filename": "新名字"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
@@ -124,7 +125,7 @@ class TestRename:
         try:
             response = client.post(
                 f"/api/v1/downloaded/{candidate_id}/rename",
-                json={"directory": "../outside"},
+                json={**observed_review(client, candidate_id), "directory": "../outside"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
@@ -139,7 +140,7 @@ class TestRename:
         try:
             response = client.post(
                 f"/api/v1/downloaded/{candidate_id}/rename",
-                json={"filename": "新名字", "repack": True},
+                json={**observed_review(client, candidate_id), "filename": "新名字", "repack": True},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
@@ -167,14 +168,15 @@ class TestRename:
         try:
             response = client.post(
                 "/api/v1/downloaded/404/rename",
-                json={"filename": "新名字"},
+                json={"work_id": "removed-work", "expected_revision": 1,
+                      "idempotency_key": "missing-work-rename", "filename": "新名字"},
                 headers={CSRF_HEADER: csrf_token(client)},
             )
         finally:
             client.__exit__(None, None, None)
 
-        assert response.status_code == 400
-        assert response.json()["error"]["code"] == "WORK_NOT_DOWNLOADED"
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "CANDIDATE_NOT_FOUND"
 
     def test_it_needs_the_same_write_gates_as_any_other_action(
         self, tmp_path: Path

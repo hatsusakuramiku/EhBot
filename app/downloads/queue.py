@@ -212,6 +212,8 @@ class QueueControl:
             result['attempts'] = [dict(row) for row in connection.execute(
                 "SELECT * FROM queue_attempts WHERE task_id = ? ORDER BY attempt_no", (task_id,),
             )]
+            if job is None and result['attempts']:
+                result['error_code'] = result['attempts'][-1]['error_code']
             result['operations'] = [dict(row) for row in connection.execute(
                 "SELECT operation_id, action, status, error_code, created_at, updated_at "
                 "FROM queue_operations WHERE task_id = ? ORDER BY created_at, operation_id", (task_id,),

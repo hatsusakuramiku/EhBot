@@ -5,12 +5,12 @@
 ## 快速接手（每次结束工作前更新）
 | 项目 | 当前事实 |
 |---|---|
-| Current phase | P11 / R98 complete; version 0.3.0rc14; committed locally as the final P11 local commit SHA verified in Git history |
-| Next action | Begin P12 after final SHA/status verification; do not add another P11 commit |
-| 已完成 | P0–P11; P10=f03c977; P11=the final P11 local commit SHA verified in Git history |
-| 工作区 | P11 files committed; pre-existing app/downloads/models.py BOM delta remains unstaged |
+| Current phase | P12 Windows checkpoint committed for handoff; final acceptance blocked on unavailable Linux environment |
+| Next action | On Linux, run the guardian and real toolchain checks, update the acceptance record, then create the final P12 acceptance commit |
+| 已完成 | P0–P11; P10=f03c977; P11=22a29468397f3cdab76f643046c03035889c272f |
+| 工作区 | P12 checkpoint is committed; Linux acceptance follow-up remains; pre-existing app/downloads/models.py BOM delta was excluded |
 | 版本/schema | 0.3.0rc14 / schema039; 027–039 frozen; no new migration |
-| Verification baseline | P11 focused regression: 131 passed, 0 failure/error/skip; compileall, CodeGraph sync, and diff-check passed |
+| Verification baseline | Final Windows full suite: 3093 passed in 2040.33s, exit 0, JUnit 0 failure/error/skip; Docker absent |
 | 边界 | No real data/private, supplier, database upgrade, deployment, push, or release |
 
 027–038 已冻结且本阶段未修改；039随P10提交冻结，旧实验039不能靠重复initialize自动补表，不手改schema_migrations、不运行真实库升级。P8/P9 TEMP已清理；P10 TEMP为ehbot-p10-api-20261015-a，提交核验/结果留痕后精确清理；.scratch不存在。
@@ -36,7 +36,7 @@
 | P8 / R95 | complete | artifact 生产者/精确打包与 refiling 依赖、发布/移动恢复、受管取消、流水线意图 | 89ef4b9，rc11/037；590 distinct passed / 2687 collect-only；37 blobs 已核实，见 R95 audit |
 | P9 / R96 | complete | 会话/心跳、周期恢复/隔离/轮转、有界中断恢复、独立预算与 TG 持久冷却 | f60412b，rc12/038；454 distinct passed / 2710 collect-only；Linux 实跑留 P12 |
 | P11 | complete | R98: approval rotation, thumbnail stale-PENDING protection, lock-free ComicInfo preparation, fair metadata synchronization | 131 focused tests passed |
-| P12 | pending | Final HTTP/WS/CBZ acceptance, migration/recovery verification, Linux guardian execution | Pending |
+| P12 | in progress | Final HTTP/WS/CBZ acceptance, migration/recovery verification, Linux guardian execution | Checkpoint committed; Windows full suite 3093 passed / exit 0 / 0 failure/error/skip; Linux pending |
 
 默认串行实施，不因“其他 agent 接手”自行启动 agent。多账号工作区允许并行启用，须在 P5/P6 完整验收前补齐去重、来源管理和在途停止边界，不将当前中间态发布。P3 已含最小发布屏障，不能等 P8 才防旧写。每个切片自带必要并发保护，P10 完成统一核对而非首次加保护。
 

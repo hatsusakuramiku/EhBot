@@ -428,11 +428,11 @@ class TestTheStreamEndpoint:
         assert response.status_code == 401
 
     @staticmethod
-    def _request(app):
+    def _request(app, session):
         class FakeRequest:
             def __init__(self) -> None:
                 self.app = app
-                self.session = {"authenticated": True, "csrf_token": "t"}
+                self.session = session
 
         return FakeRequest()
 
@@ -442,11 +442,14 @@ class TestTheStreamEndpoint:
         app = create_app(settings)
 
         async def scenario():
-            response = await stream_logs(self._request(app))
+            response = await stream_logs(self._request(app, session))
             await response.body_iterator.aclose()
             return response
 
-        response = asyncio.run(scenario())
+        with TestClient(app) as client:
+            _authenticate(client, settings)
+            session = dict(client.get("/").context["request"].session)
+            response = asyncio.run(scenario())
 
         assert response.media_type == "text/event-stream"
         assert response.headers["cache-control"] == "no-cache"
@@ -460,7 +463,7 @@ class TestTheStreamEndpoint:
         app = create_app(settings)
 
         async def scenario() -> str:
-            response = await stream_logs(self._request(app))
+            response = await stream_logs(self._request(app, session))
             frames = response.body_iterator
             # The route replays the buffer before going live, and `create_app`
             # has already logged. Reading a fixed number of frames would assert
@@ -473,7 +476,10 @@ class TestTheStreamEndpoint:
             await frames.aclose()
             return frame
 
-        frame = asyncio.run(scenario())
+        with TestClient(app) as client:
+            _authenticate(client, settings)
+            session = dict(client.get("/").context["request"].session)
+            frame = asyncio.run(scenario())
 
         assert "event: log" in frame
         assert "stream_probe" in frame

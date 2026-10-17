@@ -39,6 +39,7 @@ JOB_STATES: tuple[str, ...] = (
     "DOWNLOADING",
     "WAITING_TORRENT",
     "PAUSED",
+    "STOPPING",
     "COMPLETED",
     "CANCELLED",
     "CONVERSION_PENDING",

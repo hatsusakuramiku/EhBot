@@ -12,7 +12,7 @@
 - **P0–P8 / R95 已验收并本地提交 `89ef4b9`**：rc11/037；2687 collected only，590 个不同相关用例最终通过，未运行整库。37 blobs/空暂存区/027–037 已核实；[P8 核对](R95_COMPLETION_AUDIT.md)。
 - P5=`2ea49f2`，P6=`c61af7e`；[P5 核对](R92_REQUIREMENT_AUDIT.md)、[P6 核对](R93_COMPLETION_AUDIT.md)、[P7 核对](R94_COMPLETION_AUDIT.md)。阶段验收后立即暂存代码、测试及文档并本地提交，核对 SHA 再进入下一阶段。
 - **P9 / R96 已验收并本地提交 f60412b**：rc12/038，2710 collected only / 454 个不同相关用例通过；会话/心跳、周期恢复、恢复上限、独立预算与 TG 持久冷却。Linux guardian 尚未实跑，留 P12 验证；[P9 核对](R96_COMPLETION_AUDIT.md)。37 blobs/空暂存区/027–038 已核实；P10 审计中，P11–P12 待处理，总目标 active。
-- **P10 / R97 is complete and committed f03c977 (2026-10-16)**: rc13/039; shared CAS/receipts, v2/legacy mappings, native WS, conflict drafts, maintenance and manual-source convergence. P11/R98 is complete in the worktree; P12 is pending.
+- **P10 / R97 is complete and committed f03c977 (2026-10-16)**: rc13/039; shared CAS/receipts, v2/legacy mappings, native WS, conflict drafts, maintenance and manual-source convergence. **P11/R98 committed 22a2946**, rc14/039. P12 regression fixes pass 141 tests plus 39 adjacent tests; the final Windows run passed 3093 tests, and the checkpoint is committed for Linux handoff. Linux acceptance remains pending. See [P12 核对](P12_ACCEPTANCE_AUDIT.md).
 
 ### 验收前接续记录（历史快照，当前状态以上述 P5 提交为准）
 
@@ -222,6 +222,6 @@ R7 已随范围收窄删除；编号不重用，故从 R6 直接到 R8。
 
 ## Current phase status (2026-10-16)
 
-**P11 / R98 is complete and committed locally as the final P11 local commit SHA verified in Git history.** Version `0.3.0rc14`; the focused regression baseline is 131 passed, 0 failures, 0 errors, 0 skipped. P12 remains pending for Linux guardian execution, final local HTTP/WS/CBZ acceptance, and migration/recovery verification.
+**P11 / R98 is complete and committed locally as 22a29468397f3cdab76f643046c03035889c272f.** Version `0.3.0rc14`; the focused regression baseline is 131 passed, 0 failures, 0 errors, 0 skipped. P12 Windows checkpoint is committed for Linux handoff: the final Windows full suite passed **3093 tests in 2040.33s, exit 0, 0 failure/error/skip**; browser DOM acceptance passes. Linux guardian and real toolchain acceptance remain environment-blocked, so P12 is not finally accepted.
 
 | R98 / P11 | 0.3.0rc14 / 2026-10-16 | Bounded approval rotation, thumbnail PENDING race fix, lock-free ComicInfo preparation, fair metadata synchronization | 131 focused tests passed | `progress.md` R98, `P11_REMAINING_DEFECTS_AUDIT.md` |
